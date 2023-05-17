@@ -1,0 +1,13 @@
+[package]
+name = "rstorch"
+version = "0.1.0"
+authors = ["Ferran Sanchez Llado"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/ferranSanchezLlado/rstorch.git"
+homepage = "https://github.com/ferranSanchezLlado/rstorch.git"
+documentation = "https://docs.rs/rstorch"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
