@@ -1,0 +1,113 @@
+use std::marker::PhantomData;
+
+use crate::module::Module;
+use ndarray::prelude::*;
+
+use super::init::{InitParameters, KaimingNormal};
+
+#[derive(Debug)]
+pub struct Linear<I: InitParameters> {
+    weight: Array2<f64>,
+    bias: Option<Array1<f64>>,
+
+    prev_input: Option<Array2<f64>>,
+    grad_weight: Option<Array2<f64>>,
+    grad_bias: Option<Array1<f64>>,
+
+    init: PhantomData<I>,
+}
+
+impl<I: InitParameters> Linear<I> {
+    pub fn new_with_kernel(input_size: usize, output_size: usize) -> Linear<I> {
+        Linear {
+            weight: I::weight(input_size, output_size),
+            bias: Some(I::bias(input_size, output_size)),
+            prev_input: None,
+            grad_weight: None,
+            grad_bias: None,
+            init: PhantomData,
+        }
+    }
+}
+
+impl Linear<KaimingNormal> {
+    pub fn new(input_size: usize, output_size: usize) -> Linear<KaimingNormal> {
+        Linear::<KaimingNormal>::new_with_kernel(input_size, output_size)
+    }
+}
+
+impl<I: InitParameters> Module for Linear<I> {
+    fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
+        let mut x = input.dot(&self.weight.t());
+
+        if let Some(bias) = &self.bias {
+            x += bias;
+        }
+
+        self.prev_input = Some(input);
+        x
+    }
+    fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
+        let prev_input = self.prev_input.take().unwrap();
+        let n = prev_input.nrows() as f64;
+        self.grad_weight = Some(gradient.t().dot(&prev_input) / n);
+
+        if self.bias.is_some() {
+            self.grad_bias = Some(gradient.sum_axis(Axis(0)) / n);
+        }
+        gradient.dot(&self.weight)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct FixedInit;
+
+    impl InitParameters for FixedInit {
+        fn weight(_input_size: usize, _output_size: usize) -> Array2<f64> {
+            array![[1.0, 0.5]]
+        }
+        fn bias(_input_size: usize, _output_size: usize) -> Array1<f64> {
+            array![10.0]
+        }
+    }
+
+    #[test]
+    fn forward() {
+        let mut module = Linear::<FixedInit>::new_with_kernel(2, 1);
+        let data = array![[1.0, 2.0], [3.0, -4.0], [-5.0, -6.0]];
+        let result = module.forward(data.clone());
+        let expected = array![[12.0], [11.0], [2.0]];
+
+        crate::assert_array_eq!(result, expected);
+    }
+
+    #[test]
+    fn backward() {
+        let mut module = Linear::<FixedInit>::new_with_kernel(2, 1);
+        let data = array![[1.0, 2.0], [3.0, -4.0], [-5.0, -6.0], [-7.0, 8.0]];
+        module.forward(data.clone());
+        let result = module.backward(Array::ones((4, 1)));
+
+        assert_eq!(
+            module.grad_weight.as_ref().unwrap().shape(),
+            module.weight.shape()
+        );
+
+        assert_eq!(
+            module.grad_bias.as_ref().unwrap().shape(),
+            module.bias.unwrap().shape()
+        );
+
+        let expected_grad_w = array![[-2.0, 0.0]];
+        let expected_grad_b = array![1.0];
+        let expected_grad = array![[1.0, 0.5], [1.0, 0.5], [1.0, 0.5], [1.0, 0.5]];
+
+        crate::assert_array_eq!(module.grad_weight.clone().unwrap(), expected_grad_w);
+        crate::assert_array_eq!(module.grad_bias.clone().unwrap(), expected_grad_b);
+        crate::assert_array_eq!(result, expected_grad);
+    }
+}
