@@ -45,7 +45,7 @@ impl Sequential {
 
 #[macro_export]
 macro_rules! sequential {
-    ($ ($layer:ident ($($arg:expr),*) ),* $(,)?) => (
+    ($ ($layer:ident ($($arg:expr),* $(,)?) ),* $(,)?) => (
         $crate::__rust_force_expr!(Sequential::new(
             vec![$(Box::new($layer::new($($arg,)*)),)*]
         ))
@@ -69,6 +69,12 @@ impl Module for Sequential {
             .rev()
             .fold(gradient, |gradient, layer| layer.backward(gradient))
     }
+    fn train(&mut self) {
+        self.layers.iter_mut().for_each(|layer| layer.train())
+    }
+    fn eval(&mut self) {
+        self.layers.iter_mut().for_each(|layer| layer.eval())
+    }
 }
 
 #[cfg(test)]
@@ -80,7 +86,7 @@ mod tests {
     #[test]
     fn test_macro() {
         let _module = sequential!(
-            Linear(3, 10),
+            Linear(3, 10,),
             ReLU(),
             Linear(10, 100),
             ReLU(),
@@ -88,7 +94,7 @@ mod tests {
         );
 
         let _module_2 = sequential!(
-            Linear::new(3, 10),
+            Linear::new(3, 10,),
             ReLU::new(),
             Linear::new(10, 100),
             ReLU::new(),

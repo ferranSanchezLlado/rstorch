@@ -7,7 +7,7 @@ use ndarray_rand::RandomExt;
 pub struct XavierNormal;
 
 impl InitParameters for XavierNormal {
-    fn weight(input_size: usize, output_size: usize) -> Array2<f64> {
+    fn weight(&self, input_size: usize, output_size: usize) -> Array2<f64> {
         let sigma = f64::sqrt(2.0 / (input_size as f64 + output_size as f64));
         Array::random((output_size, input_size), Normal::new(0.0, sigma).unwrap())
     }

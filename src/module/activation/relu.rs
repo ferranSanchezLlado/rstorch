@@ -14,9 +14,10 @@ impl ReLU {
 
 impl Module for ReLU {
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
-        self.prev_input = Some(input);
-        self.prev_input.clone().unwrap().mapv(|x| x.max(0.0))
+        self.prev_input = Some(input.clone());
+        input.mapv(|x| x.max(0.0))
     }
+
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         gradient * self.prev_input.take().unwrap().mapv(|x| f64::from(x > 0.0))
     }

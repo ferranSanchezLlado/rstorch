@@ -1,6 +1,7 @@
+pub mod loss;
 pub mod module;
 
-pub use module::{Identity, Linear, ReLU, Sequential, Softmax};
+pub use module::{Identity, Linear, ReLU, SafeModule, Sequential, Softmax};
 
 mod macros {
     #[doc(hidden)]
