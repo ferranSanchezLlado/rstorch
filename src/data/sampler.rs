@@ -6,6 +6,10 @@ pub trait Sampler {
 
     fn iter(&self) -> Self::Iter;
     fn len(&self) -> usize;
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 pub struct SequentialSampler {

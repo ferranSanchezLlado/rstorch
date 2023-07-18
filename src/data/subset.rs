@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::slice::Iter;
 
 use super::{Dataset, IterableDataset};
