@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 pub mod data;
 pub mod loss;
 pub mod module;
@@ -44,4 +45,7 @@ mod macros {
 pub mod prelude {
     pub use crate::module::init::InitParameters;
     pub use crate::module::Module;
+
+    pub use crate::data::sampler::Sampler;
+    pub use crate::data::{Dataset, IterableDataset};
 }

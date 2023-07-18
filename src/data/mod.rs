@@ -1,4 +1,9 @@
+mod data_loader;
+pub mod sampler;
 mod subset;
+
+pub use data_loader::DataLoader;
+pub use subset::Subset;
 
 pub trait Dataset {
     type Item;
