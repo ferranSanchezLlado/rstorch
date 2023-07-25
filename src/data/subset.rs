@@ -1,20 +1,17 @@
-use std::slice::Iter;
-
 use super::{Dataset, IterableDataset};
+use std::{iter::FusedIterator, slice::Iter};
 
 pub struct Subset<D> {
-    dataset: D,
+    data: D,
     indices: Vec<usize>,
 }
 
 impl<D: Dataset> Subset<D> {
-    #[inline]
-    #[must_use]
-    pub fn new(dataset: D, indices: Vec<usize>) -> Self {
-        if indices.iter().any(|i| i >= &dataset.len()) {
+    pub(in crate::data) fn new(data: D, indices: Vec<usize>) -> Self {
+        if indices.iter().any(|i| i >= &data.len()) {
             panic!("One of the indices is outside bound");
         }
-        Subset { dataset, indices }
+        Subset { data, indices }
     }
 }
 
@@ -22,7 +19,7 @@ impl<D: Dataset> Dataset for Subset<D> {
     type Item = D::Item;
 
     fn get(&self, index: usize) -> Option<Self::Item> {
-        self.dataset.get(*self.indices.get(index)?)
+        self.data.get(*self.indices.get(index)?)
     }
     fn len(&self) -> usize {
         self.indices.len()
@@ -32,8 +29,8 @@ impl<D: Dataset> Dataset for Subset<D> {
     }
 }
 
-pub struct SubsetIter<'a, D: 'a + Dataset> {
-    dataset: &'a D,
+pub struct SubsetIter<'a, D: 'a> {
+    data: &'a D,
     index: Iter<'a, usize>,
 }
 
@@ -41,16 +38,30 @@ impl<'a, D: 'a + Dataset> Iterator for SubsetIter<'a, D> {
     type Item = D::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.index.next().map(|i| self.dataset.get(*i))?
+        self.index.next().map(|i| self.data.get(*i))?
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.index.size_hint()
     }
 }
+
+impl<'a, D: 'a + Dataset> DoubleEndedIterator for SubsetIter<'a, D> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.index.next_back().map(|i| self.data.get(*i))?
+    }
+}
+
+impl<D: Dataset> ExactSizeIterator for SubsetIter<'_, D> {}
+
+impl<D: Dataset> FusedIterator for SubsetIter<'_, D> {}
 
 impl<'a, D: 'a + Dataset> IterableDataset<'a> for Subset<D> {
     type Iterator = SubsetIter<'a, D> where Self::Item: 'a;
 
     fn iter(&'a self) -> Self::Iterator {
         SubsetIter {
-            dataset: &self.dataset,
+            data: &self.data,
             index: self.indices.iter(),
         }
     }

@@ -1,55 +1,44 @@
 use super::{Dataset, IterableDataset};
-use std::{iter::Map, marker::PhantomData};
+use std::iter::Map;
 
-pub struct Transform<D, F, T> {
-    dataset: D,
-    function: F,
-    new_type: PhantomData<T>,
+pub struct Transform<D, F> {
+    data: D,
+    f: F,
 }
 
-impl<D, T, T2, F> Transform<D, F, T2>
-where
-    D: Dataset<Item = T>,
-    F: FnMut(T) -> T2 + Copy,
-{
-    pub fn new(dataset: D, function: F) -> Self {
-        Self {
-            dataset,
-            function,
-            new_type: PhantomData,
-        }
+impl<D, F> Transform<D, F> {
+    pub(in crate::data) fn new(data: D, f: F) -> Self {
+        Self { data, f }
     }
 }
 
-impl<D, T, T2, F> Dataset for Transform<D, F, T2>
+impl<D: Dataset, B, F> Dataset for Transform<D, F>
 where
-    D: Dataset<Item = T>,
-    F: FnMut(T) -> T2 + Copy,
+    F: FnMut(D::Item) -> B + Copy,
 {
-    type Item = T2;
+    type Item = B;
 
     fn get(&self, index: usize) -> Option<Self::Item> {
-        self.dataset.get(index).map(self.function)
+        self.data.get(index).map(self.f)
     }
 
     fn len(&self) -> usize {
-        self.dataset.len()
+        self.data.len()
     }
 
     fn is_empty(&self) -> bool {
-        self.dataset.is_empty()
+        self.data.is_empty()
     }
 }
 
-impl<'a, D, T, T2, F> IterableDataset<'a> for Transform<D, F, T2>
+impl<'a, D: IterableDataset<'a>, B, F> IterableDataset<'a> for Transform<D, F>
 where
-    D: IterableDataset<'a, Item = T>,
-    F: FnMut(T) -> T2 + Copy,
+    F: FnMut(D::Item) -> B + Copy,
 {
     type Iterator = Map<D::Iterator, F>;
 
     fn iter(&'a self) -> Self::Iterator {
-        self.dataset.iter().map(self.function)
+        self.data.iter().map(self.f)
     }
 }
 

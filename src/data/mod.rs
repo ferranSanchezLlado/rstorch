@@ -5,6 +5,7 @@ mod transform;
 
 pub use data_loader::DataLoader;
 pub use subset::Subset;
+pub use transform::Transform;
 
 pub trait Dataset {
     type Item;
@@ -14,6 +15,21 @@ pub trait Dataset {
     #[inline]
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    fn subset(self, indices: Vec<usize>) -> Subset<Self>
+    where
+        Self: Sized,
+    {
+        Subset::new(self, indices)
+    }
+
+    fn transform<B, F>(self, f: F) -> Transform<Self, F>
+    where
+        Self: Sized,
+        F: FnMut(Self::Item) -> B,
+    {
+        Transform::new(self, f)
     }
 }
 
