@@ -21,7 +21,7 @@ impl<D: Dataset> Subset<D> {
 impl<D: Dataset> Dataset for Subset<D> {
     type Item = D::Item;
 
-    fn get(&self, index: usize) -> Option<&Self::Item> {
+    fn get(&self, index: usize) -> Option<Self::Item> {
         self.dataset.get(*self.indices.get(index)?)
     }
     fn len(&self) -> usize {
@@ -38,7 +38,7 @@ pub struct SubsetIter<'a, D: 'a + Dataset> {
 }
 
 impl<'a, D: 'a + Dataset> Iterator for SubsetIter<'a, D> {
-    type Item = &'a D::Item;
+    type Item = D::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.index.next().map(|i| self.dataset.get(*i))?
@@ -69,8 +69,8 @@ mod test {
     impl Dataset for TestDataset {
         type Item = i32;
 
-        fn get(&self, index: usize) -> Option<&Self::Item> {
-            self.data.get(index)
+        fn get(&self, index: usize) -> Option<Self::Item> {
+            self.data.get(index).copied()
         }
         fn len(&self) -> usize {
             self.data.len()
@@ -85,10 +85,7 @@ mod test {
         let indices = vec![1, 3, 4, 10];
 
         let data = Subset::new(data, indices);
-        assert_eq!(Some(&-49), data.get(0));
-        assert_eq!(
-            vec![-49, -47, -46, -40],
-            data.iter().cloned().collect::<Vec<_>>()
-        );
+        assert_eq!(Some(-49), data.get(0));
+        assert_eq!(vec![-49, -47, -46, -40], data.iter().collect::<Vec<_>>());
     }
 }
