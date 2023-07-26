@@ -1,4 +1,4 @@
-use super::{sampler::Sampler, Dataset};
+use super::{dataset::Dataset, sampler::Sampler};
 
 pub struct DataLoader<D, S> {
     dataset: D,

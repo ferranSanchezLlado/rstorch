@@ -46,6 +46,6 @@ pub mod prelude {
     pub use crate::module::init::InitParameters;
     pub use crate::module::Module;
 
+    pub use crate::data::dataset::{Dataset, IterableDataset};
     pub use crate::data::sampler::Sampler;
-    pub use crate::data::{Dataset, IterableDataset};
 }
