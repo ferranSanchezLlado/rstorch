@@ -1,5 +1,7 @@
 mod basic;
 mod chain;
+#[cfg(feature = "dataset_hub")]
+mod hub;
 mod subset;
 mod transform;
 

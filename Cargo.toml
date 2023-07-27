@@ -17,6 +17,13 @@ edition = "2021"
 ndarray = "0.15.6"
 ndarray-rand = "0.14.0"
 rand = "0.8.5"
+reqwest = { version = "0.11.18", features = ["blocking"], optional = true }
+flate2 = { version = "1.0.26", optional = true }
 
 [dev-dependencies]
+
+[features]
+default = []
+dataset_hub = ["dep:reqwest", "dep:flate2"]
+full = ["dataset_hub"]
 

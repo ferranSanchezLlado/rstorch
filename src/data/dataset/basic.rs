@@ -11,6 +11,27 @@ impl<T> Basic<T> {
     }
 }
 
+impl<T, T2> Basic<(T, T2)> {
+    pub fn new_with_targets(input: Vec<T>, targets: Vec<T2>) -> Self {
+        assert_eq!(
+            input.len(),
+            targets.len(),
+            "Input and target have different amount of elements: {} vs {}",
+            input.len(),
+            targets.len()
+        );
+        Self::from_iter_with_targets(input, targets)
+    }
+
+    pub fn from_iter_with_targets<I, I2>(input: I, targets: I2) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        I2: IntoIterator<Item = T2>,
+    {
+        Self::new(input.into_iter().zip(targets).collect())
+    }
+}
+
 impl<T> FromIterator<T> for Basic<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         Self::new(Vec::from_iter(iter))
