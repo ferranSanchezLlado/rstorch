@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 pub mod data;
+mod iterator;
 pub mod loss;
 pub mod module;
 
