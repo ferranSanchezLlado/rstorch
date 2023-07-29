@@ -327,7 +327,7 @@ mod test {
         let n_test = lock.to_owned();
 
         if n_test == 0 {
-            MNIST::download(&tmp_path());
+            MNIST::download(tmp_path());
         }
         *lock += 1;
         // Moves data from
@@ -404,7 +404,7 @@ mod test {
         let n = prepare(true);
 
         let path = data_path(n);
-        let data = MNIST::new(&path, false, false);
+        let data = MNIST::new(path, false, false);
 
         assert_eq!(10_000, data.len());
         let (sample, _) = data.get(5_001).unwrap();
