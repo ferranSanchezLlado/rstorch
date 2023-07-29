@@ -1,5 +1,4 @@
 use flate2::bufread::GzDecoder;
-use itertools::Itertools;
 use ndarray::{iter::AxisIter, prelude::*, Array, IntoDimension, RemoveAxis};
 use reqwest::{self, blocking::Response};
 use std::fs;
@@ -230,22 +229,19 @@ impl<'a> IterableDataset<'a> for MNIST {
     }
 }
 
-trait MagicType {
+trait MagicType<const N: usize> {
     const MAGIC: u32;
-    const BYTES: usize;
 
-    fn from_magic<I: Iterator<Item = u8>>(iter: I) -> Self;
+    fn from_be_bytes(data: [u8; N]) -> Self;
 }
 
 macro_rules! magic {
     ($t:ty, $m:literal, $b:literal) => {
-        impl MagicType for $t {
+        impl MagicType<$b> for $t {
             const MAGIC: u32 = $m;
-            const BYTES: usize = $b;
 
-            fn from_magic<I: Iterator<Item = u8>>(iter: I) -> Self {
-                let data: Vec<_> = iter.collect();
-                <$t>::from_be_bytes(data.try_into().unwrap())
+            fn from_be_bytes(data: [u8; $b]) -> Self {
+                <$t>::from_be_bytes(data)
             }
         }
     };
@@ -258,25 +254,27 @@ magic!(i32, 12, 4);
 magic!(f32, 13, 4);
 magic!(f64, 14, 8);
 
-fn read_int<R: Read>(data: &mut R) -> u32 {
+fn read_int<R: Read>(mut data: R) -> u32 {
     let mut buff = [0; 4];
     data.read_exact(&mut buff).unwrap();
     u32::from_be_bytes(buff)
 }
 
-fn read_sn3<T: MagicType, const N: usize>(path: &Path) -> Array<T, Dim<[usize; N]>>
+fn read_sn3<T: MagicType<N_BYTES>, const N_BYTES: usize, const N_DIM: usize>(
+    path: &Path,
+) -> Array<T, Dim<[usize; N_DIM]>>
 where
-    [usize; N]: IntoDimension<Dim = Dim<[usize; N]>>,
+    [usize; N_DIM]: IntoDimension<Dim = Dim<[usize; N_DIM]>>,
 {
     let mut data = BufReader::new(fs::File::open(path).unwrap());
 
     let magic = read_int(&mut data);
     let nd = magic % 256;
     let ty = magic / 256;
-    assert_eq!(nd, N as u32);
+    assert_eq!(nd, N_DIM as u32);
     assert_eq!(ty, T::MAGIC);
 
-    let mut shape = [0; N];
+    let mut shape = [0; N_DIM];
     shape
         .iter_mut()
         .for_each(|d| *d = read_int(&mut data) as usize);
@@ -286,9 +284,8 @@ where
 
     let parsed: Array1<T> = byte_array
         .into_iter()
-        .chunks(T::BYTES)
-        .into_iter()
-        .map(T::from_magic)
+        .array_chunks_costum()
+        .map(T::from_be_bytes)
         .collect();
 
     parsed.into_shape(shape).unwrap()
