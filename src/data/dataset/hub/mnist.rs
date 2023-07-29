@@ -57,36 +57,53 @@ impl MNIST {
         "9 - nine",
     ];
 
-    pub fn new(root: &Path, train: bool, download: bool) -> Self {
+    pub fn new<P: AsRef<Path>>(root: P, train: bool, download: bool) -> Self {
         if download {
-            MNIST::download(root);
+            MNIST::download(&root);
         }
 
         assert!(
-            MNIST::check_exits(root),
+            MNIST::check_exits(&root),
             "Dataset not found. You can set download=true to download it"
         );
 
-        let (data, labels) = MNIST::load_data(root, train);
+        let (data, labels) = MNIST::load_data(&root, train);
+        let mut path = PathBuf::new();
+        path.push(&root);
         MNIST {
-            root: root.to_owned(),
+            root: path,
             data,
             labels,
             train,
         }
     }
 
-    fn download(root: &Path) {
+    fn check_exits<P: AsRef<Path>>(root: P) -> bool {
+        match fs::read_dir(root) {
+            Err(_) => false,
+            Ok(mut folder) => folder.all_default(false, |f| match f {
+                Err(_) => false,
+                Ok(f) => Self::RESOURCES
+                    .iter()
+                    .any(|r| match f.file_name().to_str() {
+                        None => false,
+                        Some(f) => r.0.contains(f),
+                    }),
+            }),
+        }
+    }
+
+    fn download<P: AsRef<Path>>(root: P) {
         // TODO: Download multiple files same time
         // TODO: Check md5
         // TODO: Improve exception handelning
         // TODO: FIND WHY FILENAME METHOD FAILS
         // TODO: Add better error handling
-        if MNIST::check_exits(root) {
+        if MNIST::check_exits(&root) {
             return;
         }
 
-        match fs::create_dir_all(root) {
+        match fs::create_dir_all(&root) {
             Ok(_) => {}
             Err(e) if matches!(e.kind(), std::io::ErrorKind::AlreadyExists) => {}
             Err(e) => panic!("Failed to create root folder for dataset: {}", e),
@@ -131,7 +148,8 @@ impl MNIST {
                 .map(|f| f.0)
                 .unwrap_or(filename)
                 .to_owned();
-            let mut path = PathBuf::from(root);
+            let mut path = PathBuf::new();
+            path.push(&root);
             path.push(filename);
 
             // Store raw file
@@ -140,24 +158,11 @@ impl MNIST {
         }
     }
 
-    fn check_exits(root: &Path) -> bool {
-        match fs::read_dir(root) {
-            Err(_) => false,
-            Ok(mut folder) => folder.all_default(false, |f| match f {
-                Err(_) => false,
-                Ok(f) => Self::RESOURCES
-                    .iter()
-                    .any(|r| match f.file_name().to_str() {
-                        None => false,
-                        Some(f) => r.0.contains(f),
-                    }),
-            }),
-        }
-    }
+    fn load_data<P: AsRef<Path>>(root: P, train: bool) -> (Array3<u8>, Array1<u8>) {
+        let mut path = PathBuf::new();
+        path.push(root);
 
-    fn load_data(root: &Path, train: bool) -> (Array3<u8>, Array1<u8>) {
         let start = if train { "train" } else { "t10k" };
-        let mut path = PathBuf::from(root);
         path.push(format!("{start}-images-idx3-ubyte"));
         let data = read_image_file(&path);
 
