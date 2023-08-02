@@ -1,12 +1,14 @@
 mod basic;
 mod chain;
 #[cfg(feature = "dataset_hub")]
-mod hub;
+pub mod hub;
+mod shuffler;
 mod subset;
 mod transform;
 
 pub use basic::Basic;
 pub use chain::Chain;
+pub use shuffler::Shuffler;
 pub use subset::Subset;
 pub use transform::Transform;
 
@@ -15,6 +17,7 @@ pub trait Dataset {
 
     fn get(&self, index: usize) -> Option<Self::Item>;
     fn len(&self) -> usize;
+
     #[inline]
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -51,11 +54,11 @@ pub trait IterableDataset<'a>: Dataset {
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
     use std::{iter::Copied, slice::Iter};
 
-    struct TestDataset {
+    pub struct TestDataset {
         data: Vec<i32>,
     }
 
@@ -79,7 +82,7 @@ mod test {
     }
 
     impl TestDataset {
-        fn new(data: impl Iterator<Item = i32>) -> Self {
+        pub fn new(data: impl Iterator<Item = i32>) -> Self {
             Self {
                 data: data.collect(),
             }

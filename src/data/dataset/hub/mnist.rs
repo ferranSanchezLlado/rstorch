@@ -78,18 +78,18 @@ impl MNIST {
     }
 
     fn check_exits<P: AsRef<Path>>(root: P) -> bool {
-        match fs::read_dir(root) {
-            Err(_) => false,
-            Ok(mut folder) => folder.all_default(false, |f| match f {
-                Err(_) => false,
-                Ok(f) => Self::RESOURCES
-                    .iter()
-                    .any(|r| match f.file_name().to_str() {
-                        None => false,
-                        Some(f) => r.0.contains(f),
-                    }),
-            }),
-        }
+        Self::RESOURCES
+            .iter()
+            .map(|r| {
+                Some(
+                    fs::read_dir(&root)
+                        .ok()?
+                        .filter_option(|f| Some(f.as_ref().ok()?.file_type().ok()?.is_file()))
+                        .filter_map(|f| Some(f.ok()?.file_name().to_str()?.to_owned()))
+                        .any(|f| r.0.contains(&f)),
+                )
+            })
+            .all(|r| r.is_some() && r.unwrap())
     }
 
     fn download<P: AsRef<Path>>(root: P) {
@@ -311,11 +311,13 @@ mod test {
 
     #[inline]
     fn data_path(n: u8) -> PathBuf {
-        PathBuf::from(format!(".data_{n}"))
+        [".test_cache", "mnist", &format!("data_{n}")]
+            .iter()
+            .collect()
     }
     #[inline]
     fn tmp_path() -> PathBuf {
-        PathBuf::from(".data_tmp")
+        [".test_cache", "mnist"].iter().collect()
     }
 
     #[inline]
@@ -331,7 +333,10 @@ mod test {
         if loaded_data {
             fs::create_dir_all(data_path(n_test)).unwrap();
 
-            let options = CopyOptions::new().content_only(true).overwrite(true);
+            let options = CopyOptions::new()
+                .content_only(true)
+                .overwrite(true)
+                .depth(1);
             copy(tmp_path(), data_path(n_test), &options).unwrap();
         }
         n_test
@@ -341,9 +346,9 @@ mod test {
     fn finish(n: u8) {
         remove(data_path(n)).unwrap();
 
-        if TESTS_EXECUTED.lock().unwrap().eq(&TOTAL_TESTS) {
-            remove(tmp_path()).unwrap();
-        }
+        // if TESTS_EXECUTED.lock().unwrap().eq(&TOTAL_TESTS) {
+        //     remove(tmp_path()).unwrap();
+        // }
     }
 
     #[test]

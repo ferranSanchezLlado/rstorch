@@ -4,6 +4,7 @@ mod iterator;
 pub mod loss;
 pub mod module;
 
+pub use data::dataset::hub;
 pub use module::{Identity, Linear, ReLU, SafeModule, Sequential, Softmax};
 
 mod macros {
@@ -44,9 +45,15 @@ mod macros {
 }
 
 pub mod prelude {
+    // traits
     pub use crate::module::init::InitParameters;
     pub use crate::module::Module;
 
     pub use crate::data::dataset::{Dataset, IterableDataset};
     pub use crate::data::sampler::Sampler;
+
+    // macros
+    pub use crate::{safe, sequential};
+
+    pub use ndarray::prelude::*;
 }
