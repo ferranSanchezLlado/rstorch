@@ -1,3 +1,4 @@
+#![cfg(feature = "dataset_hub")]
 use rstorch::hub::MNIST;
 use rstorch::prelude::*;
 use rstorch::{Identity, Linear, ReLU, Sequential, Softmax};

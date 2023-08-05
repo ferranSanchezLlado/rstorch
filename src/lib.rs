@@ -4,6 +4,7 @@ mod iterator;
 pub mod loss;
 pub mod module;
 
+#[cfg(feature = "dataset_hub")]
 pub use data::dataset::hub;
 pub use module::{Identity, Linear, ReLU, SafeModule, Sequential, Softmax};
 

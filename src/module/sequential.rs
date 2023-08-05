@@ -1,4 +1,4 @@
-use crate::module::Module;
+use crate::module::{Module, ParameterIterator};
 use ndarray::prelude::*;
 
 #[derive(Debug, Default)]
@@ -63,17 +63,27 @@ impl Module for Sequential {
             .iter_mut()
             .fold(input, |input, layer| layer.forward(input))
     }
+
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         self.layers
             .iter_mut()
             .rev()
             .fold(gradient, |gradient, layer| layer.backward(gradient))
     }
+
     fn train(&mut self) {
         self.layers.iter_mut().for_each(|layer| layer.train())
     }
+
     fn eval(&mut self) {
         self.layers.iter_mut().for_each(|layer| layer.eval())
+    }
+
+    fn param_and_grad(&mut self) -> ParameterIterator<'_> {
+        self.layers
+            .iter_mut()
+            .flat_map(|layer| layer.param_and_grad())
+            .collect()
     }
 }
 

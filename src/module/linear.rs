@@ -1,15 +1,15 @@
 use crate::module::init::{InitParameters, KaimingNormal};
-use crate::module::Module;
+use crate::module::{Module, ParameterIterator};
 use ndarray::prelude::*;
 
 #[derive(Debug)]
 pub struct Linear {
     weight: Array2<f64>,
-    bias: Option<Array1<f64>>,
+    bias: Option<Array2<f64>>,
 
     prev_input: Option<Array2<f64>>,
     grad_weight: Option<Array2<f64>>,
-    grad_bias: Option<Array1<f64>>,
+    grad_bias: Option<Array2<f64>>,
 }
 
 impl Linear {
@@ -54,9 +54,18 @@ impl Module for Linear {
         self.grad_weight = Some(gradient.t().dot(&prev_input) / n);
 
         if self.bias.is_some() {
-            self.grad_bias = Some(gradient.sum_axis(Axis(0)) / n);
+            self.grad_bias = Some((gradient.sum_axis(Axis(0)) / n).insert_axis(Axis(1)));
         }
         gradient.dot(&self.weight)
+    }
+
+    fn param_and_grad(&mut self) -> ParameterIterator<'_> {
+        let mut iter =
+            ParameterIterator::new().add(&mut self.weight, self.grad_weight.as_ref().unwrap());
+        if let (Some(bias), Some(grad_bias)) = (self.bias.as_mut(), self.grad_bias.as_ref()) {
+            iter = iter.add(bias, grad_bias);
+        }
+        iter
     }
 }
 
@@ -71,8 +80,8 @@ mod tests {
         fn weight(&self, _input_size: usize, _output_size: usize) -> Array2<f64> {
             array![[1.0, 0.5]]
         }
-        fn bias(&self, _input_size: usize, _output_size: usize) -> Array1<f64> {
-            array![10.0]
+        fn bias(&self, _input_size: usize, _output_size: usize) -> Array2<f64> {
+            array![[10.0]]
         }
     }
 
@@ -104,7 +113,7 @@ mod tests {
         );
 
         let expected_grad_w = array![[-2.0, 0.0]];
-        let expected_grad_b = array![1.0];
+        let expected_grad_b = array![[1.0]];
         let expected_grad = array![[1.0, 0.5], [1.0, 0.5], [1.0, 0.5], [1.0, 0.5]];
 
         crate::assert_array_eq!(module.grad_weight.clone().unwrap(), expected_grad_w);

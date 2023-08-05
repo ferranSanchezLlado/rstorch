@@ -1,7 +1,6 @@
-use std::cmp::Ordering;
-
-use crate::module::Module;
+use crate::module::{Module, ParameterIterator};
 use ndarray::prelude::*;
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 pub struct Softmax {
@@ -48,6 +47,7 @@ impl Module for Softmax {
         self.output = Some(exp / sum_axis);
         self.output.clone().unwrap()
     }
+
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         let output = self.output.take().unwrap();
 
@@ -58,6 +58,10 @@ impl Module for Softmax {
         });
 
         gradient.dot(&jacobian)
+    }
+
+    fn param_and_grad(&mut self) -> ParameterIterator<'_> {
+        ParameterIterator::new()
     }
 }
 
