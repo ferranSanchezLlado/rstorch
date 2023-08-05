@@ -7,26 +7,33 @@ pub struct Sequential {
 }
 
 impl Sequential {
+    #[inline]
+    #[must_use]
     pub fn new(layers: Vec<Box<dyn Module>>) -> Sequential {
         Sequential { layers }
     }
 
+    #[inline]
     pub fn push<M: Module + 'static>(&mut self, layer: M) {
         self.layers.push(Box::new(layer))
     }
 
+    #[inline]
     pub fn insert<M: Module + 'static>(&mut self, index: usize, layer: M) {
         self.layers.insert(index, Box::new(layer))
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.layers.len()
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty()
     }
 
+    #[inline]
     pub fn remove(&mut self, index: usize) -> Option<Box<dyn Module>> {
         match index >= self.len() {
             true => None,
@@ -34,10 +41,12 @@ impl Sequential {
         }
     }
 
+    #[inline]
     pub fn push_box(&mut self, layer: Box<dyn Module>) {
         self.layers.push(layer)
     }
 
+    #[inline]
     pub fn insert_box(&mut self, index: usize, layer: Box<dyn Module>) {
         self.layers.insert(index, layer)
     }
@@ -58,12 +67,14 @@ macro_rules! sequential {
 }
 
 impl Module for Sequential {
+    #[inline]
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
         self.layers
             .iter_mut()
             .fold(input, |input, layer| layer.forward(input))
     }
 
+    #[inline]
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         self.layers
             .iter_mut()
@@ -71,14 +82,17 @@ impl Module for Sequential {
             .fold(gradient, |gradient, layer| layer.backward(gradient))
     }
 
+    #[inline]
     fn train(&mut self) {
         self.layers.iter_mut().for_each(|layer| layer.train())
     }
 
+    #[inline]
     fn eval(&mut self) {
         self.layers.iter_mut().for_each(|layer| layer.eval())
     }
 
+    #[inline]
     fn param_and_grad(&mut self) -> ParameterIterator<'_> {
         self.layers
             .iter_mut()

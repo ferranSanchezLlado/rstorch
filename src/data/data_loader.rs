@@ -13,6 +13,7 @@ enum Shuffle<D> {
 impl<D: Dataset> Dataset for Shuffle<D> {
     type Item = D::Item;
 
+    #[inline]
     fn get(&self, index: usize) -> Option<Self::Item> {
         match self {
             Shuffle::Yes(data) => data.get(index),
@@ -20,6 +21,7 @@ impl<D: Dataset> Dataset for Shuffle<D> {
         }
     }
 
+    #[inline]
     fn len(&self) -> usize {
         match self {
             Shuffle::Yes(data) => data.len(),
@@ -35,6 +37,8 @@ pub struct DataLoader<D, S> {
 }
 
 impl<D: Dataset, S: Sampler> DataLoader<D, S> {
+    #[inline]
+    #[must_use]
     pub fn new(dataset: D, batch_size: usize, shuffle: bool, sampler: S) -> Self {
         let dataset = match shuffle {
             true => Shuffle::Yes(Shuffler::new(dataset)),
@@ -48,12 +52,14 @@ impl<D: Dataset, S: Sampler> DataLoader<D, S> {
         }
     }
 
+    #[inline]
     pub fn shuffle(&mut self) {
         if let Shuffle::Yes(data) = &mut self.dataset {
             data.shuffle();
         }
     }
 
+    #[inline]
     pub fn iter(&mut self) -> DataLoaderIter<'_, D, S> {
         self.shuffle();
         DataLoaderIter::new(self)
@@ -67,6 +73,8 @@ pub struct DataLoaderIter<'a, D, S: Sampler> {
 }
 
 impl<'a, D, S: Sampler> DataLoaderIter<'a, D, S> {
+    #[inline]
+    #[must_use]
     pub(crate) fn new(data_loader: &'a DataLoader<D, S>) -> Self {
         let iter = data_loader.sampler.iter();
         Self { data_loader, iter }
@@ -105,6 +113,7 @@ where
     S: Sampler,
     S::Iter: DoubleEndedIterator,
 {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         (0..self.data_loader.batch_size)
             .map(|_| self.data_loader.dataset.get(self.iter.next_back().unwrap()))
@@ -134,6 +143,7 @@ pub struct ArrayDataLoaderIter<'a, D, S: Sampler> {
 }
 
 impl<'a, D, S: Sampler> ArrayDataLoaderIter<'a, D, S> {
+    #[inline]
     pub(crate) fn new(data_loader: &'a DataLoader<D, S>) -> Self {
         let iter = data_loader.sampler.iter();
         Self { data_loader, iter }
@@ -151,6 +161,7 @@ where
 {
     type Item = (Array<T1, D1::Larger>, Array<T2, D2::Larger>);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let (sample, target) = self.data_loader.dataset.get(self.iter.next()?)?;
         let mut samples = sample.insert_axis(Axis(0));
@@ -179,6 +190,7 @@ where
     T1: Clone,
     T2: Clone,
 {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         let (sample, target) = self.data_loader.dataset.get(self.iter.next_back()?)?;
         let mut samples = sample.insert_axis(Axis(0));
@@ -229,6 +241,7 @@ where
     T1: Clone,
     T2: Clone,
 {
+    #[inline]
     pub fn iter_array(&mut self) -> ArrayDataLoaderIter<'_, D, S> {
         self.shuffle();
         ArrayDataLoaderIter::new(self)

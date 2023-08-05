@@ -23,6 +23,7 @@ pub trait Dataset {
         self.len() == 0
     }
 
+    #[inline]
     fn chain<D>(self, other: D) -> Chain<Self, D>
     where
         Self: Sized,
@@ -31,6 +32,7 @@ pub trait Dataset {
         Chain::new(self, other)
     }
 
+    #[inline]
     fn subset(self, indices: Vec<usize>) -> Subset<Self>
     where
         Self: Sized,
@@ -38,6 +40,7 @@ pub trait Dataset {
         Subset::new(self, indices)
     }
 
+    #[inline]
     fn transform<B, F>(self, f: F) -> Transform<Self, F>
     where
         Self: Sized,

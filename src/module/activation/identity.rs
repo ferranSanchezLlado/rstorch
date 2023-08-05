@@ -5,20 +5,25 @@ use ndarray::prelude::*;
 pub struct Identity;
 
 impl Identity {
+    #[inline]
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
 }
 
 impl Module for Identity {
+    #[inline]
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
         input
     }
 
+    #[inline]
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         gradient
     }
 
+    #[inline]
     fn param_and_grad(&mut self) -> ParameterIterator<'_> {
         ParameterIterator::new()
     }

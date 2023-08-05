@@ -37,6 +37,7 @@ impl Linear {
 }
 
 impl Module for Linear {
+    #[inline]
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
         let mut x = input.dot(&self.weight.t());
 
@@ -48,6 +49,7 @@ impl Module for Linear {
         x
     }
 
+    #[inline]
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         let prev_input = self.prev_input.take().unwrap();
         let n = prev_input.nrows() as f64;
@@ -59,6 +61,7 @@ impl Module for Linear {
         gradient.dot(&self.weight)
     }
 
+    #[inline]
     fn param_and_grad(&mut self) -> ParameterIterator<'_> {
         let mut iter =
             ParameterIterator::new().add(&mut self.weight, self.grad_weight.as_ref().unwrap());

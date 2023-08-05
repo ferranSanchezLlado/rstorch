@@ -9,12 +9,16 @@ pub struct Softmax {
 }
 
 impl Default for Softmax {
+    #[inline]
+    #[must_use]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl Softmax {
+    #[inline]
+    #[must_use]
     pub fn with_axis(axis: usize) -> Self {
         Softmax {
             output: None,
@@ -22,11 +26,14 @@ impl Softmax {
         }
     }
 
+    #[inline]
+    #[must_use]
     pub fn new() -> Self {
         Self::with_axis(1)
     }
 }
 
+#[inline]
 fn max(a: f64, b: &f64) -> f64 {
     match a.partial_cmp(b).unwrap() {
         Ordering::Less => *b,
@@ -36,6 +43,7 @@ fn max(a: f64, b: &f64) -> f64 {
 }
 
 impl Module for Softmax {
+    #[inline]
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
         // Broadcasting fails, but inserting axis makes it work properly
         let max_axis = input
@@ -48,6 +56,7 @@ impl Module for Softmax {
         self.output.clone().unwrap()
     }
 
+    #[inline]
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         let output = self.output.take().unwrap();
 
@@ -60,6 +69,7 @@ impl Module for Softmax {
         gradient.dot(&jacobian)
     }
 
+    #[inline]
     fn param_and_grad(&mut self) -> ParameterIterator<'_> {
         ParameterIterator::new()
     }

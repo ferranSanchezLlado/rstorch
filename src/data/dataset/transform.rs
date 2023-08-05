@@ -7,6 +7,8 @@ pub struct Transform<D, F> {
 }
 
 impl<D, F> Transform<D, F> {
+    #[inline]
+    #[must_use]
     pub(in crate::data) fn new(data: D, f: F) -> Self {
         Self { data, f }
     }
@@ -18,14 +20,17 @@ where
 {
     type Item = B;
 
+    #[inline]
     fn get(&self, index: usize) -> Option<Self::Item> {
         self.data.get(index).map(self.f)
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.data.len()
     }
 
+    #[inline]
     fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -37,6 +42,7 @@ where
 {
     type Iterator = Map<D::Iterator, F>;
 
+    #[inline]
     fn iter(&'a self) -> Self::Iterator {
         self.data.iter().map(self.f)
     }

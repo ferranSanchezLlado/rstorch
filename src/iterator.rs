@@ -64,6 +64,8 @@ pub struct ArrayChunks<I, const N: usize> {
 }
 
 impl<I, const N: usize> ArrayChunks<I, N> {
+    #[inline]
+    #[must_use]
     pub(crate) fn new(iter: I) -> Self {
         Self { iter }
     }
@@ -94,6 +96,7 @@ impl<I: Iterator, const N: usize> Iterator for ArrayChunks<I, N> {
     }
 }
 impl<I: DoubleEndedIterator, const N: usize> DoubleEndedIterator for ArrayChunks<I, N> {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         (0..N)
             .map(|_| self.iter.next_back())
@@ -112,6 +115,8 @@ pub struct OptionFilter<I, P> {
 }
 
 impl<I, P> OptionFilter<I, P> {
+    #[inline]
+    #[must_use]
     pub(crate) fn new(iter: I, predicate: P) -> Self {
         Self { iter, predicate }
     }

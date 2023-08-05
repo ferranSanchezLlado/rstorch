@@ -47,6 +47,8 @@ impl<M, S, E> SafeModule<M, S, E> {
 }
 
 impl<M: Module> SafeModule<M, Forward, Train> {
+    #[inline]
+    #[must_use]
     pub fn new(module: M) -> Self {
         Self {
             module: ManuallyDrop::new(module),
@@ -58,6 +60,7 @@ impl<M: Module> SafeModule<M, Forward, Train> {
 
 impl<M: Module, E> SafeModule<M, Forward, E> {
     /// (batch_size, input_size) -> (batch_size, output_size)
+    #[inline]
     pub fn forward(mut self, input: Array2<f64>) -> (SafeModule<M, Backward, E>, Array2<f64>) {
         let pred = self.module.forward(input);
         let new_state = self.new_state();
@@ -67,6 +70,7 @@ impl<M: Module, E> SafeModule<M, Forward, E> {
 
 impl<M: Module, E> SafeModule<M, Backward, E> {
     /// (batch_size, output_size) -> (batch_size, input_size)
+    #[inline]
     pub fn backward(mut self, gradient: Array2<f64>) -> (SafeModule<M, Forward, E>, Array2<f64>) {
         let grad = self.module.backward(gradient);
         let new_state = self.new_state();
@@ -75,6 +79,7 @@ impl<M: Module, E> SafeModule<M, Backward, E> {
 }
 
 impl<M: Module, S> SafeModule<M, S, Train> {
+    #[inline]
     pub fn eval(mut self) -> SafeModule<M, S, Evaluation> {
         self.module.eval();
         self.new_mode()
@@ -82,6 +87,7 @@ impl<M: Module, S> SafeModule<M, S, Train> {
 }
 
 impl<M: Module, S> SafeModule<M, S, Evaluation> {
+    #[inline]
     pub fn train(mut self) -> SafeModule<M, S, Train> {
         self.module.train();
         self.new_mode()
@@ -89,6 +95,8 @@ impl<M: Module, S> SafeModule<M, S, Evaluation> {
 }
 
 impl<M: Module> From<M> for SafeModule<M, Forward, Train> {
+    #[inline]
+    #[must_use]
     fn from(module: M) -> Self {
         Self::new(module)
     }

@@ -7,21 +7,26 @@ pub struct ReLU {
 }
 
 impl ReLU {
+    #[inline]
+    #[must_use]
     pub fn new() -> Self {
         ReLU { prev_input: None }
     }
 }
 
 impl Module for ReLU {
+    #[inline]
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
         self.prev_input = Some(input.clone());
         input.mapv(|x| x.max(0.0))
     }
 
+    #[inline]
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         gradient * self.prev_input.take().unwrap().mapv(|x| f64::from(x > 0.0))
     }
 
+    #[inline]
     fn param_and_grad(&mut self) -> ParameterIterator<'_> {
         ParameterIterator::new()
     }

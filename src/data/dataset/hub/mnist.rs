@@ -56,6 +56,8 @@ impl MNIST {
         "9 - nine",
     ];
 
+    #[inline]
+    #[must_use]
     pub fn new<P: AsRef<Path>>(root: P, train: bool, download: bool) -> Self {
         if download {
             MNIST::download(&root);
@@ -77,6 +79,7 @@ impl MNIST {
         }
     }
 
+    #[inline]
     fn check_exits<P: AsRef<Path>>(root: P) -> bool {
         Self::RESOURCES
             .iter()
@@ -157,6 +160,7 @@ impl MNIST {
         }
     }
 
+    #[inline]
     fn load_data<P: AsRef<Path>>(root: P, train: bool) -> (Array3<u8>, Array1<u8>) {
         let mut path = PathBuf::new();
         path.push(root);
@@ -177,6 +181,7 @@ impl MNIST {
 impl Dataset for MNIST {
     type Item = (Array2<u8>, Array0<u8>);
 
+    #[inline]
     fn get(&self, index: usize) -> Option<Self::Item> {
         if index > self.len() {
             return None;
@@ -188,6 +193,7 @@ impl Dataset for MNIST {
         ))
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.labels.len()
     }
@@ -199,6 +205,7 @@ pub struct CombinedIter<'a, T, D, T2, D2> {
 }
 
 impl<'a, T, D: Dimension, T2, D2: Dimension> CombinedIter<'a, T, D, T2, D2> {
+    #[inline]
     pub(crate) fn new<Di, Di2>(data: &'a Array<T, Di>, labels: &'a Array<T2, Di2>) -> Self
     where
         Di: RemoveAxis<Smaller = D>,
@@ -216,6 +223,7 @@ impl<'a, T: Clone, D: Dimension, T2: Clone, D2: Dimension> Iterator
 {
     type Item = (Array<T, D>, Array<T2, D2>);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         Some((self.data.next()?.to_owned(), self.labels.next()?.to_owned()))
     }
@@ -224,6 +232,7 @@ impl<'a, T: Clone, D: Dimension, T2: Clone, D2: Dimension> Iterator
 impl<'a> IterableDataset<'a> for MNIST {
     type Iterator = CombinedIter<'a, u8, Ix2, u8, Ix0>;
 
+    #[inline]
     fn iter(&'a self) -> Self::Iterator {
         CombinedIter::new(&self.data, &self.labels)
     }
@@ -240,6 +249,7 @@ macro_rules! magic {
         impl MagicType<$b> for $t {
             const MAGIC: u32 = $m;
 
+            #[inline]
             fn from_be_bytes(data: [u8; $b]) -> Self {
                 <$t>::from_be_bytes(data)
             }
@@ -254,6 +264,7 @@ magic!(i32, 12, 4);
 magic!(f32, 13, 4);
 magic!(f64, 14, 8);
 
+#[inline]
 fn read_int<R: Read>(mut data: R) -> u32 {
     let mut buff = [0; 4];
     data.read_exact(&mut buff).unwrap();
@@ -291,10 +302,12 @@ where
     parsed.into_shape(shape).unwrap()
 }
 
+#[inline]
 fn read_label_file(path: &Path) -> Array1<u8> {
     read_sn3(path)
 }
 
+#[inline]
 fn read_image_file(path: &Path) -> Array3<u8> {
     read_sn3(path)
 }

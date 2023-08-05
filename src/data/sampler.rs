@@ -5,7 +5,9 @@ pub trait Sampler {
     type Iter: Iterator<Item = usize>;
 
     fn iter(&self) -> Self::Iter;
+
     fn len(&self) -> usize;
+
     #[inline]
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -17,6 +19,8 @@ pub struct SequentialSampler {
 }
 
 impl SequentialSampler {
+    #[inline]
+    #[must_use]
     pub fn new(size: usize) -> Self {
         Self { size }
     }
@@ -25,9 +29,12 @@ impl SequentialSampler {
 impl Sampler for SequentialSampler {
     type Iter = Range<usize>;
 
+    #[inline]
     fn iter(&self) -> Self::Iter {
         0..self.size
     }
+
+    #[inline]
     fn len(&self) -> usize {
         self.size
     }
@@ -40,6 +47,8 @@ pub struct RandomSampler {
 }
 
 impl RandomSampler {
+    #[inline]
+    #[must_use]
     pub fn new(size: usize, replacement: bool, num_samples: usize) -> Self {
         Self {
             size,
@@ -53,6 +62,8 @@ pub struct RandomSamplerIter {
     indices: Vec<usize>,
 }
 impl RandomSamplerIter {
+    #[inline]
+    #[must_use]
     fn new(size: usize, replacement: bool, num_samples: usize) -> Self {
         let mut rng = thread_rng();
         let mut indices: Vec<usize> = (0..size).collect();
@@ -74,12 +85,14 @@ impl RandomSamplerIter {
 impl Iterator for RandomSamplerIter {
     type Item = usize;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.indices.pop()
     }
 }
 
 impl ExactSizeIterator for RandomSamplerIter {
+    #[inline]
     fn len(&self) -> usize {
         self.indices.len()
     }
@@ -88,9 +101,12 @@ impl ExactSizeIterator for RandomSamplerIter {
 impl Sampler for RandomSampler {
     type Iter = RandomSamplerIter;
 
+    #[inline]
     fn iter(&self) -> Self::Iter {
         RandomSamplerIter::new(self.size, self.replacement, self.num_samples)
     }
+
+    #[inline]
     fn len(&self) -> usize {
         self.size
     }

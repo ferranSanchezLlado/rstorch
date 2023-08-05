@@ -6,6 +6,8 @@ pub struct Chain<A, B> {
 }
 
 impl<A, B> Chain<A, B> {
+    #[inline]
+    #[must_use]
     pub(in crate::data) fn new(a: A, b: B) -> Self {
         Self { a, b }
     }
@@ -18,6 +20,7 @@ where
 {
     type Item = A::Item;
 
+    #[inline]
     fn get(&self, index: usize) -> Option<Self::Item> {
         match index < self.a.len() {
             true => self.a.get(index),
@@ -25,10 +28,12 @@ where
         }
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.a.len() + self.b.len()
     }
 
+    #[inline]
     fn is_empty(&self) -> bool {
         self.a.is_empty() && self.b.is_empty()
     }
@@ -41,6 +46,7 @@ where
 {
     type Iterator = std::iter::Chain<A::Iterator, B::Iterator>;
 
+    #[inline]
     fn iter(&'a self) -> Self::Iterator {
         self.a.iter().chain(self.b.iter())
     }

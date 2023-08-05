@@ -18,10 +18,15 @@ pub use sequential::Sequential;
 pub trait Module: std::fmt::Debug {
     /// (batch_size, input_size) -> (batch_size, output_size)
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64>;
+
     /// (batch_size, output_size) -> (batch_size, input_size)
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64>;
+
     fn param_and_grad(&mut self) -> ParameterIterator<'_>;
 
+    #[inline]
     fn train(&mut self) {}
+
+    #[inline]
     fn eval(&mut self) {}
 }

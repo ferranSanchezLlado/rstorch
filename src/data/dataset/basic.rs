@@ -6,12 +6,16 @@ pub struct Basic<T> {
 }
 
 impl<T> Basic<T> {
+    #[inline]
+    #[must_use]
     pub fn new(data: Vec<T>) -> Self {
         Self { data }
     }
 }
 
 impl<T, T2> Basic<(T, T2)> {
+    #[inline]
+    #[must_use]
     pub fn new_with_targets(input: Vec<T>, targets: Vec<T2>) -> Self {
         assert_eq!(
             input.len(),
@@ -23,6 +27,8 @@ impl<T, T2> Basic<(T, T2)> {
         Self::from_iter_with_targets(input, targets)
     }
 
+    #[inline]
+    #[must_use]
     pub fn from_iter_with_targets<I, I2>(input: I, targets: I2) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -33,6 +39,8 @@ impl<T, T2> Basic<(T, T2)> {
 }
 
 impl<T> FromIterator<T> for Basic<T> {
+    #[inline]
+    #[must_use]
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         Self::new(Vec::from_iter(iter))
     }
@@ -41,14 +49,17 @@ impl<T> FromIterator<T> for Basic<T> {
 impl<T: Clone> Dataset for Basic<T> {
     type Item = T;
 
+    #[inline]
     fn get(&self, index: usize) -> Option<Self::Item> {
         self.data.get(index).cloned()
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.data.len()
     }
 
+    #[inline]
     fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -57,6 +68,7 @@ impl<T: Clone> Dataset for Basic<T> {
 impl<'a, T: 'a + Clone> IterableDataset<'a> for Basic<T> {
     type Iterator = Cloned<Iter<'a, T>>;
 
+    #[inline]
     fn iter(&'a self) -> Self::Iterator {
         self.data.iter().cloned()
     }

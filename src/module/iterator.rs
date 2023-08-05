@@ -1,6 +1,5 @@
-use std::vec::IntoIter;
-
 use ndarray::prelude::*;
+use std::vec::IntoIter;
 
 pub struct ParameterIterator<'a> {
     data: Vec<(&'a mut Array2<f64>, &'a Array2<f64>)>,
@@ -33,6 +32,7 @@ impl<'a> IntoIterator for ParameterIterator<'a> {
     type Item = (&'a mut Array2<f64>, &'a Array2<f64>);
     type IntoIter = IntoIter<Self::Item>;
 
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.data.into_iter()
     }
