@@ -1,6 +1,6 @@
-use rand::distributions::Uniform;
+use rand::distributions::{DistIter, Uniform};
 use rand::prelude::*;
-use std::iter::FusedIterator;
+use std::iter::{FusedIterator, Take};
 use std::ops::Range;
 
 pub trait Sampler {
@@ -77,64 +77,133 @@ impl<R: Rng> RandomSampler<R> {
     }
 }
 
-pub struct RandomSamplerIter {
-    indices: Vec<usize>,
+pub struct NoReplacement<R> {
+    data: Vec<usize>,
+    index: usize,
+    size: usize, // Number elements to generate
+    rng: R,
 }
 
-impl RandomSamplerIter {
+impl<R: Rng> NoReplacement<R> {
     #[inline]
     #[must_use]
-    fn new<R: Rng>(size: usize, replacement: bool, num_samples: usize, rng: &mut R) -> Self {
-        let indices = match replacement {
-            true => Uniform::new(0, num_samples)
-                .sample_iter(rng)
-                .take(size)
-                .collect(),
-            false => {
-                let mut indices = Vec::with_capacity(size);
-                loop {
-                    let mut shuffled: Vec<_> = (0..num_samples).collect();
-                    shuffled.shuffle(rng);
-
-                    let remaining = size - indices.len();
-                    match remaining <= num_samples {
-                        true => {
-                            shuffled.truncate(remaining);
-                            indices.append(&mut shuffled);
-                            break;
-                        }
-                        false => indices.append(&mut shuffled),
-                    }
-                }
-                indices
-            }
-        };
-        Self { indices }
+    fn new(size: usize, num_samples: usize, rng: R) -> Self {
+        Self {
+            data: (0..num_samples).collect(),
+            index: 0,
+            size,
+            rng,
+        }
     }
 }
 
-impl Iterator for RandomSamplerIter {
+impl<R: Rng> Iterator for NoReplacement<R> {
     type Item = usize;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.indices.pop()
+        if self.index >= self.size {
+            return None;
+        }
+
+        let index = self.index % self.data.len();
+        // Iterated over all elements or is start
+        if index == 0 {
+            self.data.shuffle(&mut self.rng);
+        }
+
+        let el = self.data.get(index);
+        self.index += 1;
+        el.copied()
     }
+
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.indices.len(), Some(self.indices.len()))
+        (self.size, Some(self.size))
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.size
     }
 }
 
-impl ExactSizeIterator for RandomSamplerIter {}
-impl FusedIterator for RandomSamplerIter {}
+impl<R: Rng> ExactSizeIterator for NoReplacement<R> {}
+impl<R: Rng> FusedIterator for NoReplacement<R> {}
 
-impl<R: Rng> Sampler for RandomSampler<R> {
-    type Iter = RandomSamplerIter;
+pub enum RandomSamplerIter<R> {
+    Replacement(Take<DistIter<Uniform<usize>, R, usize>>),
+    NoReplacement(NoReplacement<R>),
+}
+
+impl<R: Rng> RandomSamplerIter<R> {
+    #[inline]
+    #[must_use]
+    fn new(size: usize, replacement: bool, num_samples: usize, rng: R) -> Self {
+        match replacement {
+            true => RandomSamplerIter::Replacement(
+                Uniform::new(0, num_samples).sample_iter(rng).take(size),
+            ),
+            false => RandomSamplerIter::NoReplacement(NoReplacement::new(size, num_samples, rng)),
+        }
+    }
+
+    #[inline]
+    fn move_rng(size: usize, replacement: bool, num_samples: usize, mut rng: R) {
+        // TODO: Improve rng movement
+        match replacement {
+            true => (0..size).for_each(|_| {
+                rng.gen::<usize>();
+            }),
+            false => (0..(size / num_samples + 1)).for_each(|_| {
+                rng.gen_range(0..num_samples);
+            }),
+        }
+    }
+}
+
+impl<R: Rng> Iterator for RandomSamplerIter<R> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            RandomSamplerIter::Replacement(iter) => iter.next(),
+            RandomSamplerIter::NoReplacement(iter) => iter.next(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            RandomSamplerIter::Replacement(iter) => iter.size_hint(),
+            RandomSamplerIter::NoReplacement(iter) => iter.size_hint(),
+        }
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        match self {
+            RandomSamplerIter::Replacement(iter) => iter.count(),
+            RandomSamplerIter::NoReplacement(iter) => iter.count(),
+        }
+    }
+}
+
+impl<R: Rng> ExactSizeIterator for RandomSamplerIter<R> {}
+impl<R: Rng> FusedIterator for RandomSamplerIter<R> {}
+
+impl<R: Rng + Clone> Sampler for RandomSampler<R> {
+    type Iter = RandomSamplerIter<R>;
 
     #[inline]
     fn iter(&mut self) -> Self::Iter {
-        RandomSamplerIter::new(self.size, self.replacement, self.num_samples, &mut self.rng)
+        // Clones rng to avoid the unecessery need to link lifetimes between iterator and random
+        // sampler. However, becouse of this the rng doesn't move. Therefore, I opted to move
+        // proactively the rng.
+        let rng = self.rng.clone();
+        RandomSamplerIter::move_rng(self.size, self.replacement, self.num_samples, &mut self.rng);
+        RandomSamplerIter::new(self.size, self.replacement, self.num_samples, rng)
     }
 
     #[inline]
