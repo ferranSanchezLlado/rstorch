@@ -75,7 +75,7 @@ pub struct DataLoaderIter<'a, D, S: Sampler> {
 impl<'a, D, S: Sampler> DataLoaderIter<'a, D, S> {
     #[inline]
     #[must_use]
-    pub(crate) fn new(data_loader: &'a DataLoader<D, S>) -> Self {
+    pub(crate) fn new(data_loader: &'a mut DataLoader<D, S>) -> Self {
         let iter = data_loader.sampler.iter();
         Self { data_loader, iter }
     }
@@ -144,7 +144,7 @@ pub struct ArrayDataLoaderIter<'a, D, S: Sampler> {
 
 impl<'a, D, S: Sampler> ArrayDataLoaderIter<'a, D, S> {
     #[inline]
-    pub(crate) fn new(data_loader: &'a DataLoader<D, S>) -> Self {
+    pub(crate) fn new(data_loader: &'a mut DataLoader<D, S>) -> Self {
         let iter = data_loader.sampler.iter();
         Self { data_loader, iter }
     }
@@ -250,12 +250,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use ndarray::IntoDimension;
-
+    use super::*;
     use crate::data::dataset::test::TestDataset;
     use crate::data::SequentialSampler;
-
-    use super::*;
+    use ndarray::IntoDimension;
 
     struct ArrayTestDataset {
         samples: Vec<Array2<f64>>,
