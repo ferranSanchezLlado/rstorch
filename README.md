@@ -44,7 +44,6 @@ let model = sequential!(
     Linear(100, 10), // Input size is 100 and output size is 10
     Softmax()
 );
-```rust
 
 ## License
 
