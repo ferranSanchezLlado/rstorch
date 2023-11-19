@@ -1,5 +1,3 @@
-use std::fmt::Debug;
-
 use ndarray::prelude::*;
 
 pub mod activation;
@@ -15,7 +13,7 @@ pub use linear::Linear;
 pub use safe_module::SafeModule;
 pub use sequential::Sequential;
 
-pub trait Module: Debug {
+pub trait Module {
     /// (batch_size, input_size) -> (batch_size, output_size)
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64>;
 
