@@ -1,4 +1,4 @@
-use crate::module::{Module, ParameterIterator};
+use crate::module::Module;
 use ndarray::prelude::*;
 
 #[derive(Debug, Default)]
@@ -21,11 +21,6 @@ impl Module for Identity {
     #[inline]
     fn backward(&mut self, gradient: Array2<f64>) -> Array2<f64> {
         gradient
-    }
-
-    #[inline]
-    fn param_and_grad(&mut self) -> ParameterIterator<'_> {
-        ParameterIterator::new()
     }
 }
 

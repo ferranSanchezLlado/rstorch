@@ -1,5 +1,5 @@
 use crate::module::init::{InitParameters, KaimingNormal};
-use crate::module::{Module, ParameterIterator};
+use crate::module::Module;
 use ndarray::prelude::*;
 
 #[derive(Debug)]
@@ -59,16 +59,6 @@ impl Module for Linear {
             self.grad_bias = Some((gradient.sum_axis(Axis(0)) / n).insert_axis(Axis(1)));
         }
         gradient.dot(&self.weight)
-    }
-
-    #[inline]
-    fn param_and_grad(&mut self) -> ParameterIterator<'_> {
-        let mut iter =
-            ParameterIterator::new().add(&mut self.weight, self.grad_weight.as_ref().unwrap());
-        if let (Some(bias), Some(grad_bias)) = (self.bias.as_mut(), self.grad_bias.as_ref()) {
-            iter = iter.add(bias, grad_bias);
-        }
-        iter
     }
 }
 

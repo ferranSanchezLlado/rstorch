@@ -1,4 +1,4 @@
-use crate::module::{Module, ParameterIterator};
+use crate::module::Module;
 use ndarray::prelude::*;
 
 #[derive(Debug, Default)]
@@ -90,14 +90,6 @@ impl Module for Sequential {
     #[inline]
     fn eval(&mut self) {
         self.layers.iter_mut().for_each(|layer| layer.eval())
-    }
-
-    #[inline]
-    fn param_and_grad(&mut self) -> ParameterIterator<'_> {
-        self.layers
-            .iter_mut()
-            .flat_map(|layer| layer.param_and_grad())
-            .collect()
     }
 }
 
