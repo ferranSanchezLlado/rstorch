@@ -1,25 +1,32 @@
-use crate::module::{Module, ParameterIterator};
+use std::fmt::Debug;
+
+use crate::module::Module;
 use ndarray::prelude::*;
+
+use super::Parameters;
+
+pub trait ModuleDebug: Module + Debug {}
+impl<T: Module + Debug> ModuleDebug for T {}
 
 #[derive(Debug, Default)]
 pub struct Sequential {
-    layers: Vec<Box<dyn Module>>,
+    layers: Vec<Box<dyn ModuleDebug>>,
 }
 
 impl Sequential {
     #[inline]
     #[must_use]
-    pub fn new(layers: Vec<Box<dyn Module>>) -> Sequential {
+    pub fn new(layers: Vec<Box<dyn ModuleDebug>>) -> Sequential {
         Sequential { layers }
     }
 
     #[inline]
-    pub fn push<M: Module + 'static>(&mut self, layer: M) {
+    pub fn push<M: ModuleDebug + 'static>(&mut self, layer: M) {
         self.layers.push(Box::new(layer))
     }
 
     #[inline]
-    pub fn insert<M: Module + 'static>(&mut self, index: usize, layer: M) {
+    pub fn insert<M: ModuleDebug + 'static>(&mut self, index: usize, layer: M) {
         self.layers.insert(index, Box::new(layer))
     }
 
@@ -34,7 +41,7 @@ impl Sequential {
     }
 
     #[inline]
-    pub fn remove(&mut self, index: usize) -> Option<Box<dyn Module>> {
+    pub fn remove(&mut self, index: usize) -> Option<Box<dyn ModuleDebug>> {
         match index >= self.len() {
             true => None,
             false => Some(self.layers.remove(index)),
@@ -42,12 +49,12 @@ impl Sequential {
     }
 
     #[inline]
-    pub fn push_box(&mut self, layer: Box<dyn Module>) {
+    pub fn push_box(&mut self, layer: Box<dyn ModuleDebug>) {
         self.layers.push(layer)
     }
 
     #[inline]
-    pub fn insert_box(&mut self, index: usize, layer: Box<dyn Module>) {
+    pub fn insert_box(&mut self, index: usize, layer: Box<dyn ModuleDebug>) {
         self.layers.insert(index, layer)
     }
 }
@@ -92,12 +99,13 @@ impl Module for Sequential {
         self.layers.iter_mut().for_each(|layer| layer.eval())
     }
 
-    #[inline]
-    fn param_and_grad(&mut self) -> ParameterIterator<'_> {
-        self.layers
+    fn parameters(&mut self) -> Parameters<'_> {
+        let parms = self
+            .layers
             .iter_mut()
-            .flat_map(|layer| layer.param_and_grad())
-            .collect()
+            .flat_map(|l| l.parameters().iter())
+            .collect::<Vec<_>>();
+        Parameters { parms }
     }
 }
 

@@ -2,7 +2,9 @@
 pub mod data;
 mod iterator;
 pub mod loss;
+mod model;
 pub mod module;
+pub mod optim;
 
 #[cfg(feature = "dataset_hub")]
 pub use data::dataset::hub;
@@ -52,6 +54,10 @@ pub mod prelude {
 
     pub use crate::data::dataset::{Dataset, IterableDataset};
     pub use crate::data::sampler::Sampler;
+
+    pub use crate::loss::Loss;
+
+    pub use crate::optim::Optimizer;
 
     // macros
     pub use crate::{safe, sequential};

@@ -17,12 +17,12 @@ pub struct MNIST {
 }
 
 impl MNIST {
-    const MIRRORS: [&str; 2] = [
+    const MIRRORS: [&'static str; 2] = [
         "http://yann.lecun.com/exdb/mnist/",
         "https://ossci-datasets.s3.amazonaws.com/mnist/",
     ];
 
-    const RESOURCES: [(&str, &str); 4] = [
+    const RESOURCES: [(&'static str, &'static str); 4] = [
         (
             "train-images-idx3-ubyte.gz",
             "f68b3c2dcbeaaa9fbdd348bbdeb94873",
@@ -41,9 +41,9 @@ impl MNIST {
         ),
     ];
 
-    const TRAINING_FILE: &str = "training.pt";
-    const TEST_FILE: &str = "test.pt";
-    const CLASSES: [&str; 10] = [
+    const TRAINING_FILE: &'static str = "training.pt";
+    const TEST_FILE: &'static str = "test.pt";
+    const CLASSES: [&'static str; 10] = [
         "0 - zero",
         "1 - one",
         "2 - two",
