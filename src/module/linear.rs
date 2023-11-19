@@ -2,6 +2,8 @@ use crate::module::init::{InitParameters, KaimingNormal};
 use crate::module::Module;
 use ndarray::prelude::*;
 
+use super::Parameters;
+
 #[derive(Debug)]
 pub struct Linear {
     weight: Array2<f64>,
@@ -59,6 +61,15 @@ impl Module for Linear {
             self.grad_bias = Some((gradient.sum_axis(Axis(0)) / n).insert_axis(Axis(1)));
         }
         gradient.dot(&self.weight)
+    }
+
+    fn parameters(&mut self) -> Parameters<'_> {
+        let params = Parameters::new(2).add(&mut self.weight, self.grad_weight.as_mut().unwrap());
+
+        match self.bias.as_mut() {
+            Some(bias) => params.add(bias, self.grad_bias.as_mut().unwrap()),
+            None => params,
+        }
     }
 }
 

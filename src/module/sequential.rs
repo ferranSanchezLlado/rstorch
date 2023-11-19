@@ -3,6 +3,8 @@ use std::fmt::Debug;
 use crate::module::Module;
 use ndarray::prelude::*;
 
+use super::Parameters;
+
 pub trait ModuleDebug: Module + Debug {}
 impl<T: Module + Debug> ModuleDebug for T {}
 
@@ -95,6 +97,16 @@ impl Module for Sequential {
     #[inline]
     fn eval(&mut self) {
         self.layers.iter_mut().for_each(|layer| layer.eval())
+    }
+
+    fn parameters(&mut self) -> Parameters<'_> {
+        let parms = self
+            .layers
+            .iter_mut()
+            .map(|l| l.parameters().iter())
+            .flatten()
+            .collect::<Vec<_>>();
+        Parameters { parms }
     }
 }
 

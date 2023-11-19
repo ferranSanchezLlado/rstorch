@@ -1,4 +1,5 @@
 use super::Optimizer;
+use crate::module::Parameter;
 use crate::prelude::Module;
 
 #[allow(clippy::upper_case_acronyms)]
@@ -16,20 +17,34 @@ impl SGD {
 
 impl Optimizer for SGD {
     fn step<M: Module>(&mut self, module: &mut M) {
-        todo!()
+        module
+            .parameters()
+            .iter()
+            .for_each(|Parameter { parm, grad }| *parm = parm.clone() - (self.lr * grad.clone()))
     }
     fn zero_grad<M: Module>(&mut self, module: &mut M) {
-        todo!()
+        module
+            .parameters()
+            .iter()
+            .for_each(|Parameter { grad, .. }| grad.fill(0.0))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use ndarray::Array;
+
     use super::*;
+    use crate::Linear;
 
     #[test]
     fn optimize() {
-        let _optim = SGD::new(0.1);
-        unimplemented!()
+        let mut optim = SGD::new(0.1);
+        let mut linear = Linear::new(2, 2);
+
+        linear.forward(Array::zeros((2, 2)));
+        linear.backward(Array::zeros((2, 2)));
+
+        optim.step(&mut linear);
     }
 }

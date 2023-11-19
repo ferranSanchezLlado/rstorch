@@ -1,4 +1,4 @@
-use crate::module::Module;
+use crate::module::{Module, Parameters};
 use ndarray::prelude::*;
 use std::cmp::Ordering;
 
@@ -67,6 +67,10 @@ impl Module for Softmax {
         });
 
         gradient.dot(&jacobian)
+    }
+
+    fn parameters(&mut self) -> Parameters<'_> {
+        Parameters::new(0)
     }
 }
 
