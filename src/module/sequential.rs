@@ -103,8 +103,7 @@ impl Module for Sequential {
         let parms = self
             .layers
             .iter_mut()
-            .map(|l| l.parameters().iter())
-            .flatten()
+            .flat_map(|l| l.parameters().iter())
             .collect::<Vec<_>>();
         Parameters { parms }
     }
