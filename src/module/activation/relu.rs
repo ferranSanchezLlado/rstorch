@@ -1,4 +1,4 @@
-use crate::module::{Module, ParameterIterator};
+use crate::module::{Module, Parameters};
 use ndarray::prelude::*;
 
 #[derive(Debug, Default)]
@@ -26,9 +26,8 @@ impl Module for ReLU {
         gradient * self.prev_input.take().unwrap().mapv(|x| f64::from(x > 0.0))
     }
 
-    #[inline]
-    fn param_and_grad(&mut self) -> ParameterIterator<'_> {
-        ParameterIterator::new()
+    fn parameters(&mut self) -> Parameters<'_> {
+        Parameters::new(0)
     }
 }
 
