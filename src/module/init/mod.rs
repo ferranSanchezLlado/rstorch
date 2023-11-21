@@ -13,6 +13,6 @@ pub trait InitParameters {
 
     #[inline]
     fn bias(&self, _input_size: usize, output_size: usize) -> Array2<f64> {
-        Array2::zeros((output_size, 1))
+        Array2::zeros((1, output_size))
     }
 }

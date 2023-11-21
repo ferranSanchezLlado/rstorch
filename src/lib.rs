@@ -9,6 +9,7 @@ pub mod optim;
 #[cfg(feature = "dataset_hub")]
 pub use data::dataset::hub;
 pub use module::{Identity, Linear, ReLU, SafeModule, Sequential, Softmax};
+pub use optim::SGD;
 
 mod macros {
     #[doc(hidden)]
