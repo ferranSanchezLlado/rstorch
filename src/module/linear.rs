@@ -43,6 +43,11 @@ impl Module for Linear {
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
         let mut x = input.dot(&self.weight.t());
 
+        // Debug assert to validate proper shape
+        let batch_size = input.shape()[0];
+        let output_size = self.weight.shape()[0];
+        debug_assert_eq!(x.shape(), &[batch_size, output_size]);
+
         if let Some(bias) = &self.bias {
             x += bias;
         }
