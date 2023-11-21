@@ -114,6 +114,7 @@ mod tests {
     use super::*;
     use crate::module::activation::ReLU;
     use crate::module::linear::Linear;
+    use crate::Softmax;
 
     #[test]
     fn test_macro() {
@@ -122,7 +123,8 @@ mod tests {
             ReLU(),
             Linear(10, 100),
             ReLU(),
-            Linear(100, 2)
+            Linear(100, 2),
+            Softmax(),
         );
 
         let _module_2 = sequential!(
@@ -130,7 +132,42 @@ mod tests {
             ReLU::new(),
             Linear::new(10, 100),
             ReLU::new(),
-            Linear::new(100, 2)
+            Linear::new(100, 2),
+            Softmax::new()
         );
+    }
+
+    #[test]
+    fn forward() {
+        let mut module = sequential!(
+            Linear(3, 10,),
+            ReLU(),
+            Linear(10, 100),
+            ReLU(),
+            Linear(100, 2),
+            Softmax(),
+        );
+        let data = array![[1.0, 2.0, 3.0], [-4.0, -5.0, -6.0]];
+        let _result = module.forward(data.clone());
+
+        // TODO: finish test
+    }
+
+    #[test]
+    fn backward() {
+        let mut module = sequential!(
+            Linear(3, 10,),
+            ReLU(),
+            Linear(10, 100),
+            ReLU(),
+            Linear(100, 2),
+            Softmax(),
+        );
+        let data = array![[1.0, 2.0, 3.0], [-4.0, -5.0, -6.0]];
+        module.forward(data);
+        let backward_data = array![[1.0, 2.0], [3.0, -4.0]];
+        module.backward(backward_data);
+
+        // TODO: finish test
     }
 }
