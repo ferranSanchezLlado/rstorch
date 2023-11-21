@@ -63,7 +63,7 @@ impl Module for Linear {
         self.grad_weight = Some(gradient.t().dot(&prev_input) / n);
 
         if self.bias.is_some() {
-            self.grad_bias = Some((gradient.sum_axis(Axis(0)) / n).insert_axis(Axis(1)));
+            self.grad_bias = Some((gradient.sum_axis(Axis(0)) / n).insert_axis(Axis(0)));
         }
         gradient.dot(&self.weight)
     }
