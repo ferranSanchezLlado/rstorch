@@ -2,9 +2,9 @@ use ndarray::prelude::*;
 
 pub mod activation;
 pub mod init;
-mod linear;
-mod safe_module;
-mod sequential;
+pub(crate) mod linear;
+pub(crate) mod safe_module;
+pub(crate) mod sequential;
 
 pub use activation::Identity;
 pub use activation::ReLU;

@@ -42,17 +42,20 @@ fn max(a: f64, b: &f64) -> f64 {
     }
 }
 
+pub fn softmax(input: Array2<f64>, axis: Axis) -> Array2<f64> {
+    // Broadcasting fails, but inserting axis makes it work properly
+    let max_axis = input
+        .map_axis(axis, |axis| axis.iter().fold(f64::MIN, max))
+        .insert_axis(axis);
+    let exp = (input - max_axis).mapv(f64::exp);
+    let sum_axis = exp.sum_axis(axis).insert_axis(axis);
+    exp / sum_axis
+}
+
 impl Module for Softmax {
     #[inline]
     fn forward(&mut self, input: Array2<f64>) -> Array2<f64> {
-        // Broadcasting fails, but inserting axis makes it work properly
-        let max_axis = input
-            .map_axis(self.axis, |axis| axis.iter().fold(f64::MIN, max))
-            .insert_axis(self.axis);
-        let exp = (input - max_axis).mapv(f64::exp);
-        let sum_axis = exp.sum_axis(self.axis).insert_axis(self.axis);
-
-        self.output = Some(exp / sum_axis);
+        self.output = Some(softmax(input, self.axis));
         self.output.clone().unwrap()
     }
 

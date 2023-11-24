@@ -1,6 +1,6 @@
-mod identity;
-mod relu;
-mod softmax;
+pub(crate) mod identity;
+pub(crate) mod relu;
+pub(crate) mod softmax;
 
 pub use identity::Identity;
 pub use relu::ReLU;
