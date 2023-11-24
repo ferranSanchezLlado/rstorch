@@ -1,10 +1,9 @@
 #![cfg(feature = "dataset_hub")]
-use rand::thread_rng;
-use rstorch::data::{DataLoader, RandomSampler};
+use rstorch::data::{DataLoader, SequentialSampler};
 use rstorch::hub::MNIST;
 use rstorch::loss::CrossEntropyLoss;
 use rstorch::prelude::*;
-use rstorch::{Identity, Linear, ReLU, Sequential, Softmax, SGD};
+use rstorch::{Identity, Linear, ReLU, Sequential, SGD};
 use std::path::PathBuf;
 
 fn one_hot(x: Array0<u8>, n: usize) -> Array1<f64> {
@@ -37,7 +36,6 @@ fn accuracy(pred: Array2<f64>, truth: Array2<f64>) -> f64 {
 }
 
 #[test]
-#[ignore = "Not working yet"]
 fn basic_test() {
     const BATCH_SIZE: usize = 32;
     const EPOCHS: usize = 5;
@@ -47,7 +45,7 @@ fn basic_test() {
     let data = MNIST::new(path, false, true)
         .transform(|(x, y)| (x.mapv(f64::from) / 255.0, y))
         .transform(|(x, y)| (Array::from_iter(x), one_hot(y, 10)));
-    let sampler = RandomSampler::new(data.len(), false, BATCH_SIZE, thread_rng());
+    let sampler = SequentialSampler::new(data.len());
     let mut data_loader = DataLoader::new(data, BATCH_SIZE, true, sampler);
 
     let mut model = sequential!(
@@ -57,7 +55,6 @@ fn basic_test() {
         Linear(100, 100),
         ReLU(),
         Linear(100, 10),
-        Softmax()
     );
     let mut loss = CrossEntropyLoss::new();
 
@@ -77,4 +74,6 @@ fn basic_test() {
             optim.step(&mut model);
         }
     }
+
+    todo!()
 }
