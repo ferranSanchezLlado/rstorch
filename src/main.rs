@@ -1,4 +1,3 @@
-#![cfg(feature = "dataset_hub")]
 use rstorch::data::{DataLoader, SequentialSampler};
 use rstorch::hub::MNIST;
 use rstorch::loss::CrossEntropyLoss;
@@ -35,11 +34,9 @@ fn accuracy(pred: Array2<f64>, truth: Array2<f64>) -> f64 {
         / n
 }
 
-#[test]
-#[ignore = "CHECK ITS CORRECT"]
-fn basic_test() {
+fn main() {
     const BATCH_SIZE: usize = 32;
-    const EPOCHS: usize = 5;
+    const EPOCHS: usize = 10;
 
     let path: PathBuf = [".test_cache", "mnist"].iter().collect();
 
@@ -58,23 +55,26 @@ fn basic_test() {
         Linear(100, 10),
     );
     let mut loss = CrossEntropyLoss::new();
-
     let mut optim = SGD::new(0.001);
 
     for _ in 0..EPOCHS {
-        // TODO
+        let n = data_loader.len() as f64;
+        let mut total_loss = 0.0;
+        let mut total_acc = 0.0;
         for (x, y) in data_loader.iter_array() {
-            println!("{:?}", x.shape());
             let pred = model.forward(x);
             let l = loss.forward(pred.clone(), y.clone());
             let acc = accuracy(pred, y);
 
-            println!("Loss {l}, Accuracy {acc}");
+            total_loss += l;
+            total_acc += acc;
 
             model.backward(loss.backward());
             optim.step(&mut model);
         }
-    }
 
-    todo!()
+        let avg_loss = total_loss / n;
+        let avg_acc = total_acc / n;
+        println!("Avarage loss {avg_loss} - Avarage accuracy {avg_acc}");
+    }
 }

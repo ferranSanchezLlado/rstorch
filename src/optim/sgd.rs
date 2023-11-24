@@ -22,12 +22,6 @@ impl Optimizer for SGD {
             .iter()
             .for_each(|Parameter { parm, grad }| *parm = parm.clone() - (self.lr * grad.clone()))
     }
-    fn zero_grad<M: Module>(&mut self, module: &mut M) {
-        module
-            .parameters()
-            .iter()
-            .for_each(|Parameter { grad, .. }| grad.fill(0.0))
-    }
 }
 
 #[cfg(test)]

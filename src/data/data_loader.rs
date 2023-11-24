@@ -64,6 +64,33 @@ impl<D: Dataset, S: Sampler> DataLoader<D, S> {
         self.shuffle();
         DataLoaderIter::new(self)
     }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.dataset.len() / self.batch_size
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        // Currently it ignores the remaining elements
+        self.dataset.len() < self.batch_size
+    }
+}
+
+impl<D, T1, D1, T2, D2, S> DataLoader<D, S>
+where
+    D: Dataset<Item = (Array<T1, D1>, Array<T2, D2>)>,
+    S: Sampler,
+    D1: Dimension,
+    D2: Dimension,
+    T1: Clone,
+    T2: Clone,
+{
+    #[inline]
+    pub fn iter_array(&mut self) -> ArrayDataLoaderIter<'_, D, S> {
+        self.shuffle();
+        ArrayDataLoaderIter::new(self)
+    }
 }
 
 // -- GENERIC ITER --
@@ -87,7 +114,7 @@ impl<'a, D: Dataset, S: Sampler> Iterator for DataLoaderIter<'a, D, S> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         (0..self.data_loader.batch_size)
-            .map(|_| self.data_loader.dataset.get(self.iter.next().unwrap()))
+            .map(|_| self.data_loader.dataset.get(self.iter.next()?))
             .collect()
     }
 
@@ -116,7 +143,7 @@ where
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         (0..self.data_loader.batch_size)
-            .map(|_| self.data_loader.dataset.get(self.iter.next_back().unwrap()))
+            .map(|_| self.data_loader.dataset.get(self.iter.next_back()?))
             .collect()
     }
 }
@@ -230,22 +257,6 @@ where
     T1: Clone,
     T2: Clone,
 {
-}
-
-impl<D, T1, D1, T2, D2, S> DataLoader<D, S>
-where
-    D: Dataset<Item = (Array<T1, D1>, Array<T2, D2>)>,
-    S: Sampler,
-    D1: Dimension,
-    D2: Dimension,
-    T1: Clone,
-    T2: Clone,
-{
-    #[inline]
-    pub fn iter_array(&mut self) -> ArrayDataLoaderIter<'_, D, S> {
-        self.shuffle();
-        ArrayDataLoaderIter::new(self)
-    }
 }
 
 #[cfg(test)]
