@@ -24,7 +24,6 @@ impl<M: Module, L: Loss, O: Optimizer> BasicModel<M, L, O> {
         self.module.backward(gradient);
 
         self.optim.step(&mut self.module);
-        self.optim.zero_grad(&mut self.module)
     }
 
     fn predict(&mut self, input: Array2<f64>) -> Array2<f64> {
