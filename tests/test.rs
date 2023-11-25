@@ -14,7 +14,7 @@ fn training() {
 
     let path: PathBuf = [".test_cache", "training"].iter().collect();
 
-    let data = MNIST::new(&path, false, true)
+    let data = MNIST::new(path, false, true)
         .transform(|(x, y)| (x.mapv(f64::from) / 255.0, y))
         .transform(|(x, y)| (Array::from_iter(x), one_hot(y, 10)));
     let sampler = SequentialSampler::new(data.len());
