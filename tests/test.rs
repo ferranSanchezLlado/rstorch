@@ -5,7 +5,6 @@ use rstorch::loss::CrossEntropyLoss;
 use rstorch::prelude::*;
 use rstorch::utils::{accuracy, one_hot};
 use rstorch::{Identity, Linear, ReLU, Sequential, SGD};
-use std::fs;
 use std::path::PathBuf;
 
 #[test]
@@ -53,6 +52,4 @@ fn training() {
         let avg_acc = total_acc / n;
         println!("EPOCH {i}: Avarage loss {avg_loss} - Avarage accuracy {avg_acc}");
     }
-
-    fs::remove_file(path).unwrap();
 }
