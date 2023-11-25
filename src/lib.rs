@@ -5,9 +5,11 @@ pub mod loss;
 mod model;
 pub mod module;
 pub mod optim;
+pub mod utils;
 
 #[cfg(feature = "dataset_hub")]
 pub use data::dataset::hub;
+pub use loss::CrossEntropyLoss;
 pub use module::{Identity, Linear, ReLU, SafeModule, Sequential, Softmax};
 pub use optim::SGD;
 
