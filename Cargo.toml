@@ -2,7 +2,7 @@
 name = "rstorch"
 version = "0.2.0"
 authors = ["Ferran Sanchez Llado"]
-license = "MIT or Apache-2.0"
+license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/ferranSanchezLlado/rstorch.git"
 homepage = "https://github.com/ferranSanchezLlado/rstorch.git"
