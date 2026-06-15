@@ -1,7 +1,19 @@
 //! Floating-point element types supported by tensors.
 
 /// Project-owned floating-point trait used by tensor and backend code.
-pub trait FloatElement: Copy + Default + Send + Sync + PartialEq + PartialOrd + 'static {
+pub trait FloatElement:
+    Copy
+    + Default
+    + Send
+    + Sync
+    + PartialEq
+    + PartialOrd
+    + std::ops::Add<Output = Self>
+    + std::ops::Sub<Output = Self>
+    + std::ops::Mul<Output = Self>
+    + std::ops::Div<Output = Self>
+    + 'static
+{
     fn zero() -> Self;
     fn one() -> Self;
     fn from_usize(value: usize) -> Self;
