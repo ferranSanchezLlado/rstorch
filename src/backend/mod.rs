@@ -19,4 +19,19 @@ pub trait Backend<E: FloatElement>: Clone + Send + Sync + 'static {
     type Storage: Clone + Send + Sync + 'static;
 
     fn default_device() -> Self::Device;
+
+    fn zeros<const N: usize>(device: &Self::Device) -> Self::Storage
+    where
+        [(); N]:;
+
+    fn ones<const N: usize>(device: &Self::Device) -> Self::Storage
+    where
+        [(); N]:;
+
+    fn from_array<const N: usize>(device: &Self::Device, data: [E; N]) -> Self::Storage
+    where
+        [(); N]:;
+
+    fn from_vec(device: &Self::Device, data: Vec<E>) -> Self::Storage;
+    fn to_vec(storage: &Self::Storage) -> Vec<E>;
 }
