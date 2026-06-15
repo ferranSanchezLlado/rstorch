@@ -10,6 +10,8 @@ pub mod tensor;
 
 pub mod prelude {
     pub use crate::backend::Cpu;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub use crate::backend::Metal;
     pub use crate::dtype::FloatElement;
     pub use crate::nn::{Linear, Module, Parameter};
     pub use crate::optim::{OptimParameter, SGD};

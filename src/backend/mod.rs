@@ -4,12 +4,14 @@ pub mod cpu;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 #[cfg(feature = "wgpu")]
 pub mod wgpu;
 
 pub use cpu::{Cpu, CpuDevice, CpuStorage};
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub use metal::{Metal, MetalDevice, MetalStorage};
 
 use crate::dtype::FloatElement;
 
