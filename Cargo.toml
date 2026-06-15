@@ -19,3 +19,8 @@ edition = "2024"
 [dev-dependencies]
 
 [features]
+default = ["cpu"]
+cpu = []
+metal = []
+cuda = []
+wgpu = []
