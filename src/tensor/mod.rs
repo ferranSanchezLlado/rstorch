@@ -85,6 +85,30 @@ where
             }),
         }
     }
+
+    pub(crate) fn replace_data_as_leaf(&mut self, data: Vec<E>, requires_grad: bool)
+    where
+        [(); S::NUMEL]:,
+    {
+        assert_eq!(data.len(), S::NUMEL, "replacement data length mismatch");
+
+        let device = self.inner.device.clone();
+        let data = B::from_vec(&device, data);
+        let grad = Arc::clone(&self.inner.grad);
+
+        *self = Self {
+            inner: Arc::new(TensorInner {
+                id: autograd::next_node_id(),
+                data,
+                device,
+                requires_grad,
+                is_leaf: true,
+                grad,
+                grad_fn: None,
+                shape: PhantomData,
+            }),
+        };
+    }
 }
 
 impl<S, E, B> Tensor<S, E, B>
