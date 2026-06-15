@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/dtype_mismatch.rs:9:19
+  |
+9 |     let _ = a.add(&b);
+  |               --- ^^ expected `&Tensor<D2<32, 10>>`, found `&Tensor<D2<32, 10>, f64>`
+  |               |
+  |               arguments to this method are incorrect
+  |
+  = note: expected reference `&Tensor<D2<32, 10>, f32>`
+             found reference `&Tensor<D2<32, 10>, f64>`
+note: method defined here
+ --> src/tensor/ops.rs
+  |
+  |     pub fn add(&self, rhs: &Self) -> Self {
+  |            ^^^

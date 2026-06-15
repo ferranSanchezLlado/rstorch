@@ -17,6 +17,7 @@ edition = "2024"
 
 
 [dev-dependencies]
+trybuild = "1"
 
 [features]
 default = ["cpu"]

@@ -203,7 +203,6 @@ where
     S: Shape,
     E: FloatElement,
     B: Backend<E>,
-    [(); S::NUMEL]:,
 {
     /// Returns a leaf tensor with the same value and requested gradient tracking setting.
     pub fn with_requires_grad(self, requires_grad: bool) -> Self {
@@ -255,7 +254,7 @@ where
     B: Backend<E>,
 {
     pub fn backward(&self) {
-        let seed = B::ones::<{ D0::NUMEL }>(&self.inner.device);
+        let seed = B::ones(&self.inner.device, D0::NUMEL);
         run_backward::<E, B>(AnyTensor::from_tensor(self), seed);
     }
 }

@@ -4,14 +4,16 @@ Implementation from scratch of a deep learning framework in Rust with a PyTorch-
 
 ## Rust Toolchain
 
-RsTorch currently targets nightly Rust for const-generic shape support:
+RsTorch currently targets nightly Rust for const-generic shape support. Crates
+that use the const-generic tensor APIs should enable the same gates:
 
 ```rust
 #![feature(generic_const_exprs)]
 #![allow(incomplete_features)]
 ```
 
-Use `cargo +nightly check` while the autograd restart is in progress.
+Use `cargo +nightly test` while the autograd restart is in progress. Compile-fail
+tests are part of the normal test suite.
 
 ## Installation
 
@@ -31,7 +33,29 @@ rstorch = { git = "https://github.com/ferranSanchezLlado/rstorch.git" }
 
 ## Status
 
-The current restart foundation defines the module layout, feature flags, shape markers, floating-point trait, backend placeholders, and tensor aliases. Tensor constructors, operations, autograd, neural network layers, and optimizers are planned for later epochs.
+The current restart includes the CPU backend, owned tensor storage, const-generic
+shape markers, `f32` as the default dtype, `f64` support, typed tensor aliases,
+forward CPU operations, dynamic autograd, trainable parameters, a `Linear` layer,
+and SGD.
+
+Supported guarantees before GPU backends:
+
+- Tensor shapes are compile-time types where possible.
+- Elementwise operations require matching shape, dtype, and backend.
+- Matrix multiplication dimensions are encoded in the method signature.
+- `backward()` without an explicit seed is only available on scalar tensors.
+- Non-scalar tensors use `backward_with(seed)`.
+- CPU storage is safe owned `Vec` data.
+- Optimizer steps run with graph construction disabled through `no_grad`.
+
+The stable initial backend is CPU. Metal, CUDA, and WGPU are feature-gated
+placeholders planned for later epochs.
+
+## Safety
+
+The safe tensor layer contains no `unsafe` code. GPU backends may require unsafe
+or platform-specific code in later epochs; that code should stay isolated inside
+backend modules with documented invariants.
 
 ## License
 

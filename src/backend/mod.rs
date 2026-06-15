@@ -20,13 +20,9 @@ pub trait Backend<E: FloatElement>: Clone + Send + Sync + 'static {
 
     fn default_device() -> Self::Device;
 
-    fn zeros<const N: usize>(device: &Self::Device) -> Self::Storage
-    where
-        [(); N]:;
+    fn zeros(device: &Self::Device, len: usize) -> Self::Storage;
 
-    fn ones<const N: usize>(device: &Self::Device) -> Self::Storage
-    where
-        [(); N]:;
+    fn ones(device: &Self::Device, len: usize) -> Self::Storage;
 
     fn from_array<const N: usize>(device: &Self::Device, data: [E; N]) -> Self::Storage
     where
@@ -35,131 +31,63 @@ pub trait Backend<E: FloatElement>: Clone + Send + Sync + 'static {
     fn from_vec(device: &Self::Device, data: Vec<E>) -> Self::Storage;
     fn to_vec(storage: &Self::Storage) -> Vec<E>;
 
-    fn add<const N: usize>(
+    fn add(device: &Self::Device, lhs: &Self::Storage, rhs: &Self::Storage) -> Self::Storage;
+
+    fn sub(device: &Self::Device, lhs: &Self::Storage, rhs: &Self::Storage) -> Self::Storage;
+
+    fn mul(device: &Self::Device, lhs: &Self::Storage, rhs: &Self::Storage) -> Self::Storage;
+
+    fn div(device: &Self::Device, lhs: &Self::Storage, rhs: &Self::Storage) -> Self::Storage;
+
+    fn add_scalar(device: &Self::Device, lhs: &Self::Storage, rhs: E) -> Self::Storage;
+
+    fn sub_scalar(device: &Self::Device, lhs: &Self::Storage, rhs: E) -> Self::Storage;
+
+    fn mul_scalar(device: &Self::Device, lhs: &Self::Storage, rhs: E) -> Self::Storage;
+
+    fn div_scalar(device: &Self::Device, lhs: &Self::Storage, rhs: E) -> Self::Storage;
+
+    fn powf(device: &Self::Device, lhs: &Self::Storage, exponent: E) -> Self::Storage;
+
+    fn relu(device: &Self::Device, input: &Self::Storage) -> Self::Storage;
+
+    fn exp(device: &Self::Device, input: &Self::Storage) -> Self::Storage;
+
+    fn ln(device: &Self::Device, input: &Self::Storage) -> Self::Storage;
+
+    fn sum(device: &Self::Device, input: &Self::Storage) -> Self::Storage;
+
+    fn mean(device: &Self::Device, input: &Self::Storage) -> Self::Storage;
+
+    fn matmul(
         device: &Self::Device,
         lhs: &Self::Storage,
         rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); N]:;
+        rows: usize,
+        inner: usize,
+        cols: usize,
+    ) -> Self::Storage;
 
-    fn sub<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn mul<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn div<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn add_scalar<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: E,
-    ) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn sub_scalar<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: E,
-    ) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn mul_scalar<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: E,
-    ) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn div_scalar<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: E,
-    ) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn powf<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        exponent: E,
-    ) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn relu<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn exp<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn ln<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn sum<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn mean<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:;
-
-    fn matmul<const M: usize, const K: usize, const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); M * K]:,
-        [(); K * N]:,
-        [(); M * N]:;
-
-    fn transpose<const M: usize, const N: usize>(
+    fn transpose(
         device: &Self::Device,
         input: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); M * N]:,
-        [(); N * M]:;
+        rows: usize,
+        cols: usize,
+    ) -> Self::Storage;
 
-    fn add_row<const M: usize, const N: usize>(
+    fn add_row(
         device: &Self::Device,
         input: &Self::Storage,
         row: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); M * N]:,
-        [(); N]:;
+        rows: usize,
+        cols: usize,
+    ) -> Self::Storage;
 
-    fn add_col<const M: usize, const N: usize>(
+    fn add_col(
         device: &Self::Device,
         input: &Self::Storage,
         col: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); M * N]:,
-        [(); M]:;
+        rows: usize,
+        cols: usize,
+    ) -> Self::Storage;
 }

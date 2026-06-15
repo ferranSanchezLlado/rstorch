@@ -25,7 +25,6 @@ where
     S: Shape,
     E: FloatElement,
     B: Backend<E>,
-    [(); S::NUMEL]:,
 {
     pub fn new(tensor: Tensor<S, E, B>) -> Self {
         Self {
@@ -56,7 +55,6 @@ where
     S: Shape,
     E: FloatElement,
     B: Backend<E>,
-    [(); S::NUMEL]:,
 {
     fn param_id(&self) -> usize {
         self.id
@@ -99,10 +97,6 @@ pub struct Linear<const IN: usize, const OUT: usize, E = f32, B = Cpu>
 where
     E: FloatElement,
     B: Backend<E>,
-    [(); IN * OUT]:,
-    [(); OUT]:,
-    [(); <D2<IN, OUT> as Shape>::NUMEL]:,
-    [(); <D1<OUT> as Shape>::NUMEL]:,
 {
     weight: Parameter<D2<IN, OUT>, E, B>,
     bias: Parameter<D1<OUT>, E, B>,
@@ -112,10 +106,6 @@ impl<const IN: usize, const OUT: usize, E, B> Linear<IN, OUT, E, B>
 where
     E: FloatElement,
     B: Backend<E>,
-    [(); IN * OUT]:,
-    [(); OUT]:,
-    [(); <D2<IN, OUT> as Shape>::NUMEL]:,
-    [(); <D1<OUT> as Shape>::NUMEL]:,
 {
     pub fn new() -> Self {
         Self {
@@ -142,13 +132,7 @@ where
     pub fn forward<const BATCH: usize>(
         &self,
         x: &Tensor2D<BATCH, IN, E, B>,
-    ) -> Tensor2D<BATCH, OUT, E, B>
-    where
-        [(); BATCH * IN]:,
-        [(); BATCH * OUT]:,
-        [(); OUT * IN]:,
-        [(); IN * BATCH]:,
-    {
+    ) -> Tensor2D<BATCH, OUT, E, B> {
         x.matmul(self.weight.tensor()).add_row(self.bias.tensor())
     }
 }
@@ -157,10 +141,6 @@ impl<const IN: usize, const OUT: usize, E, B> Default for Linear<IN, OUT, E, B>
 where
     E: FloatElement,
     B: Backend<E>,
-    [(); IN * OUT]:,
-    [(); OUT]:,
-    [(); <D2<IN, OUT> as Shape>::NUMEL]:,
-    [(); <D1<OUT> as Shape>::NUMEL]:,
 {
     fn default() -> Self {
         Self::new()
@@ -171,10 +151,6 @@ impl<const IN: usize, const OUT: usize, E, B> Module<E, B> for Linear<IN, OUT, E
 where
     E: FloatElement,
     B: Backend<E>,
-    [(); IN * OUT]:,
-    [(); OUT]:,
-    [(); <D2<IN, OUT> as Shape>::NUMEL]:,
-    [(); <D1<OUT> as Shape>::NUMEL]:,
 {
     fn parameters_mut(&mut self) -> Vec<&mut dyn OptimParameter<E, B>> {
         vec![&mut self.weight, &mut self.bias]

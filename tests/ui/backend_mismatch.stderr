@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+   --> tests/ui/backend_mismatch.rs:177:21
+    |
+177 |     let _ = cpu.add(&other);
+    |                 --- ^^^^^^ expected `&Tensor<D2<32, 10>>`, found `&Tensor<D2<32, 10>, f32, OtherBackend>`
+    |                 |
+    |                 arguments to this method are incorrect
+    |
+    = note: expected reference `&Tensor<D2<32, 10>, f32, rstorch::backend::Cpu>`
+               found reference `&Tensor<D2<32, 10>, f32, OtherBackend>`
+note: method defined here
+   --> src/tensor/ops.rs
+    |
+    |     pub fn add(&self, rhs: &Self) -> Self {
+    |            ^^^

@@ -87,8 +87,6 @@ where
     }
 
     pub(crate) fn replace_data_as_leaf(&mut self, data: Vec<E>, requires_grad: bool)
-    where
-        [(); S::NUMEL]:,
     {
         assert_eq!(data.len(), S::NUMEL, "replacement data length mismatch");
 
@@ -116,7 +114,6 @@ where
     S: Shape,
     E: FloatElement,
     B: Backend<E>,
-    [(); S::NUMEL]:,
 {
     pub fn zeros() -> Self {
         Self::zeros_on(B::default_device())
@@ -127,12 +124,12 @@ where
     }
 
     pub fn zeros_on(device: B::Device) -> Self {
-        let data = B::zeros::<{ S::NUMEL }>(&device);
+        let data = B::zeros(&device, S::NUMEL);
         Self::from_storage(device, data)
     }
 
     pub fn ones_on(device: B::Device) -> Self {
-        let data = B::ones::<{ S::NUMEL }>(&device);
+        let data = B::ones(&device, S::NUMEL);
         Self::from_storage(device, data)
     }
 
@@ -180,7 +177,6 @@ impl<const N: usize, E, B> Tensor1D<N, E, B>
 where
     E: FloatElement,
     B: Backend<E>,
-    [(); N]:,
 {
     pub fn from_array(data: [E; N]) -> Self {
         let device = B::default_device();
@@ -193,7 +189,6 @@ impl<const M: usize, const N: usize, E, B> Tensor2D<M, N, E, B>
 where
     E: FloatElement,
     B: Backend<E>,
-    [(); M * N]:,
 {
     pub fn from_array(data: [[E; N]; M]) -> Self {
         let device = B::default_device();

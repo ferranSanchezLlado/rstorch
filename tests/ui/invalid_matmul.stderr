@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/invalid_matmul.rs:9:22
+  |
+9 |     let _ = a.matmul(&b);
+  |               ------ ^^ expected `784`, found `128`
+  |               |
+  |               arguments to this method are incorrect
+  |
+  = note: expected reference `&Tensor<D2<784, _>>`
+             found reference `&Tensor<D2<128, 10>>`
+note: method defined here
+ --> src/tensor/ops.rs
+  |
+  |     pub fn matmul<const N: usize>(&self, rhs: &Tensor2D<K, N, E, B>) -> Tensor2D<M, N, E, B>
+  |            ^^^^^^

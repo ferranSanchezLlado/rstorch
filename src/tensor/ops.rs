@@ -12,11 +12,10 @@ where
     S: Shape,
     E: FloatElement,
     B: Backend<E>,
-    [(); S::NUMEL]:,
 {
     pub fn add(&self, rhs: &Self) -> Self {
         let device = self.inner.device.clone();
-        let data = B::add::<{ S::NUMEL }>(&device, &self.inner.data, &rhs.inner.data);
+        let data = B::add(&device, &self.inner.data, &rhs.inner.data);
         let requires_grad =
             autograd::should_track_grad(self.inner.requires_grad || rhs.inner.requires_grad);
         let grad_fn = requires_grad.then(|| {
@@ -30,7 +29,7 @@ where
 
     pub fn sub(&self, rhs: &Self) -> Self {
         let device = self.inner.device.clone();
-        let data = B::sub::<{ S::NUMEL }>(&device, &self.inner.data, &rhs.inner.data);
+        let data = B::sub(&device, &self.inner.data, &rhs.inner.data);
         let backward_device = device.clone();
         let requires_grad =
             autograd::should_track_grad(self.inner.requires_grad || rhs.inner.requires_grad);
@@ -38,8 +37,7 @@ where
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self), AnyTensor::from_tensor(rhs)],
                 backward: Box::new(move |grad| {
-                    let negative =
-                        B::mul_scalar::<{ S::NUMEL }>(&backward_device, grad, E::zero() - E::one());
+                    let negative = B::mul_scalar(&backward_device, grad, E::zero() - E::one());
                     vec![grad.clone(), negative]
                 }),
             })
@@ -49,7 +47,7 @@ where
 
     pub fn mul(&self, rhs: &Self) -> Self {
         let device = self.inner.device.clone();
-        let data = B::mul::<{ S::NUMEL }>(&device, &self.inner.data, &rhs.inner.data);
+        let data = B::mul(&device, &self.inner.data, &rhs.inner.data);
         let lhs_data = self.inner.data.clone();
         let rhs_data = rhs.inner.data.clone();
         let backward_device = device.clone();
@@ -60,8 +58,8 @@ where
                 parents: vec![AnyTensor::from_tensor(self), AnyTensor::from_tensor(rhs)],
                 backward: Box::new(move |grad| {
                     vec![
-                        B::mul::<{ S::NUMEL }>(&backward_device, grad, &rhs_data),
-                        B::mul::<{ S::NUMEL }>(&backward_device, grad, &lhs_data),
+                        B::mul(&backward_device, grad, &rhs_data),
+                        B::mul(&backward_device, grad, &lhs_data),
                     ]
                 }),
             })
@@ -71,7 +69,7 @@ where
 
     pub fn div(&self, rhs: &Self) -> Self {
         let device = self.inner.device.clone();
-        let data = B::div::<{ S::NUMEL }>(&device, &self.inner.data, &rhs.inner.data);
+        let data = B::div(&device, &self.inner.data, &rhs.inner.data);
         let lhs_data = self.inner.data.clone();
         let rhs_data = rhs.inner.data.clone();
         let backward_device = device.clone();
@@ -81,13 +79,11 @@ where
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self), AnyTensor::from_tensor(rhs)],
                 backward: Box::new(move |grad| {
-                    let dx = B::div::<{ S::NUMEL }>(&backward_device, grad, &rhs_data);
-                    let rhs_squared =
-                        B::powf::<{ S::NUMEL }>(&backward_device, &rhs_data, E::from_usize(2));
-                    let numerator = B::mul::<{ S::NUMEL }>(&backward_device, grad, &lhs_data);
-                    let dy = B::div::<{ S::NUMEL }>(&backward_device, &numerator, &rhs_squared);
-                    let dy =
-                        B::mul_scalar::<{ S::NUMEL }>(&backward_device, &dy, E::zero() - E::one());
+                    let dx = B::div(&backward_device, grad, &rhs_data);
+                    let rhs_squared = B::powf(&backward_device, &rhs_data, E::from_usize(2));
+                    let numerator = B::mul(&backward_device, grad, &lhs_data);
+                    let dy = B::div(&backward_device, &numerator, &rhs_squared);
+                    let dy = B::mul_scalar(&backward_device, &dy, E::zero() - E::one());
                     vec![dx, dy]
                 }),
             })
@@ -97,7 +93,7 @@ where
 
     pub fn add_scalar(&self, rhs: E) -> Self {
         let device = self.inner.device.clone();
-        let data = B::add_scalar::<{ S::NUMEL }>(&device, &self.inner.data, rhs);
+        let data = B::add_scalar(&device, &self.inner.data, rhs);
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
@@ -110,7 +106,7 @@ where
 
     pub fn sub_scalar(&self, rhs: E) -> Self {
         let device = self.inner.device.clone();
-        let data = B::sub_scalar::<{ S::NUMEL }>(&device, &self.inner.data, rhs);
+        let data = B::sub_scalar(&device, &self.inner.data, rhs);
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
@@ -123,14 +119,14 @@ where
 
     pub fn mul_scalar(&self, rhs: E) -> Self {
         let device = self.inner.device.clone();
-        let data = B::mul_scalar::<{ S::NUMEL }>(&device, &self.inner.data, rhs);
+        let data = B::mul_scalar(&device, &self.inner.data, rhs);
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
                 backward: Box::new(move |grad| {
-                    vec![B::mul_scalar::<{ S::NUMEL }>(&backward_device, grad, rhs)]
+                    vec![B::mul_scalar(&backward_device, grad, rhs)]
                 }),
             })
         });
@@ -139,14 +135,14 @@ where
 
     pub fn div_scalar(&self, rhs: E) -> Self {
         let device = self.inner.device.clone();
-        let data = B::div_scalar::<{ S::NUMEL }>(&device, &self.inner.data, rhs);
+        let data = B::div_scalar(&device, &self.inner.data, rhs);
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
                 backward: Box::new(move |grad| {
-                    vec![B::div_scalar::<{ S::NUMEL }>(&backward_device, grad, rhs)]
+                    vec![B::div_scalar(&backward_device, grad, rhs)]
                 }),
             })
         });
@@ -155,7 +151,7 @@ where
 
     pub fn powf(&self, exponent: E) -> Self {
         let device = self.inner.device.clone();
-        let data = B::powf::<{ S::NUMEL }>(&device, &self.inner.data, exponent);
+        let data = B::powf(&device, &self.inner.data, exponent);
         let input_data = self.inner.data.clone();
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
@@ -164,10 +160,9 @@ where
                 parents: vec![AnyTensor::from_tensor(self)],
                 backward: Box::new(move |grad| {
                     let exponent_minus_one = exponent - E::one();
-                    let power =
-                        B::powf::<{ S::NUMEL }>(&backward_device, &input_data, exponent_minus_one);
-                    let scaled = B::mul_scalar::<{ S::NUMEL }>(&backward_device, &power, exponent);
-                    vec![B::mul::<{ S::NUMEL }>(&backward_device, grad, &scaled)]
+                    let power = B::powf(&backward_device, &input_data, exponent_minus_one);
+                    let scaled = B::mul_scalar(&backward_device, &power, exponent);
+                    vec![B::mul(&backward_device, grad, &scaled)]
                 }),
             })
         });
@@ -176,7 +171,7 @@ where
 
     pub fn relu(&self) -> Self {
         let device = self.inner.device.clone();
-        let data = B::relu::<{ S::NUMEL }>(&device, &self.inner.data);
+        let data = B::relu(&device, &self.inner.data);
         let input_data = self.inner.data.clone();
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
@@ -200,7 +195,7 @@ where
 
     pub fn exp(&self) -> Self {
         let device = self.inner.device.clone();
-        let data = B::exp::<{ S::NUMEL }>(&device, &self.inner.data);
+        let data = B::exp(&device, &self.inner.data);
         let output_data = data.clone();
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
@@ -208,7 +203,7 @@ where
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
                 backward: Box::new(move |grad| {
-                    vec![B::mul::<{ S::NUMEL }>(&backward_device, grad, &output_data)]
+                    vec![B::mul(&backward_device, grad, &output_data)]
                 }),
             })
         });
@@ -217,7 +212,7 @@ where
 
     pub fn ln(&self) -> Self {
         let device = self.inner.device.clone();
-        let data = B::ln::<{ S::NUMEL }>(&device, &self.inner.data);
+        let data = B::ln(&device, &self.inner.data);
         let input_data = self.inner.data.clone();
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
@@ -225,7 +220,7 @@ where
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
                 backward: Box::new(move |grad| {
-                    vec![B::div::<{ S::NUMEL }>(&backward_device, grad, &input_data)]
+                    vec![B::div(&backward_device, grad, &input_data)]
                 }),
             })
         });
@@ -234,7 +229,7 @@ where
 
     pub fn sum(&self) -> Scalar<E, B> {
         let device = self.inner.device.clone();
-        let data = B::sum::<{ S::NUMEL }>(&device, &self.inner.data);
+        let data = B::sum(&device, &self.inner.data);
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
         let grad_fn = requires_grad.then(|| {
@@ -251,7 +246,7 @@ where
 
     pub fn mean(&self) -> Scalar<E, B> {
         let device = self.inner.device.clone();
-        let data = B::mean::<{ S::NUMEL }>(&device, &self.inner.data);
+        let data = B::mean(&device, &self.inner.data);
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
         let grad_fn = requires_grad.then(|| {
@@ -271,17 +266,11 @@ impl<const M: usize, const K: usize, E, B> Tensor2D<M, K, E, B>
 where
     E: FloatElement,
     B: Backend<E>,
-    [(); M * K]:,
 {
     pub fn matmul<const N: usize>(&self, rhs: &Tensor2D<K, N, E, B>) -> Tensor2D<M, N, E, B>
-    where
-        [(); K * N]:,
-        [(); N * K]:,
-        [(); M * N]:,
-        [(); K * M]:,
     {
         let device = self.inner.device.clone();
-        let data = B::matmul::<M, K, N>(&device, &self.inner.data, &rhs.inner.data);
+        let data = B::matmul(&device, &self.inner.data, &rhs.inner.data, M, K, N);
         let lhs_data = self.inner.data.clone();
         let rhs_data = rhs.inner.data.clone();
         let backward_device = device.clone();
@@ -291,11 +280,11 @@ where
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self), AnyTensor::from_tensor(rhs)],
                 backward: Box::new(move |grad| {
-                    let rhs_t = B::transpose::<K, N>(&backward_device, &rhs_data);
-                    let lhs_t = B::transpose::<M, K>(&backward_device, &lhs_data);
+                    let rhs_t = B::transpose(&backward_device, &rhs_data, K, N);
+                    let lhs_t = B::transpose(&backward_device, &lhs_data, M, K);
                     vec![
-                        B::matmul::<M, N, K>(&backward_device, grad, &rhs_t),
-                        B::matmul::<K, M, N>(&backward_device, &lhs_t, grad),
+                        B::matmul(&backward_device, grad, &rhs_t, M, N, K),
+                        B::matmul(&backward_device, &lhs_t, grad, K, M, N),
                     ]
                 }),
             })
@@ -308,20 +297,17 @@ impl<const M: usize, const N: usize, E, B> Tensor2D<M, N, E, B>
 where
     E: FloatElement,
     B: Backend<E>,
-    [(); M * N]:,
 {
     pub fn transpose(&self) -> Tensor2D<N, M, E, B>
-    where
-        [(); N * M]:,
     {
         let device = self.inner.device.clone();
-        let data = B::transpose::<M, N>(&device, &self.inner.data);
+        let data = B::transpose(&device, &self.inner.data, M, N);
         let backward_device = device.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
-                backward: Box::new(move |grad| vec![B::transpose::<N, M>(&backward_device, grad)]),
+                backward: Box::new(move |grad| vec![B::transpose(&backward_device, grad, N, M)]),
             })
         });
         Tensor::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
@@ -341,11 +327,9 @@ where
     }
 
     pub fn add_row(&self, row: &Tensor1D<N, E, B>) -> Self
-    where
-        [(); N]:,
     {
         let device = self.inner.device.clone();
-        let data = B::add_row::<M, N>(&device, &self.inner.data, &row.inner.data);
+        let data = B::add_row(&device, &self.inner.data, &row.inner.data, M, N);
         let backward_device = device.clone();
         let requires_grad =
             autograd::should_track_grad(self.inner.requires_grad || row.inner.requires_grad);
@@ -368,11 +352,9 @@ where
     }
 
     pub fn add_col(&self, col: &Tensor1D<M, E, B>) -> Self
-    where
-        [(); M]:,
     {
         let device = self.inner.device.clone();
-        let data = B::add_col::<M, N>(&device, &self.inner.data, &col.inner.data);
+        let data = B::add_col(&device, &self.inner.data, &col.inner.data, M, N);
         let backward_device = device.clone();
         let requires_grad =
             autograd::should_track_grad(self.inner.requires_grad || col.inner.requires_grad);

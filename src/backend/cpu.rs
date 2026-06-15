@@ -25,21 +25,15 @@ impl<E: FloatElement> Backend<E> for Cpu {
         CpuDevice
     }
 
-    fn zeros<const N: usize>(_device: &Self::Device) -> Self::Storage
-    where
-        [(); N]:,
-    {
+    fn zeros(_device: &Self::Device, len: usize) -> Self::Storage {
         CpuStorage {
-            data: vec![E::zero(); N],
+            data: vec![E::zero(); len],
         }
     }
 
-    fn ones<const N: usize>(_device: &Self::Device) -> Self::Storage
-    where
-        [(); N]:,
-    {
+    fn ones(_device: &Self::Device, len: usize) -> Self::Storage {
         CpuStorage {
-            data: vec![E::one(); N],
+            data: vec![E::one(); len],
         }
     }
 
@@ -60,132 +54,57 @@ impl<E: FloatElement> Backend<E> for Cpu {
         storage.data.clone()
     }
 
-    fn add<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        elementwise::<E, N, _>(device, lhs, rhs, |lhs, rhs| lhs + rhs)
+    fn add(device: &Self::Device, lhs: &Self::Storage, rhs: &Self::Storage) -> Self::Storage {
+        elementwise::<E, _>(device, lhs, rhs, |lhs, rhs| lhs + rhs)
     }
 
-    fn sub<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        elementwise::<E, N, _>(device, lhs, rhs, |lhs, rhs| lhs - rhs)
+    fn sub(device: &Self::Device, lhs: &Self::Storage, rhs: &Self::Storage) -> Self::Storage {
+        elementwise::<E, _>(device, lhs, rhs, |lhs, rhs| lhs - rhs)
     }
 
-    fn mul<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        elementwise::<E, N, _>(device, lhs, rhs, |lhs, rhs| lhs * rhs)
+    fn mul(device: &Self::Device, lhs: &Self::Storage, rhs: &Self::Storage) -> Self::Storage {
+        elementwise::<E, _>(device, lhs, rhs, |lhs, rhs| lhs * rhs)
     }
 
-    fn div<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        elementwise::<E, N, _>(device, lhs, rhs, |lhs, rhs| lhs / rhs)
+    fn div(device: &Self::Device, lhs: &Self::Storage, rhs: &Self::Storage) -> Self::Storage {
+        elementwise::<E, _>(device, lhs, rhs, |lhs, rhs| lhs / rhs)
     }
 
-    fn add_scalar<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: E,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        unary::<E, N, _>(device, lhs, |lhs| lhs + rhs)
+    fn add_scalar(device: &Self::Device, lhs: &Self::Storage, rhs: E) -> Self::Storage {
+        unary::<E, _>(device, lhs, |lhs| lhs + rhs)
     }
 
-    fn sub_scalar<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: E,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        unary::<E, N, _>(device, lhs, |lhs| lhs - rhs)
+    fn sub_scalar(device: &Self::Device, lhs: &Self::Storage, rhs: E) -> Self::Storage {
+        unary::<E, _>(device, lhs, |lhs| lhs - rhs)
     }
 
-    fn mul_scalar<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: E,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        unary::<E, N, _>(device, lhs, |lhs| lhs * rhs)
+    fn mul_scalar(device: &Self::Device, lhs: &Self::Storage, rhs: E) -> Self::Storage {
+        unary::<E, _>(device, lhs, |lhs| lhs * rhs)
     }
 
-    fn div_scalar<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        rhs: E,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        unary::<E, N, _>(device, lhs, |lhs| lhs / rhs)
+    fn div_scalar(device: &Self::Device, lhs: &Self::Storage, rhs: E) -> Self::Storage {
+        unary::<E, _>(device, lhs, |lhs| lhs / rhs)
     }
 
-    fn powf<const N: usize>(
-        device: &Self::Device,
-        lhs: &Self::Storage,
-        exponent: E,
-    ) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        unary::<E, N, _>(device, lhs, |lhs| lhs.powf(exponent))
+    fn powf(device: &Self::Device, lhs: &Self::Storage, exponent: E) -> Self::Storage {
+        unary::<E, _>(device, lhs, |lhs| lhs.powf(exponent))
     }
 
-    fn relu<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        unary::<E, N, _>(device, input, |value| {
+    fn relu(device: &Self::Device, input: &Self::Storage) -> Self::Storage {
+        unary::<E, _>(device, input, |value| {
             if value > E::zero() { value } else { E::zero() }
         })
     }
 
-    fn exp<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        unary::<E, N, _>(device, input, E::exp)
+    fn exp(device: &Self::Device, input: &Self::Storage) -> Self::Storage {
+        unary::<E, _>(device, input, E::exp)
     }
 
-    fn ln<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:,
-    {
-        unary::<E, N, _>(device, input, E::ln)
+    fn ln(device: &Self::Device, input: &Self::Storage) -> Self::Storage {
+        unary::<E, _>(device, input, E::ln)
     }
 
-    fn sum<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:,
-    {
+    fn sum(device: &Self::Device, input: &Self::Storage) -> Self::Storage {
         let value = input
             .data
             .iter()
@@ -194,96 +113,85 @@ impl<E: FloatElement> Backend<E> for Cpu {
         Self::from_array(device, [value])
     }
 
-    fn mean<const N: usize>(device: &Self::Device, input: &Self::Storage) -> Self::Storage
-    where
-        [(); N]:,
-    {
+    fn mean(device: &Self::Device, input: &Self::Storage) -> Self::Storage {
         let total = input
             .data
             .iter()
             .copied()
             .fold(E::zero(), |total, value| total + value);
-        Self::from_array(device, [total / E::from_usize(N)])
+        Self::from_array(device, [total / E::from_usize(input.data.len())])
     }
 
-    fn matmul<const M: usize, const K: usize, const N: usize>(
+    fn matmul(
         device: &Self::Device,
         lhs: &Self::Storage,
         rhs: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); M * K]:,
-        [(); K * N]:,
-        [(); M * N]:,
-    {
-        let mut data = vec![E::zero(); M * N];
+        rows: usize,
+        inner: usize,
+        cols: usize,
+    ) -> Self::Storage {
+        let mut data = vec![E::zero(); rows * cols];
 
-        for row in 0..M {
-            for col in 0..N {
+        for row in 0..rows {
+            for col in 0..cols {
                 let mut total = E::zero();
-                for inner in 0..K {
-                    total = total + lhs.data[row * K + inner] * rhs.data[inner * N + col];
+                for index in 0..inner {
+                    total = total + lhs.data[row * inner + index] * rhs.data[index * cols + col];
                 }
-                data[row * N + col] = total;
+                data[row * cols + col] = total;
             }
         }
 
         Self::from_vec(device, data)
     }
 
-    fn transpose<const M: usize, const N: usize>(
+    fn transpose(
         device: &Self::Device,
         input: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); M * N]:,
-        [(); N * M]:,
-    {
-        let mut data = vec![E::zero(); M * N];
+        rows: usize,
+        cols: usize,
+    ) -> Self::Storage {
+        let mut data = vec![E::zero(); rows * cols];
 
-        for row in 0..M {
-            for col in 0..N {
-                data[col * M + row] = input.data[row * N + col];
+        for row in 0..rows {
+            for col in 0..cols {
+                data[col * rows + row] = input.data[row * cols + col];
             }
         }
 
         Self::from_vec(device, data)
     }
 
-    fn add_row<const M: usize, const N: usize>(
+    fn add_row(
         device: &Self::Device,
         input: &Self::Storage,
         row: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); M * N]:,
-        [(); N]:,
-    {
-        let mut data = Vec::with_capacity(M * N);
+        rows: usize,
+        cols: usize,
+    ) -> Self::Storage {
+        let mut data = Vec::with_capacity(rows * cols);
 
-        for matrix_row in 0..M {
-            for col in 0..N {
-                data.push(input.data[matrix_row * N + col] + row.data[col]);
+        for matrix_row in 0..rows {
+            for col in 0..cols {
+                data.push(input.data[matrix_row * cols + col] + row.data[col]);
             }
         }
 
         Self::from_vec(device, data)
     }
 
-    fn add_col<const M: usize, const N: usize>(
+    fn add_col(
         device: &Self::Device,
         input: &Self::Storage,
         col: &Self::Storage,
-    ) -> Self::Storage
-    where
-        [(); M * N]:,
-        [(); M]:,
-    {
-        let mut data = Vec::with_capacity(M * N);
+        rows: usize,
+        cols: usize,
+    ) -> Self::Storage {
+        let mut data = Vec::with_capacity(rows * cols);
 
-        for row in 0..M {
-            for matrix_col in 0..N {
-                data.push(input.data[row * N + matrix_col] + col.data[row]);
+        for row in 0..rows {
+            for matrix_col in 0..cols {
+                data.push(input.data[row * cols + matrix_col] + col.data[row]);
             }
         }
 
@@ -291,7 +199,7 @@ impl<E: FloatElement> Backend<E> for Cpu {
     }
 }
 
-fn elementwise<E, const N: usize, F>(
+fn elementwise<E, F>(
     device: &CpuDevice,
     lhs: &CpuStorage<E>,
     rhs: &CpuStorage<E>,
@@ -300,7 +208,6 @@ fn elementwise<E, const N: usize, F>(
 where
     E: FloatElement,
     F: Fn(E, E) -> E,
-    [(); N]:,
 {
     let data = lhs
         .data
@@ -311,11 +218,10 @@ where
     Cpu::from_vec(device, data)
 }
 
-fn unary<E, const N: usize, F>(device: &CpuDevice, input: &CpuStorage<E>, op: F) -> CpuStorage<E>
+fn unary<E, F>(device: &CpuDevice, input: &CpuStorage<E>, op: F) -> CpuStorage<E>
 where
     E: FloatElement,
     F: Fn(E) -> E,
-    [(); N]:,
 {
     let data = input.data.iter().copied().map(op).collect();
     Cpu::from_vec(device, data)
