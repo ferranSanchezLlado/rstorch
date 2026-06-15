@@ -8,6 +8,7 @@ use crate::dtype::FloatElement;
 use crate::shape::{D0, D1, D2, Shape};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 /// Error returned by checked tensor constructors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,8 +32,13 @@ where
     E: FloatElement,
     B: Backend<E>,
 {
+    id: autograd::NodeId,
     data: B::Storage,
     device: B::Device,
+    requires_grad: bool,
+    is_leaf: bool,
+    grad: Arc<Mutex<Option<B::Storage>>>,
+    grad_fn: Option<Arc<autograd::GradFn<E, B>>>,
     shape: PhantomData<S>,
 }
 
@@ -56,10 +62,25 @@ where
     B: Backend<E>,
 {
     fn from_storage(device: B::Device, data: B::Storage) -> Self {
+        Self::from_storage_with_autograd(device, data, false, true, None)
+    }
+
+    fn from_storage_with_autograd(
+        device: B::Device,
+        data: B::Storage,
+        requires_grad: bool,
+        is_leaf: bool,
+        grad_fn: Option<Arc<autograd::GradFn<E, B>>>,
+    ) -> Self {
         Self {
             inner: Arc::new(TensorInner {
+                id: autograd::next_node_id(),
                 data,
                 device,
+                requires_grad,
+                is_leaf,
+                grad: Arc::new(Mutex::new(None)),
+                grad_fn,
                 shape: PhantomData,
             }),
         }
