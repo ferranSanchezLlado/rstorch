@@ -86,8 +86,7 @@ where
         }
     }
 
-    pub(crate) fn replace_data_as_leaf(&mut self, data: Vec<E>, requires_grad: bool)
-    {
+    pub(crate) fn replace_data_as_leaf(&mut self, data: Vec<E>, requires_grad: bool) {
         assert_eq!(data.len(), S::NUMEL, "replacement data length mismatch");
 
         let device = self.inner.device.clone();

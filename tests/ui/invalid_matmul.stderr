@@ -11,5 +11,5 @@ error[E0308]: mismatched types
 note: method defined here
  --> src/tensor/ops.rs
   |
-  |     pub fn matmul<const N: usize>(&self, rhs: &Tensor2D<K, N, E, B>) -> Tensor2D<M, N, E, B>
+  |     pub fn matmul<const N: usize>(&self, rhs: &Tensor2D<K, N, E, B>) -> Tensor2D<M, N, E, B> {
   |            ^^^^^^

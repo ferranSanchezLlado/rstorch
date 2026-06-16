@@ -125,9 +125,7 @@ where
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
-                backward: Box::new(move |grad| {
-                    vec![B::mul_scalar(&backward_device, grad, rhs)]
-                }),
+                backward: Box::new(move |grad| vec![B::mul_scalar(&backward_device, grad, rhs)]),
             })
         });
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
@@ -141,9 +139,7 @@ where
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
-                backward: Box::new(move |grad| {
-                    vec![B::div_scalar(&backward_device, grad, rhs)]
-                }),
+                backward: Box::new(move |grad| vec![B::div_scalar(&backward_device, grad, rhs)]),
             })
         });
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
@@ -202,9 +198,7 @@ where
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
-                backward: Box::new(move |grad| {
-                    vec![B::mul(&backward_device, grad, &output_data)]
-                }),
+                backward: Box::new(move |grad| vec![B::mul(&backward_device, grad, &output_data)]),
             })
         });
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
@@ -219,9 +213,7 @@ where
         let grad_fn = requires_grad.then(|| {
             Arc::new(GradFn {
                 parents: vec![AnyTensor::from_tensor(self)],
-                backward: Box::new(move |grad| {
-                    vec![B::div(&backward_device, grad, &input_data)]
-                }),
+                backward: Box::new(move |grad| vec![B::div(&backward_device, grad, &input_data)]),
             })
         });
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
@@ -267,8 +259,7 @@ where
     E: FloatElement,
     B: Backend<E>,
 {
-    pub fn matmul<const N: usize>(&self, rhs: &Tensor2D<K, N, E, B>) -> Tensor2D<M, N, E, B>
-    {
+    pub fn matmul<const N: usize>(&self, rhs: &Tensor2D<K, N, E, B>) -> Tensor2D<M, N, E, B> {
         let device = self.inner.device.clone();
         let data = B::matmul(&device, &self.inner.data, &rhs.inner.data, M, K, N);
         let lhs_data = self.inner.data.clone();
@@ -298,8 +289,7 @@ where
     E: FloatElement,
     B: Backend<E>,
 {
-    pub fn transpose(&self) -> Tensor2D<N, M, E, B>
-    {
+    pub fn transpose(&self) -> Tensor2D<N, M, E, B> {
         let device = self.inner.device.clone();
         let data = B::transpose(&device, &self.inner.data, M, N);
         let backward_device = device.clone();
@@ -326,8 +316,7 @@ where
         Tensor::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
     }
 
-    pub fn add_row(&self, row: &Tensor1D<N, E, B>) -> Self
-    {
+    pub fn add_row(&self, row: &Tensor1D<N, E, B>) -> Self {
         let device = self.inner.device.clone();
         let data = B::add_row(&device, &self.inner.data, &row.inner.data, M, N);
         let backward_device = device.clone();
@@ -351,8 +340,7 @@ where
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
     }
 
-    pub fn add_col(&self, col: &Tensor1D<M, E, B>) -> Self
-    {
+    pub fn add_col(&self, col: &Tensor1D<M, E, B>) -> Self {
         let device = self.inner.device.clone();
         let data = B::add_col(&device, &self.inner.data, &col.inner.data, M, N);
         let backward_device = device.clone();

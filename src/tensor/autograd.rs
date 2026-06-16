@@ -60,7 +60,7 @@ where
     B: Backend<E>,
 {
     pub(super) parents: Vec<AnyTensor<E, B>>,
-    pub(super) backward: Box<dyn Fn(&B::Storage) -> Vec<B::Storage> + Send + Sync>,
+    pub(super) backward: Box<BackwardFn<E, B>>,
 }
 
 #[derive(Clone)]
@@ -100,6 +100,9 @@ where
 pub(super) fn should_track_grad(parents_require_grad: bool) -> bool {
     parents_require_grad && is_grad_enabled()
 }
+
+pub(super) type BackwardFn<E, B> =
+    dyn Fn(&<B as Backend<E>>::Storage) -> Vec<<B as Backend<E>>::Storage> + Send + Sync;
 
 pub(super) fn add_storages<E, B>(
     device: &B::Device,
