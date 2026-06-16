@@ -17,6 +17,7 @@ pub trait FloatElement:
     fn zero() -> Self;
     fn one() -> Self;
     fn from_usize(value: usize) -> Self;
+    fn from_f64(value: f64) -> Self;
     fn exp(self) -> Self;
     fn ln(self) -> Self;
     fn sqrt(self) -> Self;
@@ -33,6 +34,10 @@ impl FloatElement for f32 {
     }
 
     fn from_usize(value: usize) -> Self {
+        value as Self
+    }
+
+    fn from_f64(value: f64) -> Self {
         value as Self
     }
 
@@ -64,6 +69,10 @@ impl FloatElement for f64 {
 
     fn from_usize(value: usize) -> Self {
         value as Self
+    }
+
+    fn from_f64(value: f64) -> Self {
+        value
     }
 
     fn exp(self) -> Self {

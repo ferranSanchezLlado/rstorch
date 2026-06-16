@@ -3,6 +3,7 @@
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatElement;
 use crate::optim::OptimParameter;
+use crate::rng::SmallRng;
 use crate::shape::{D1, D2, Shape};
 use crate::tensor::{Tensor, Tensor1D, Tensor2D};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,9 +108,43 @@ where
     E: FloatElement,
     B: Backend<E>,
 {
+    /// Returns a zero-initialized layer.
+    ///
+    /// This constructor is deterministic and useful for exact-value tests. Prefer
+    /// `kaiming_uniform` or `xavier_uniform` for trainable models.
     pub fn new() -> Self {
+        Self::zeros()
+    }
+
+    /// Returns a zero-initialized layer for exact-value tests.
+    pub fn zeros() -> Self {
         Self {
             weight: Parameter::new(Tensor2D::<IN, OUT, E, B>::zeros()),
+            bias: Parameter::new(Tensor1D::<OUT, E, B>::zeros()),
+        }
+    }
+
+    /// Returns a layer with Kaiming-uniform weights and zero bias.
+    pub fn kaiming_uniform(rng: &mut SmallRng) -> Self {
+        assert!(IN > 0, "fan_in must be greater than zero");
+        let bound = (6.0 / IN as f64).sqrt();
+        Self::uniform_weights_zero_bias(rng, bound)
+    }
+
+    /// Returns a layer with Xavier-uniform weights and zero bias.
+    pub fn xavier_uniform(rng: &mut SmallRng) -> Self {
+        assert!(IN + OUT > 0, "fan_in + fan_out must be greater than zero");
+        let bound = (6.0 / (IN + OUT) as f64).sqrt();
+        Self::uniform_weights_zero_bias(rng, bound)
+    }
+
+    fn uniform_weights_zero_bias(rng: &mut SmallRng, bound: f64) -> Self {
+        let weight = (0..IN * OUT)
+            .map(|_| E::from_f64(rng.uniform_f64(-bound, bound)))
+            .collect();
+
+        Self {
+            weight: Parameter::new(Tensor2D::<IN, OUT, E, B>::from_vec(weight).unwrap()),
             bias: Parameter::new(Tensor1D::<OUT, E, B>::zeros()),
         }
     }

@@ -1,34 +1,10 @@
 #![feature(generic_const_exprs)]
 #![allow(incomplete_features)]
 
+mod common;
+
+use common::{assert_close, finite_difference};
 use rstorch::prelude::*;
-
-const EPSILON: f64 = 1e-6;
-const TOLERANCE: f64 = 1e-6;
-
-fn assert_close(actual: &[f64], expected: &[f64]) {
-    assert_eq!(actual.len(), expected.len());
-    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (actual - expected).abs() < TOLERANCE,
-            "index {index}: {actual} != {expected}"
-        );
-    }
-}
-
-fn finite_difference(values: &[f64], f: impl Fn(&[f64]) -> f64) -> Vec<f64> {
-    let mut gradient = Vec::with_capacity(values.len());
-
-    for index in 0..values.len() {
-        let mut plus = values.to_vec();
-        plus[index] += EPSILON;
-        let mut minus = values.to_vec();
-        minus[index] -= EPSILON;
-        gradient.push((f(&plus) - f(&minus)) / (2.0 * EPSILON));
-    }
-
-    gradient
-}
 
 #[test]
 fn finite_difference_checks_add_gradient() {
