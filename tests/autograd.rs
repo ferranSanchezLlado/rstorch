@@ -206,7 +206,6 @@ fn finite_difference_checks_powf_gradient() {
 }
 
 #[test]
-#[ignore = "future work: keep coverage for shared non-leaf graph edges"]
 fn non_leaf_diamond_graph_accumulates_before_parent_backward() {
     let x = Tensor1D::<3, f64>::from_array([-1.0, 2.0, 4.0]).requires_grad();
 

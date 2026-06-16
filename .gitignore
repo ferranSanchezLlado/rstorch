@@ -2,4 +2,4 @@ target
 Cargo.lock
 .test_cache
 data
-docs
+docs/*

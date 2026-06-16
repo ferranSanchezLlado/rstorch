@@ -10,6 +10,10 @@ pub mod metal;
 pub mod wgpu;
 
 pub use cpu::{Cpu, CpuDevice, CpuStorage};
+#[cfg(feature = "cuda")]
+pub use cuda::Cuda;
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+pub use cuda::{CudaDevice, CudaStorage};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{Metal, MetalDevice, MetalStorage};
 

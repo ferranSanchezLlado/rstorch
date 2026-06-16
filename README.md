@@ -34,9 +34,10 @@ rstorch = { git = "https://github.com/ferranSanchezLlado/rstorch.git" }
 ## Status
 
 The current restart includes the CPU backend, owned tensor storage, const-generic
-shape markers, `f32` as the default dtype, `f64` support, typed tensor aliases,
-forward CPU operations, dynamic autograd, trainable parameters, a `Linear` layer,
-and SGD.
+shape markers, `f32` as the default dtype, `f64` support on CPU, typed tensor
+aliases, forward CPU operations, dynamic autograd, trainable parameters, a
+`Linear` layer, and SGD. Metal and CUDA are feature-gated GPU backends for `f32`
+tensors.
 
 Supported guarantees before GPU backends:
 
@@ -48,8 +49,11 @@ Supported guarantees before GPU backends:
 - CPU storage is safe owned `Vec` data.
 - Optimizer steps run with graph construction disabled through `no_grad`.
 
-The stable initial backend is CPU. Metal, CUDA, and WGPU are feature-gated
-placeholders planned for later epochs.
+The stable initial backend is CPU. Metal is available on macOS with
+`--features metal`. CUDA is available on Linux and Windows with
+`--features cuda` and uses runtime-compiled kernels through `cudarc`; it
+requires a CUDA driver/NVRTC at runtime. WGPU is still a feature-gated
+placeholder planned for a later epoch.
 
 ## Safety
 

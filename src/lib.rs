@@ -10,6 +10,8 @@ pub mod tensor;
 
 pub mod prelude {
     pub use crate::backend::Cpu;
+    #[cfg(feature = "cuda")]
+    pub use crate::backend::Cuda;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub use crate::backend::Metal;
     pub use crate::dtype::FloatElement;
