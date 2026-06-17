@@ -30,16 +30,16 @@ fn tiny_linear_regression_loss_decreases() {
     let input = Tensor2D::<4, 1>::from_array([[0.0], [1.0], [2.0], [3.0]]);
     let target = Tensor2D::<4, 1>::from_array([[1.0], [3.0], [5.0], [7.0]]);
     let mut optimizer = SGD::new(0.1);
-    let initial = layer.forward(&input).sub(&target).powf(2.0).mean().to_vec()[0];
+    let initial = mse_loss(&layer.forward(&input), &target).to_vec()[0];
 
     for _ in 0..80 {
         layer.zero_grad();
-        let loss = layer.forward(&input).sub(&target).powf(2.0).mean();
+        let loss = mse_loss(&layer.forward(&input), &target);
         loss.backward();
         optimizer.step(layer.parameters_mut());
     }
 
-    let final_loss = layer.forward(&input).sub(&target).powf(2.0).mean().to_vec()[0];
+    let final_loss = mse_loss(&layer.forward(&input), &target).to_vec()[0];
     assert!(final_loss < initial);
     assert!(final_loss < 0.1, "final loss too high: {final_loss}");
 }

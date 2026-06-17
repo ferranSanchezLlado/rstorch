@@ -12,6 +12,7 @@ pub trait FloatElement:
     + std::ops::Sub<Output = Self>
     + std::ops::Mul<Output = Self>
     + std::ops::Div<Output = Self>
+    + std::ops::Neg<Output = Self>
     + 'static
 {
     fn zero() -> Self;

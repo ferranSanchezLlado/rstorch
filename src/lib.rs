@@ -16,6 +16,7 @@ pub mod prelude {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub use crate::backend::Metal;
     pub use crate::dtype::FloatElement;
+    pub use crate::nn::loss::{binary_cross_entropy, mse_loss};
     pub use crate::nn::{Linear, Module, Parameter};
     pub use crate::optim::{OptimParameter, SGD};
     pub use crate::rng::SmallRng;

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/loss_shape_mismatch.rs:9:35
+  |
+9 |     let _ = mse_loss(&prediction, &target);
+  |             --------              ^^^^^^^ expected `1`, found `2`
+  |             |
+  |             arguments to this function are incorrect
+  |
+  = note: expected reference `&Tensor<D2<4, 1>>`
+             found reference `&Tensor<D2<4, 2>>`
+note: function defined here
+ --> src/nn/loss.rs
+  |
+  | pub fn mse_loss<S, E, B>(prediction: &Tensor<S, E, B>, target: &Tensor<S, E, B>) -> Scalar<E, B>
+  |        ^^^^^^^^
