@@ -189,6 +189,20 @@ where
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
     }
 
+    pub fn sigmoid(&self) -> Self {
+        self.mul_scalar(-E::one())
+            .exp()
+            .add_scalar(E::one())
+            .powf(-E::one())
+    }
+
+    pub fn tanh(&self) -> Self {
+        let exp_twice = self.mul_scalar(E::from_usize(2)).exp();
+        exp_twice
+            .sub_scalar(E::one())
+            .div(&exp_twice.add_scalar(E::one()))
+    }
+
     pub fn exp(&self) -> Self {
         let device = self.inner.device.clone();
         let data = B::exp(&device, &self.inner.data);
@@ -363,6 +377,142 @@ where
         });
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
     }
+
+    pub fn softmax_rows(&self) -> Self {
+        assert!(N > 0, "softmax requires at least one class");
+
+        let device = self.inner.device.clone();
+        let values = B::to_vec(&self.inner.data);
+        let softmax = softmax_rows_values::<M, N, E>(&values);
+        let data = B::from_vec(&device, softmax.clone());
+        let backward_device = device.clone();
+        let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
+        let grad_fn = requires_grad.then(|| {
+            Arc::new(GradFn {
+                parents: vec![AnyTensor::from_tensor(self)],
+                backward: Box::new(move |grad| {
+                    let grad = B::to_vec(grad);
+                    let mut input_grad = vec![E::zero(); M * N];
+
+                    for row in 0..M {
+                        let start = row * N;
+                        let mut weighted_grad_sum = E::zero();
+                        for col in 0..N {
+                            let index = start + col;
+                            weighted_grad_sum = weighted_grad_sum + grad[index] * softmax[index];
+                        }
+                        for col in 0..N {
+                            let index = start + col;
+                            input_grad[index] = softmax[index] * (grad[index] - weighted_grad_sum);
+                        }
+                    }
+
+                    vec![B::from_vec(&backward_device, input_grad)]
+                }),
+            })
+        });
+        Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
+    }
+
+    pub fn log_softmax_rows(&self) -> Self {
+        assert!(N > 0, "log_softmax requires at least one class");
+
+        let device = self.inner.device.clone();
+        let values = B::to_vec(&self.inner.data);
+        let softmax = softmax_rows_values::<M, N, E>(&values);
+        let log_softmax = log_softmax_rows_values::<M, N, E>(&values);
+        let data = B::from_vec(&device, log_softmax);
+        let backward_device = device.clone();
+        let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
+        let grad_fn = requires_grad.then(|| {
+            Arc::new(GradFn {
+                parents: vec![AnyTensor::from_tensor(self)],
+                backward: Box::new(move |grad| {
+                    let grad = B::to_vec(grad);
+                    let mut input_grad = vec![E::zero(); M * N];
+
+                    for row in 0..M {
+                        let start = row * N;
+                        let mut grad_sum = E::zero();
+                        for col in 0..N {
+                            grad_sum = grad_sum + grad[start + col];
+                        }
+                        for col in 0..N {
+                            let index = start + col;
+                            input_grad[index] = grad[index] - softmax[index] * grad_sum;
+                        }
+                    }
+
+                    vec![B::from_vec(&backward_device, input_grad)]
+                }),
+            })
+        });
+        Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
+    }
+}
+
+fn softmax_rows_values<const M: usize, const N: usize, E>(values: &[E]) -> Vec<E>
+where
+    E: FloatElement,
+{
+    debug_assert_eq!(values.len(), M * N);
+    let mut output = vec![E::zero(); M * N];
+
+    for row in 0..M {
+        let start = row * N;
+        let mut max = values[start];
+        for col in 1..N {
+            let value = values[start + col];
+            if value > max {
+                max = value;
+            }
+        }
+
+        let mut sum = E::zero();
+        for col in 0..N {
+            let index = start + col;
+            let exp = (values[index] - max).exp();
+            output[index] = exp;
+            sum = sum + exp;
+        }
+        for col in 0..N {
+            let index = start + col;
+            output[index] = output[index] / sum;
+        }
+    }
+
+    output
+}
+
+fn log_softmax_rows_values<const M: usize, const N: usize, E>(values: &[E]) -> Vec<E>
+where
+    E: FloatElement,
+{
+    debug_assert_eq!(values.len(), M * N);
+    let mut output = vec![E::zero(); M * N];
+
+    for row in 0..M {
+        let start = row * N;
+        let mut max = values[start];
+        for col in 1..N {
+            let value = values[start + col];
+            if value > max {
+                max = value;
+            }
+        }
+
+        let mut exp_sum = E::zero();
+        for col in 0..N {
+            exp_sum = exp_sum + (values[start + col] - max).exp();
+        }
+        let log_sum_exp = max + exp_sum.ln();
+        for col in 0..N {
+            let index = start + col;
+            output[index] = values[index] - log_sum_exp;
+        }
+    }
+
+    output
 }
 
 #[cfg(test)]
@@ -375,6 +525,34 @@ mod tests {
         for (actual, expected) in actual.iter().zip(expected.iter()) {
             assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
         }
+    }
+
+    fn assert_close_with_tolerance(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (actual - expected).abs() < tolerance,
+                "{actual} != {expected}"
+            );
+        }
+    }
+
+    fn finite_difference<F>(values: &[f32], f: F) -> Vec<f32>
+    where
+        F: Fn(&[f32]) -> f32,
+    {
+        let epsilon = 1e-2;
+        let mut gradient = Vec::with_capacity(values.len());
+
+        for index in 0..values.len() {
+            let mut plus = values.to_vec();
+            plus[index] += epsilon;
+            let mut minus = values.to_vec();
+            minus[index] -= epsilon;
+            gradient.push((f(&plus) - f(&minus)) / (2.0 * epsilon));
+        }
+
+        gradient
     }
 
     #[test]
@@ -438,6 +616,81 @@ mod tests {
     }
 
     #[test]
+    fn activation_ops_compute_values() {
+        let tensor = Tensor1D::<3>::from_array([-2.0, 0.0, 2.0]);
+
+        assert_close(
+            &tensor.sigmoid().to_vec(),
+            &[
+                1.0 / (1.0 + 2.0_f32.exp()),
+                0.5,
+                1.0 / (1.0 + (-2.0_f32).exp()),
+            ],
+        );
+        assert_close(
+            &tensor.tanh().to_vec(),
+            &[-2.0_f32.tanh(), 0.0, 2.0_f32.tanh()],
+        );
+    }
+
+    #[test]
+    fn activation_gradients_match_finite_differences() {
+        let values = [-1.0, 0.5, 2.0];
+
+        let x = Tensor1D::<3>::from_array(values).requires_grad();
+        x.sigmoid().sum().backward();
+        let expected = finite_difference(&values, |values| {
+            Tensor1D::<3>::from_vec(values.to_vec())
+                .unwrap()
+                .sigmoid()
+                .sum()
+                .to_vec()[0]
+        });
+        assert_close_with_tolerance(&x.grad().unwrap().to_vec(), &expected, 1e-2);
+
+        let x = Tensor1D::<3>::from_array(values).requires_grad();
+        x.tanh().sum().backward();
+        let expected = finite_difference(&values, |values| {
+            Tensor1D::<3>::from_vec(values.to_vec())
+                .unwrap()
+                .tanh()
+                .sum()
+                .to_vec()[0]
+        });
+        assert_close_with_tolerance(&x.grad().unwrap().to_vec(), &expected, 1e-2);
+    }
+
+    #[test]
+    fn softmax_rows_are_stable_and_sum_to_one() {
+        let logits =
+            Tensor2D::<2, 3>::from_array([[1000.0, 1001.0, 999.0], [-1000.0, -999.0, -1001.0]]);
+
+        let probabilities = logits.softmax_rows().to_vec();
+
+        assert_close(
+            &[probabilities[0] + probabilities[1] + probabilities[2]],
+            &[1.0],
+        );
+        assert_close(
+            &[probabilities[3] + probabilities[4] + probabilities[5]],
+            &[1.0],
+        );
+
+        let base = Tensor2D::<1, 3>::from_array([[1.0, 2.0, 3.0]]).softmax_rows();
+        let shifted = Tensor2D::<1, 3>::from_array([[1001.0, 1002.0, 1003.0]]).softmax_rows();
+        assert_close(&base.to_vec(), &shifted.to_vec());
+    }
+
+    #[test]
+    fn log_softmax_rows_exponentiate_to_probabilities() {
+        let logits = Tensor2D::<1, 3>::from_array([[2.0, 1.0, -1.0]]);
+
+        let probabilities = logits.log_softmax_rows().exp().to_vec();
+
+        assert_close(&[probabilities.iter().sum()], &[1.0]);
+    }
+
+    #[test]
     fn flatten_preserves_shape_and_values() {
         let tensor = Tensor2D::<2, 3>::from_array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
 
@@ -469,7 +722,10 @@ mod tests {
         let rhs: Tensor1D<2, f64, Cpu> = Tensor1D::from_array([3.0, 4.0]);
 
         let result: Tensor1D<2, f64, Cpu> = lhs.add(&rhs);
+        let logits: Tensor2D<1, 2, f64, Cpu> = Tensor2D::from_array([[1.0, 2.0]]);
+        let probabilities: Tensor2D<1, 2, f64, Cpu> = logits.softmax_rows();
 
         assert_eq!(result.to_vec(), vec![4.0, 6.0]);
+        assert_eq!(probabilities.shape(), &[1, 2]);
     }
 }
