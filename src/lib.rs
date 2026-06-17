@@ -18,7 +18,7 @@ pub mod prelude {
     pub use crate::dtype::FloatElement;
     pub use crate::nn::loss::{binary_cross_entropy, cross_entropy_one_hot, mse_loss};
     pub use crate::nn::{Linear, Module, Parameter};
-    pub use crate::optim::{OptimParameter, SGD};
+    pub use crate::optim::{Adam, OptimParameter, SGD, SGDMomentum};
     pub use crate::rng::SmallRng;
     pub use crate::shape::{D0, D1, D2, Shape};
     pub use crate::tensor::autograd::{NoGradGuard, is_grad_enabled, no_grad, with_no_grad};

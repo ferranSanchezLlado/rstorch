@@ -43,3 +43,33 @@ fn tiny_linear_regression_loss_decreases() {
     assert!(final_loss < initial);
     assert!(final_loss < 0.1, "final loss too high: {final_loss}");
 }
+
+#[test]
+fn tiny_mlp_loss_decreases_with_adam() {
+    let mut rng = SmallRng::seed_from_u64(42);
+    let mut layer1 = Linear::<2, 4>::kaiming_uniform(&mut rng);
+    let mut layer2 = Linear::<4, 1>::xavier_uniform(&mut rng);
+    let input = Tensor2D::<4, 2>::from_array([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]);
+    let target = Tensor2D::<4, 1>::from_array([[0.0], [1.0], [1.0], [2.0]]);
+    let mut optimizer = Adam::new(0.05);
+
+    let initial = mse_loss(&layer2.forward(&layer1.forward(&input).tanh()), &target).to_vec()[0];
+
+    for _ in 0..400 {
+        layer1.zero_grad();
+        layer2.zero_grad();
+        let hidden = layer1.forward(&input).tanh();
+        let prediction = layer2.forward(&hidden);
+        let loss = mse_loss(&prediction, &target);
+        loss.backward();
+        optimizer.step(layer1.parameters_mut());
+        optimizer.step(layer2.parameters_mut());
+    }
+
+    let final_loss = mse_loss(&layer2.forward(&layer1.forward(&input).tanh()), &target).to_vec()[0];
+    assert!(
+        final_loss < initial,
+        "initial={initial}, final={final_loss}"
+    );
+    assert!(final_loss < 0.1, "final loss too high: {final_loss}");
+}
