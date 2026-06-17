@@ -20,7 +20,7 @@ pub mod prelude {
     pub use crate::nn::{Linear, Module, Parameter};
     pub use crate::optim::{Adam, OptimParameter, SGD, SGDMomentum};
     pub use crate::rng::SmallRng;
-    pub use crate::shape::{D0, D1, D2, Shape};
+    pub use crate::shape::{D0, D1, D2, D3, Shape};
     pub use crate::tensor::autograd::{NoGradGuard, is_grad_enabled, no_grad, with_no_grad};
-    pub use crate::tensor::{Scalar, Tensor, Tensor1D, Tensor2D, TensorError};
+    pub use crate::tensor::{Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D, TensorError};
 }

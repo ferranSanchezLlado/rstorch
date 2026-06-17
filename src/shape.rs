@@ -22,6 +22,12 @@ pub struct D1<const N: usize>(PhantomData<[(); N]>);
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct D2<const M: usize, const N: usize>(PhantomData<([(); M], [(); N])>);
 
+/// Three-dimensional shape.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct D3<const A: usize, const B: usize, const C: usize>(
+    PhantomData<([(); A], [(); B], [(); C])>,
+);
+
 impl Shape for D0 {
     const RANK: usize = 0;
     const NUMEL: usize = 1;
@@ -49,9 +55,18 @@ impl<const M: usize, const N: usize> Shape for D2<M, N> {
     }
 }
 
+impl<const A: usize, const B: usize, const C: usize> Shape for D3<A, B, C> {
+    const RANK: usize = 3;
+    const NUMEL: usize = A * B * C;
+
+    fn dims() -> &'static [usize] {
+        &[A, B, C]
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{D0, D1, D2, Shape};
+    use super::{D0, D1, D2, D3, Shape};
 
     #[test]
     fn shape_metadata_is_compile_time_backed() {
@@ -66,5 +81,9 @@ mod tests {
         assert_eq!(D2::<2, 3>::RANK, 2);
         assert_eq!(D2::<2, 3>::NUMEL, 6);
         assert_eq!(D2::<2, 3>::dims(), &[2, 3]);
+
+        assert_eq!(D3::<2, 3, 4>::RANK, 3);
+        assert_eq!(D3::<2, 3, 4>::NUMEL, 24);
+        assert_eq!(D3::<2, 3, 4>::dims(), &[2, 3, 4]);
     }
 }

@@ -1,7 +1,7 @@
 //! Forward tensor operations and their first-order backward formulas.
 
 use super::autograd::{self, AnyTensor, GradFn};
-use super::{Scalar, Tensor, Tensor1D, Tensor2D};
+use super::{Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D};
 use crate::backend::Backend;
 use crate::dtype::FloatElement;
 use crate::shape::Shape;
@@ -451,6 +451,31 @@ where
     }
 }
 
+impl<const A: usize, const B: usize, const C: usize, E, BK> Tensor3D<A, B, C, E, BK>
+where
+    E: FloatElement,
+    BK: Backend<E>,
+{
+    pub fn reshape_2d<const M: usize, const N: usize>(&self) -> Tensor2D<M, N, E, BK>
+    where
+        [(); A * B * C]:,
+        [(); M * N]:,
+        [(); A * B * C - M * N]:,
+        [(); M * N - A * B * C]:,
+    {
+        let device = self.inner.device.clone();
+        let data = self.inner.data.clone();
+        let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
+        let grad_fn = requires_grad.then(|| {
+            Arc::new(GradFn {
+                parents: vec![AnyTensor::from_tensor(self)],
+                backward: Box::new(|grad| vec![grad.clone()]),
+            })
+        });
+        Tensor::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
+    }
+}
+
 fn softmax_rows_values<const M: usize, const N: usize, E>(values: &[E]) -> Vec<E>
 where
     E: FloatElement,
@@ -517,7 +542,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Tensor1D, Tensor2D};
+    use super::{Tensor1D, Tensor2D, Tensor3D};
     use crate::backend::Cpu;
 
     fn assert_close(actual: &[f32], expected: &[f32]) {
@@ -698,6 +723,39 @@ mod tests {
 
         assert_eq!(flattened.shape(), &[6]);
         assert_eq!(flattened.to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn reshape_2d_preserves_shape_and_values() {
+        let tensor = Tensor3D::<2, 2, 3>::from_array([
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        ]);
+
+        let reshaped: Tensor2D<3, 4> = tensor.reshape_2d();
+
+        assert_eq!(reshaped.shape(), &[3, 4]);
+        assert_eq!(
+            reshaped.to_vec(),
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0
+            ]
+        );
+    }
+
+    #[test]
+    fn reshape_2d_gradient_flows_to_source_shape() {
+        let tensor = Tensor3D::<2, 2, 3>::from_array([
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        ])
+        .requires_grad();
+
+        tensor.reshape_2d::<3, 4>().sum().backward();
+
+        let grad = tensor.grad().unwrap();
+        assert_eq!(grad.shape(), &[2, 2, 3]);
+        assert_eq!(grad.to_vec(), vec![1.0; 12]);
     }
 
     #[test]

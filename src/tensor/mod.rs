@@ -5,7 +5,7 @@ pub mod ops;
 
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatElement;
-use crate::shape::{D0, D1, D2, Shape};
+use crate::shape::{D0, D1, D2, D3, Shape};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -172,6 +172,10 @@ pub type Tensor1D<const N: usize, E = f32, B = Cpu> = Tensor<D1<N>, E, B>;
 /// Two-dimensional tensor alias.
 pub type Tensor2D<const M: usize, const N: usize, E = f32, B = Cpu> = Tensor<D2<M, N>, E, B>;
 
+/// Three-dimensional tensor alias.
+pub type Tensor3D<const A: usize, const B: usize, const C: usize, E = f32, BK = Cpu> =
+    Tensor<D3<A, B, C>, E, BK>;
+
 impl<const N: usize, E, B> Tensor1D<N, E, B>
 where
     E: FloatElement,
@@ -197,9 +201,26 @@ where
     }
 }
 
+impl<const A: usize, const B: usize, const C: usize, E, BK> Tensor3D<A, B, C, E, BK>
+where
+    E: FloatElement,
+    BK: Backend<E>,
+{
+    pub fn from_array(data: [[[E; C]; B]; A]) -> Self {
+        let device = BK::default_device();
+        let data = data
+            .into_iter()
+            .flat_map(|matrix| matrix.into_iter())
+            .flat_map(|row| row.into_iter())
+            .collect();
+        let data = BK::from_vec(&device, data);
+        Self::from_storage(device, data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Tensor, Tensor1D, Tensor2D, TensorError};
+    use super::{Tensor, Tensor1D, Tensor2D, Tensor3D, TensorError};
 
     #[test]
     fn tensor2d_has_static_shape_metadata() {
@@ -207,6 +228,14 @@ mod tests {
 
         assert_eq!(tensor.shape(), &[32, 784]);
         assert_eq!(tensor.numel(), 25_088);
+    }
+
+    #[test]
+    fn tensor3d_has_static_shape_metadata() {
+        let tensor = Tensor3D::<2, 28, 28>::zeros();
+
+        assert_eq!(tensor.shape(), &[2, 28, 28]);
+        assert_eq!(tensor.numel(), 1_568);
     }
 
     #[test]
@@ -244,6 +273,30 @@ mod tests {
         let tensor = Tensor2D::<2, 2>::from_array(data);
 
         assert_eq!(tensor.to_vec(), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn from_array_owns_3d_data() {
+        let data = [[[1.0_f32, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]];
+        let tensor = Tensor3D::<2, 2, 2>::from_array(data);
+
+        assert_eq!(
+            tensor.to_vec(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+    }
+
+    #[test]
+    fn tensor3d_from_vec_rejects_wrong_lengths() {
+        let result = Tensor3D::<2, 2, 2>::from_vec(vec![1.0, 2.0]);
+
+        assert!(matches!(
+            result,
+            Err(TensorError::InvalidLength {
+                expected: 8,
+                actual: 2,
+            })
+        ));
     }
 
     #[test]

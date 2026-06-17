@@ -1,0 +1,5 @@
+error[E0080]: attempt to compute `10_usize - 12_usize`, which would overflow
+ --> src/tensor/ops.rs
+  |
+  |         [(); M * N - A * B * C]:,
+  |              ^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::tensor::Tensor<rstorch::shape::D3<2, 2, 3>>>::reshape_2d::<2, 5>::{constant#3}` failed here
