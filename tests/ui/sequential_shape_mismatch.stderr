@@ -1,0 +1,25 @@
+error[E0277]: the trait bound `rstorch::nn::Linear<5, 2>: Layer<4, _, f32, Cpu>` is not satisfied
+ --> tests/ui/sequential_shape_mismatch.rs:9:21
+  |
+9 |         .add_module(Linear::<5, 2>::new());
+  |          ---------- ^^^^^^^^^^^^^^^^^^^^^ the trait `Layer<4, _, f32, Cpu>` is not implemented for `rstorch::nn::Linear<5, 2>`
+  |          |
+  |          required by a bound introduced by this call
+  |
+help: the trait `Layer<4, _, f32, Cpu>` is not implemented for `rstorch::nn::Linear<5, 2>`
+      but trait `Layer<5, 2, f32, Cpu>` is implemented for it
+ --> src/nn/mod.rs
+  |
+  | / impl<const IN: usize, const OUT: usize, E, B> Layer<IN, OUT, E, B> for Linear<IN, OUT, E, B>
+  | | where
+  | |     E: FloatElement,
+  | |     B: Backend<E>,
+  | |__________________^
+note: required by a bound in `rstorch::nn::Sequential::<Stack, IN, OUT, E, B>::add_module`
+ --> src/nn/mod.rs
+  |
+  |     pub fn add_module<const NEXT_OUT: usize, Next>(
+  |            ---------- required by a bound in this associated function
+...
+  |         Next: Layer<OUT, NEXT_OUT, E, B>,
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Sequential::<Stack, IN, OUT, E, B>::add_module`

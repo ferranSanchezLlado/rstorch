@@ -17,7 +17,7 @@ pub mod prelude {
     pub use crate::backend::Metal;
     pub use crate::dtype::FloatElement;
     pub use crate::nn::loss::{binary_cross_entropy, cross_entropy_one_hot, mse_loss};
-    pub use crate::nn::{Linear, Module, Parameter};
+    pub use crate::nn::{Layer, Linear, Module, Parameter, ReLU, Sequential, Sigmoid, Tanh};
     pub use crate::optim::{Adam, OptimParameter, SGD, SGDMomentum};
     pub use crate::rng::SmallRng;
     pub use crate::shape::{D0, D1, D2, D3, Shape};
