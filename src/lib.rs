@@ -2,6 +2,7 @@
 #![allow(incomplete_features)]
 
 pub mod backend;
+pub mod data;
 pub mod dtype;
 pub mod nn;
 pub mod optim;
@@ -15,6 +16,10 @@ pub mod prelude {
     pub use crate::backend::Cuda;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub use crate::backend::Metal;
+    pub use crate::data::{
+        BatchedDataLoader, Collate, DataLoader, Dataset, IdentityCollate,
+        ImageOneHotClassification, OneHotClassification, one_hot_label, one_hot_labels,
+    };
     pub use crate::dtype::FloatElement;
     pub use crate::nn::loss::{binary_cross_entropy, cross_entropy_one_hot, mse_loss};
     pub use crate::nn::{Layer, Linear, Module, Parameter, ReLU, Sequential, Sigmoid, Tanh};

@@ -456,6 +456,22 @@ where
     E: FloatElement,
     BK: Backend<E>,
 {
+    pub fn flatten_2d(&self) -> Tensor2D<A, { B * C }, E, BK>
+    where
+        [(); B * C]:,
+    {
+        let device = self.inner.device.clone();
+        let data = self.inner.data.clone();
+        let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
+        let grad_fn = requires_grad.then(|| {
+            Arc::new(GradFn {
+                parents: vec![AnyTensor::from_tensor(self)],
+                backward: Box::new(|grad| vec![grad.clone()]),
+            })
+        });
+        Tensor::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
+    }
+
     pub fn reshape_2d<const M: usize, const N: usize>(&self) -> Tensor2D<M, N, E, BK>
     where
         [(); A * B * C]:,
@@ -752,6 +768,39 @@ mod tests {
         .requires_grad();
 
         tensor.reshape_2d::<3, 4>().sum().backward();
+
+        let grad = tensor.grad().unwrap();
+        assert_eq!(grad.shape(), &[2, 2, 3]);
+        assert_eq!(grad.to_vec(), vec![1.0; 12]);
+    }
+
+    #[test]
+    fn flatten_2d_preserves_batch_dimension_and_values() {
+        let tensor = Tensor3D::<2, 2, 3>::from_array([
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        ]);
+
+        let flattened: Tensor2D<2, 6> = tensor.flatten_2d();
+
+        assert_eq!(flattened.shape(), &[2, 6]);
+        assert_eq!(
+            flattened.to_vec(),
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_2d_gradient_flows_to_source_shape() {
+        let tensor = Tensor3D::<2, 2, 3>::from_array([
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        ])
+        .requires_grad();
+
+        tensor.flatten_2d().sum().backward();
 
         let grad = tensor.grad().unwrap();
         assert_eq!(grad.shape(), &[2, 2, 3]);
