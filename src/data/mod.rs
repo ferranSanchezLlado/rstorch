@@ -1,5 +1,8 @@
 //! Dataset and fixed-shape batching utilities.
 
+#[cfg(feature = "datasets")]
+pub mod datasets;
+
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatElement;
 use crate::rng::SmallRng;

@@ -16,6 +16,8 @@ pub mod prelude {
     pub use crate::backend::Cuda;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub use crate::backend::Metal;
+    #[cfg(feature = "datasets")]
+    pub use crate::data::datasets::{Mnist, MnistError, MnistSplit};
     pub use crate::data::{
         BatchedDataLoader, Collate, DataLoader, Dataset, IdentityCollate,
         ImageOneHotClassification, OneHotClassification, one_hot_label, one_hot_labels,
