@@ -35,9 +35,10 @@ rstorch = { git = "https://github.com/ferranSanchezLlado/rstorch.git" }
 
 The current restart includes the CPU backend, owned tensor storage, const-generic
 shape markers, `f32` as the default dtype, `f64` support on CPU, typed tensor
-aliases, forward CPU operations, dynamic autograd, trainable parameters, a
-`Linear` layer, and SGD. Metal and CUDA are feature-gated GPU backends for `f32`
-tensors.
+aliases, forward CPU operations, dynamic autograd, trainable parameters, seeded
+project-owned random initialization, a `Linear` layer, common losses,
+activations, SGD, SGD with momentum, and Adam. Metal and CUDA are feature-gated
+GPU backends for `f32` tensors.
 
 Supported guarantees before GPU backends:
 
@@ -48,6 +49,71 @@ Supported guarantees before GPU backends:
 - Non-scalar tensors use `backward_with(seed)`.
 - CPU storage is safe owned `Vec` data.
 - Optimizer steps run with graph construction disabled through `no_grad`.
+
+## Training Example
+
+Small models can be trained today with explicit typed layers and manual parameter
+collection. The API is still unstable, but the current workflow supports seeded
+initialization, scalar losses, activations, and stateful optimizers:
+
+```rust
+use rstorch::prelude::*;
+
+struct Mlp {
+    hidden: Linear<2, 8>,
+    output: Linear<8, 1>,
+}
+
+impl Mlp {
+    fn new(rng: &mut SmallRng) -> Self {
+        Self {
+            hidden: Linear::kaiming_uniform(rng),
+            output: Linear::xavier_uniform(rng),
+        }
+    }
+
+    fn forward<const BATCH: usize>(&self, x: &Tensor2D<BATCH, 2>) -> Tensor2D<BATCH, 1> {
+        self.output.forward(&self.hidden.forward(x).tanh()).sigmoid()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut dyn OptimParameter<f32, Cpu>> {
+        let mut parameters = self.hidden.parameters_mut();
+        parameters.extend(self.output.parameters_mut());
+        parameters
+    }
+
+    fn zero_grad(&mut self) {
+        self.hidden.zero_grad();
+        self.output.zero_grad();
+    }
+}
+
+let mut rng = SmallRng::seed_from_u64(42);
+let mut model = Mlp::new(&mut rng);
+let input = Tensor2D::<4, 2>::from_array([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]);
+let target = Tensor2D::<4, 1>::from_array([[0.0], [1.0], [1.0], [0.0]]);
+let mut optimizer = Adam::new(0.05);
+
+for _ in 0..1000 {
+    model.zero_grad();
+    let prediction = model.forward(&input);
+    let loss = binary_cross_entropy(&prediction, &target);
+    loss.backward();
+    optimizer.step(model.parameters_mut());
+}
+```
+
+Runnable CPU-only programs are available with:
+
+```text
+cargo +nightly run --example tiny_regression
+cargo +nightly run --example xor_mlp
+```
+
+Current model-building limitations are intentional: there is no dataset loader,
+serialization, checkpointing, typed `Sequential`, gradient clipping, scheduler,
+or higher-rank tensor API yet. Compose small models manually and collect
+parameters explicitly.
 
 The stable initial backend is CPU. Metal is available on macOS with
 `--features metal`. CUDA is available on Linux and Windows with
