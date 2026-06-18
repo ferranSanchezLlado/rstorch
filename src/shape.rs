@@ -16,17 +16,15 @@ pub struct D0;
 
 /// One-dimensional shape.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct D1<const N: usize>(PhantomData<[(); N]>);
+pub struct D1<const N: usize>(PhantomData<()>);
 
 /// Two-dimensional shape.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct D2<const M: usize, const N: usize>(PhantomData<([(); M], [(); N])>);
+pub struct D2<const M: usize, const N: usize>(PhantomData<()>);
 
 /// Three-dimensional shape.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct D3<const A: usize, const B: usize, const C: usize>(
-    PhantomData<([(); A], [(); B], [(); C])>,
-);
+pub struct D3<const A: usize, const B: usize, const C: usize>(PhantomData<()>);
 
 impl Shape for D0 {
     const RANK: usize = 0;

@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: kaiming_uniform: fan_in (IN) must be greater than 0
+ --> src/nn/mod.rs
+  |
+  |         [(); nonzero(IN, "kaiming_uniform", "fan_in (IN)")]:,
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::nn::Linear::<0, 4>::kaiming_uniform::{constant#0}` failed here

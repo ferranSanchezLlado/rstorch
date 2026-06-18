@@ -8,6 +8,7 @@
 pub mod loss;
 
 use crate::backend::{Backend, Cpu};
+use crate::const_check::nonzero;
 use crate::dtype::FloatElement;
 use crate::optim::OptimParameter;
 use crate::rng::SmallRng;
@@ -355,15 +356,19 @@ where
     }
 
     /// Returns a layer with Kaiming-uniform weights and zero bias.
-    pub fn kaiming_uniform(rng: &mut SmallRng) -> Self {
-        assert!(IN > 0, "fan_in must be greater than zero");
+    pub fn kaiming_uniform(rng: &mut SmallRng) -> Self
+    where
+        [(); nonzero(IN, "kaiming_uniform", "fan_in (IN)")]:,
+    {
         let bound = (6.0 / IN as f64).sqrt();
         Self::uniform_weights_zero_bias(rng, bound)
     }
 
     /// Returns a layer with Xavier-uniform weights and zero bias.
-    pub fn xavier_uniform(rng: &mut SmallRng) -> Self {
-        assert!(IN + OUT > 0, "fan_in + fan_out must be greater than zero");
+    pub fn xavier_uniform(rng: &mut SmallRng) -> Self
+    where
+        [(); nonzero(IN + OUT, "xavier_uniform", "fan_in + fan_out (IN+OUT)")]:,
+    {
         let bound = (6.0 / (IN + OUT) as f64).sqrt();
         Self::uniform_weights_zero_bias(rng, bound)
     }

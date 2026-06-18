@@ -104,10 +104,7 @@ mod real {
             Self::from_vec(device, vec![1.0; len])
         }
 
-        fn from_array<const N: usize>(device: &Self::Device, data: [f32; N]) -> Self::Storage
-        where
-            [(); N]:,
-        {
+        fn from_array<const N: usize>(device: &Self::Device, data: [f32; N]) -> Self::Storage {
             Self::from_vec(device, Vec::from(data))
         }
 

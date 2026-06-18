@@ -1,5 +1,5 @@
-error[E0080]: attempt to compute `10_usize - 12_usize`, which would overflow
+error[E0080]: evaluation panicked: reshape_2d: source A*B*C=12 must equal target M*N=10
  --> src/tensor/ops.rs
   |
-  |         [(); M * N - A * B * C]:,
-  |              ^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::tensor::Tensor<rstorch::shape::D3<2, 2, 3>>>::reshape_2d::<2, 5>::{constant#3}` failed here
+  |         [(); size_eq(A * B * C, M * N, "reshape_2d", "source A*B*C", "target M*N")]:,
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::tensor::Tensor<rstorch::shape::D3<2, 2, 3>>>::reshape_2d::<2, 5>::{constant#0}` failed here

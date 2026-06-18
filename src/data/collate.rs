@@ -1,4 +1,5 @@
 use crate::backend::{Backend, Cpu};
+use crate::const_check::nonzero;
 use crate::dtype::FloatElement;
 use crate::tensor::{Tensor2D, Tensor3D};
 use std::fmt::Debug;
@@ -60,6 +61,7 @@ where
     BK: Backend<E>,
     L: TryInto<usize>,
     L::Error: Debug,
+    [(); nonzero(CLASSES, "one_hot_label", "CLASSES")]:,
 {
     type Batch = (
         Tensor2D<BATCH, FEATURES, E, BK>,
@@ -97,6 +99,7 @@ where
     BK: Backend<E>,
     L: TryInto<usize>,
     L::Error: Debug,
+    [(); nonzero(CLASSES, "one_hot_label", "CLASSES")]:,
 {
     type Batch = (
         Tensor3D<BATCH, HEIGHT, WIDTH, E, BK>,
@@ -130,6 +133,7 @@ where
 pub fn one_hot_label<const CLASSES: usize, E>(label: u8) -> [E; CLASSES]
 where
     E: FloatElement,
+    [(); nonzero(CLASSES, "one_hot_label", "CLASSES")]:,
 {
     one_hot_label_index(usize::from(label))
 }
@@ -137,8 +141,8 @@ where
 fn one_hot_label_index<const CLASSES: usize, E>(class: usize) -> [E; CLASSES]
 where
     E: FloatElement,
+    [(); nonzero(CLASSES, "one_hot_label", "CLASSES")]:,
 {
-    assert!(CLASSES > 0, "one-hot labels require at least one class");
     assert!(
         class < CLASSES,
         "label index {class} is out of range for {CLASSES} classes"
@@ -156,6 +160,7 @@ pub fn one_hot_labels<const BATCH: usize, const CLASSES: usize, E, BK>(
 where
     E: FloatElement,
     BK: Backend<E>,
+    [(); nonzero(CLASSES, "one_hot_label", "CLASSES")]:,
 {
     one_hot_label_indices(labels.map(usize::from))
 }
@@ -166,6 +171,7 @@ fn one_hot_label_indices<const BATCH: usize, const CLASSES: usize, E, BK>(
 where
     E: FloatElement,
     BK: Backend<E>,
+    [(); nonzero(CLASSES, "one_hot_label", "CLASSES")]:,
 {
     let mut values = Vec::with_capacity(BATCH * CLASSES);
     for label in labels {

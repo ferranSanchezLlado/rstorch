@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: cross_entropy_one_hot: CLASSES must be greater than 0
+ --> src/nn/loss.rs
+  |
+  |     [(); nonzero(CLASSES, "cross_entropy_one_hot", "CLASSES")]:,
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::prelude::cross_entropy_one_hot::<1, 0, f32, rstorch::backend::Cpu>::{constant#1}` failed here
+
+error[E0080]: evaluation panicked: log_softmax_rows: N must be greater than 0
+ --> src/nn/loss.rs
+  |
+  |     [(); nonzero(CLASSES, "log_softmax_rows", "N")]:,
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::prelude::cross_entropy_one_hot::<1, 0, f32, rstorch::backend::Cpu>::{constant#2}` failed here

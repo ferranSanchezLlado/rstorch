@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: cross_entropy_one_hot: BATCH must be greater than 0
+ --> src/nn/loss.rs
+  |
+  |     [(); nonzero(BATCH, "cross_entropy_one_hot", "BATCH")]:,
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::prelude::cross_entropy_one_hot::<0, 2, f32, rstorch::backend::Cpu>::{constant#0}` failed here

@@ -1,6 +1,7 @@
 //! Differentiable loss functions for training loops.
 
 use crate::backend::Backend;
+use crate::const_check::nonzero;
 use crate::dtype::FloatElement;
 use crate::shape::Shape;
 use crate::tensor::{Scalar, Tensor, Tensor2D};
@@ -48,10 +49,10 @@ pub fn cross_entropy_one_hot<const BATCH: usize, const CLASSES: usize, E, B>(
 where
     E: FloatElement,
     B: Backend<E>,
+    [(); nonzero(BATCH, "cross_entropy_one_hot", "BATCH")]:,
+    [(); nonzero(CLASSES, "cross_entropy_one_hot", "CLASSES")]:,
+    [(); nonzero(CLASSES, "log_softmax_rows", "N")]:,
 {
-    assert!(BATCH > 0, "cross entropy requires at least one row");
-    assert!(CLASSES > 0, "cross entropy requires at least one class");
-
     targets
         .mul(&logits.log_softmax_rows())
         .sum()

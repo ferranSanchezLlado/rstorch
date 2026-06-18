@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: softmax_rows: N must be greater than 0
+ --> src/tensor/ops.rs
+  |
+  |         [(); nonzero(N, "softmax_rows", "N")]:,
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::tensor::Tensor<rstorch::shape::D2<1, 0>>>::softmax_rows::{constant#0}` failed here

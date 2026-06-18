@@ -3,6 +3,7 @@
 use super::autograd::{self, AnyTensor, GradFn};
 use super::{Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D};
 use crate::backend::Backend;
+use crate::const_check::{nonzero, size_eq};
 use crate::dtype::FloatElement;
 use crate::shape::Shape;
 use std::sync::Arc;
@@ -378,9 +379,10 @@ where
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
     }
 
-    pub fn softmax_rows(&self) -> Self {
-        assert!(N > 0, "softmax requires at least one class");
-
+    pub fn softmax_rows(&self) -> Self
+    where
+        [(); nonzero(N, "softmax_rows", "N")]:,
+    {
         let device = self.inner.device.clone();
         let values = B::to_vec(&self.inner.data);
         let softmax = softmax_rows_values::<M, N, E>(&values);
@@ -414,9 +416,10 @@ where
         Self::from_storage_with_autograd(device, data, requires_grad, !requires_grad, grad_fn)
     }
 
-    pub fn log_softmax_rows(&self) -> Self {
-        assert!(N > 0, "log_softmax requires at least one class");
-
+    pub fn log_softmax_rows(&self) -> Self
+    where
+        [(); nonzero(N, "log_softmax_rows", "N")]:,
+    {
         let device = self.inner.device.clone();
         let values = B::to_vec(&self.inner.data);
         let softmax = softmax_rows_values::<M, N, E>(&values);
@@ -456,10 +459,7 @@ where
     E: FloatElement,
     BK: Backend<E>,
 {
-    pub fn flatten_2d(&self) -> Tensor2D<A, { B * C }, E, BK>
-    where
-        [(); B * C]:,
-    {
+    pub fn flatten_2d(&self) -> Tensor2D<A, { B * C }, E, BK> {
         let device = self.inner.device.clone();
         let data = self.inner.data.clone();
         let requires_grad = autograd::should_track_grad(self.inner.requires_grad);
@@ -474,10 +474,7 @@ where
 
     pub fn reshape_2d<const M: usize, const N: usize>(&self) -> Tensor2D<M, N, E, BK>
     where
-        [(); A * B * C]:,
-        [(); M * N]:,
-        [(); A * B * C - M * N]:,
-        [(); M * N - A * B * C]:,
+        [(); size_eq(A * B * C, M * N, "reshape_2d", "source A*B*C", "target M*N")]:,
     {
         let device = self.inner.device.clone();
         let data = self.inner.data.clone();

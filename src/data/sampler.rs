@@ -1,3 +1,4 @@
+use crate::const_check::nonzero;
 use crate::rng::SmallRng;
 use std::ops::Range;
 use std::slice;
@@ -123,22 +124,33 @@ impl<S, const BATCH: usize> BatchSampler<S, BATCH>
 where
     S: Sampler,
 {
-    pub fn new(sampler: S) -> Self {
-        assert!(BATCH > 0, "batch size must be greater than zero");
+    pub fn new(sampler: S) -> Self
+    where
+        [(); nonzero(BATCH, "BatchSampler", "BATCH")]:,
+    {
         Self { sampler }
     }
 
-    pub fn iter(&self) -> BatchSamplerIter<S::Iter<'_>, BATCH> {
+    pub fn iter(&self) -> BatchSamplerIter<S::Iter<'_>, BATCH>
+    where
+        [(); nonzero(BATCH, "BatchSampler", "BATCH")]:,
+    {
         BatchSamplerIter {
             indices: self.sampler.iter(),
         }
     }
 
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> usize
+    where
+        [(); nonzero(BATCH, "BatchSampler", "BATCH")]:,
+    {
         self.sampler.len() / BATCH
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool
+    where
+        [(); nonzero(BATCH, "BatchSampler", "BATCH")]:,
+    {
         self.len() == 0
     }
 }

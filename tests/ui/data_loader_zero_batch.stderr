@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: BatchSampler: BATCH must be greater than 0
+ --> src/data/data_loader.rs
+  |
+  |         [(); nonzero(BATCH, "BatchSampler", "BATCH")]:,
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::data::DataLoader::<rstorch::data::Basic<u8>>::batch_size::<0>::{constant#0}` failed here

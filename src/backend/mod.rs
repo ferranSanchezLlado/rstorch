@@ -30,9 +30,7 @@ pub trait Backend<E: FloatElement>: Clone + Send + Sync + 'static {
 
     fn ones(device: &Self::Device, len: usize) -> Self::Storage;
 
-    fn from_array<const N: usize>(device: &Self::Device, data: [E; N]) -> Self::Storage
-    where
-        [(); N]:;
+    fn from_array<const N: usize>(device: &Self::Device, data: [E; N]) -> Self::Storage;
 
     fn from_vec(device: &Self::Device, data: Vec<E>) -> Self::Storage;
     fn to_vec(storage: &Self::Storage) -> Vec<E>;

@@ -5,6 +5,7 @@ use super::sampler::{
     SequentialSampler,
 };
 use crate::backend::{Backend, Cpu};
+use crate::const_check::nonzero;
 use crate::dtype::FloatElement;
 use crate::rng::SmallRng;
 use std::marker::PhantomData;
@@ -121,7 +122,10 @@ where
         self.sampler(sampler)
     }
 
-    pub fn batch_size<const BATCH: usize>(self) -> BatchedDataLoader<D, C, S, BATCH, E, BK> {
+    pub fn batch_size<const BATCH: usize>(self) -> BatchedDataLoader<D, C, S, BATCH, E, BK>
+    where
+        [(); nonzero(BATCH, "BatchSampler", "BATCH")]:,
+    {
         BatchedDataLoader {
             dataset: self.dataset,
             batch_sampler: BatchSampler::new(self.sampler),
@@ -149,6 +153,7 @@ where
     S: Sampler,
     E: FloatElement,
     BK: Backend<E>,
+    [(); nonzero(BATCH, "BatchSampler", "BATCH")]:,
 {
     pub fn sampler<Next>(self, sampler: Next) -> BatchedDataLoader<D, C, Next, BATCH, E, BK>
     where

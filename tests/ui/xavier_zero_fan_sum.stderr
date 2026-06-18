@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: xavier_uniform: fan_in + fan_out (IN+OUT) must be greater than 0
+ --> src/nn/mod.rs
+  |
+  |         [(); nonzero(IN + OUT, "xavier_uniform", "fan_in + fan_out (IN+OUT)")]:,
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::nn::Linear::<0, 0>::xavier_uniform::{constant#0}` failed here

@@ -37,10 +37,7 @@ impl<E: FloatElement> Backend<E> for Cpu {
         }
     }
 
-    fn from_array<const N: usize>(_device: &Self::Device, data: [E; N]) -> Self::Storage
-    where
-        [(); N]:,
-    {
+    fn from_array<const N: usize>(_device: &Self::Device, data: [E; N]) -> Self::Storage {
         CpuStorage {
             data: Vec::from(data),
         }

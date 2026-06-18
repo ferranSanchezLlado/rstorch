@@ -2,6 +2,7 @@
 #![allow(incomplete_features)]
 
 pub mod backend;
+mod const_check;
 pub mod data;
 pub mod dtype;
 pub mod nn;

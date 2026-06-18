@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: one_hot_label: CLASSES must be greater than 0
+ --> src/data/collate.rs
+  |
+  |     [(); nonzero(CLASSES, "one_hot_label", "CLASSES")]:,
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::data::one_hot_labels::<1, 0, f32, rstorch::backend::Cpu>::{constant#0}` failed here
