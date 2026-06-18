@@ -58,12 +58,12 @@ impl From<std::io::Error> for MnistError {
 }
 
 #[derive(Debug)]
-struct IdxData {
+struct IdxData<'a> {
     dimensions: Vec<usize>,
-    data: Vec<u8>,
+    data: &'a [u8],
 }
 
-fn parse_idx(bytes: &[u8]) -> Result<IdxData, MnistError> {
+fn parse_idx(bytes: &[u8]) -> Result<IdxData<'_>, MnistError> {
     if bytes.len() < 4 {
         return Err(invalid_idx("truncated IDX header"));
     }
@@ -114,7 +114,7 @@ fn parse_idx(bytes: &[u8]) -> Result<IdxData, MnistError> {
 
     Ok(IdxData {
         dimensions,
-        data: bytes[header_len..].to_vec(),
+        data: &bytes[header_len..],
     })
 }
 
@@ -151,7 +151,7 @@ impl MnistSplit {
 
 #[derive(Debug, Clone)]
 pub struct Mnist {
-    images: Vec<[[u8; MNIST_COLS]; MNIST_ROWS]>,
+    images: Vec<u8>,
     labels: Vec<u8>,
 }
 
@@ -185,10 +185,11 @@ impl Mnist {
         let images = parse_mnist_images(&images)?;
         let labels = parse_mnist_labels(&labels)?;
 
-        if images.len() != labels.len() {
+        let image_count = images.len() / MNIST_PIXELS;
+        if image_count != labels.len() {
             return Err(invalid_mnist(format!(
                 "image count {} does not match label count {}",
-                images.len(),
+                image_count,
                 labels.len()
             )));
         }
@@ -209,23 +210,26 @@ impl Dataset for Mnist {
     }
 
     fn get(&self, index: usize) -> Option<Self::Item> {
-        let image = self.images.get(index)?;
+        let start = index.checked_mul(MNIST_PIXELS)?;
+        let end = start.checked_add(MNIST_PIXELS)?;
+        let image = self.images.get(start..end)?;
         let label = *self.labels.get(index)?;
         Some((normalize_image(image), label))
     }
 }
 
-fn normalize_image(image: &[[u8; MNIST_COLS]; MNIST_ROWS]) -> [[f32; MNIST_COLS]; MNIST_ROWS] {
+fn normalize_image(image: &[u8]) -> [[f32; MNIST_COLS]; MNIST_ROWS] {
+    debug_assert_eq!(image.len(), MNIST_PIXELS);
     let mut normalized = [[0.0; MNIST_COLS]; MNIST_ROWS];
     for row in 0..MNIST_ROWS {
         for col in 0..MNIST_COLS {
-            normalized[row][col] = normalize_pixel(image[row][col]);
+            normalized[row][col] = normalize_pixel(image[row * MNIST_COLS + col]);
         }
     }
     normalized
 }
 
-fn parse_mnist_images(bytes: &[u8]) -> Result<Vec<[[u8; MNIST_COLS]; MNIST_ROWS]>, MnistError> {
+fn parse_mnist_images(bytes: &[u8]) -> Result<Vec<u8>, MnistError> {
     let idx = parse_idx(bytes)?;
     if idx.dimensions.len() != 3
         || idx.dimensions[1] != MNIST_ROWS
@@ -238,15 +242,8 @@ fn parse_mnist_images(bytes: &[u8]) -> Result<Vec<[[u8; MNIST_COLS]; MNIST_ROWS]
     }
 
     let count = idx.dimensions[0];
-    let mut images = Vec::with_capacity(count);
-    for chunk in idx.data.chunks_exact(MNIST_PIXELS) {
-        let mut image = [[0_u8; MNIST_COLS]; MNIST_ROWS];
-        for (row, pixels) in chunk.chunks_exact(MNIST_COLS).enumerate() {
-            image[row].copy_from_slice(pixels);
-        }
-        images.push(image);
-    }
-    Ok(images)
+    debug_assert_eq!(idx.data.len(), count * MNIST_PIXELS);
+    Ok(idx.data.to_vec())
 }
 
 fn parse_mnist_labels(bytes: &[u8]) -> Result<Vec<u8>, MnistError> {
@@ -262,7 +259,7 @@ fn parse_mnist_labels(bytes: &[u8]) -> Result<Vec<u8>, MnistError> {
             "label {label} is out of range for MNIST"
         )));
     }
-    Ok(idx.data)
+    Ok(idx.data.to_vec())
 }
 
 fn ensure_mnist_cache() -> Result<PathBuf, MnistError> {
@@ -401,7 +398,7 @@ mod tests {
         let IdxData { dimensions, data } = parse_idx(&bytes).unwrap();
 
         assert_eq!(dimensions, vec![2, 3]);
-        assert_eq!(data, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(data, &[1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

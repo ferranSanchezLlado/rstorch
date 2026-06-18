@@ -17,10 +17,12 @@ pub mod prelude {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub use crate::backend::Metal;
     #[cfg(feature = "datasets")]
-    pub use crate::data::datasets::{Mnist, MnistError, MnistSplit};
+    pub use crate::data::dataset::hub::{Mnist, MnistError, MnistSplit};
     pub use crate::data::{
-        BatchedDataLoader, Collate, DataLoader, Dataset, IdentityCollate,
-        ImageOneHotClassification, OneHotClassification, one_hot_label, one_hot_labels,
+        Basic, BatchSampler, BatchedDataLoader, Chain, Collate, DataLoader, Dataset,
+        IdentityCollate, ImageOneHotClassification, OneHotClassification, PartialBatchSampler,
+        RandomSampler, Sampler, SequentialSampler, Subset, Transform, one_hot_label,
+        one_hot_labels,
     };
     pub use crate::dtype::FloatElement;
     pub use crate::nn::loss::{binary_cross_entropy, cross_entropy_one_hot, mse_loss};
