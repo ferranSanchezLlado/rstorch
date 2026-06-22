@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/matmul_static_mismatch.rs:7:24
+  |
+7 |     let _ = lhs.matmul(&rhs);
+  |                 ------ ^^^^ expected `3`, found `4`
+  |                 |
+  |                 arguments to this method are incorrect
+  |
+  = note: expected reference `&Tensor<D2<C<3>, _>>`
+             found reference `&Tensor<D2<C<4>, C<2>>>`
+note: method defined here
+ --> src/tensor/mod.rs
+  |
+  |     pub fn matmul<Cc>(&self, rhs: &Tensor<D2<K, Cc>, E, B>) -> Result<Tensor<D2<A, Cc>, E, B>>
+  |            ^^^^^^

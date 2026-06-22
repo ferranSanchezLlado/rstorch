@@ -1,0 +1,27 @@
+error[E0599]: the associated function or constant `zeros` exists for struct `Tensor<D2<Sym<Batch>, C<784>>>`, but its trait bounds were not satisfied
+ --> tests/ui/symbolic_static_constructor.rs:6:47
+  |
+6 |     let _ = Tensor::<D2<Sym<Batch>, C<784>>>::zeros();
+  |                                               ^^^^^ associated function or constant cannot be called on `Tensor<D2<Sym<Batch>, C<784>>>` due to unsatisfied trait bounds
+  |
+ ::: src/shape/mod.rs
+  |
+  |         pub struct $rank<$($prev,)* $head>(PhantomData<fn($($prev,)* $head)>);
+  |         ---------------------------------------------------------------------- doesn't satisfy `D2<Sym<Batch>, C<784>>: StaticShape`
+  |
+note: if you're trying to build a new `Tensor<D2<Sym<Batch>, C<784>>>` consider using one of the following associated functions:
+      Tensor::<S, E, B>::zeros_with_shape
+      Tensor::<S, E, B>::ones_with_shape
+      Tensor::<S, E, B>::from_vec_with_shape
+ --> src/tensor/mod.rs
+  |
+  |     pub fn zeros_with_shape(shape: impl Into<Shape>) -> Result<Self> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn ones_with_shape(shape: impl Into<Shape>) -> Result<Self> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn from_vec_with_shape(data: Vec<E>, shape: impl Into<Shape>) -> Result<Self> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: the following trait bounds were not satisfied:
+          `D2<Sym<Batch>, C<784>>: StaticShape`

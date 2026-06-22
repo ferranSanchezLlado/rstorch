@@ -16,5 +16,6 @@ edition = "2024"
 [dependencies]
 
 [dev-dependencies]
+trybuild = "1"
 
 [features]
