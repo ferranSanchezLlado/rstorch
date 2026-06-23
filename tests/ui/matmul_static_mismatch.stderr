@@ -9,7 +9,7 @@ error[E0308]: mismatched types
   = note: expected reference `&Tensor<D2<C<3>, _>>`
              found reference `&Tensor<D2<C<4>, C<2>>>`
 note: method defined here
- --> src/tensor/mod.rs
+ --> src/tensor/ops.rs
   |
   |     pub fn matmul<Cc>(&self, rhs: &Tensor<D2<K, Cc>, E, B>) -> Result<Tensor<D2<A, Cc>, E, B>>
   |            ^^^^^^

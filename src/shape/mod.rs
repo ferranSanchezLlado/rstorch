@@ -3,6 +3,10 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
+mod layout;
+
+pub use layout::Layout;
+
 mod sealed {
     pub trait SealedDim {}
     pub trait SealedShape {}
@@ -53,42 +57,6 @@ impl From<Vec<usize>> for Shape {
 impl From<Box<[usize]>> for Shape {
     fn from(dims: Box<[usize]>) -> Self {
         Self::known(dims)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Layout {
-    shape: Shape,
-    strides: Box<[usize]>,
-    offset: usize,
-}
-
-impl Layout {
-    pub fn contiguous(shape: Shape) -> Self {
-        let mut strides = vec![0; shape.rank()];
-        let mut stride = 1usize;
-        for (idx, &dim) in shape.dims().iter().enumerate().rev() {
-            strides[idx] = stride;
-            stride = stride.saturating_mul(dim);
-        }
-
-        Self {
-            shape,
-            strides: strides.into_boxed_slice(),
-            offset: 0,
-        }
-    }
-
-    pub fn shape(&self) -> &Shape {
-        &self.shape
-    }
-
-    pub fn strides(&self) -> &[usize] {
-        &self.strides
-    }
-
-    pub fn offset(&self) -> usize {
-        self.offset
     }
 }
 
@@ -357,13 +325,6 @@ mod tests {
             Shape::known([usize::MAX, 2]).numel(),
             Err(Error::Shape(ShapeError::NumelOverflow { .. }))
         ));
-    }
-
-    #[test]
-    fn layout_has_row_major_strides() {
-        let layout = Layout::contiguous(Shape::known([2, 3, 4]));
-        assert_eq!(layout.strides(), &[12, 4, 1]);
-        assert_eq!(layout.offset(), 0);
     }
 
     #[test]

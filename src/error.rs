@@ -87,6 +87,18 @@ pub enum ShapeError {
     NumelOverflow {
         dims: Box<[usize]>,
     },
+    InvalidOffset {
+        offset: usize,
+        storage_len: usize,
+    },
+    LayoutOutOfBounds {
+        offset: usize,
+        storage_len: usize,
+    },
+    ViewIncompatible {
+        op: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for ShapeError {
@@ -121,6 +133,23 @@ impl fmt::Display for ShapeError {
                 lhs, rhs
             ),
             Self::NumelOverflow { dims } => write!(f, "shape element count overflow for {dims:?}"),
+            Self::InvalidOffset {
+                offset,
+                storage_len,
+            } => write!(
+                f,
+                "invalid layout offset {offset} for storage length {storage_len}"
+            ),
+            Self::LayoutOutOfBounds {
+                offset,
+                storage_len,
+            } => write!(
+                f,
+                "layout addresses element {offset} outside storage length {storage_len}"
+            ),
+            Self::ViewIncompatible { op, reason } => {
+                write!(f, "{op} view incompatible: {reason}")
+            }
         }
     }
 }

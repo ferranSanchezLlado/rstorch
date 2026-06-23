@@ -3,16 +3,16 @@ use crate::dtype::{DType, DTypeId};
 use crate::error::{Error, Result, ShapeError};
 use crate::shape::{Layout, Shape};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 pub(crate) struct RawTensor<E = f32, B = Cpu>
 where
     E: DType,
     B: Backend<E>,
 {
-    storage: B::Storage,
+    storage: Arc<B::Storage>,
     device: B::Device,
     layout: Layout,
-    numel: usize,
     _dtype: PhantomData<E>,
     _backend: PhantomData<B>,
 }
@@ -79,13 +79,31 @@ where
         }
 
         Ok(Self {
-            storage,
+            storage: Arc::new(storage),
             device,
-            layout: Layout::contiguous(shape),
-            numel,
+            layout: Layout::contiguous(shape)?,
             _dtype: PhantomData,
             _backend: PhantomData,
         })
+    }
+
+    pub(crate) fn from_shared_storage(
+        storage: Arc<B::Storage>,
+        device: B::Device,
+        layout: Layout,
+    ) -> Result<Self> {
+        layout.validate_in_storage(B::storage_len(&storage))?;
+        Ok(Self {
+            storage,
+            device,
+            layout,
+            _dtype: PhantomData,
+            _backend: PhantomData,
+        })
+    }
+
+    pub(crate) fn view_with_layout(&self, layout: Layout) -> Result<Self> {
+        Self::from_shared_storage(Arc::clone(&self.storage), self.device.clone(), layout)
     }
 
     pub(crate) fn dtype(&self) -> DTypeId {
@@ -109,14 +127,39 @@ where
     }
 
     pub(crate) fn numel(&self) -> usize {
-        self.numel
+        self.layout.numel()
     }
 
     pub(crate) fn storage(&self) -> &B::Storage {
         &self.storage
     }
 
+    pub(crate) fn is_contiguous(&self) -> bool {
+        self.layout.is_contiguous()
+    }
+
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.storage, &other.storage)
+    }
+
+    pub(crate) fn has_storage_view(&self) -> bool {
+        Arc::strong_count(&self.storage) > 1
+    }
+
     pub(crate) fn to_vec(&self) -> Result<Vec<E>> {
-        B::to_vec(&self.device, &self.storage).map_err(Error::backend)
+        let physical = B::to_vec(&self.device, &self.storage).map_err(Error::backend)?;
+        self.layout
+            .storage_positions()?
+            .into_iter()
+            .map(|position| {
+                physical.get(position).copied().ok_or_else(|| {
+                    ShapeError::LayoutOutOfBounds {
+                        offset: position,
+                        storage_len: physical.len(),
+                    }
+                    .into()
+                })
+            })
+            .collect()
     }
 }
