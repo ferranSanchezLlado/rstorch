@@ -17,6 +17,22 @@ where
     _backend: PhantomData<B>,
 }
 
+impl<E, B> Clone for RawTensor<E, B>
+where
+    E: DType,
+    B: Backend<E>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            storage: Arc::clone(&self.storage),
+            device: self.device.clone(),
+            layout: self.layout.clone(),
+            _dtype: PhantomData,
+            _backend: PhantomData,
+        }
+    }
+}
+
 impl<E, B> RawTensor<E, B>
 where
     E: DType,
@@ -161,5 +177,61 @@ where
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Tensor2D;
+    use crate::backend::Cpu;
+    use crate::error::Error;
+    use crate::tensor::test_support::FailingBackend;
+
+    #[test]
+    fn backend_built_storage_lengths_match_numel() {
+        let zeros = Tensor2D::<2, 3>::zeros().unwrap();
+        assert_eq!(<Cpu as Backend<f32>>::storage_len(zeros.raw().storage()), 6);
+        assert_eq!(zeros.numel(), 6);
+
+        let ones = Tensor2D::<2, 3>::ones().unwrap();
+        assert_eq!(<Cpu as Backend<f32>>::storage_len(ones.raw().storage()), 6);
+        assert_eq!(ones.numel(), 6);
+    }
+
+    #[test]
+    fn backend_errors_are_boxed_sources() {
+        let err = match RawTensor::<f32, FailingBackend>::zeros(Shape::known([2])) {
+            Ok(_) => panic!("expected backend error"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, Error::Backend(_)));
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    mod metal_tests {
+        use super::*;
+        use crate::backend::{Metal, MetalDevice};
+
+        fn device() -> Option<MetalDevice> {
+            <Metal as Backend<f32>>::default_device().ok()
+        }
+
+        #[test]
+        fn metal_zeros_and_ones_have_expected_values_and_lengths() {
+            let Some(device) = device() else {
+                return;
+            };
+
+            let zeros =
+                RawTensor::<f32, Metal>::zeros_on(device.clone(), Shape::known([3])).unwrap();
+            assert_eq!(<Metal as Backend<f32>>::storage_len(zeros.storage()), 3);
+            assert_eq!(zeros.to_vec().unwrap(), vec![0.0, 0.0, 0.0]);
+
+            let ones = RawTensor::<f32, Metal>::ones_on(device, Shape::known([3])).unwrap();
+            assert_eq!(<Metal as Backend<f32>>::storage_len(ones.storage()), 3);
+            assert_eq!(ones.to_vec().unwrap(), vec![1.0, 1.0, 1.0]);
+        }
     }
 }
