@@ -1,15 +1,19 @@
 mod cpu;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod metal;
 
 use crate::dtype::DType;
 
 pub use cpu::{Cpu, CpuDevice, CpuError};
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub use metal::{Metal, MetalDevice, MetalError};
 
 pub trait Backend<E: DType>: Clone + Send + Sync + 'static {
     type Device: Clone + Send + Sync + PartialEq + std::fmt::Debug + 'static;
     type Storage: Clone + Send + Sync + 'static;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn default_device() -> Self::Device;
+    fn default_device() -> std::result::Result<Self::Device, Self::Error>;
     fn zeros(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error>;
     fn ones(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error>;
     fn from_vec(
@@ -56,6 +60,40 @@ pub trait Backend<E: DType>: Clone + Send + Sync + 'static {
         device: &Self::Device,
         lhs: &Self::Storage,
         rhs: &Self::Storage,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error>;
+
+    fn add_scalar(
+        device: &Self::Device,
+        input: &Self::Storage,
+        rhs: E,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error>;
+
+    fn sub_scalar(
+        device: &Self::Device,
+        input: &Self::Storage,
+        rhs: E,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error>;
+
+    fn mul_scalar(
+        device: &Self::Device,
+        input: &Self::Storage,
+        rhs: E,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error>;
+
+    fn div_scalar(
+        device: &Self::Device,
+        input: &Self::Storage,
+        rhs: E,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error>;
+
+    fn sum(
+        device: &Self::Device,
+        input: &Self::Storage,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error>;
 }

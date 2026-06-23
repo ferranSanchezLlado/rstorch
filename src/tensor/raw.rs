@@ -23,15 +23,18 @@ where
     B: Backend<E>,
 {
     pub(crate) fn zeros(shape: Shape) -> Result<Self> {
-        Self::zeros_on(B::default_device(), shape)
+        let device = B::default_device().map_err(Error::backend)?;
+        Self::zeros_on(device, shape)
     }
 
     pub(crate) fn ones(shape: Shape) -> Result<Self> {
-        Self::ones_on(B::default_device(), shape)
+        let device = B::default_device().map_err(Error::backend)?;
+        Self::ones_on(device, shape)
     }
 
     pub(crate) fn from_vec(data: Vec<E>, shape: Shape) -> Result<Self> {
-        Self::from_vec_on(B::default_device(), data, shape)
+        let device = B::default_device().map_err(Error::backend)?;
+        Self::from_vec_on(device, data, shape)
     }
 
     pub(crate) fn zeros_on(device: B::Device, shape: Shape) -> Result<Self> {

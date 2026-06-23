@@ -51,8 +51,8 @@ impl<E: DType> Backend<E> for Cpu {
     type Storage = Vec<E>;
     type Error = CpuError;
 
-    fn default_device() -> Self::Device {
-        CpuDevice::Cpu
+    fn default_device() -> std::result::Result<Self::Device, Self::Error> {
+        Ok(CpuDevice::Cpu)
     }
 
     fn zeros(
@@ -150,6 +150,59 @@ impl<E: DType> Backend<E> for Cpu {
     ) -> std::result::Result<Self::Storage, Self::Error> {
         binary(lhs, rhs, len, |a, b| a / b)
     }
+
+    fn add_scalar(
+        _device: &Self::Device,
+        input: &Self::Storage,
+        rhs: E,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error> {
+        unary_scalar(input, rhs, len, |a, b| a + b)
+    }
+
+    fn sub_scalar(
+        _device: &Self::Device,
+        input: &Self::Storage,
+        rhs: E,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error> {
+        unary_scalar(input, rhs, len, |a, b| a - b)
+    }
+
+    fn mul_scalar(
+        _device: &Self::Device,
+        input: &Self::Storage,
+        rhs: E,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error> {
+        unary_scalar(input, rhs, len, |a, b| a * b)
+    }
+
+    fn div_scalar(
+        _device: &Self::Device,
+        input: &Self::Storage,
+        rhs: E,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error> {
+        unary_scalar(input, rhs, len, |a, b| a / b)
+    }
+
+    fn sum(
+        _device: &Self::Device,
+        input: &Self::Storage,
+        len: usize,
+    ) -> std::result::Result<Self::Storage, Self::Error> {
+        if input.len() != len {
+            return Err(CpuError::LengthMismatch {
+                lhs: input.len(),
+                rhs: len,
+            });
+        }
+
+        Ok(vec![
+            input.iter().fold(E::zero(), |acc, &value| acc + value),
+        ])
+    }
 }
 
 fn binary<E, F>(lhs: &[E], rhs: &[E], len: usize, f: F) -> std::result::Result<Vec<E>, CpuError>
@@ -165,4 +218,24 @@ where
     }
 
     Ok(lhs.iter().zip(rhs.iter()).map(|(&a, &b)| f(a, b)).collect())
+}
+
+fn unary_scalar<E, F>(
+    input: &[E],
+    rhs: E,
+    len: usize,
+    f: F,
+) -> std::result::Result<Vec<E>, CpuError>
+where
+    E: DType,
+    F: Fn(E, E) -> E,
+{
+    if input.len() != len {
+        return Err(CpuError::LengthMismatch {
+            lhs: input.len(),
+            rhs: len,
+        });
+    }
+
+    Ok(input.iter().map(|&value| f(value, rhs)).collect())
 }
