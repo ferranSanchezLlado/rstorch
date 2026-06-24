@@ -92,8 +92,8 @@ impl Layout {
             for axis in (0..rank).rev() {
                 let dim = self.shape.dims()[axis];
                 let coord = if dim == 0 { 0 } else { remaining % dim };
-                if dim != 0 {
-                    remaining /= dim;
+                if let Some(next) = remaining.checked_div(dim) {
+                    remaining = next;
                 }
                 let contribution = coord.checked_mul(self.strides[axis]).ok_or_else(|| {
                     ShapeError::NumelOverflow {

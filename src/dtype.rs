@@ -26,6 +26,8 @@ pub trait DType:
 
 pub trait FloatDType: DType + Neg<Output = Self> {
     fn from_usize(value: usize) -> Self;
+    fn from_f64(value: f64) -> Self;
+    fn sqrt(self) -> Self;
 }
 
 impl DType for f32 {
@@ -44,6 +46,14 @@ impl FloatDType for f32 {
     fn from_usize(value: usize) -> Self {
         value as Self
     }
+
+    fn from_f64(value: f64) -> Self {
+        value as Self
+    }
+
+    fn sqrt(self) -> Self {
+        f32::sqrt(self)
+    }
 }
 
 impl DType for f64 {
@@ -61,5 +71,13 @@ impl DType for f64 {
 impl FloatDType for f64 {
     fn from_usize(value: usize) -> Self {
         value as Self
+    }
+
+    fn from_f64(value: f64) -> Self {
+        value
+    }
+
+    fn sqrt(self) -> Self {
+        f64::sqrt(self)
     }
 }

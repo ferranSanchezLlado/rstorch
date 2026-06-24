@@ -1,5 +1,6 @@
 use super::autograd::{
-    AnyTensor, raw_div, raw_div_scalar, raw_full_like, raw_mul, raw_mul_scalar, raw_neg,
+    AnyTensor, raw_div, raw_div_scalar, raw_from_vec_like, raw_full_like, raw_mul, raw_mul_scalar,
+    raw_neg,
 };
 use super::{RawTensor, Scalar, Tensor, Tensor1D, Tensor4D};
 use crate::backend::Backend;
@@ -163,6 +164,31 @@ where
         Tensor::<D0, E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let seed = grad.to_vec()?[0];
             Ok(vec![Some(raw_full_like(&input_raw, seed)?)])
+        })
+    }
+
+    pub fn relu(&self) -> Result<Self> {
+        let input = self.contiguous()?;
+        let zero = E::zero();
+        let values = input
+            .to_vec()?
+            .into_iter()
+            .map(|value| if value > zero { value } else { zero })
+            .collect();
+        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let input_raw = self.raw().clone();
+        Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let mask = input_raw
+                .to_vec()?
+                .into_iter()
+                .map(|value| if value > zero { E::one() } else { zero });
+            let grad_values = grad
+                .to_vec()?
+                .into_iter()
+                .zip(mask)
+                .map(|(g, m)| g * m)
+                .collect();
+            Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
         })
     }
 
@@ -368,6 +394,67 @@ where
                 Ok(vec![
                     Some(raw_matmul(grad, &rhs_t)?),
                     Some(raw_matmul(&lhs_t, grad)?),
+                ])
+            },
+        )
+    }
+}
+
+impl<A, N, E, B> Tensor<D2<A, N>, E, B>
+where
+    A: DimSpec,
+    N: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    pub fn add_row(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
+        ensure_same_device::<E, B>(self.device(), rhs.device(), "add_row")?;
+        let dims = self.shape().dims();
+        let rows = dims[0];
+        let cols = dims[1];
+        bind_and_check(
+            "add_row",
+            [
+                (DimEntry::of::<A>(0, 0), rows),
+                (DimEntry::of::<N>(0, 1), cols),
+                (DimEntry::of::<N>(1, 0), rhs.shape().dims()[0]),
+            ],
+        )?;
+        if rhs.shape().dims()[0] != cols {
+            return Err(ShapeError::DimMismatch {
+                op: "add_row",
+                operand: 1,
+                axis: 0,
+                expected: cols,
+                found: rhs.shape().dims()[0],
+            }
+            .into());
+        }
+
+        let lhs_values = self.to_vec()?;
+        let rhs_values = rhs.to_vec()?;
+        let values = lhs_values
+            .into_iter()
+            .enumerate()
+            .map(|(idx, value)| value + rhs_values[idx % cols])
+            .collect();
+        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let lhs_raw = self.raw().clone();
+        let rhs_raw = rhs.raw().clone();
+        Self::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
+            move |grad| {
+                let grad_values = grad.to_vec()?;
+                let mut bias_grad = vec![E::zero(); cols];
+                for row in 0..rows {
+                    for col in 0..cols {
+                        bias_grad[col] = bias_grad[col] + grad_values[row * cols + col];
+                    }
+                }
+                Ok(vec![
+                    Some(raw_from_vec_like(&lhs_raw, grad_values)?),
+                    Some(raw_from_vec_like(&rhs_raw, bias_grad)?),
                 ])
             },
         )

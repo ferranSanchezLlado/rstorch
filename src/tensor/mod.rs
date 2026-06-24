@@ -140,6 +140,12 @@ where
         self.raw().to_vec()
     }
 
+    pub(crate) fn replace_data(&mut self, data: Vec<E>) -> Result<()> {
+        let raw = RawTensor::from_vec_on(self.device().clone(), data, self.shape().clone())?;
+        *self = Self::from_raw(raw)?.with_requires_grad(true);
+        Ok(())
+    }
+
     pub fn is_contiguous(&self) -> bool {
         self.raw().is_contiguous()
     }
