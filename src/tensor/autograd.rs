@@ -577,9 +577,9 @@ mod tests {
 
         let eps = 1e-6;
         for idx in 0..2 {
-            let mut plus = vec![1.5, -2.0];
+            let mut plus = [1.5, -2.0];
             plus[idx] += eps;
-            let mut minus = vec![1.5, -2.0];
+            let mut minus = [1.5, -2.0];
             minus[idx] -= eps;
             let f_plus: f64 = plus.iter().map(|v| v * v).sum();
             let f_minus: f64 = minus.iter().map(|v| v * v).sum();

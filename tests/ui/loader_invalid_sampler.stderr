@@ -1,0 +1,27 @@
+error[E0277]: the trait bound `usize: Sampler` is not satisfied
+ --> tests/ui/loader_invalid_sampler.rs:5:43
+  |
+5 |     let _ = data::loader(dataset).sampler(123usize);
+  |                                   ------- ^^^^^^^^ the trait `Sampler` is not implemented for `usize`
+  |                                   |
+  |                                   required by a bound introduced by this call
+  |
+help: the following other types implement trait `Sampler`
+ --> src/data/sampler.rs
+  |
+  | impl Sampler for SequentialSampler {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SequentialSampler`
+...
+  | impl Sampler for ShuffleSampler {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ShuffleSampler`
+...
+  | impl Sampler for RandomSampler {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `RandomSampler`
+note: required by a bound in `DataLoaderBuilder::<D, S, C>::sampler`
+ --> src/data/dataloader.rs
+  |
+  |     pub fn sampler<S2>(self, sampler: S2) -> DataLoaderBuilder<D, S2, C>
+  |            ------- required by a bound in this associated function
+  |     where
+  |         S2: Sampler,
+  |             ^^^^^^^ required by this bound in `DataLoaderBuilder::<D, S, C>::sampler`

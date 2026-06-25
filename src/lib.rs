@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod data;
 pub mod dtype;
 pub mod error;
 pub mod nn;
@@ -10,8 +11,21 @@ pub mod tensor;
 pub use backend::{Backend, Cpu, CpuDevice, CpuError};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use backend::{Metal, MetalDevice, MetalError};
+pub use data::{
+    Batch, Chain, ChainError, Collate, DataLoader, Dataset, DynamicFeatures, Features, ImageBatch,
+    IntoTensorDataset, RandomSampler, SequentialSampler, ShuffleSampler, StackDynVecCollate,
+    StackImageCollate, StackVecCollate, StaticDataLoader, StaticFeatures, StaticImageBatch,
+    StaticStackImageCollate, StaticStackVecCollate, Subset, SubsetError, TensorDataset, Transform,
+    VecDataset, dynamic_features, features, images, loader, static_features, static_images,
+    static_loader,
+};
+#[cfg(feature = "hub")]
+pub use data::{
+    DatasetHub, DatasetResource, Mnist, MnistCollate, MnistImageBatch, MnistImageCollate,
+    MnistSample, MnistSplit,
+};
 pub use dtype::{DType, DTypeId, FloatDType};
-pub use error::{DTypeError, DeviceError, Error, Result, ShapeError};
+pub use error::{DTypeError, DataError, DeviceError, Error, Result, ShapeError};
 pub use nn::{HasParameters, Linear, Module, Parameter, ParameterId, mse_loss, relu};
 pub use optim::{Adam, Optimizer, Sgd};
 pub use random::SmallRng;
@@ -26,8 +40,21 @@ pub mod prelude {
     pub use crate::backend::{Backend, Cpu};
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub use crate::backend::{Metal, MetalDevice, MetalError};
+    pub use crate::data::{
+        Batch, Chain, ChainError, Collate, DataLoader, Dataset, DynamicFeatures, Features,
+        ImageBatch, IntoTensorDataset, RandomSampler, SequentialSampler, ShuffleSampler,
+        StackDynVecCollate, StackImageCollate, StackVecCollate, StaticDataLoader, StaticFeatures,
+        StaticImageBatch, StaticStackImageCollate, StaticStackVecCollate, Subset, SubsetError,
+        TensorDataset, Transform, VecDataset, dynamic_features, features, images, loader,
+        static_features, static_images, static_loader,
+    };
+    #[cfg(feature = "hub")]
+    pub use crate::data::{
+        DatasetHub, DatasetResource, Mnist, MnistCollate, MnistImageBatch, MnistImageCollate,
+        MnistSample, MnistSplit,
+    };
     pub use crate::dtype::{DType, FloatDType};
-    pub use crate::error::Result;
+    pub use crate::error::{DataError, Result};
     pub use crate::nn::{HasParameters, Linear, Module, Parameter, mse_loss, relu};
     pub use crate::optim::{Adam, Optimizer, Sgd};
     pub use crate::random::SmallRng;

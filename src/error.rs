@@ -1,4 +1,5 @@
 use crate::dtype::DTypeId;
+use std::convert::Infallible;
 use std::error;
 use std::fmt;
 
@@ -10,6 +11,7 @@ pub enum Error {
     Backend(Box<dyn error::Error + Send + Sync + 'static>),
     Device(DeviceError),
     DType(DTypeError),
+    Data(DataError),
 }
 
 impl Error {
@@ -28,6 +30,7 @@ impl fmt::Display for Error {
             Self::Backend(err) => write!(f, "backend error: {err}"),
             Self::Device(err) => write!(f, "device error: {err}"),
             Self::DType(err) => write!(f, "dtype error: {err}"),
+            Self::Data(err) => write!(f, "data error: {err}"),
         }
     }
 }
@@ -36,6 +39,7 @@ impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::Backend(err) => Some(err.as_ref()),
+            Self::Data(err) => err.source(),
             _ => None,
         }
     }
@@ -56,6 +60,86 @@ impl From<DeviceError> for Error {
 impl From<DTypeError> for Error {
     fn from(err: DTypeError) -> Self {
         Self::DType(err)
+    }
+}
+
+impl From<DataError> for Error {
+    fn from(err: DataError) -> Self {
+        Self::Data(err)
+    }
+}
+
+impl From<Infallible> for Error {
+    fn from(err: Infallible) -> Self {
+        match err {}
+    }
+}
+
+#[derive(Debug)]
+pub enum DataError {
+    IndexOutOfBounds {
+        index: usize,
+        len: usize,
+    },
+    EmptyBatch,
+    InvalidBatchSize {
+        batch_size: usize,
+    },
+    WrongBatchSize {
+        expected: usize,
+        found: usize,
+    },
+    InconsistentSampleShape {
+        index: usize,
+        expected: Vec<usize>,
+        found: Vec<usize>,
+    },
+    InvalidTensorDataset {
+        reason: &'static str,
+    },
+    Io {
+        source: std::io::Error,
+    },
+    Parse {
+        source: Box<dyn error::Error + Send + Sync + 'static>,
+    },
+}
+
+impl fmt::Display for DataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IndexOutOfBounds { index, len } => {
+                write!(f, "index {index} out of bounds for dataset of length {len}")
+            }
+            Self::EmptyBatch => write!(f, "cannot collate an empty batch"),
+            Self::InvalidBatchSize { batch_size } => {
+                write!(f, "invalid batch size {batch_size}")
+            }
+            Self::WrongBatchSize { expected, found } => {
+                write!(f, "wrong batch size: expected {expected}, found {found}")
+            }
+            Self::InconsistentSampleShape {
+                index,
+                expected,
+                found,
+            } => write!(
+                f,
+                "inconsistent sample shape at index {index}: expected {expected:?}, found {found:?}"
+            ),
+            Self::InvalidTensorDataset { reason } => write!(f, "invalid tensor dataset: {reason}"),
+            Self::Io { source } => write!(f, "io error: {source}"),
+            Self::Parse { source } => write!(f, "parse error: {source}"),
+        }
+    }
+}
+
+impl error::Error for DataError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Self::Io { source } => Some(source),
+            Self::Parse { source } => Some(source.as_ref()),
+            _ => None,
+        }
     }
 }
 
