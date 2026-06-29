@@ -1,16 +1,16 @@
 error[E0277]: the trait bound `usize: Collate<Vec<f32>>` is not satisfied
- --> tests/ui/static_dataloader_invalid_iter.rs:6:20
+ --> tests/ui/static_dataloader_invalid_iter_test_features_hub.rs:6:20
   |
 6 |     let _ = loader.iter();
   |                    ^^^^ the trait `Collate<Vec<f32>>` is not implemented for `usize`
   |
   = help: the following other types implement trait `Collate<Item>`:
             `(C0, C1)` implements `Collate<(I0, I1)>`
+            `MnistCollate<E, B>` implements `Collate<MnistSample>`
+            `MnistImageCollate<E, B>` implements `Collate<MnistSample>`
             `StackDynVecCollate<E, B>` implements `Collate<(Vec<E>, L)>`
             `StackDynVecCollate<E, B>` implements `Collate<Vec<E>>`
             `StackImageCollate<CH, H, W, E, B>` implements `Collate<(Vec<E>, L)>`
             `StackImageCollate<CH, H, W, E, B>` implements `Collate<Vec<E>>`
             `StackVecCollate<N, E, B>` implements `Collate<(Vec<E>, L)>`
-            `StackVecCollate<N, E, B>` implements `Collate<Vec<E>>`
-            `StaticStackImageCollate<BATCH, CH, H, W, E, B>` implements `Collate<(Vec<E>, L)>`
           and $N others

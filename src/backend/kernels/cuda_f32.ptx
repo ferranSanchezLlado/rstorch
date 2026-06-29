@@ -1,0 +1,192 @@
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry binary_f32_kernel(
+    .param .u64 lhs_param,
+    .param .u64 rhs_param,
+    .param .u64 out_param,
+    .param .u32 op_param,
+    .param .u32 len_param
+) {
+    .reg .pred %p<6>;
+    .reg .b32 %r<10>;
+    .reg .b64 %rd<9>;
+    .reg .f32 %f<4>;
+
+    ld.param.u64 %rd1, [lhs_param];
+    ld.param.u64 %rd2, [rhs_param];
+    ld.param.u64 %rd3, [out_param];
+    ld.param.u32 %r1, [op_param];
+    ld.param.u32 %r2, [len_param];
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %ntid.x;
+    mad.lo.u32 %r6, %r4, %r5, %r3;
+    setp.ge.u32 %p1, %r6, %r2;
+    @%p1 ret;
+
+    mul.wide.u32 %rd4, %r6, 4;
+    add.u64 %rd5, %rd1, %rd4;
+    add.u64 %rd6, %rd2, %rd4;
+    add.u64 %rd7, %rd3, %rd4;
+    ld.global.f32 %f1, [%rd5];
+    ld.global.f32 %f2, [%rd6];
+
+    setp.eq.u32 %p2, %r1, 0;
+    @%p2 bra BIN_ADD;
+    setp.eq.u32 %p3, %r1, 1;
+    @%p3 bra BIN_SUB;
+    setp.eq.u32 %p4, %r1, 2;
+    @%p4 bra BIN_MUL;
+    div.rn.f32 %f3, %f1, %f2;
+    bra BIN_STORE;
+BIN_ADD:
+    add.rn.f32 %f3, %f1, %f2;
+    bra BIN_STORE;
+BIN_SUB:
+    sub.rn.f32 %f3, %f1, %f2;
+    bra BIN_STORE;
+BIN_MUL:
+    mul.rn.f32 %f3, %f1, %f2;
+BIN_STORE:
+    st.global.f32 [%rd7], %f3;
+    ret;
+}
+
+.visible .entry scalar_f32_kernel(
+    .param .u64 input_param,
+    .param .u64 out_param,
+    .param .f32 rhs_param,
+    .param .u32 op_param,
+    .param .u32 len_param
+) {
+    .reg .pred %p<6>;
+    .reg .b32 %r<10>;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<4>;
+
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [out_param];
+    ld.param.f32 %f2, [rhs_param];
+    ld.param.u32 %r1, [op_param];
+    ld.param.u32 %r2, [len_param];
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %ntid.x;
+    mad.lo.u32 %r6, %r4, %r5, %r3;
+    setp.ge.u32 %p1, %r6, %r2;
+    @%p1 ret;
+
+    mul.wide.u32 %rd3, %r6, 4;
+    add.u64 %rd4, %rd1, %rd3;
+    add.u64 %rd5, %rd2, %rd3;
+    ld.global.f32 %f1, [%rd4];
+
+    setp.eq.u32 %p2, %r1, 0;
+    @%p2 bra SCA_ADD;
+    setp.eq.u32 %p3, %r1, 1;
+    @%p3 bra SCA_SUB;
+    setp.eq.u32 %p4, %r1, 2;
+    @%p4 bra SCA_MUL;
+    div.rn.f32 %f3, %f1, %f2;
+    bra SCA_STORE;
+SCA_ADD:
+    add.rn.f32 %f3, %f1, %f2;
+    bra SCA_STORE;
+SCA_SUB:
+    sub.rn.f32 %f3, %f1, %f2;
+    bra SCA_STORE;
+SCA_MUL:
+    mul.rn.f32 %f3, %f1, %f2;
+SCA_STORE:
+    st.global.f32 [%rd5], %f3;
+    ret;
+}
+
+.visible .entry matmul_f32_kernel(
+    .param .u64 lhs_param,
+    .param .u64 rhs_param,
+    .param .u64 out_param,
+    .param .u32 m_param,
+    .param .u32 k_param,
+    .param .u32 n_param
+) {
+    .reg .pred %p<4>;
+    .reg .b32 %r<20>;
+    .reg .b64 %rd<14>;
+    .reg .f32 %f<5>;
+
+    ld.param.u64 %rd1, [lhs_param];
+    ld.param.u64 %rd2, [rhs_param];
+    ld.param.u64 %rd3, [out_param];
+    ld.param.u32 %r1, [m_param];
+    ld.param.u32 %r2, [k_param];
+    ld.param.u32 %r3, [n_param];
+    mov.u32 %r4, %tid.x;
+    mov.u32 %r5, %ctaid.x;
+    mov.u32 %r6, %ntid.x;
+    mad.lo.u32 %r7, %r5, %r6, %r4;
+    mul.lo.u32 %r8, %r1, %r3;
+    setp.ge.u32 %p1, %r7, %r8;
+    @%p1 ret;
+
+    div.u32 %r9, %r7, %r3;
+    rem.u32 %r10, %r7, %r3;
+    mov.u32 %r11, 0;
+    mov.f32 %f1, 0f00000000;
+MAT_LOOP:
+    setp.ge.u32 %p2, %r11, %r2;
+    @%p2 bra MAT_DONE;
+    mad.lo.u32 %r12, %r9, %r2, %r11;
+    mad.lo.u32 %r13, %r11, %r3, %r10;
+    mul.wide.u32 %rd4, %r12, 4;
+    mul.wide.u32 %rd5, %r13, 4;
+    add.u64 %rd6, %rd1, %rd4;
+    add.u64 %rd7, %rd2, %rd5;
+    ld.global.f32 %f2, [%rd6];
+    ld.global.f32 %f3, [%rd7];
+    fma.rn.f32 %f1, %f2, %f3, %f1;
+    add.u32 %r11, %r11, 1;
+    bra MAT_LOOP;
+MAT_DONE:
+    mul.wide.u32 %rd8, %r7, 4;
+    add.u64 %rd9, %rd3, %rd8;
+    st.global.f32 [%rd9], %f1;
+    ret;
+}
+
+.visible .entry sum_f32_kernel(
+    .param .u64 input_param,
+    .param .u64 out_param,
+    .param .u32 len_param
+) {
+    .reg .pred %p<3>;
+    .reg .b32 %r<6>;
+    .reg .b64 %rd<6>;
+    .reg .f32 %f<4>;
+
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    or.b32 %r3, %r1, %r2;
+    setp.ne.u32 %p1, %r3, 0;
+    @%p1 ret;
+
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [out_param];
+    ld.param.u32 %r4, [len_param];
+    mov.u32 %r5, 0;
+    mov.f32 %f1, 0f00000000;
+SUM_LOOP:
+    setp.ge.u32 %p2, %r5, %r4;
+    @%p2 bra SUM_DONE;
+    mul.wide.u32 %rd3, %r5, 4;
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.f32 %f2, [%rd4];
+    add.rn.f32 %f1, %f1, %f2;
+    add.u32 %r5, %r5, 1;
+    bra SUM_LOOP;
+SUM_DONE:
+    st.global.f32 [%rd2], %f1;
+    ret;
+}

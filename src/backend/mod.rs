@@ -1,12 +1,20 @@
 mod cpu;
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+mod cuda;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod metal;
+#[cfg(feature = "wgpu")]
+mod wgpu;
 
 use crate::dtype::DType;
 
 pub use cpu::{Cpu, CpuDevice, CpuError};
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+pub use cuda::{Cuda, CudaDevice, CudaError};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{Metal, MetalDevice, MetalError};
+#[cfg(feature = "wgpu")]
+pub use wgpu::{Wgpu, WgpuDevice, WgpuError};
 
 pub trait Backend<E: DType>: Clone + Send + Sync + 'static {
     type Device: Clone + Send + Sync + PartialEq + std::fmt::Debug + 'static;

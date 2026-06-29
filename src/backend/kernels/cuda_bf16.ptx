@@ -1,0 +1,245 @@
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry binary_bf16_kernel(
+    .param .u64 lhs_param,
+    .param .u64 rhs_param,
+    .param .u64 out_param,
+    .param .u32 op_param,
+    .param .u32 len_param
+) {
+    .reg .pred %p<6>;
+    .reg .b16 %h<4>;
+    .reg .b32 %r<18>;
+    .reg .b64 %rd<9>;
+    .reg .f32 %f<4>;
+
+    ld.param.u64 %rd1, [lhs_param];
+    ld.param.u64 %rd2, [rhs_param];
+    ld.param.u64 %rd3, [out_param];
+    ld.param.u32 %r1, [op_param];
+    ld.param.u32 %r2, [len_param];
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %ntid.x;
+    mad.lo.u32 %r6, %r4, %r5, %r3;
+    setp.ge.u32 %p1, %r6, %r2;
+    @%p1 ret;
+
+    mul.wide.u32 %rd4, %r6, 2;
+    add.u64 %rd5, %rd1, %rd4;
+    add.u64 %rd6, %rd2, %rd4;
+    add.u64 %rd7, %rd3, %rd4;
+    ld.global.u16 %h1, [%rd5];
+    ld.global.u16 %h2, [%rd6];
+    cvt.u32.u16 %r7, %h1;
+    cvt.u32.u16 %r8, %h2;
+    shl.b32 %r9, %r7, 16;
+    shl.b32 %r10, %r8, 16;
+    mov.b32 %f1, %r9;
+    mov.b32 %f2, %r10;
+
+    setp.eq.u32 %p2, %r1, 0;
+    @%p2 bra BINBF_ADD;
+    setp.eq.u32 %p3, %r1, 1;
+    @%p3 bra BINBF_SUB;
+    setp.eq.u32 %p4, %r1, 2;
+    @%p4 bra BINBF_MUL;
+    div.rn.f32 %f3, %f1, %f2;
+    bra BINBF_STORE;
+BINBF_ADD:
+    add.rn.f32 %f3, %f1, %f2;
+    bra BINBF_STORE;
+BINBF_SUB:
+    sub.rn.f32 %f3, %f1, %f2;
+    bra BINBF_STORE;
+BINBF_MUL:
+    mul.rn.f32 %f3, %f1, %f2;
+BINBF_STORE:
+    mov.b32 %r11, %f3;
+    shr.u32 %r12, %r11, 16;
+    and.b32 %r13, %r12, 1;
+    add.u32 %r14, %r11, 32767;
+    add.u32 %r15, %r14, %r13;
+    shr.u32 %r16, %r15, 16;
+    cvt.u16.u32 %h3, %r16;
+    st.global.u16 [%rd7], %h3;
+    ret;
+}
+
+.visible .entry scalar_bf16_kernel(
+    .param .u64 input_param,
+    .param .u64 out_param,
+    .param .u16 rhs_param,
+    .param .u32 op_param,
+    .param .u32 len_param
+) {
+    .reg .pred %p<6>;
+    .reg .b16 %h<4>;
+    .reg .b32 %r<18>;
+    .reg .b64 %rd<8>;
+    .reg .f32 %f<4>;
+
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [out_param];
+    ld.param.u16 %h2, [rhs_param];
+    ld.param.u32 %r1, [op_param];
+    ld.param.u32 %r2, [len_param];
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %ntid.x;
+    mad.lo.u32 %r6, %r4, %r5, %r3;
+    setp.ge.u32 %p1, %r6, %r2;
+    @%p1 ret;
+
+    mul.wide.u32 %rd3, %r6, 2;
+    add.u64 %rd4, %rd1, %rd3;
+    add.u64 %rd5, %rd2, %rd3;
+    ld.global.u16 %h1, [%rd4];
+    cvt.u32.u16 %r7, %h1;
+    cvt.u32.u16 %r8, %h2;
+    shl.b32 %r9, %r7, 16;
+    shl.b32 %r10, %r8, 16;
+    mov.b32 %f1, %r9;
+    mov.b32 %f2, %r10;
+
+    setp.eq.u32 %p2, %r1, 0;
+    @%p2 bra SCABF_ADD;
+    setp.eq.u32 %p3, %r1, 1;
+    @%p3 bra SCABF_SUB;
+    setp.eq.u32 %p4, %r1, 2;
+    @%p4 bra SCABF_MUL;
+    div.rn.f32 %f3, %f1, %f2;
+    bra SCABF_STORE;
+SCABF_ADD:
+    add.rn.f32 %f3, %f1, %f2;
+    bra SCABF_STORE;
+SCABF_SUB:
+    sub.rn.f32 %f3, %f1, %f2;
+    bra SCABF_STORE;
+SCABF_MUL:
+    mul.rn.f32 %f3, %f1, %f2;
+SCABF_STORE:
+    mov.b32 %r11, %f3;
+    shr.u32 %r12, %r11, 16;
+    and.b32 %r13, %r12, 1;
+    add.u32 %r14, %r11, 32767;
+    add.u32 %r15, %r14, %r13;
+    shr.u32 %r16, %r15, 16;
+    cvt.u16.u32 %h3, %r16;
+    st.global.u16 [%rd5], %h3;
+    ret;
+}
+
+.visible .entry matmul_bf16_kernel(
+    .param .u64 lhs_param,
+    .param .u64 rhs_param,
+    .param .u64 out_param,
+    .param .u32 m_param,
+    .param .u32 k_param,
+    .param .u32 n_param
+) {
+    .reg .pred %p<4>;
+    .reg .b16 %h<4>;
+    .reg .b32 %r<28>;
+    .reg .b64 %rd<14>;
+    .reg .f32 %f<5>;
+
+    ld.param.u64 %rd1, [lhs_param];
+    ld.param.u64 %rd2, [rhs_param];
+    ld.param.u64 %rd3, [out_param];
+    ld.param.u32 %r1, [m_param];
+    ld.param.u32 %r2, [k_param];
+    ld.param.u32 %r3, [n_param];
+    mov.u32 %r4, %tid.x;
+    mov.u32 %r5, %ctaid.x;
+    mov.u32 %r6, %ntid.x;
+    mad.lo.u32 %r7, %r5, %r6, %r4;
+    mul.lo.u32 %r8, %r1, %r3;
+    setp.ge.u32 %p1, %r7, %r8;
+    @%p1 ret;
+
+    div.u32 %r9, %r7, %r3;
+    rem.u32 %r10, %r7, %r3;
+    mov.u32 %r11, 0;
+    mov.f32 %f1, 0f00000000;
+MATBF_LOOP:
+    setp.ge.u32 %p2, %r11, %r2;
+    @%p2 bra MATBF_DONE;
+    mad.lo.u32 %r12, %r9, %r2, %r11;
+    mad.lo.u32 %r13, %r11, %r3, %r10;
+    mul.wide.u32 %rd4, %r12, 2;
+    mul.wide.u32 %rd5, %r13, 2;
+    add.u64 %rd6, %rd1, %rd4;
+    add.u64 %rd7, %rd2, %rd5;
+    ld.global.u16 %h1, [%rd6];
+    ld.global.u16 %h2, [%rd7];
+    cvt.u32.u16 %r14, %h1;
+    cvt.u32.u16 %r15, %h2;
+    shl.b32 %r16, %r14, 16;
+    shl.b32 %r17, %r15, 16;
+    mov.b32 %f2, %r16;
+    mov.b32 %f3, %r17;
+    fma.rn.f32 %f1, %f2, %f3, %f1;
+    add.u32 %r11, %r11, 1;
+    bra MATBF_LOOP;
+MATBF_DONE:
+    mul.wide.u32 %rd8, %r7, 2;
+    add.u64 %rd9, %rd3, %rd8;
+    mov.b32 %r18, %f1;
+    shr.u32 %r19, %r18, 16;
+    and.b32 %r20, %r19, 1;
+    add.u32 %r21, %r18, 32767;
+    add.u32 %r22, %r21, %r20;
+    shr.u32 %r23, %r22, 16;
+    cvt.u16.u32 %h3, %r23;
+    st.global.u16 [%rd9], %h3;
+    ret;
+}
+
+.visible .entry sum_bf16_kernel(
+    .param .u64 input_param,
+    .param .u64 out_param,
+    .param .u32 len_param
+) {
+    .reg .pred %p<3>;
+    .reg .b16 %h<3>;
+    .reg .b32 %r<18>;
+    .reg .b64 %rd<6>;
+    .reg .f32 %f<4>;
+
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    or.b32 %r3, %r1, %r2;
+    setp.ne.u32 %p1, %r3, 0;
+    @%p1 ret;
+
+    ld.param.u64 %rd1, [input_param];
+    ld.param.u64 %rd2, [out_param];
+    ld.param.u32 %r4, [len_param];
+    mov.u32 %r5, 0;
+    mov.f32 %f1, 0f00000000;
+SUMBF_LOOP:
+    setp.ge.u32 %p2, %r5, %r4;
+    @%p2 bra SUMBF_DONE;
+    mul.wide.u32 %rd3, %r5, 2;
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.u16 %h1, [%rd4];
+    cvt.u32.u16 %r6, %h1;
+    shl.b32 %r7, %r6, 16;
+    mov.b32 %f2, %r7;
+    add.rn.f32 %f1, %f1, %f2;
+    add.u32 %r5, %r5, 1;
+    bra SUMBF_LOOP;
+SUMBF_DONE:
+    mov.b32 %r8, %f1;
+    shr.u32 %r9, %r8, 16;
+    and.b32 %r10, %r9, 1;
+    add.u32 %r11, %r8, 32767;
+    add.u32 %r12, %r11, %r10;
+    shr.u32 %r13, %r12, 16;
+    cvt.u16.u32 %h2, %r13;
+    st.global.u16 [%rd2], %h2;
+    ret;
+}

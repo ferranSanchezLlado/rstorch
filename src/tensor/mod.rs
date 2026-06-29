@@ -140,6 +140,58 @@ where
         self.raw().to_vec()
     }
 
+    pub fn to<F, C>(&self) -> Result<Tensor<S, F, C>>
+    where
+        F: FloatDType,
+        C: Backend<F>,
+    {
+        let device = C::default_device().map_err(crate::error::Error::backend)?;
+        self.to_on::<F, C>(device)
+    }
+
+    pub fn cast<F>(&self) -> Result<Tensor<S, F, B>>
+    where
+        F: FloatDType,
+        B: Backend<F, Device = <B as Backend<E>>::Device>,
+    {
+        self.to_on::<F, B>(self.device().clone())
+    }
+
+    pub fn to_device<C>(&self) -> Result<Tensor<S, E, C>>
+    where
+        C: Backend<E>,
+    {
+        self.to::<E, C>()
+    }
+
+    pub fn to_backend<C>(&self) -> Result<Tensor<S, E, C>>
+    where
+        C: Backend<E>,
+    {
+        self.to_device::<C>()
+    }
+
+    pub fn to_device_on<C>(&self, device: C::Device) -> Result<Tensor<S, E, C>>
+    where
+        C: Backend<E>,
+    {
+        self.to_on::<E, C>(device)
+    }
+
+    pub fn to_on<F, C>(&self, device: C::Device) -> Result<Tensor<S, F, C>>
+    where
+        F: FloatDType,
+        C: Backend<F>,
+    {
+        let data = self
+            .to_vec()?
+            .into_iter()
+            .map(|value| F::from_f64(value.to_f64()))
+            .collect();
+        let raw = RawTensor::<F, C>::from_vec_on(device, data, self.shape().clone())?;
+        Tensor::<S, F, C>::from_raw(raw)
+    }
+
     pub(crate) fn replace_data(&mut self, data: Vec<E>) -> Result<()> {
         let raw = RawTensor::from_vec_on(self.device().clone(), data, self.shape().clone())?;
         *self = Self::from_raw(raw)?.with_requires_grad(true);

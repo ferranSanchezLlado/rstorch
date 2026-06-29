@@ -1,5 +1,5 @@
 error[E0277]: the trait bound `usize: Collate<Vec<f32>>` is not satisfied
- --> tests/ui/dataloader_invalid_iter.rs:4:20
+ --> tests/ui/dataloader_invalid_iter_test_features_default.rs:4:20
   |
 4 |     let _ = loader.iter();
   |                    ^^^^ the trait `Collate<Vec<f32>>` is not implemented for `usize`

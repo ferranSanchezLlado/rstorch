@@ -14,14 +14,20 @@ edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12000", "f16"], optional = true }
 flate2 = { version = "1", optional = true }
+half = "2"
+pollster = { version = "0.4", optional = true }
 ureq = { version = "2", optional = true }
+wgpu = { version = "25", optional = true }
 
 [dev-dependencies]
 trybuild = "1"
 
 [features]
 metal = ["dep:metal"]
+wgpu = ["dep:pollster", "dep:wgpu"]
+cuda = ["dep:cudarc"]
 hub = ["dep:flate2", "dep:ureq"]
 
 [target.'cfg(target_os = "macos")'.dependencies]

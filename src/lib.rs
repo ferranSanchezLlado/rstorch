@@ -9,8 +9,12 @@ pub mod shape;
 pub mod tensor;
 
 pub use backend::{Backend, Cpu, CpuDevice, CpuError};
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+pub use backend::{Cuda, CudaDevice, CudaError};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use backend::{Metal, MetalDevice, MetalError};
+#[cfg(feature = "wgpu")]
+pub use backend::{Wgpu, WgpuDevice, WgpuError};
 pub use data::{
     Batch, Chain, ChainError, Collate, DataLoader, Dataset, DynamicFeatures, Features, ImageBatch,
     IntoTensorDataset, RandomSampler, SequentialSampler, ShuffleSampler, StackDynVecCollate,
@@ -24,7 +28,7 @@ pub use data::{
     DatasetHub, DatasetResource, Mnist, MnistCollate, MnistImageBatch, MnistImageCollate,
     MnistSample, MnistSplit,
 };
-pub use dtype::{DType, DTypeId, FloatDType};
+pub use dtype::{DType, DTypeId, FloatDType, bf16, f16};
 pub use error::{DTypeError, DataError, DeviceError, Error, Result, ShapeError};
 pub use nn::{HasParameters, Linear, Module, Parameter, ParameterId, mse_loss, relu};
 pub use optim::{Adam, Optimizer, Sgd};
@@ -38,8 +42,12 @@ pub use tensor::{
 
 pub mod prelude {
     pub use crate::backend::{Backend, Cpu};
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    pub use crate::backend::{Cuda, CudaDevice, CudaError};
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub use crate::backend::{Metal, MetalDevice, MetalError};
+    #[cfg(feature = "wgpu")]
+    pub use crate::backend::{Wgpu, WgpuDevice, WgpuError};
     pub use crate::data::{
         Batch, Chain, ChainError, Collate, DataLoader, Dataset, DynamicFeatures, Features,
         ImageBatch, IntoTensorDataset, RandomSampler, SequentialSampler, ShuffleSampler,
@@ -53,7 +61,7 @@ pub mod prelude {
         DatasetHub, DatasetResource, Mnist, MnistCollate, MnistImageBatch, MnistImageCollate,
         MnistSample, MnistSplit,
     };
-    pub use crate::dtype::{DType, FloatDType};
+    pub use crate::dtype::{DType, FloatDType, bf16, f16};
     pub use crate::error::{DataError, Result};
     pub use crate::nn::{HasParameters, Linear, Module, Parameter, mse_loss, relu};
     pub use crate::optim::{Adam, Optimizer, Sgd};

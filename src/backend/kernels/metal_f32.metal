@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-static float apply_op(float lhs, float rhs, uint op) {
+static float apply_op_f32(float lhs, float rhs, uint op) {
     switch (op) {
         case 0: return lhs + rhs;
         case 1: return lhs - rhs;
@@ -10,7 +10,7 @@ static float apply_op(float lhs, float rhs, uint op) {
     }
 }
 
-kernel void binary_kernel(
+kernel void binary_f32_kernel(
     device const float* lhs [[buffer(0)]],
     device const float* rhs [[buffer(1)]],
     device float* out [[buffer(2)]],
@@ -21,10 +21,10 @@ kernel void binary_kernel(
     if (gid >= len) {
         return;
     }
-    out[gid] = apply_op(lhs[gid], rhs[gid], op);
+    out[gid] = apply_op_f32(lhs[gid], rhs[gid], op);
 }
 
-kernel void scalar_kernel(
+kernel void scalar_f32_kernel(
     device const float* input [[buffer(0)]],
     device float* out [[buffer(1)]],
     constant float& rhs [[buffer(2)]],
@@ -35,10 +35,10 @@ kernel void scalar_kernel(
     if (gid >= len) {
         return;
     }
-    out[gid] = apply_op(input[gid], rhs, op);
+    out[gid] = apply_op_f32(input[gid], rhs, op);
 }
 
-kernel void matmul_kernel(
+kernel void matmul_f32_kernel(
     device const float* lhs [[buffer(0)]],
     device const float* rhs [[buffer(1)]],
     device float* out [[buffer(2)]],
@@ -61,7 +61,7 @@ kernel void matmul_kernel(
     out[gid] = acc;
 }
 
-kernel void sum_kernel(
+kernel void sum_f32_kernel(
     device const float* input [[buffer(0)]],
     device float* out [[buffer(1)]],
     constant uint& len [[buffer(2)]],

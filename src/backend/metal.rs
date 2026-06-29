@@ -1,4 +1,5 @@
 use super::Backend;
+use crate::dtype::{DType, f16};
 use std::error;
 use std::ffi::c_void;
 use std::fmt;
@@ -6,7 +7,8 @@ use std::sync::Arc;
 
 use ::metal as metal_rs;
 
-const SHADERS: &str = include_str!("kernels/metal.metal");
+const SHADERS_F32: &str = include_str!("kernels/metal_f32.metal");
+const SHADERS_F16: &str = include_str!("kernels/metal_f16.metal");
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Metal;
@@ -95,7 +97,34 @@ impl fmt::Display for MetalError {
 
 impl error::Error for MetalError {}
 
-impl Backend<f32> for Metal {
+trait MetalDType: DType {
+    const SHADERS: &'static str;
+    const BINARY_KERNEL: &'static str;
+    const SCALAR_KERNEL: &'static str;
+    const MATMUL_KERNEL: &'static str;
+    const SUM_KERNEL: &'static str;
+}
+
+impl MetalDType for f32 {
+    const SHADERS: &'static str = SHADERS_F32;
+    const BINARY_KERNEL: &'static str = "binary_f32_kernel";
+    const SCALAR_KERNEL: &'static str = "scalar_f32_kernel";
+    const MATMUL_KERNEL: &'static str = "matmul_f32_kernel";
+    const SUM_KERNEL: &'static str = "sum_f32_kernel";
+}
+
+impl MetalDType for f16 {
+    const SHADERS: &'static str = SHADERS_F16;
+    const BINARY_KERNEL: &'static str = "binary_f16_kernel";
+    const SCALAR_KERNEL: &'static str = "scalar_f16_kernel";
+    const MATMUL_KERNEL: &'static str = "matmul_f16_kernel";
+    const SUM_KERNEL: &'static str = "sum_f16_kernel";
+}
+
+impl<E> Backend<E> for Metal
+where
+    E: MetalDType,
+{
     type Device = MetalDevice;
     type Storage = MetalStorage;
     type Error = MetalError;
@@ -110,19 +139,19 @@ impl Backend<f32> for Metal {
     }
 
     fn zeros(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error> {
-        Self::from_vec(device, vec![0.0; len])
+        Self::from_vec(device, vec![E::zero(); len])
     }
 
     fn ones(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error> {
-        Self::from_vec(device, vec![1.0; len])
+        Self::from_vec(device, vec![E::one(); len])
     }
 
     fn from_vec(
         device: &Self::Device,
-        data: Vec<f32>,
+        data: Vec<E>,
     ) -> std::result::Result<Self::Storage, Self::Error> {
         let len = data.len();
-        let byte_len = buffer_byte_len(len);
+        let byte_len = buffer_byte_len::<E>(len);
         let buffer = if len == 0 {
             device
                 .raw
@@ -143,13 +172,13 @@ impl Backend<f32> for Metal {
     fn to_vec(
         _device: &Self::Device,
         storage: &Self::Storage,
-    ) -> std::result::Result<Vec<f32>, Self::Error> {
+    ) -> std::result::Result<Vec<E>, Self::Error> {
         if storage.len == 0 {
             return Ok(Vec::new());
         }
 
         unsafe {
-            let ptr = storage.buffer.contents().cast::<f32>();
+            let ptr = storage.buffer.contents().cast::<E>();
             Ok(std::slice::from_raw_parts(ptr, storage.len).to_vec())
         }
     }
@@ -177,12 +206,12 @@ impl Backend<f32> for Metal {
         }
 
         let len = m.saturating_mul(n);
-        let output = empty_storage(device, len);
+        let output = empty_storage::<E>(device, len);
         if len == 0 {
             return Ok(output);
         }
 
-        let pipeline = pipeline(device, "matmul_kernel")?;
+        let pipeline = pipeline::<E>(device, E::MATMUL_KERNEL)?;
         let m = checked_u32(m, "m")?;
         let k = checked_u32(k, "k")?;
         let n = checked_u32(n, "n")?;
@@ -204,7 +233,7 @@ impl Backend<f32> for Metal {
         rhs: &Self::Storage,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
-        binary(device, lhs, rhs, len, 0)
+        binary::<E>(device, lhs, rhs, len, 0)
     }
 
     fn sub(
@@ -213,7 +242,7 @@ impl Backend<f32> for Metal {
         rhs: &Self::Storage,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
-        binary(device, lhs, rhs, len, 1)
+        binary::<E>(device, lhs, rhs, len, 1)
     }
 
     fn mul(
@@ -222,7 +251,7 @@ impl Backend<f32> for Metal {
         rhs: &Self::Storage,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
-        binary(device, lhs, rhs, len, 2)
+        binary::<E>(device, lhs, rhs, len, 2)
     }
 
     fn div(
@@ -231,13 +260,13 @@ impl Backend<f32> for Metal {
         rhs: &Self::Storage,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
-        binary(device, lhs, rhs, len, 3)
+        binary::<E>(device, lhs, rhs, len, 3)
     }
 
     fn add_scalar(
         device: &Self::Device,
         input: &Self::Storage,
-        rhs: f32,
+        rhs: E,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
         scalar(device, input, rhs, len, 0)
@@ -246,7 +275,7 @@ impl Backend<f32> for Metal {
     fn sub_scalar(
         device: &Self::Device,
         input: &Self::Storage,
-        rhs: f32,
+        rhs: E,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
         scalar(device, input, rhs, len, 1)
@@ -255,7 +284,7 @@ impl Backend<f32> for Metal {
     fn mul_scalar(
         device: &Self::Device,
         input: &Self::Storage,
-        rhs: f32,
+        rhs: E,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
         scalar(device, input, rhs, len, 2)
@@ -264,7 +293,7 @@ impl Backend<f32> for Metal {
     fn div_scalar(
         device: &Self::Device,
         input: &Self::Storage,
-        rhs: f32,
+        rhs: E,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
         scalar(device, input, rhs, len, 3)
@@ -277,11 +306,11 @@ impl Backend<f32> for Metal {
     ) -> std::result::Result<Self::Storage, Self::Error> {
         ensure_len(input.len, len)?;
         if len == 0 {
-            return Self::from_vec(device, vec![0.0]);
+            return Self::from_vec(device, vec![E::zero()]);
         }
 
-        let output = empty_storage(device, 1);
-        let pipeline = pipeline(device, "sum_kernel")?;
+        let output = empty_storage::<E>(device, 1);
+        let pipeline = pipeline::<E>(device, E::SUM_KERNEL)?;
         let len_u32 = checked_u32(len, "sum length")?;
         encode_and_wait(device, &pipeline, 1, |encoder| {
             encoder.set_buffer(0, Some(&input.buffer), 0);
@@ -292,7 +321,7 @@ impl Backend<f32> for Metal {
     }
 }
 
-fn binary(
+fn binary<E: MetalDType>(
     device: &MetalDevice,
     lhs: &MetalStorage,
     rhs: &MetalStorage,
@@ -301,12 +330,12 @@ fn binary(
 ) -> std::result::Result<MetalStorage, MetalError> {
     ensure_len(lhs.len, len)?;
     ensure_len(rhs.len, len)?;
-    let output = empty_storage(device, len);
+    let output = empty_storage::<E>(device, len);
     if len == 0 {
         return Ok(output);
     }
 
-    let pipeline = pipeline(device, "binary_kernel")?;
+    let pipeline = pipeline::<E>(device, E::BINARY_KERNEL)?;
     let len_u32 = checked_u32(len, "binary length")?;
     encode_and_wait(device, &pipeline, len, |encoder| {
         encoder.set_buffer(0, Some(&lhs.buffer), 0);
@@ -318,39 +347,39 @@ fn binary(
     Ok(output)
 }
 
-fn scalar(
+fn scalar<E: MetalDType>(
     device: &MetalDevice,
     input: &MetalStorage,
-    rhs: f32,
+    rhs: E,
     len: usize,
     op: u32,
 ) -> std::result::Result<MetalStorage, MetalError> {
     ensure_len(input.len, len)?;
-    let output = empty_storage(device, len);
+    let output = empty_storage::<E>(device, len);
     if len == 0 {
         return Ok(output);
     }
 
-    let pipeline = pipeline(device, "scalar_kernel")?;
+    let pipeline = pipeline::<E>(device, E::SCALAR_KERNEL)?;
     let len_u32 = checked_u32(len, "scalar length")?;
     encode_and_wait(device, &pipeline, len, |encoder| {
         encoder.set_buffer(0, Some(&input.buffer), 0);
         encoder.set_buffer(1, Some(&output.buffer), 0);
-        set_f32(encoder, 2, rhs);
+        set_value(encoder, 2, rhs);
         set_u32(encoder, 3, op);
         set_u32(encoder, 4, len_u32);
     })?;
     Ok(output)
 }
 
-fn pipeline(
+fn pipeline<E: MetalDType>(
     device: &MetalDevice,
     name: &str,
 ) -> std::result::Result<metal_rs::ComputePipelineState, MetalError> {
     let options = metal_rs::CompileOptions::new();
     let library = device
         .raw
-        .new_library_with_source(SHADERS, &options)
+        .new_library_with_source(E::SHADERS, &options)
         .map_err(MetalError::LibraryCompile)?;
     let function = library
         .get_function(name, None)
@@ -392,9 +421,9 @@ fn encode_and_wait(
     Ok(())
 }
 
-fn empty_storage(device: &MetalDevice, len: usize) -> MetalStorage {
+fn empty_storage<E>(device: &MetalDevice, len: usize) -> MetalStorage {
     let buffer = device.raw.new_buffer(
-        buffer_byte_len(len),
+        buffer_byte_len::<E>(len),
         metal_rs::MTLResourceOptions::StorageModeShared,
     );
     MetalStorage {
@@ -422,27 +451,33 @@ fn set_u32(encoder: &metal_rs::ComputeCommandEncoderRef, index: u64, value: u32)
     );
 }
 
-fn set_f32(encoder: &metal_rs::ComputeCommandEncoderRef, index: u64, value: f32) {
+fn set_value<E>(encoder: &metal_rs::ComputeCommandEncoderRef, index: u64, value: E) {
     encoder.set_bytes(
         index,
-        std::mem::size_of::<f32>() as u64,
-        (&value as *const f32).cast::<c_void>(),
+        std::mem::size_of::<E>() as u64,
+        (&value as *const E).cast::<c_void>(),
     );
 }
 
-fn buffer_byte_len(len: usize) -> u64 {
-    len.max(1).saturating_mul(std::mem::size_of::<f32>()) as u64
+fn buffer_byte_len<E>(len: usize) -> u64 {
+    len.max(1).saturating_mul(std::mem::size_of::<E>()) as u64
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SHADERS;
+    use super::{SHADERS_F16, SHADERS_F32};
 
     #[test]
     fn bundled_kernel_source_contains_required_entrypoints() {
-        assert!(SHADERS.contains("kernel void binary_kernel"));
-        assert!(SHADERS.contains("kernel void scalar_kernel"));
-        assert!(SHADERS.contains("kernel void matmul_kernel"));
-        assert!(SHADERS.contains("kernel void sum_kernel"));
+        assert!(SHADERS_F32.contains("float apply_op_f32"));
+        assert!(SHADERS_F32.contains("kernel void binary_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void scalar_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void matmul_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void sum_f32_kernel"));
+        assert!(SHADERS_F16.contains("half apply_op_f16"));
+        assert!(SHADERS_F16.contains("kernel void binary_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void scalar_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void matmul_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void sum_f16_kernel"));
     }
 }

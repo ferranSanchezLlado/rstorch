@@ -1,5 +1,5 @@
 error[E0277]: the trait bound `usize: Sampler` is not satisfied
- --> tests/ui/loader_invalid_sampler.rs:5:43
+ --> tests/ui/loader_invalid_sampler_test_features_hub.rs:5:43
   |
 5 |     let _ = data::loader(dataset).sampler(123usize);
   |                                   ------- ^^^^^^^^ the trait `Sampler` is not implemented for `usize`

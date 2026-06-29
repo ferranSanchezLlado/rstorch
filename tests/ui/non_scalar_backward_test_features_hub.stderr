@@ -1,5 +1,5 @@
 error[E0599]: no method named `backward` found for struct `Tensor<D1<C<2>>>` in the current scope
- --> tests/ui/non_scalar_backward.rs:5:12
+ --> tests/ui/non_scalar_backward_test_features_hub.rs:5:12
   |
 5 |     tensor.backward().unwrap();
   |            ^^^^^^^^

@@ -1,5 +1,5 @@
 error[E0599]: the associated function or constant `zeros` exists for struct `Tensor<D2<Sym<Batch>, C<784>>>`, but its trait bounds were not satisfied
- --> tests/ui/symbolic_static_constructor.rs:6:47
+ --> tests/ui/symbolic_static_constructor_test_features_hub.rs:6:47
   |
 6 |     let _ = Tensor::<D2<Sym<Batch>, C<784>>>::zeros();
   |                                               ^^^^^ associated function or constant cannot be called on `Tensor<D2<Sym<Batch>, C<784>>>` due to unsatisfied trait bounds
