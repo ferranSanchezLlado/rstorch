@@ -59,11 +59,11 @@ impl<E: DType> Backend<E> for Cpu {
         _device: &Self::Device,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error> {
-        Ok(vec![E::zero(); len])
+        Ok(vec![E::ZERO; len])
     }
 
     fn ones(_device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error> {
-        Ok(vec![E::one(); len])
+        Ok(vec![E::ONE; len])
     }
 
     fn from_vec(
@@ -102,12 +102,12 @@ impl<E: DType> Backend<E> for Cpu {
             });
         }
 
-        let mut out = vec![E::zero(); m.saturating_mul(n)];
+        let mut out = vec![E::ZERO; m.saturating_mul(n)];
         for row in 0..m {
             for col in 0..n {
-                let mut acc = E::zero();
+                let mut acc = E::ZERO;
                 for inner in 0..k {
-                    acc = acc + lhs[row * k + inner] * rhs[inner * n + col];
+                    acc += lhs[row * k + inner] * rhs[inner * n + col];
                 }
                 out[row * n + col] = acc;
             }
@@ -199,9 +199,7 @@ impl<E: DType> Backend<E> for Cpu {
             });
         }
 
-        Ok(vec![
-            input.iter().fold(E::zero(), |acc, &value| acc + value),
-        ])
+        Ok(vec![input.iter().fold(E::ZERO, |acc, &value| acc + value)])
     }
 }
 

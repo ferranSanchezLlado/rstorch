@@ -20,6 +20,66 @@ struct AdamState<E> {
     v: Vec<E>,
 }
 
+/// Hyperparameters shared by the Adam and AdamW update.
+///
+/// `weight_decay` is the decoupled term: plain Adam passes zero, AdamW passes
+/// its configured decay.
+struct AdamConfig<E> {
+    lr: E,
+    beta1: E,
+    beta2: E,
+    eps: E,
+    weight_decay: E,
+}
+
+/// Applies one moment-estimate update step to every parameter that has a
+/// gradient, shared by [`Adam`] and [`AdamW`].
+fn adam_step<E, B>(
+    config: &AdamConfig<E>,
+    step: usize,
+    state: &mut HashMap<ParameterId, AdamState<E>>,
+    params: &mut [ParameterRefMut<'_, E, B>],
+) -> Result<()>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    let _guard = no_grad();
+    let one = E::ONE;
+    let beta1_pow = pow(config.beta1, step);
+    let beta2_pow = pow(config.beta2, step);
+    for param in params {
+        let Some(grad) = param.grad()? else {
+            continue;
+        };
+        let data = param.data()?;
+        let moments = state.entry(param.id()).or_insert_with(|| AdamState {
+            m: vec![E::ZERO; grad.len()],
+            v: vec![E::ZERO; grad.len()],
+        });
+        if moments.m.len() != grad.len() || moments.v.len() != grad.len() {
+            moments.m = vec![E::ZERO; grad.len()];
+            moments.v = vec![E::ZERO; grad.len()];
+        }
+
+        let mut next = Vec::with_capacity(data.len());
+        for ((value, &g), (m, v)) in data
+            .into_iter()
+            .zip(&grad)
+            .zip(moments.m.iter_mut().zip(moments.v.iter_mut()))
+        {
+            *m = config.beta1 * *m + (one - config.beta1) * g;
+            *v = config.beta2 * *v + (one - config.beta2) * g * g;
+            let m_hat = *m / (one - beta1_pow);
+            let v_hat = *v / (one - beta2_pow);
+            let decayed = value - config.lr * config.weight_decay * value;
+            next.push(decayed - config.lr * m_hat / (v_hat.sqrt() + config.eps));
+        }
+        param.set_data(next)?;
+    }
+    Ok(())
+}
+
 impl<E> Adam<E>
 where
     E: FloatDType,
@@ -34,6 +94,14 @@ where
             state: HashMap::new(),
         }
     }
+
+    pub fn lr(&self) -> E {
+        self.lr
+    }
+
+    pub fn set_lr(&mut self, lr: E) {
+        self.lr = lr;
+    }
 }
 
 impl<E, B> Optimizer<E, B> for Adam<E>
@@ -42,43 +110,75 @@ where
     B: Backend<E>,
 {
     fn step(&mut self, params: &mut [ParameterRefMut<'_, E, B>]) -> Result<()> {
-        let _guard = no_grad();
         self.step += 1;
-        let one = E::one();
-        let beta1_pow = pow(self.beta1, self.step);
-        let beta2_pow = pow(self.beta2, self.step);
-        for param in params {
-            let Some(grad) = param.grad()? else {
-                continue;
-            };
-            let data = param.data()?;
-            let state = self.state.entry(param.id()).or_insert_with(|| AdamState {
-                m: vec![E::zero(); grad.len()],
-                v: vec![E::zero(); grad.len()],
-            });
-            if state.m.len() != grad.len() || state.v.len() != grad.len() {
-                state.m = vec![E::zero(); grad.len()];
-                state.v = vec![E::zero(); grad.len()];
-            }
-
-            let mut next = Vec::with_capacity(data.len());
-            for ((value, &g), (m, v)) in data
-                .into_iter()
-                .zip(&grad)
-                .zip(state.m.iter_mut().zip(state.v.iter_mut()))
-            {
-                *m = self.beta1 * *m + (one - self.beta1) * g;
-                *v = self.beta2 * *v + (one - self.beta2) * g * g;
-                let m_hat = *m / (one - beta1_pow);
-                let v_hat = *v / (one - beta2_pow);
-                next.push(value - self.lr * m_hat / (v_hat.sqrt() + self.eps));
-            }
-            param.set_data(next)?;
-        }
-        Ok(())
+        let config = AdamConfig {
+            lr: self.lr,
+            beta1: self.beta1,
+            beta2: self.beta2,
+            eps: self.eps,
+            weight_decay: E::ZERO,
+        };
+        adam_step(&config, self.step, &mut self.state, params)
     }
 }
 
 fn pow<E: FloatDType>(value: E, n: usize) -> E {
-    (0..n).fold(E::one(), |acc, _| acc * value)
+    (0..n).fold(E::ONE, |acc, _| acc * value)
+}
+
+pub struct AdamW<E> {
+    lr: E,
+    beta1: E,
+    beta2: E,
+    eps: E,
+    weight_decay: E,
+    step: usize,
+    state: HashMap<ParameterId, AdamState<E>>,
+}
+
+impl<E> AdamW<E>
+where
+    E: FloatDType,
+{
+    pub fn new(lr: E, weight_decay: E) -> Self {
+        Self {
+            lr,
+            beta1: E::from_f64(0.9),
+            beta2: E::from_f64(0.999),
+            eps: E::from_f64(1e-8),
+            weight_decay,
+            step: 0,
+            state: HashMap::new(),
+        }
+    }
+
+    pub fn lr(&self) -> E {
+        self.lr
+    }
+
+    pub fn set_lr(&mut self, lr: E) {
+        self.lr = lr;
+    }
+
+    pub fn weight_decay(&self) -> E {
+        self.weight_decay
+    }
+}
+
+impl<E, B> Optimizer<E, B> for AdamW<E>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn step(&mut self, params: &mut [ParameterRefMut<'_, E, B>]) -> Result<()> {
+        self.step += 1;
+        let config = AdamConfig {
+            lr: self.lr,
+            beta1: self.beta1,
+            beta2: self.beta2,
+            eps: self.eps,
+            weight_decay: self.weight_decay,
+        };
+        adam_step(&config, self.step, &mut self.state, params)
+    }
 }

@@ -162,11 +162,11 @@ where
     }
 
     fn zeros(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error> {
-        Self::from_vec(device, vec![E::zero(); len])
+        Self::from_vec(device, vec![E::ZERO; len])
     }
 
     fn ones(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error> {
-        Self::from_vec(device, vec![E::one(); len])
+        Self::from_vec(device, vec![E::ONE; len])
     }
 
     fn from_vec(
@@ -351,7 +351,7 @@ where
     ) -> std::result::Result<Self::Storage, Self::Error> {
         ensure_len(input.len, len)?;
         if len == 0 {
-            return Self::from_vec(device, vec![E::zero()]);
+            return Self::from_vec(device, vec![E::ZERO]);
         }
         run_kernel::<E>(
             device,
@@ -632,7 +632,7 @@ fn slice_as_bytes<E>(values: &[E]) -> &[u8] {
 }
 
 fn read_value<E: DType>(bytes: &[u8]) -> E {
-    let mut value = E::zero();
+    let mut value = E::ZERO;
     unsafe {
         std::ptr::copy_nonoverlapping(
             bytes.as_ptr(),

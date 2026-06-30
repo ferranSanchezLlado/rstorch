@@ -19,8 +19,9 @@ fn linear_zeros_forward_and_symbolic_batch() {
     let input =
         Tensor::<D2<Sym<Batch>, C<2>>>::from_vec_with_shape(vec![1.0, 2.0, 3.0, 4.0], [2, 2])
             .unwrap();
+    let mut ctx = Ctx::eval();
 
-    let out: Tensor<D2<Sym<Batch>, C<1>>> = layer.forward(&input).unwrap();
+    let out: Tensor<D2<Sym<Batch>, C<1>>> = layer.forward(&input, &mut ctx).unwrap();
 
     assert_eq!(out.shape().dims(), &[2, 1]);
     assert_eq!(out.to_vec().unwrap(), vec![0.0, 0.0]);
@@ -146,10 +147,37 @@ fn tiny_linear_regression_loss_decreases() {
     assert!(last < first, "expected {last} < {first}");
 }
 
+#[test]
+fn clip_grad_norm_rescales_then_adamw_steps() {
+    let mut layer = Linear::<1, 1>::zeros().unwrap();
+    scalar_loss(&layer).backward().unwrap();
+
+    let mut params = Vec::new();
+    layer.parameters_mut(&mut params);
+    let norm = clip_grad_norm(&mut params, 0.1).unwrap();
+    assert!(
+        norm > 0.1,
+        "expected gradient norm {norm} to exceed the clip threshold"
+    );
+
+    // AdamW should accept the clipped gradients and move the parameter.
+    AdamW::new(0.01, 0.01).step(&mut params).unwrap();
+    drop(params);
+    assert_ne!(layer.weight().tensor().to_vec().unwrap()[0], 0.0);
+}
+
+#[test]
+fn warmup_wraps_a_step_schedule() {
+    let schedule = WarmupLr::new(StepLr::new(1.0, 0.1, 2), 2);
+    assert_close(schedule.lr(0), 0.5, 1e-6);
+    assert_close(schedule.lr(2), 0.1, 1e-6);
+}
+
 fn scalar_loss(layer: &Linear<1, 1>) -> Scalar {
     let input = Tensor2D::<1, 1>::from_vec(vec![2.0]).unwrap();
     let target = Tensor2D::<1, 1>::from_vec(vec![4.0]).unwrap();
-    mse_loss(&layer.forward(&input).unwrap(), &target).unwrap()
+    let mut ctx = Ctx::eval();
+    mse_loss(&layer.forward(&input, &mut ctx).unwrap(), &target).unwrap()
 }
 
 fn train_one_scalar_step<O>(layer: &mut Linear<1, 1>, opt: &mut O)

@@ -31,6 +31,14 @@ where
             velocity: HashMap::new(),
         }
     }
+
+    pub fn lr(&self) -> E {
+        self.lr
+    }
+
+    pub fn set_lr(&mut self, lr: E) {
+        self.lr = lr;
+    }
 }
 
 impl<E, B> Optimizer<E, B> for Sgd<E>
@@ -49,9 +57,9 @@ where
                 let velocity = self
                     .velocity
                     .entry(param.id())
-                    .or_insert_with(|| vec![E::zero(); grad.len()]);
+                    .or_insert_with(|| vec![E::ZERO; grad.len()]);
                 if velocity.len() != grad.len() {
-                    *velocity = vec![E::zero(); grad.len()];
+                    *velocity = vec![E::ZERO; grad.len()];
                 }
                 for (v, &g) in velocity.iter_mut().zip(&grad) {
                     *v = *v * momentum + g;

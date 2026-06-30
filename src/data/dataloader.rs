@@ -411,7 +411,7 @@ mod tests {
         static_features,
     };
     use crate::error::Error;
-    use crate::nn::{HasParameters, Linear, Module, mse_loss};
+    use crate::nn::{Ctx, HasParameters, Linear, Module, mse_loss};
     use crate::optim::{Optimizer, Sgd};
     use crate::shape::{C, D2, Sym};
     use crate::tensor::Tensor;
@@ -532,7 +532,7 @@ mod tests {
 
             for batch in &loader {
                 let (x, y) = batch.unwrap();
-                let pred = model.forward(&x).unwrap();
+                let pred = model.forward(&x, &mut Ctx::eval()).unwrap();
                 mse_loss(&pred, &y).unwrap().backward().unwrap();
             }
 
@@ -559,7 +559,7 @@ mod tests {
         let mut total = 0.0;
         for batch in loader {
             let (x, y) = batch.unwrap();
-            total += mse_loss(&model.forward(&x).unwrap(), &y)
+            total += mse_loss(&model.forward(&x, &mut Ctx::eval()).unwrap(), &y)
                 .unwrap()
                 .to_vec()
                 .unwrap()[0];

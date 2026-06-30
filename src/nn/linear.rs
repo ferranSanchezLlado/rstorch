@@ -1,4 +1,4 @@
-use super::parameter::{HasParameters, Module, Parameter, ParameterRef, ParameterRefMut};
+use super::parameter::{HasParameters, Layer, Module, Parameter, ParameterRef, ParameterRefMut};
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatDType;
 use crate::error::Result;
@@ -54,7 +54,7 @@ where
     }
 }
 
-impl<Batch, const IN: usize, const OUT: usize, E, B> Module<Tensor<D2<Batch, C<IN>>, E, B>>
+impl<Batch, const IN: usize, const OUT: usize, E, B> Layer<Tensor<D2<Batch, C<IN>>, E, B>>
     for Linear<IN, OUT, E, B>
 where
     Batch: DimSpec,
@@ -62,8 +62,20 @@ where
     B: Backend<E>,
 {
     type Output = Tensor<D2<Batch, C<OUT>>, E, B>;
+}
 
-    fn forward(&self, input: &Tensor<D2<Batch, C<IN>>, E, B>) -> Result<Self::Output> {
+impl<Batch, const IN: usize, const OUT: usize, E, B, Ctx>
+    Module<Tensor<D2<Batch, C<IN>>, E, B>, Ctx> for Linear<IN, OUT, E, B>
+where
+    Batch: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn forward(
+        &self,
+        input: &Tensor<D2<Batch, C<IN>>, E, B>,
+        _ctx: &mut Ctx,
+    ) -> Result<Self::Output> {
         input
             .matmul(self.weight.tensor())?
             .add_row(self.bias.tensor())

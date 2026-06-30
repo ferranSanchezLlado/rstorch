@@ -485,7 +485,7 @@ fn sum<E: CudaElement>(
 ) -> std::result::Result<CudaStorage<E>, CudaError> {
     ensure_len(input.len, len)?;
     if len == 0 {
-        let data = device.stream.clone_htod(&[E::zero()]).map_err(cuda_err)?;
+        let data = device.stream.clone_htod(&[E::ZERO]).map_err(cuda_err)?;
         return Ok(CudaStorage { data, len: 1 });
     }
     let mut output = empty_storage(device, 1)?;

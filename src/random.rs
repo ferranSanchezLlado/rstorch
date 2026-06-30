@@ -16,7 +16,7 @@ impl SmallRng {
 
     pub fn gen_range(&mut self, upper: usize) -> usize {
         assert!(upper > 0, "upper bound must be greater than zero");
-        (self.next_u64() % upper as u64) as usize
+        ((self.next_u64() as u128 * upper as u128) >> 64) as usize
     }
 
     fn next_u64(&mut self) -> u64 {

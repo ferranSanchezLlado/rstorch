@@ -30,14 +30,21 @@ pub use data::{
 };
 pub use dtype::{DType, DTypeId, FloatDType, bf16, f16};
 pub use error::{DTypeError, DataError, DeviceError, Error, Result, ShapeError};
-pub use nn::{HasParameters, Linear, Module, Parameter, ParameterId, mse_loss, relu};
-pub use optim::{Adam, Optimizer, Sgd};
+pub use nn::{
+    Ctx, Dropout, Gelu, HasParameters, Layer, LayerNorm, Linear, Module, Parameter, ParameterId,
+    Reduction, Relu, RngSource, Sequential, Sigmoid, Tanh, TrainingMode, cross_entropy,
+    cross_entropy_with_reduction, gelu, mse_loss, relu, sigmoid, tanh,
+};
+pub use optim::{
+    Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr, clip_grad_norm,
+};
 pub use random::SmallRng;
 pub use shape::{
     AnyDim, C, D0, D1, D2, D3, D4, DimSpec, Layout, Shape, ShapeSpec, StaticShape, Sym,
 };
 pub use tensor::{
-    NoGradGuard, Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D, Tensor4D, is_grad_enabled, no_grad,
+    Mask, NoGradGuard, Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D, Tensor4D, is_grad_enabled,
+    no_grad,
 };
 
 pub mod prelude {
@@ -63,11 +70,19 @@ pub mod prelude {
     };
     pub use crate::dtype::{DType, FloatDType, bf16, f16};
     pub use crate::error::{DataError, Result};
-    pub use crate::nn::{HasParameters, Linear, Module, Parameter, mse_loss, relu};
-    pub use crate::optim::{Adam, Optimizer, Sgd};
+    pub use crate::nn::{
+        Ctx, Dropout, Gelu, HasParameters, Layer, LayerNorm, Linear, Module, Parameter, Reduction,
+        Relu, RngSource, Sequential, Sigmoid, Tanh, TrainingMode, cross_entropy,
+        cross_entropy_with_reduction, gelu, mse_loss, relu, sigmoid, tanh,
+    };
+    pub use crate::optim::{
+        Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr,
+        clip_grad_norm,
+    };
     pub use crate::random::SmallRng;
+    pub use crate::seq;
     pub use crate::shape::{AnyDim, C, D0, D1, D2, D3, D4, DimSpec, ShapeSpec, StaticShape, Sym};
     pub use crate::tensor::{
-        Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D, Tensor4D, is_grad_enabled, no_grad,
+        Mask, Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D, Tensor4D, is_grad_enabled, no_grad,
     };
 }

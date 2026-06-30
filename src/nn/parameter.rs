@@ -75,6 +75,7 @@ where
 {
     fn data(&self) -> Result<Vec<E>>;
     fn grad(&self) -> Result<Option<Vec<E>>>;
+    fn set_grad(&mut self, data: Vec<E>) -> Result<()>;
     fn set_data(&mut self, data: Vec<E>) -> Result<()>;
 }
 
@@ -107,15 +108,21 @@ where
         self.grad().map(|grad| grad.to_vec()).transpose()
     }
 
+    fn set_grad(&mut self, grad: Vec<E>) -> Result<()> {
+        self.tensor.set_grad_data(grad)
+    }
+
     fn set_data(&mut self, data: Vec<E>) -> Result<()> {
         self.tensor.replace_data(data)
     }
 }
 
-pub trait Module<Input> {
+pub trait Layer<Input> {
     type Output;
+}
 
-    fn forward(&self, input: &Input) -> Result<Self::Output>;
+pub trait Module<Input, Ctx>: Layer<Input> {
+    fn forward(&self, input: &Input, ctx: &mut Ctx) -> Result<Self::Output>;
 }
 
 pub trait HasParameters<E, B>
@@ -172,6 +179,10 @@ where
 
     pub fn grad(&self) -> Result<Option<Vec<E>>> {
         self.inner.grad()
+    }
+
+    pub fn set_grad(&mut self, grad: Vec<E>) -> Result<()> {
+        self.inner.set_grad(grad)
     }
 
     pub fn set_data(&mut self, data: Vec<E>) -> Result<()> {

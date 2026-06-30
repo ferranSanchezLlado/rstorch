@@ -139,11 +139,11 @@ where
     }
 
     fn zeros(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error> {
-        Self::from_vec(device, vec![E::zero(); len])
+        Self::from_vec(device, vec![E::ZERO; len])
     }
 
     fn ones(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error> {
-        Self::from_vec(device, vec![E::one(); len])
+        Self::from_vec(device, vec![E::ONE; len])
     }
 
     fn from_vec(
@@ -306,7 +306,7 @@ where
     ) -> std::result::Result<Self::Storage, Self::Error> {
         ensure_len(input.len, len)?;
         if len == 0 {
-            return Self::from_vec(device, vec![E::zero()]);
+            return Self::from_vec(device, vec![E::ZERO]);
         }
 
         let output = empty_storage::<E>(device, 1);

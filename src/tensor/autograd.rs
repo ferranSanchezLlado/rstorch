@@ -146,6 +146,12 @@ where
         }
     }
 
+    pub(crate) fn set_grad_data(&self, grad: Vec<E>) -> Result<()> {
+        let raw = RawTensor::from_vec_on(self.device().clone(), grad, self.shape().clone())?;
+        *self.inner.autograd.grad.lock().expect("grad slot poisoned") = Some(raw);
+        Ok(())
+    }
+
     pub fn detach(&self) -> Self {
         Self::from_raw(self.raw().clone()).expect("detached tensor preserves validated shape")
     }

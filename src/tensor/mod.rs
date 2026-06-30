@@ -45,6 +45,56 @@ pub type Tensor4D<
     B = Cpu,
 > = Tensor<D4<C<N>, C<CH>, C<H>, C<W>>, E, B>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mask<S>
+where
+    S: ShapeSpec,
+{
+    shape: Shape,
+    values: Vec<bool>,
+    _shape: PhantomData<S>,
+}
+
+impl<S> Mask<S>
+where
+    S: ShapeSpec,
+{
+    pub fn from_vec_with_shape(values: Vec<bool>, shape: impl Into<Shape>) -> Result<Self> {
+        let shape = shape.into();
+        S::validate(&shape)?;
+        let expected = shape.numel()?;
+        if values.len() != expected {
+            return Err(crate::error::ShapeError::LengthMismatch {
+                expected,
+                found: values.len(),
+            }
+            .into());
+        }
+        Ok(Self {
+            shape,
+            values,
+            _shape: PhantomData,
+        })
+    }
+
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+
+    pub fn values(&self) -> &[bool] {
+        &self.values
+    }
+}
+
+impl<S> Mask<S>
+where
+    S: StaticShape,
+{
+    pub fn from_vec(values: Vec<bool>) -> Result<Self> {
+        Self::from_vec_with_shape(values, S::static_shape())
+    }
+}
+
 impl<S, E, B> Clone for Tensor<S, E, B>
 where
     S: ShapeSpec,
@@ -298,14 +348,14 @@ pub(super) mod test_support {
             _device: &Self::Device,
             len: usize,
         ) -> std::result::Result<Self::Storage, Self::Error> {
-            Ok(vec![E::zero(); len])
+            Ok(vec![E::ZERO; len])
         }
 
         fn ones(
             _device: &Self::Device,
             len: usize,
         ) -> std::result::Result<Self::Storage, Self::Error> {
-            Ok(vec![E::one(); len])
+            Ok(vec![E::ONE; len])
         }
 
         fn from_vec(
@@ -334,7 +384,7 @@ pub(super) mod test_support {
             _k: usize,
             n: usize,
         ) -> std::result::Result<Self::Storage, Self::Error> {
-            Ok(vec![E::zero(); m * n])
+            Ok(vec![E::ZERO; m * n])
         }
 
         fn add(
@@ -438,7 +488,7 @@ pub(super) mod test_support {
                 input
                     .iter()
                     .take(len)
-                    .fold(E::zero(), |acc, &value| acc + value),
+                    .fold(E::ZERO, |acc, &value| acc + value),
             ])
         }
     }
