@@ -21,6 +21,6 @@ pub use dataset::{
 #[cfg(feature = "hub")]
 pub use hub::{
     DatasetHub, DatasetResource, Mnist, MnistCollate, MnistImageBatch, MnistImageCollate,
-    MnistSample, MnistSplit,
+    MnistSample, MnistSplit, TINY_SHAKESPEARE, TinyShakespeare,
 };
 pub use sampler::{RandomSampler, Sampler, SequentialSampler, ShuffleSampler};

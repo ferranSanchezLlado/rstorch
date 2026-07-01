@@ -180,6 +180,23 @@ impl Layout {
             self.offset,
         )
     }
+
+    pub(crate) fn transpose_axes(&self, lhs: usize, rhs: usize) -> Result<Self> {
+        let rank = self.shape.rank();
+        if lhs >= rank || rhs >= rank {
+            return Err(ShapeError::RankMismatch {
+                expected: lhs.max(rhs) + 1,
+                found: rank,
+            }
+            .into());
+        }
+
+        let mut dims = self.shape.dims().to_vec();
+        let mut strides = self.strides.to_vec();
+        dims.swap(lhs, rhs);
+        strides.swap(lhs, rhs);
+        Self::from_parts(Shape::known(dims), strides, self.offset)
+    }
 }
 
 #[cfg(test)]

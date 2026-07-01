@@ -35,6 +35,20 @@ where
     cross_entropy_with_reduction(logits, targets, Reduction::Mean)
 }
 
+pub fn cross_entropy_ignore_index<A, Cc, E, B>(
+    logits: &Tensor<D2<A, Cc>, E, B>,
+    targets: &[usize],
+    ignore_index: usize,
+) -> Result<Scalar<E, B>>
+where
+    A: DimSpec,
+    Cc: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    logits.cross_entropy_ignore_index(targets, ignore_index)
+}
+
 pub fn cross_entropy_with_reduction<A, Cc, E, B>(
     logits: &Tensor<D2<A, Cc>, E, B>,
     targets: &[usize],
@@ -46,7 +60,7 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    let loss = logits.cross_entropy(targets)?;
+    let loss = logits.cross_entropy_ignore_index(targets, usize::MAX)?;
     match reduction {
         Reduction::Mean => Ok(loss),
         Reduction::Sum => loss.mul_scalar(E::from_usize(targets.len())),

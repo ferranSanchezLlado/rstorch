@@ -4,8 +4,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub mod mnist;
+pub mod tiny_shakespeare;
 
 pub use mnist::{Mnist, MnistCollate, MnistImageBatch, MnistImageCollate, MnistSample, MnistSplit};
+pub use tiny_shakespeare::{TINY_SHAKESPEARE, TinyShakespeare};
 
 #[derive(Debug, Clone)]
 pub struct DatasetHub {

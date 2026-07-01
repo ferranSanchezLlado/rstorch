@@ -51,6 +51,11 @@ where
         let raw = source.raw().view_with_layout(layout)?;
         let input_raw = self.raw().clone();
         Tensor::<T, E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let grad = RawTensor::from_vec_on(
+                grad.device().clone(),
+                grad.to_vec()?,
+                grad.shape().clone(),
+            )?;
             let layout = grad
                 .layout()
                 .reshape_contiguous(input_raw.shape().clone())?;
@@ -77,6 +82,11 @@ where
         let raw = source.raw().view_with_layout(layout)?;
         let input_raw = self.raw().clone();
         Tensor::<T, E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let grad = RawTensor::from_vec_on(
+                grad.device().clone(),
+                grad.to_vec()?,
+                grad.shape().clone(),
+            )?;
             let layout = grad
                 .layout()
                 .reshape_contiguous(input_raw.shape().clone())?;
@@ -972,6 +982,14 @@ where
     }
 
     pub fn cross_entropy(&self, targets: &[usize]) -> Result<Scalar<E, B>> {
+        self.cross_entropy_ignore_index(targets, usize::MAX)
+    }
+
+    pub fn cross_entropy_ignore_index(
+        &self,
+        targets: &[usize],
+        ignore_index: usize,
+    ) -> Result<Scalar<E, B>> {
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
@@ -983,6 +1001,9 @@ where
             .into());
         }
         for &target in targets {
+            if target == ignore_index {
+                continue;
+            }
             if target >= cols {
                 return Err(DataError::IndexOutOfBounds {
                     index: target,
@@ -994,24 +1015,44 @@ where
         let input = self.to_vec()?;
         let softmax = stable_row_softmax(&input, rows, cols);
         let log_probs = stable_row_log_softmax(&input, rows, cols);
+        let valid_count = targets
+            .iter()
+            .filter(|&&target| target != ignore_index)
+            .count();
         let loss_sum = targets
             .iter()
             .enumerate()
+            .filter(|&(_, &target)| target != ignore_index)
             .fold(E::ZERO, |acc, (row, &target)| {
                 acc - log_probs[row * cols + target]
             });
-        let scale = E::from_usize(rows);
-        let raw = RawTensor::from_vec_on(
-            self.device().clone(),
-            vec![loss_sum / scale],
-            Shape::known([]),
-        )?;
+        let scale = E::from_usize(valid_count);
+        let loss = if valid_count == 0 {
+            E::ZERO
+        } else {
+            loss_sum / scale
+        };
+        let raw = RawTensor::from_vec_on(self.device().clone(), vec![loss], Shape::known([]))?;
         let input_raw = self.raw().clone();
         let targets = targets.to_vec();
         Tensor::<D0, E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let seed = grad.to_vec()?[0];
-            let mut values = softmax.clone();
+            let mut values = vec![E::ZERO; rows * cols];
+            if valid_count == 0 {
+                return Ok(vec![Some(raw_from_vec_like(&input_raw, values)?)]);
+            }
             for row in 0..rows {
+                if targets[row] == ignore_index {
+                    continue;
+                }
+                for col in 0..cols {
+                    values[row * cols + col] = softmax[row * cols + col];
+                }
+            }
+            for row in 0..rows {
+                if targets[row] == ignore_index {
+                    continue;
+                }
                 values[row * cols + targets[row]] -= E::ONE;
             }
             for value in &mut values {
@@ -1239,6 +1280,21 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
+    pub fn transpose_last2(&self) -> Result<Tensor<D3<Batch, K, M>, E, B>> {
+        let raw = self
+            .raw()
+            .view_with_layout(self.layout().transpose_axes(1, 2)?)?;
+        Tensor::<D3<Batch, K, M>, E, B>::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self)],
+            |grad| {
+                Ok(vec![Some(
+                    grad.view_with_layout(grad.layout().transpose_axes(1, 2)?)?,
+                )])
+            },
+        )
+    }
+
     pub fn bmm<N>(
         &self,
         rhs: &Tensor<D3<Batch, K, N>, E, B>,
@@ -1342,6 +1398,30 @@ where
     E: FloatDType,
     BackendT: Backend<E>,
 {
+    pub fn softmax_axis2(&self) -> Result<Self> {
+        let dims = self.shape().dims();
+        let rows = dims[0] * dims[1];
+        let cols = dims[2];
+        let values = stable_row_softmax(&self.to_vec()?, rows, cols);
+        let raw =
+            RawTensor::from_vec_on(self.device().clone(), values.clone(), self.shape().clone())?;
+        let input_raw = self.raw().clone();
+        Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let grad = grad.to_vec()?;
+            let mut out = vec![E::ZERO; rows * cols];
+            for row in 0..rows {
+                let start = row * cols;
+                let dot = (0..cols).fold(E::ZERO, |acc, col| {
+                    acc + grad[start + col] * values[start + col]
+                });
+                for col in 0..cols {
+                    out[start + col] = values[start + col] * (grad[start + col] - dot);
+                }
+            }
+            Ok(vec![Some(raw_from_vec_like(&input_raw, out)?)])
+        })
+    }
+
     pub fn add_last_dim(&self, rhs: &Tensor<D1<Cc>, E, BackendT>) -> Result<Self> {
         self.broadcast_last_dim(
             rhs,
@@ -1434,6 +1514,31 @@ where
                     Some(raw_from_vec_like(&lhs_raw, lhs_grad)?),
                     Some(raw_from_vec_like(&rhs_raw, rhs_grad)?),
                 ])
+            },
+        )
+    }
+}
+
+impl<A, BDim, Cc, Dd, E, BackendT> Tensor<D4<A, BDim, Cc, Dd>, E, BackendT>
+where
+    A: DimSpec,
+    BDim: DimSpec,
+    Cc: DimSpec,
+    Dd: DimSpec,
+    E: FloatDType,
+    BackendT: Backend<E>,
+{
+    pub fn transpose_axes12(&self) -> Result<Tensor<D4<A, Cc, BDim, Dd>, E, BackendT>> {
+        let raw = self
+            .raw()
+            .view_with_layout(self.layout().transpose_axes(1, 2)?)?;
+        Tensor::<D4<A, Cc, BDim, Dd>, E, BackendT>::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self)],
+            |grad| {
+                Ok(vec![Some(
+                    grad.view_with_layout(grad.layout().transpose_axes(1, 2)?)?,
+                )])
             },
         )
     }

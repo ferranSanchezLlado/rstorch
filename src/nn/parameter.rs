@@ -117,11 +117,11 @@ where
     }
 }
 
-pub trait Layer<Input> {
+pub trait Layer<Input: ?Sized> {
     type Output;
 }
 
-pub trait Module<Input, Ctx>: Layer<Input> {
+pub trait Module<Input: ?Sized, Ctx>: Layer<Input> {
     fn forward(&self, input: &Input, ctx: &mut Ctx) -> Result<Self::Output>;
 }
 
