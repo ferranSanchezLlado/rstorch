@@ -2,7 +2,7 @@ use super::parameter::{HasParameters, Parameter, ParameterRef, ParameterRefMut};
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;
 use crate::dtype::FloatDType;
-use crate::error::Result;
+use crate::error::{Result, const_check};
 use crate::random::SmallRng;
 use crate::shape::{AnyDim, C, D2, D3, Sym};
 use crate::tensor::Tensor;
@@ -27,6 +27,8 @@ where
     }
 
     pub fn uniform(rng: &mut SmallRng, low: E, high: E) -> Result<Self> {
+        const { const_check::mul_fits(VOCAB, DIM, "embedding_uniform", "VOCAB", "DIM") };
+
         let values = (0..VOCAB * DIM).map(|_| rng.uniform(low, high)).collect();
         Ok(Self::from_weight(Tensor::from_vec(values)?))
     }
@@ -76,6 +78,8 @@ where
     B: Backend<E>,
 {
     pub fn uniform(rng: &mut SmallRng, low: E, high: E) -> Result<Self> {
+        const { const_check::mul_fits(SEQ, DIM, "positional_embedding_uniform", "SEQ", "DIM") };
+
         let values = (0..SEQ * DIM).map(|_| rng.uniform(low, high)).collect();
         Ok(Self {
             weight: Parameter::new(Tensor::from_vec(values)?),

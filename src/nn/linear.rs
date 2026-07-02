@@ -1,7 +1,7 @@
 use super::parameter::{HasParameters, Layer, Module, Parameter, ParameterRef, ParameterRefMut};
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatDType;
-use crate::error::Result;
+use crate::error::{Result, const_check};
 use crate::random::SmallRng;
 use crate::shape::{C, D1, D2, DimSpec};
 use crate::tensor::Tensor;
@@ -28,16 +28,31 @@ where
     }
 
     pub fn xavier_uniform(rng: &mut SmallRng) -> Result<Self> {
+        const {
+            const_check::sum_nonzero(
+                IN,
+                OUT,
+                "xavier_uniform",
+                "fan_in (IN)",
+                "fan_out (OUT)",
+                "fan_in + fan_out (IN+OUT)",
+            );
+        };
+
         let limit = (6.0 / ((IN + OUT) as f64)).sqrt();
         Self::uniform(rng, -E::from_f64(limit), E::from_f64(limit))
     }
 
     pub fn kaiming_uniform(rng: &mut SmallRng) -> Result<Self> {
+        const { const_check::nonzero(IN, "kaiming_uniform", "fan_in (IN)") };
+
         let limit = (6.0 / (IN as f64)).sqrt();
         Self::uniform(rng, -E::from_f64(limit), E::from_f64(limit))
     }
 
     fn uniform(rng: &mut SmallRng, low: E, high: E) -> Result<Self> {
+        const { const_check::mul_fits(IN, OUT, "linear_uniform", "IN", "OUT") };
+
         let weight = (0..IN * OUT).map(|_| rng.uniform(low, high)).collect();
         Ok(Self {
             weight: Parameter::new(Tensor::from_vec(weight)?),

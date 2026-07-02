@@ -1,7 +1,7 @@
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;
 use crate::dtype::FloatDType;
-use crate::error::Result;
+use crate::error::{Result, const_check};
 use crate::nn::{
     Embedding, HasParameters, Layer, LayerNorm, Linear, Module, MultiHeadAttention, ParameterRef,
     ParameterRefMut, PositionalEmbedding, ensure_head_shape,
@@ -252,6 +252,8 @@ where
     /// The logit is read at the last real position. Once the sequence grows to
     /// `SEQ` tokens the window slides left and all positions are real.
     pub fn generate(&self, prompt_ids: &[usize], max_new_tokens: usize) -> Result<Vec<usize>> {
+        const { const_check::nonzero(SEQ, "generate", "SEQ") };
+
         assert!(!prompt_ids.is_empty(), "prompt must not be empty");
         let _guard = no_grad();
         let mut ids = prompt_ids.to_vec();

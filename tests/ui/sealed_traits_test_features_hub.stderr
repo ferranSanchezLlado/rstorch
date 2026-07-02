@@ -1,3 +1,11 @@
+error[E0046]: not all trait items implemented, missing: `KNOWN`
+ --> tests/ui/sealed_traits_test_features_hub.rs:6:1
+  |
+6 | impl DimSpec for RogueDim {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^ missing `KNOWN` in implementation
+  |
+  = help: implement the missing item: `const KNOWN: Option<usize> = None;`
+
 error[E0277]: the trait bound `RogueDim: shape::sealed::SealedDim` is not satisfied
  --> tests/ui/sealed_traits_test_features_hub.rs:6:18
   |
@@ -31,6 +39,14 @@ note: required by a bound in `DimSpec`
             rstorch::Sym<Tag>
             rstorch::AnyDim
 
+error[E0046]: not all trait items implemented, missing: `KNOWN_NUMEL`
+  --> tests/ui/sealed_traits_test_features_hub.rs:22:1
+   |
+22 | impl ShapeSpec for RogueShape {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `KNOWN_NUMEL` in implementation
+   |
+   = help: implement the missing item: `const KNOWN_NUMEL: Option<usize> = None;`
+
 error[E0277]: the trait bound `RogueShape: shape::sealed::SealedShape` is not satisfied
   --> tests/ui/sealed_traits_test_features_hub.rs:22:20
    |
@@ -60,6 +76,15 @@ note: required by a bound in `ShapeSpec`
              rstorch::D2<A, B>
              rstorch::D3<A, B, CC>
              rstorch::D4<A, B, CC, D>
+
+error[E0046]: not all trait items implemented, missing: `DIMS`, `NUMEL`
+  --> tests/ui/sealed_traits_test_features_hub.rs:34:1
+   |
+34 | impl StaticShape for RogueShape {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `DIMS`, `NUMEL` in implementation
+   |
+   = help: implement the missing item: `const DIMS: &'static [usize] = &[];`
+   = help: implement the missing item: `const NUMEL: usize = 42;`
 
 error[E0277]: the trait bound `RogueShape: shape::sealed::SealedShape` is not satisfied
   --> tests/ui/sealed_traits_test_features_hub.rs:34:22

@@ -5,7 +5,7 @@ use super::autograd::{
 use super::{Mask, RawTensor, Scalar, Tensor, Tensor1D, Tensor4D};
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
-use crate::error::{DataError, DeviceError, Error, Result, ShapeError};
+use crate::error::{DataError, DeviceError, Error, Result, ShapeError, const_check};
 use crate::shape::{
     C, D0, D1, D2, D3, D4, DimEntry, DimSpec, Shape, ShapeSpec, StaticShape, bind_and_check,
 };
@@ -36,6 +36,16 @@ where
     where
         T: StaticShape,
     {
+        const {
+            const_check::known_size_eq(
+                S::KNOWN_NUMEL,
+                T::KNOWN_NUMEL,
+                "reshape",
+                "source elements",
+                "target elements",
+            );
+        };
+
         let shape = T::static_shape();
         let expected = shape.numel()?;
         if expected != self.numel() {
@@ -67,6 +77,16 @@ where
     where
         T: ShapeSpec,
     {
+        const {
+            const_check::known_size_eq(
+                S::KNOWN_NUMEL,
+                T::KNOWN_NUMEL,
+                "reshape_with_shape",
+                "source elements",
+                "target elements",
+            );
+        };
+
         let shape = shape.into();
         let expected = shape.numel()?;
         if expected != self.numel() {
@@ -504,6 +524,18 @@ where
     where
         R: DimSpec,
     {
+        const {
+            const_check::known_sum_eq(
+                A::KNOWN,
+                R::KNOWN,
+                N,
+                "cat1",
+                "lhs length",
+                "rhs length",
+                "output length",
+            );
+        };
+
         ensure_same_device::<E, B>(self.device(), rhs.device(), "cat1")?;
         let found =
             self.numel()
@@ -842,11 +874,15 @@ where
     }
 
     pub fn mean_axis0(&self) -> Result<Tensor<D1<N>, E, B>> {
+        const { const_check::known_nonzero(A::KNOWN, "mean_axis0", "axis 0") };
+        ensure_nonzero_dim("mean_axis0", 0, self.shape().dims()[0])?;
         self.sum_axis0()?
             .div_scalar(E::from_usize(self.shape().dims()[0]))
     }
 
     pub fn mean_axis1(&self) -> Result<Tensor<D1<A>, E, B>> {
+        const { const_check::known_nonzero(N::KNOWN, "mean_axis1", "axis 1") };
+        ensure_nonzero_dim("mean_axis1", 1, self.shape().dims()[1])?;
         self.sum_axis1()?
             .div_scalar(E::from_usize(self.shape().dims()[1]))
     }
@@ -854,9 +890,12 @@ where
     /// Reduces columns with max. Backward splits gradient evenly across tied
     /// maxima instead of selecting the first maximum.
     pub fn max_axis1(&self) -> Result<Tensor<D1<A>, E, B>> {
+        const { const_check::known_nonzero(N::KNOWN, "max_axis1", "axis 1") };
+
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
+        ensure_nonzero_dim("max_axis1", 1, cols)?;
         let values = self.to_vec()?;
         let mut out = Vec::with_capacity(rows);
         for row in 0..rows {
@@ -896,9 +935,12 @@ where
     }
 
     pub fn logsumexp_axis1(&self) -> Result<Tensor<D1<A>, E, B>> {
+        const { const_check::known_nonzero(N::KNOWN, "logsumexp_axis1", "axis 1") };
+
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
+        ensure_nonzero_dim("logsumexp_axis1", 1, cols)?;
         let values = self.to_vec()?;
         let mut softmax = vec![E::ZERO; rows * cols];
         let mut out = Vec::with_capacity(rows);
@@ -935,9 +977,12 @@ where
     }
 
     pub fn softmax_axis1(&self) -> Result<Self> {
+        const { const_check::known_nonzero(N::KNOWN, "softmax_axis1", "axis 1") };
+
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
+        ensure_nonzero_dim("softmax_axis1", 1, cols)?;
         let values = stable_row_softmax(&self.to_vec()?, rows, cols);
         let raw =
             RawTensor::from_vec_on(self.device().clone(), values.clone(), self.shape().clone())?;
@@ -959,9 +1004,12 @@ where
     }
 
     pub fn log_softmax_axis1(&self) -> Result<Self> {
+        const { const_check::known_nonzero(N::KNOWN, "log_softmax_axis1", "axis 1") };
+
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
+        ensure_nonzero_dim("log_softmax_axis1", 1, cols)?;
         let input = self.to_vec()?;
         let softmax = stable_row_softmax(&input, rows, cols);
         let values = stable_row_log_softmax(&input, rows, cols);
@@ -990,9 +1038,12 @@ where
         targets: &[usize],
         ignore_index: usize,
     ) -> Result<Scalar<E, B>> {
+        const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
+
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
+        ensure_nonzero_dim("cross_entropy", 1, cols)?;
         if targets.len() != rows {
             return Err(ShapeError::LengthMismatch {
                 expected: rows,
@@ -1399,9 +1450,12 @@ where
     BackendT: Backend<E>,
 {
     pub fn softmax_axis2(&self) -> Result<Self> {
+        const { const_check::known_nonzero(Cc::KNOWN, "softmax_axis2", "axis 2") };
+
         let dims = self.shape().dims();
         let rows = dims[0] * dims[1];
         let cols = dims[2];
+        ensure_nonzero_dim("softmax_axis2", 2, cols)?;
         let values = stable_row_softmax(&self.to_vec()?, rows, cols);
         let raw =
             RawTensor::from_vec_on(self.device().clone(), values.clone(), self.shape().clone())?;
@@ -1560,6 +1614,13 @@ where
     Ok(())
 }
 
+fn ensure_nonzero_dim(op: &'static str, axis: usize, size: usize) -> Result<()> {
+    if size == 0 {
+        return Err(ShapeError::ZeroDimension { op, axis }.into());
+    }
+    Ok(())
+}
+
 fn raw_matmul<E, B>(lhs: &RawTensor<E, B>, rhs: &RawTensor<E, B>) -> Result<RawTensor<E, B>>
 where
     E: FloatDType,
@@ -1688,7 +1749,12 @@ mod tests {
         assert_eq!(reshaped.shape().dims(), &[1, 2, 2, 3]);
         assert!(reshaped.shares_storage_with(&tensor));
 
-        let err = tensor.reshape2::<5, 2>().unwrap_err();
+        let dynamic = Tensor::<D2<AnyDim, AnyDim>>::from_vec_with_shape(
+            (0..12).map(|x| x as f32).collect(),
+            [2, 6],
+        )
+        .unwrap();
+        let err = dynamic.reshape2::<5, 2>().unwrap_err();
         assert!(matches!(
             err,
             Error::Shape(ShapeError::LengthMismatch {
@@ -1794,7 +1860,7 @@ mod tests {
         let tensor = Tensor2D::<2, 3>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
         let out = tensor.sum().unwrap();
 
-        assert_eq!(out.shape().dims(), &[]);
+        assert_eq!(out.shape().dims(), &[] as &[usize]);
         assert_eq!(out.rank(), 0);
         assert_eq!(out.numel(), 1);
         assert_eq!(out.to_vec().unwrap(), vec![21.0]);
@@ -1841,12 +1907,42 @@ mod tests {
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
         );
 
-        let err = tensor.flatten::<5>().unwrap_err();
+        let dynamic = Tensor::<D2<AnyDim, AnyDim>>::from_vec_with_shape(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [2, 3],
+        )
+        .unwrap();
+        let err = dynamic.flatten::<5>().unwrap_err();
         assert!(matches!(
             err,
             Error::Shape(ShapeError::LengthMismatch {
                 expected: 5,
                 found: 6,
+            })
+        ));
+    }
+
+    #[test]
+    fn zero_reduction_axes_are_rejected_for_runtime_shapes() {
+        let cols =
+            Tensor::<D2<C<2>, AnyDim>>::from_vec_with_shape(Vec::<f32>::new(), [2, 0]).unwrap();
+        let err = cols.softmax_axis1().unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Shape(ShapeError::ZeroDimension {
+                op: "softmax_axis1",
+                axis: 1,
+            })
+        ));
+
+        let rows =
+            Tensor::<D2<AnyDim, C<3>>>::from_vec_with_shape(Vec::<f32>::new(), [0, 3]).unwrap();
+        let err = rows.mean_axis0().unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Shape(ShapeError::ZeroDimension {
+                op: "mean_axis0",
+                axis: 0,
             })
         ));
     }
@@ -1981,7 +2077,7 @@ mod tests {
         let tensor = Scalar::<f32, Cpu>::from_vec(vec![3.0]).unwrap();
         let out = tensor.mul_scalar(2.0).unwrap();
 
-        assert_eq!(out.shape().dims(), &[]);
+        assert_eq!(out.shape().dims(), &[] as &[usize]);
         assert_eq!(out.rank(), 0);
         assert_eq!(out.numel(), 1);
         assert_eq!(out.to_vec().unwrap(), vec![6.0]);

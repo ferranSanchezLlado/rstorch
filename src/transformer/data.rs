@@ -1,5 +1,5 @@
 use crate::data::Dataset;
-use crate::error::{DataError, Result};
+use crate::error::{DataError, Result, const_check};
 use crate::shape::{C, D2};
 use crate::tensor::Mask;
 use crate::transformer::Tokenizer;
@@ -90,6 +90,8 @@ impl<const BATCH: usize, const SEQ: usize> PaddedCausalLmCollator<BATCH, SEQ> {
     }
 
     pub fn collate(&self, sequences: Vec<Vec<usize>>) -> Result<PaddedCausalLmBatch<BATCH, SEQ>> {
+        const { const_check::mul_fits(BATCH, SEQ, "padded_causal_lm_collate", "BATCH", "SEQ") };
+
         if sequences.len() != BATCH {
             return Err(DataError::WrongBatchSize {
                 expected: BATCH,

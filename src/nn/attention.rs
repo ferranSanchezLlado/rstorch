@@ -3,7 +3,7 @@ use super::parameter::{HasParameters, Module, ParameterRef, ParameterRefMut};
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;
 use crate::dtype::FloatDType;
-use crate::error::{Result, ShapeError};
+use crate::error::{Result, ShapeError, const_check};
 use crate::random::SmallRng;
 use crate::shape::{AnyDim, C, D2, D3, D4, DimSpec, Sym};
 use crate::tensor::{Mask, Tensor};
@@ -11,6 +11,8 @@ use crate::tensor::{Mask, Tensor};
 pub fn causal_attention_mask<const SEQ: usize>(
     batch_heads: usize,
 ) -> Result<Mask<D3<AnyDim, C<SEQ>, C<SEQ>>>> {
+    const { const_check::mul_fits(SEQ, SEQ, "causal_attention_mask", "SEQ", "SEQ") };
+
     let mut values = Vec::with_capacity(batch_heads * SEQ * SEQ);
     for _ in 0..batch_heads {
         for query in 0..SEQ {
@@ -33,6 +35,8 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
+    const { const_check::nonzero(HEAD_DIM, "scaled_dot_product_attention", "HEAD_DIM") };
+
     let scale = E::from_f64((HEAD_DIM as f64).sqrt());
     let mut scores = q.bmm(&k.transpose_last2()?)?.div_scalar(scale)?;
     if let Some(mask) = mask {
@@ -65,6 +69,8 @@ where
     B: Backend<E>,
 {
     pub fn xavier_uniform(rng: &mut SmallRng) -> Result<Self> {
+        ensure_head_shape::<EMBED, HEADS, HEAD_DIM>()?;
+
         Ok(Self {
             q_proj: Linear::xavier_uniform(rng)?,
             k_proj: Linear::xavier_uniform(rng)?,
@@ -153,6 +159,21 @@ where
 
 pub(crate) fn ensure_head_shape<const EMBED: usize, const HEADS: usize, const HEAD_DIM: usize>()
 -> Result<()> {
+    const { const_check::nonzero(EMBED, "multi_head_attention", "EMBED") };
+    const { const_check::nonzero(HEADS, "multi_head_attention", "HEADS") };
+    const { const_check::nonzero(HEAD_DIM, "multi_head_attention", "HEAD_DIM") };
+    const {
+        const_check::mul_eq(
+            HEADS,
+            HEAD_DIM,
+            EMBED,
+            "multi_head_attention",
+            "HEADS",
+            "HEAD_DIM",
+            "EMBED",
+        )
+    };
+
     if HEADS == 0 || HEADS * HEAD_DIM != EMBED {
         return Err(ShapeError::LengthMismatch {
             expected: EMBED,

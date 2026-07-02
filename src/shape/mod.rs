@@ -64,7 +64,12 @@ impl From<Box<[usize]>> for Shape {
 pub struct DimId(TypeId);
 
 pub trait DimSpec: sealed::SealedDim + Send + Sync + 'static {
-    fn known() -> Option<usize>;
+    const KNOWN: Option<usize>;
+
+    fn known() -> Option<usize> {
+        Self::KNOWN
+    }
+
     fn symbol() -> Option<DimId>;
     fn symbol_name() -> Option<&'static str>;
 }
@@ -81,9 +86,7 @@ pub struct AnyDim;
 impl<const N: usize> sealed::SealedDim for C<N> {}
 
 impl<const N: usize> DimSpec for C<N> {
-    fn known() -> Option<usize> {
-        Some(N)
-    }
+    const KNOWN: Option<usize> = Some(N);
 
     fn symbol() -> Option<DimId> {
         Some(DimId(TypeId::of::<C<N>>()))
@@ -97,9 +100,7 @@ impl<const N: usize> DimSpec for C<N> {
 impl<Tag: Send + Sync + 'static> sealed::SealedDim for Sym<Tag> {}
 
 impl<Tag: Send + Sync + 'static> DimSpec for Sym<Tag> {
-    fn known() -> Option<usize> {
-        None
-    }
+    const KNOWN: Option<usize> = None;
 
     fn symbol() -> Option<DimId> {
         Some(DimId(TypeId::of::<Sym<Tag>>()))
@@ -113,9 +114,7 @@ impl<Tag: Send + Sync + 'static> DimSpec for Sym<Tag> {
 impl sealed::SealedDim for AnyDim {}
 
 impl DimSpec for AnyDim {
-    fn known() -> Option<usize> {
-        None
-    }
+    const KNOWN: Option<usize> = None;
 
     fn symbol() -> Option<DimId> {
         None
@@ -193,6 +192,7 @@ pub(crate) fn bind_and_check(
 
 pub trait ShapeSpec: sealed::SealedShape + Send + Sync + 'static {
     const RANK: usize;
+    const KNOWN_NUMEL: Option<usize>;
 
     fn known_shape() -> Option<Shape>;
     fn dim_entries(operand: usize) -> Vec<DimEntry>;
@@ -216,7 +216,48 @@ pub trait ShapeSpec: sealed::SealedShape + Send + Sync + 'static {
 }
 
 pub trait StaticShape: ShapeSpec {
-    fn static_shape() -> Shape;
+    const DIMS: &'static [usize];
+    const NUMEL: usize;
+
+    fn static_shape() -> Shape {
+        let _ = Self::NUMEL;
+        Shape::known(Self::DIMS)
+    }
+}
+
+pub(crate) const fn static_numel<const N: usize>(dims: [usize; N]) -> usize {
+    let mut idx = 0usize;
+    let mut numel = 1usize;
+    while idx < N {
+        match numel.checked_mul(dims[idx]) {
+            Some(next) => numel = next,
+            None => crate::error::const_check::ConstWriter::new()
+                .str("static shape: element count overflow while multiplying by dimension ")
+                .num(dims[idx])
+                .panic(),
+        }
+        idx += 1;
+    }
+    numel
+}
+
+pub(crate) const fn known_numel<const N: usize>(dims: [Option<usize>; N]) -> Option<usize> {
+    let mut idx = 0usize;
+    let mut numel = 1usize;
+    while idx < N {
+        match dims[idx] {
+            Some(dim) => match numel.checked_mul(dim) {
+                Some(next) => numel = next,
+                None => crate::error::const_check::ConstWriter::new()
+                    .str("static shape: element count overflow while multiplying by dimension ")
+                    .num(dim)
+                    .panic(),
+            },
+            None => return None,
+        }
+        idx += 1;
+    }
+    Some(numel)
 }
 
 macro_rules! impl_dims {
@@ -228,6 +269,7 @@ macro_rules! impl_dims {
 
         impl ShapeSpec for D0 {
             const RANK: usize = 0;
+            const KNOWN_NUMEL: Option<usize> = Some(1);
 
             fn known_shape() -> Option<Shape> {
                 Some(Shape::known([]))
@@ -239,9 +281,8 @@ macro_rules! impl_dims {
         }
 
         impl StaticShape for D0 {
-            fn static_shape() -> Shape {
-                Shape::known([])
-            }
+            const DIMS: &'static [usize] = &[];
+            const NUMEL: usize = 1;
         }
 
         impl_dims!(@emit [D1 D2 D3 D4 D5 D6 D7 D8] [] ; $($dim),+);
@@ -264,6 +305,7 @@ macro_rules! impl_dims {
             $head: DimSpec,
         {
             const RANK: usize = impl_dims!(@count $($prev,)* $head);
+            const KNOWN_NUMEL: Option<usize> = known_numel([$($prev::KNOWN,)* $head::KNOWN]);
 
             fn known_shape() -> Option<Shape> {
                 Some(Shape::known([$($prev::known()?,)* $head::known()?]))
@@ -286,9 +328,8 @@ macro_rules! impl_dims {
         impl<$(const $prev: usize,)* const $head: usize> StaticShape
             for $rank<$(C<$prev>,)* C<$head>>
         {
-            fn static_shape() -> Shape {
-                Shape::known([$($prev,)* $head])
-            }
+            const DIMS: &'static [usize] = &[$($prev,)* $head];
+            const NUMEL: usize = static_numel([$($prev,)* $head]);
         }
 
         impl_dims!(@emit [$($rest_ranks)*] [$($prev,)* $head] ; $($tail),*);
@@ -332,5 +373,12 @@ mod tests {
         assert_eq!(Sym::<Batch>::symbol(), Sym::<Batch>::symbol());
         assert_ne!(Sym::<Batch>::symbol(), Sym::<Hidden>::symbol());
         assert_ne!(Sym::<Batch>::symbol(), Some(DimId(TypeId::of::<Batch>())));
+    }
+
+    #[test]
+    fn static_numel_is_available_at_type_level() {
+        assert_eq!(<D2<C<2>, C<3>> as ShapeSpec>::KNOWN_NUMEL, Some(6));
+        assert_eq!(<D2<Sym<Batch>, C<3>> as ShapeSpec>::KNOWN_NUMEL, None);
+        assert_eq!(<D2<C<2>, C<3>> as StaticShape>::NUMEL, 6);
     }
 }
