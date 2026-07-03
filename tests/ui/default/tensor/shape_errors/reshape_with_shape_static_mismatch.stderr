@@ -1,0 +1,32 @@
+error[E0080]: evaluation panicked: reshape_with_shape: source elements=12 must equal target elements=8
+  --> src/tensor/ops.rs:83:13
+   |
+83 | /             const_check::known_size_eq(
+84 | |                 S::KNOWN_NUMEL,
+85 | |                 T::KNOWN_NUMEL,
+86 | |                 "reshape_with_shape",
+87 | |                 "source elements",
+88 | |                 "target elements",
+89 | |             );
+   | |_____________^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<6>>>>::reshape_with_shape::<rstorch::D2<rstorch::C<4>, rstorch::C<2>>, [usize; 2]>::{constant#0}` failed here
+
+note: erroneous constant encountered
+  --> src/tensor/ops.rs:82:9
+   |
+82 | /         const {
+83 | |             const_check::known_size_eq(
+84 | |                 S::KNOWN_NUMEL,
+85 | |                 T::KNOWN_NUMEL,
+...  |
+89 | |             );
+90 | |         };
+   | |_________^
+
+note: the above error was encountered while instantiating `<instantiation>`
+ --> src/main.rs:8:13
+  |
+8 |     let _ = tensor.reshape_with_shape::<D2<C<4>, C<2>>>([4, 2]);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `default-tensor-shape-errors-reshape-with-shape-static-mismatch` (bin "default-tensor-shape-errors-reshape-with-shape-static-mismatch") due to 1 previous error

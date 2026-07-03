@@ -3,3 +3,4 @@ Cargo.lock
 .test_cache
 /data
 docs
+.DS_Store

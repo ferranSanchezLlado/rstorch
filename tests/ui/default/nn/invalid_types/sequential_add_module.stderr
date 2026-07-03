@@ -1,0 +1,26 @@
+error[E0277]: the trait bound `{integer}: Layer<Tensor<D2<C<2>, C<3>>>>` is not satisfied
+ --> tests/ui/default/nn/invalid_types/sequential_add_module.rs
+  |
+  |         .add_module(42);
+  |          ---------- ^^ the trait `Layer<Tensor<D2<C<2>, C<3>>>>` is not implemented for `{integer}`
+  |          |
+  |          required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `Layer<Input>`:
+            `(A, B)` implements `Layer<Input>`
+            `DecoderOnlyTransformer<VOCAB, SEQ, EMBED, HEADS, HEAD_DIM, FF, LAYERS, E, B>` implements `Layer<[[usize; SEQ]]>`
+            `Dropout<E>` implements `Layer<Tensor<S, E, B>>`
+            `Gelu` implements `Layer<Tensor<S, E, B>>`
+            `LayerNorm<FEATURES, E, B>` implements `Layer<Tensor<D2<A, C<FEATURES>>, E, B>>`
+            `Sigmoid` implements `Layer<Tensor<S, E, B>>`
+            `Tanh` implements `Layer<Tensor<S, E, B>>`
+            `TransformerBlock<SEQ, EMBED, HEADS, HEAD_DIM, FF, E, B>` implements `Layer<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>>`
+          and $N others
+note: required by a bound in `rstorch::Sequential::<M, In>::add_module`
+ --> src/nn/sequential.rs
+  |
+  |     pub fn add_module<Next>(self, next: Next) -> Sequential<(M, Next), In>
+  |            ---------- required by a bound in this associated function
+...
+  |         Next: Layer<<M as Layer<In>>::Output>,
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Sequential::<M, In>::add_module`

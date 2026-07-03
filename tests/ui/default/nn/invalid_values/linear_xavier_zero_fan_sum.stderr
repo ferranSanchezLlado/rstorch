@@ -1,0 +1,32 @@
+error[E0080]: evaluation panicked: xavier_uniform: fan_in (IN)=0 plus fan_out (OUT)=0 gives fan_in + fan_out (IN+OUT)=0, which must be greater than 0
+  --> src/nn/linear.rs:32:13
+   |
+32 | /             const_check::sum_nonzero(
+33 | |                 IN,
+34 | |                 OUT,
+35 | |                 "xavier_uniform",
+...  |
+38 | |                 "fan_in + fan_out (IN+OUT)",
+39 | |             );
+   | |_____________^ evaluation of `rstorch::Linear::<0, 0>::xavier_uniform::{constant#0}` failed here
+
+note: erroneous constant encountered
+  --> src/nn/linear.rs:31:9
+   |
+31 | /         const {
+32 | |             const_check::sum_nonzero(
+33 | |                 IN,
+34 | |                 OUT,
+...  |
+39 | |             );
+40 | |         };
+   | |_________^
+
+note: the above error was encountered while instantiating `<instantiation>`
+ --> src/main.rs:8:13
+  |
+8 |     let _ = Linear::<0, 0>::xavier_uniform(&mut rng);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `default-nn-invalid-values-linear-xavier-zero-fan-sum` (bin "default-nn-invalid-values-linear-xavier-zero-fan-sum") due to 1 previous error

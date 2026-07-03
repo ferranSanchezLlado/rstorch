@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use super::autograd::{
     AnyTensor, raw_div, raw_div_scalar, raw_from_vec_like, raw_full_like, raw_mul, raw_mul_scalar,
     raw_neg,
@@ -954,7 +956,7 @@ where
                 softmax[start + col] = exp;
             }
             for col in 0..cols {
-                softmax[start + col] = softmax[start + col] / sum;
+                softmax[start + col] /= sum;
             }
             out.push(max + sum.ln());
         }
@@ -1174,8 +1176,7 @@ where
                 let mut values = vec![E::ZERO; rows * cols];
                 for (out_row, &source_row) in indices.iter().enumerate() {
                     for col in 0..cols {
-                        values[source_row * cols + col] =
-                            values[source_row * cols + col] + grad[out_row * cols + col];
+                        values[source_row * cols + col] += grad[out_row * cols + col];
                     }
                 }
                 Ok(vec![Some(raw_from_vec_like(&input_raw, values)?)])
@@ -1236,8 +1237,7 @@ where
                     let col = idx % cols;
                     let g = grad_values[idx];
                     lhs_grad.push(lhs_backward(lhs_values[idx], rhs_values[col], g));
-                    rhs_grad[col] =
-                        rhs_grad[col] + rhs_backward(lhs_values[idx], rhs_values[col], g);
+                    rhs_grad[col] += rhs_backward(lhs_values[idx], rhs_values[col], g);
                 }
                 Ok(vec![
                     Some(raw_from_vec_like(&lhs_raw, lhs_grad)?),
@@ -1300,8 +1300,7 @@ where
                     let row = idx / cols;
                     let g = grad_values[idx];
                     lhs_grad.push(lhs_backward(lhs_values[idx], rhs_values[row], g));
-                    rhs_grad[row] =
-                        rhs_grad[row] + rhs_backward(lhs_values[idx], rhs_values[row], g);
+                    rhs_grad[row] += rhs_backward(lhs_values[idx], rhs_values[row], g);
                 }
                 Ok(vec![
                     Some(raw_from_vec_like(&lhs_raw, lhs_grad)?),
@@ -1561,8 +1560,7 @@ where
                     let col = idx % cols;
                     let g = grad_values[idx];
                     lhs_grad.push(lhs_backward(lhs_values[idx], rhs_values[col], g));
-                    rhs_grad[col] =
-                        rhs_grad[col] + rhs_backward(lhs_values[idx], rhs_values[col], g);
+                    rhs_grad[col] += rhs_backward(lhs_values[idx], rhs_values[col], g);
                 }
                 Ok(vec![
                     Some(raw_from_vec_like(&lhs_raw, lhs_grad)?),
@@ -1667,7 +1665,7 @@ fn stable_row_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize) -> 
             out[start + col] = exp;
         }
         for col in 0..cols {
-            out[start + col] = out[start + col] / sum;
+            out[start + col] /= sum;
         }
     }
     out

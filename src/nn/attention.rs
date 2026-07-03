@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use super::linear::Linear;
 use super::parameter::{HasParameters, Module, ParameterRef, ParameterRefMut};
 use crate::backend::{Backend, Cpu};

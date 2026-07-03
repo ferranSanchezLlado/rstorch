@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;
 use crate::dtype::FloatDType;

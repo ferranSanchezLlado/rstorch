@@ -1,0 +1,31 @@
+error[E0080]: evaluation panicked: multi_head_attention: HEADS=3 times HEAD_DIM=2 gives 6, but EMBED=8
+   --> src/nn/attention.rs:168:9
+    |
+168 | /         const_check::mul_eq(
+169 | |             HEADS,
+170 | |             HEAD_DIM,
+171 | |             EMBED,
+...   |
+175 | |             "EMBED",
+176 | |         )
+    | |_________^ evaluation of `rstorch::nn::attention::ensure_head_shape::<8, 3, 2>::{constant#3}` failed here
+
+note: erroneous constant encountered
+   --> src/nn/attention.rs:167:5
+    |
+167 | /     const {
+168 | |         const_check::mul_eq(
+169 | |             HEADS,
+170 | |             HEAD_DIM,
+...   |
+177 | |     };
+    | |_____^
+
+note: the above error was encountered while instantiating `<instantiation>`
+  --> src/nn/attention.rs:74:9
+   |
+74 |         ensure_head_shape::<EMBED, HEADS, HEAD_DIM>()?;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `default-nn-shape-errors-attention-head-mismatch` (bin "default-nn-shape-errors-attention-head-mismatch") due to 1 previous error

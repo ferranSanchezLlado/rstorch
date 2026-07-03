@@ -1,0 +1,43 @@
+error[E0080]: evaluation panicked: multi_head_attention: HEADS=0 must be greater than 0
+   --> src/nn/attention.rs:165:13
+    |
+165 |     const { const_check::nonzero(HEADS, "multi_head_attention", "HEADS") };
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::nn::attention::ensure_head_shape::<8, 0, 2>::{constant#1}` failed here
+
+note: erroneous constant encountered
+   --> src/nn/attention.rs:165:5
+    |
+165 |     const { const_check::nonzero(HEADS, "multi_head_attention", "HEADS") };
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0080]: evaluation panicked: multi_head_attention: HEADS=0 times HEAD_DIM=2 gives 0, but EMBED=8
+   --> src/nn/attention.rs:168:9
+    |
+168 | /         const_check::mul_eq(
+169 | |             HEADS,
+170 | |             HEAD_DIM,
+171 | |             EMBED,
+...   |
+175 | |             "EMBED",
+176 | |         )
+    | |_________^ evaluation of `rstorch::nn::attention::ensure_head_shape::<8, 0, 2>::{constant#3}` failed here
+
+note: erroneous constant encountered
+   --> src/nn/attention.rs:167:5
+    |
+167 | /     const {
+168 | |         const_check::mul_eq(
+169 | |             HEADS,
+170 | |             HEAD_DIM,
+...   |
+177 | |     };
+    | |_____^
+
+note: the above error was encountered while instantiating `<instantiation>`
+  --> src/nn/attention.rs:74:9
+   |
+74 |         ensure_head_shape::<EMBED, HEADS, HEAD_DIM>()?;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `default-nn-invalid-values-multi-head-attention-zero-heads` (bin "default-nn-invalid-values-multi-head-attention-zero-heads") due to 2 previous errors

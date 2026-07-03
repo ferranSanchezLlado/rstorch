@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use super::parameter::{HasParameters, Parameter, ParameterRef, ParameterRefMut};
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;

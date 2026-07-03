@@ -1,0 +1,32 @@
+error[E0080]: evaluation panicked: reshape: source elements=12 must equal target elements=10
+  --> src/tensor/ops.rs:42:13
+   |
+42 | /             const_check::known_size_eq(
+43 | |                 S::KNOWN_NUMEL,
+44 | |                 T::KNOWN_NUMEL,
+45 | |                 "reshape",
+46 | |                 "source elements",
+47 | |                 "target elements",
+48 | |             );
+   | |_____________^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<6>>>>::reshape::<rstorch::D2<rstorch::C<5>, rstorch::C<2>>>::{constant#0}` failed here
+
+note: erroneous constant encountered
+  --> src/tensor/ops.rs:41:9
+   |
+41 | /         const {
+42 | |             const_check::known_size_eq(
+43 | |                 S::KNOWN_NUMEL,
+44 | |                 T::KNOWN_NUMEL,
+...  |
+48 | |             );
+49 | |         };
+   | |_________^
+
+note: the above error was encountered while instantiating `<instantiation>`
+   --> src/tensor/ops.rs:128:9
+    |
+128 |         self.reshape::<D2<C<M>, C<N>>>()
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `default-tensor-shape-errors-reshape-static-mismatch` (bin "default-tensor-shape-errors-reshape-static-mismatch") due to 1 previous error

@@ -1,0 +1,11 @@
+error[E0599]: no method named `backward` found for struct `Tensor<D1<C<2>>>` in the current scope
+ --> tests/ui/hub/autograd/invalid_usage/non_scalar_backward.rs
+  |
+  |     tensor.backward().unwrap();
+  |            ^^^^^^^^
+  |
+help: there is a method `backward_with` with a similar name, but with different arguments
+ --> src/tensor/autograd.rs
+  |
+  |     pub fn backward_with(&self, seed: &Self) -> Result<()> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
