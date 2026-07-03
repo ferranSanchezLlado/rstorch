@@ -16,7 +16,16 @@ pub use metal::{Metal, MetalDevice, MetalError};
 #[cfg(feature = "wgpu")]
 pub use wgpu::{Wgpu, WgpuDevice, WgpuError};
 
-pub trait Backend<E: DType>: Clone + Send + Sync + 'static {
+pub(crate) mod sealed {
+    pub trait SealedBackend {}
+}
+
+/// Tensor storage and kernel backend.
+///
+/// Backend implementation is not a supported downstream extension point yet.
+/// The trait is sealed until the backend-parity work settles the final kernel
+/// surface and any future trait split before 1.0.
+pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
     type Device: Clone + Send + Sync + PartialEq + std::fmt::Debug + 'static;
     type Storage: Clone + Send + Sync + 'static;
     type Error: std::error::Error + Send + Sync + 'static;

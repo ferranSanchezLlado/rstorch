@@ -2,6 +2,7 @@ use std::error;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeviceError {
     Mismatch {
         op: &'static str,

@@ -11,6 +11,12 @@ pub use adam::{Adam, AdamW};
 pub use scheduler::{ConstantLr, CosineLr, LrSchedule, StepLr, WarmupLr};
 pub use sgd::Sgd;
 
+/// Optimizer interface over parameter references.
+///
+/// `Optimizer` remains public and implementable. The raw data methods on
+/// [`ParameterRefMut`] currently use host `Vec<E>` round-trips and are
+/// documented as unstable for external optimizer implementors until backend
+/// parity defines the device-resident update kernel set.
 pub trait Optimizer<E, B>
 where
     E: FloatDType,

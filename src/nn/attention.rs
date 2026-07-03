@@ -13,6 +13,12 @@ use crate::tensor::{Mask, Tensor};
 pub fn causal_attention_mask<const SEQ: usize>(
     batch_heads: usize,
 ) -> Result<Mask<D3<AnyDim, C<SEQ>, C<SEQ>>>> {
+    causal_attention_mask_for_backend::<SEQ, Cpu>(batch_heads)
+}
+
+pub fn causal_attention_mask_for_backend<const SEQ: usize, B>(
+    batch_heads: usize,
+) -> Result<Mask<D3<AnyDim, C<SEQ>, C<SEQ>>, B>> {
     const { const_check::mul_fits(SEQ, SEQ, "causal_attention_mask", "SEQ", "SEQ") };
 
     let mut values = Vec::with_capacity(batch_heads * SEQ * SEQ);
@@ -30,7 +36,7 @@ pub fn scaled_dot_product_attention<BatchDim, const SEQ: usize, const HEAD_DIM: 
     q: &Tensor<D3<BatchDim, C<SEQ>, C<HEAD_DIM>>, E, B>,
     k: &Tensor<D3<BatchDim, C<SEQ>, C<HEAD_DIM>>, E, B>,
     v: &Tensor<D3<BatchDim, C<SEQ>, C<HEAD_DIM>>, E, B>,
-    mask: Option<&Mask<D3<BatchDim, C<SEQ>, C<SEQ>>>>,
+    mask: Option<&Mask<D3<BatchDim, C<SEQ>, C<SEQ>>, B>>,
 ) -> Result<Tensor<D3<BatchDim, C<SEQ>, C<HEAD_DIM>>, E, B>>
 where
     BatchDim: DimSpec,
@@ -44,7 +50,7 @@ where
     if let Some(mask) = mask {
         scores = scores.masked_fill(mask, E::from_f64(-1.0e9))?;
     }
-    scores.softmax_axis2()?.bmm(v)
+    scores.softmax_last()?.bmm(v)
 }
 
 pub struct MultiHeadAttention<
@@ -93,14 +99,14 @@ where
         input: &Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>,
     ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>> {
         let batch = input.shape().dims()[0];
-        let mask = causal_attention_mask::<SEQ>(batch * HEADS)?;
+        let mask = causal_attention_mask_for_backend::<SEQ, B>(batch * HEADS)?;
         self.forward_with_mask(input, Some(&mask))
     }
 
     pub fn forward_with_mask(
         &self,
         input: &Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>,
-        mask: Option<&Mask<D3<AnyDim, C<SEQ>, C<SEQ>>>>,
+        mask: Option<&Mask<D3<AnyDim, C<SEQ>, C<SEQ>>, B>>,
     ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>> {
         ensure_head_shape::<EMBED, HEADS, HEAD_DIM>()?;
         let q = self.split_heads(&project_3d(&self.q_proj, input)?)?;
@@ -120,7 +126,7 @@ where
             .reshape_with_shape::<D4<Sym<Batch>, C<SEQ>, C<HEADS>, C<HEAD_DIM>>>([
                 batch, SEQ, HEADS, HEAD_DIM,
             ])?
-            .transpose_axes12()?
+            .transpose_middle2()?
             .reshape_with_shape([batch * HEADS, SEQ, HEAD_DIM])
     }
 
@@ -133,7 +139,7 @@ where
             .reshape_with_shape::<D4<Sym<Batch>, C<HEADS>, C<SEQ>, C<HEAD_DIM>>>([
                 batch, HEADS, SEQ, HEAD_DIM,
             ])?
-            .transpose_axes12()?
+            .transpose_middle2()?
             .reshape_with_shape([batch, SEQ, EMBED])
     }
 }
@@ -144,18 +150,34 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
-        self.q_proj.parameters(out);
-        self.k_proj.parameters(out);
-        self.v_proj.parameters(out);
-        self.out_proj.parameters(out);
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+        self.q_proj
+            .visit_parameters(&crate::nn::parameter_path(prefix, "q_proj"), visit);
+        self.k_proj
+            .visit_parameters(&crate::nn::parameter_path(prefix, "k_proj"), visit);
+        self.v_proj
+            .visit_parameters(&crate::nn::parameter_path(prefix, "v_proj"), visit);
+        self.out_proj
+            .visit_parameters(&crate::nn::parameter_path(prefix, "out_proj"), visit);
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
-        self.q_proj.parameters_mut(out);
-        self.k_proj.parameters_mut(out);
-        self.v_proj.parameters_mut(out);
-        self.out_proj.parameters_mut(out);
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+        self.q_proj
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "q_proj"), visit);
+        self.k_proj
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "k_proj"), visit);
+        self.v_proj
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "v_proj"), visit);
+        self.out_proj
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "out_proj"), visit);
     }
 }
 

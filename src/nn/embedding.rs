@@ -57,12 +57,26 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
-        out.push(self.weight.as_ref());
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+        visit(
+            &crate::nn::parameter_path(prefix, "weight"),
+            self.weight.as_ref(),
+        );
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
-        out.push(self.weight.as_mut());
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+        visit(
+            &crate::nn::parameter_path(prefix, "weight"),
+            self.weight.as_mut(),
+        );
     }
 }
 
@@ -103,11 +117,25 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
-        out.push(self.weight.as_ref());
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+        visit(
+            &crate::nn::parameter_path(prefix, "weight"),
+            self.weight.as_ref(),
+        );
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
-        out.push(self.weight.as_mut());
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+        visit(
+            &crate::nn::parameter_path(prefix, "weight"),
+            self.weight.as_mut(),
+        );
     }
 }

@@ -3,6 +3,7 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssi
 pub use half::{bf16, f16};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DTypeId {
     F16,
     BF16,
@@ -10,8 +11,18 @@ pub enum DTypeId {
     F64,
 }
 
+mod sealed {
+    pub trait SealedDType {}
+}
+
+/// Element type supported by RsTorch tensors.
+///
+/// The dtype set is sealed before 1.0 while backend and kernel coverage is
+/// still expanding. New dtypes will be added in-tree without requiring
+/// downstream implementations to track an unstable trait surface.
 pub trait DType:
-    Copy
+    sealed::SealedDType
+    + Copy
     + Default
     + Send
     + Sync
@@ -40,12 +51,11 @@ pub trait DType:
     }
 }
 
+/// Floating-point dtype operations.
+///
+/// This trait is sealed for the same reason as [`DType`]: the set of required
+/// operations remains crate-owned until dtype and backend expansion settles.
 pub trait FloatDType: DType + Neg<Output = Self> {
-    const HALF: Self;
-    const THREE: Self;
-    const GELU_K: Self;
-    const GELU_C: Self;
-
     fn from_usize(value: usize) -> Self;
     fn from_f32(value: f32) -> Self {
         Self::from_f64(value as f64)
@@ -70,11 +80,15 @@ pub trait FloatDType: DType + Neg<Output = Self> {
     }
 }
 
+impl sealed::SealedDType for f32 {}
+
 impl DType for f32 {
     const ID: DTypeId = DTypeId::F32;
     const ZERO: Self = 0.0;
     const ONE: Self = 1.0;
 }
+
+impl sealed::SealedDType for f16 {}
 
 impl DType for f16 {
     const ID: DTypeId = DTypeId::F16;
@@ -83,11 +97,6 @@ impl DType for f16 {
 }
 
 impl FloatDType for f16 {
-    const HALF: Self = f16::from_f32_const(0.5);
-    const THREE: Self = f16::from_f32_const(3.0);
-    const GELU_K: Self = f16::from_f32_const(0.797_884_6);
-    const GELU_C: Self = f16::from_f32_const(0.044_715);
-
     fn from_usize(value: usize) -> Self {
         Self::from_f32(value as f32)
     }
@@ -129,6 +138,8 @@ impl FloatDType for f16 {
     }
 }
 
+impl sealed::SealedDType for bf16 {}
+
 impl DType for bf16 {
     const ID: DTypeId = DTypeId::BF16;
     const ZERO: Self = bf16::ZERO;
@@ -136,11 +147,6 @@ impl DType for bf16 {
 }
 
 impl FloatDType for bf16 {
-    const HALF: Self = bf16::from_f32_const(0.5);
-    const THREE: Self = bf16::from_f32_const(3.0);
-    const GELU_K: Self = bf16::from_f32_const(0.797_884_6);
-    const GELU_C: Self = bf16::from_f32_const(0.044_715);
-
     fn from_usize(value: usize) -> Self {
         Self::from_f32(value as f32)
     }
@@ -183,11 +189,6 @@ impl FloatDType for bf16 {
 }
 
 impl FloatDType for f32 {
-    const HALF: Self = 0.5;
-    const THREE: Self = 3.0;
-    const GELU_K: Self = 0.797_884_6;
-    const GELU_C: Self = 0.044_715;
-
     fn from_usize(value: usize) -> Self {
         value as Self
     }
@@ -229,6 +230,8 @@ impl FloatDType for f32 {
     }
 }
 
+impl sealed::SealedDType for f64 {}
+
 impl DType for f64 {
     const ID: DTypeId = DTypeId::F64;
     const ZERO: Self = 0.0;
@@ -236,11 +239,6 @@ impl DType for f64 {
 }
 
 impl FloatDType for f64 {
-    const HALF: Self = 0.5;
-    const THREE: Self = 3.0;
-    const GELU_K: Self = 0.797_884_560_802_865_4;
-    const GELU_C: Self = 0.044_715;
-
     fn from_usize(value: usize) -> Self {
         value as Self
     }

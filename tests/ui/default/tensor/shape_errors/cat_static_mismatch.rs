@@ -6,5 +6,5 @@ fn main() {
     let lhs = Tensor1D::<2>::zeros().unwrap();
     let rhs = Tensor1D::<3>::zeros().unwrap();
 
-    let _ = lhs.cat1::<C<3>, 4>(&rhs);
+    let _ = lhs.cat::<C<3>, 4>(&rhs);
 }

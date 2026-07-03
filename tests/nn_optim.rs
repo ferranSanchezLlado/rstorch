@@ -19,7 +19,7 @@ fn linear_zeros_forward_and_symbolic_batch() {
     let input =
         Tensor::<D2<Sym<Batch>, C<2>>>::from_vec_with_shape(vec![1.0, 2.0, 3.0, 4.0], [2, 2])
             .unwrap();
-    let mut ctx = Ctx::eval();
+    let mut ctx = TrainContext::eval();
 
     let out: Tensor<D2<Sym<Batch>, C<1>>> = layer.forward(&input, &mut ctx).unwrap();
 
@@ -41,11 +41,35 @@ fn seeded_initialization_is_repeatable_and_non_zero() {
 }
 
 #[test]
+fn named_parameter_traversal_is_deterministic_and_drives_anonymous_order() {
+    let layer = Linear::<3, 2>::zeros().unwrap();
+    let mut named = Vec::new();
+    layer.visit_parameters("", &mut |name, param| {
+        named.push((name.to_owned(), param.id()));
+    });
+
+    let mut anonymous = Vec::new();
+    layer.parameters(&mut anonymous);
+
+    assert_eq!(
+        named
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["weight", "bias"]
+    );
+    assert_eq!(
+        named.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+        anonymous.iter().map(|param| param.id()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn relu_forward_and_backward_use_zero_derivative_at_zero() {
     let x = Tensor1D::<4>::from_vec(vec![-1.0, 0.0, 2.0, 3.0])
         .unwrap()
         .with_requires_grad(true);
-    let y = relu(&x).unwrap();
+    let y = x.relu().unwrap();
 
     assert_eq!(y.to_vec().unwrap(), vec![0.0, 0.0, 2.0, 3.0]);
 
@@ -64,7 +88,7 @@ fn mse_loss_returns_scalar_and_computes_gradients() {
     let target = Tensor1D::<2>::from_vec(vec![0.0, 1.0]).unwrap();
     let loss = mse_loss(&pred, &target).unwrap();
 
-    assert_eq!(loss.shape().dims(), &[]);
+    assert_eq!(loss.shape().dims(), &[] as &[usize]);
     assert_eq!(loss.to_vec().unwrap(), vec![2.5]);
 
     loss.backward().unwrap();
@@ -176,7 +200,7 @@ fn warmup_wraps_a_step_schedule() {
 fn scalar_loss(layer: &Linear<1, 1>) -> Scalar {
     let input = Tensor2D::<1, 1>::from_vec(vec![2.0]).unwrap();
     let target = Tensor2D::<1, 1>::from_vec(vec![4.0]).unwrap();
-    let mut ctx = Ctx::eval();
+    let mut ctx = TrainContext::eval();
     mse_loss(&layer.forward(&input, &mut ctx).unwrap(), &target).unwrap()
 }
 

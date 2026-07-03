@@ -1,25 +1,25 @@
 error[E0080]: evaluation panicked: reshape_with_shape: source elements=12 must equal target elements=8
-  --> src/tensor/ops.rs:83:13
+  --> src/tensor/ops.rs:84:13
    |
-83 | /             const_check::known_size_eq(
-84 | |                 S::KNOWN_NUMEL,
-85 | |                 T::KNOWN_NUMEL,
-86 | |                 "reshape_with_shape",
-87 | |                 "source elements",
-88 | |                 "target elements",
-89 | |             );
+84 | /             const_check::known_size_eq(
+85 | |                 S::KNOWN_NUMEL,
+86 | |                 T::KNOWN_NUMEL,
+87 | |                 "reshape_with_shape",
+88 | |                 "source elements",
+89 | |                 "target elements",
+90 | |             );
    | |_____________^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<6>>>>::reshape_with_shape::<rstorch::D2<rstorch::C<4>, rstorch::C<2>>, [usize; 2]>::{constant#0}` failed here
 
 note: erroneous constant encountered
-  --> src/tensor/ops.rs:82:9
+  --> src/tensor/ops.rs:83:9
    |
-82 | /         const {
-83 | |             const_check::known_size_eq(
-84 | |                 S::KNOWN_NUMEL,
-85 | |                 T::KNOWN_NUMEL,
+83 | /         const {
+84 | |             const_check::known_size_eq(
+85 | |                 S::KNOWN_NUMEL,
+86 | |                 T::KNOWN_NUMEL,
 ...  |
-89 | |             );
-90 | |         };
+90 | |             );
+91 | |         };
    | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`

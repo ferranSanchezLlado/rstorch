@@ -1,4 +1,4 @@
-use super::Backend;
+use super::{Backend, sealed};
 use crate::dtype::DType;
 use std::error;
 use std::fmt;
@@ -12,6 +12,7 @@ pub enum CpuDevice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CpuError {
     LengthMismatch {
         lhs: usize,
@@ -45,6 +46,8 @@ impl fmt::Display for CpuError {
 }
 
 impl error::Error for CpuError {}
+
+impl sealed::SealedBackend for Cpu {}
 
 impl<E: DType> Backend<E> for Cpu {
     type Device = CpuDevice;

@@ -2,14 +2,14 @@ use super::Shape;
 use crate::error::{Result, ShapeError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Layout {
+pub(crate) struct Layout {
     shape: Shape,
     strides: Box<[usize]>,
     offset: usize,
 }
 
 impl Layout {
-    pub fn contiguous(shape: Shape) -> Result<Self> {
+    pub(crate) fn contiguous(shape: Shape) -> Result<Self> {
         let mut strides = vec![0; shape.rank()];
         let mut stride = 1usize;
         for (idx, &dim) in shape.dims().iter().enumerate().rev() {
@@ -49,26 +49,28 @@ impl Layout {
         })
     }
 
-    pub fn shape(&self) -> &Shape {
+    pub(crate) fn shape(&self) -> &Shape {
         &self.shape
     }
 
-    pub fn strides(&self) -> &[usize] {
+    #[cfg(test)]
+    pub(crate) fn strides(&self) -> &[usize] {
         &self.strides
     }
 
-    pub fn offset(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn offset(&self) -> usize {
         self.offset
     }
 
-    pub fn is_contiguous(&self) -> bool {
+    pub(crate) fn is_contiguous(&self) -> bool {
         let Ok(contiguous) = Self::contiguous(self.shape.clone()) else {
             return false;
         };
         self.offset == 0 && self.strides == contiguous.strides
     }
 
-    pub fn numel(&self) -> usize {
+    pub(crate) fn numel(&self) -> usize {
         self.shape
             .numel()
             .expect("constructed layouts have valid numel")

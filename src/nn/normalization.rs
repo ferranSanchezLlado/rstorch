@@ -46,14 +46,14 @@ where
     where
         A: DimSpec,
     {
-        let mean = input.mean_axis1()?;
-        let centered = input.sub_col(&mean)?;
-        let var = centered.mul(&centered)?.mean_axis1()?;
+        let mean = input.mean_last()?;
+        let centered = input.sub_leading_dim(&mean)?;
+        let var = centered.mul(&centered)?.mean_last()?;
         let denom = var.add_scalar(self.eps)?.sqrt()?;
         centered
-            .div_col(&denom)?
-            .mul_row(self.weight.tensor())?
-            .add_row(self.bias.tensor())
+            .div_leading_dim(&denom)?
+            .mul_last_dim(self.weight.tensor())?
+            .add_last_dim(self.bias.tensor())
     }
 }
 
@@ -67,7 +67,7 @@ where
     type Output = Tensor<D2<A, C<FEATURES>>, E, B>;
 }
 
-impl<const FEATURES: usize, A, E, B, Ctx> Module<Tensor<D2<A, C<FEATURES>>, E, B>, Ctx>
+impl<const FEATURES: usize, A, E, B, Context> Module<Tensor<D2<A, C<FEATURES>>, E, B>, Context>
     for LayerNorm<FEATURES, E, B>
 where
     A: DimSpec,
@@ -77,7 +77,7 @@ where
     fn forward(
         &self,
         input: &Tensor<D2<A, C<FEATURES>>, E, B>,
-        _ctx: &mut Ctx,
+        _ctx: &mut Context,
     ) -> Result<Self::Output> {
         self.normalize(input)
     }
@@ -88,13 +88,33 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
-        out.push(self.weight.as_ref());
-        out.push(self.bias.as_ref());
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+        visit(
+            &crate::nn::parameter_path(prefix, "weight"),
+            self.weight.as_ref(),
+        );
+        visit(
+            &crate::nn::parameter_path(prefix, "bias"),
+            self.bias.as_ref(),
+        );
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
-        out.push(self.weight.as_mut());
-        out.push(self.bias.as_mut());
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+        visit(
+            &crate::nn::parameter_path(prefix, "weight"),
+            self.weight.as_mut(),
+        );
+        visit(
+            &crate::nn::parameter_path(prefix, "bias"),
+            self.bias.as_mut(),
+        );
     }
 }

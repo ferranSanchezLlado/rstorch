@@ -1,0 +1,20 @@
+error[E0080]: evaluation panicked: softmax_last: last axis=0 must be greater than 0
+    --> src/tensor/ops.rs:1503:17
+     |
+1503 |         const { const_check::known_nonzero(Cc::KNOWN, "softmax_last", "last axis") };
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D3<rstorch::C<2>, rstorch::C<3>, rstorch::C<0>>>>::softmax_last::{constant#0}` failed here
+
+note: erroneous constant encountered
+    --> src/tensor/ops.rs:1503:9
+     |
+1503 |         const { const_check::known_nonzero(Cc::KNOWN, "softmax_last", "last axis") };
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: the above error was encountered while instantiating `<instantiation>`
+ --> src/main.rs:8:13
+  |
+8 |     let _ = tensor.softmax_last();
+  |             ^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `default-tensor-invalid-values-softmax-last-3d-zero-axis` (bin "default-tensor-invalid-values-softmax-last-3d-zero-axis") due to 1 previous error

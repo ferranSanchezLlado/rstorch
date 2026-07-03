@@ -1,20 +1,20 @@
-error[E0080]: evaluation panicked: log_softmax_axis1: axis 1=0 must be greater than 0
-    --> src/tensor/ops.rs:1009:17
+error[E0080]: evaluation panicked: log_softmax_last: last axis=0 must be greater than 0
+    --> src/tensor/ops.rs:1048:17
      |
-1009 |         const { const_check::known_nonzero(N::KNOWN, "log_softmax_axis1", "axis 1") };
-     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<0>>>>::log_softmax_axis1::{constant#0}` failed here
+1048 |         const { const_check::known_nonzero(N::KNOWN, "log_softmax_last", "last axis") };
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<0>>>>::log_softmax_last::{constant#0}` failed here
 
 note: erroneous constant encountered
-    --> src/tensor/ops.rs:1009:9
+    --> src/tensor/ops.rs:1048:9
      |
-1009 |         const { const_check::known_nonzero(N::KNOWN, "log_softmax_axis1", "axis 1") };
-     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1048 |         const { const_check::known_nonzero(N::KNOWN, "log_softmax_last", "last axis") };
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `<instantiation>`
  --> src/main.rs:8:13
   |
-8 |     let _ = tensor.log_softmax_axis1();
-  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+8 |     let _ = tensor.log_softmax_last();
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For more information about this error, try `rustc --explain E0080`.
 error: could not compile `default-tensor-invalid-values-log-softmax-zero-axis` (bin "default-tensor-invalid-values-log-softmax-zero-axis") due to 1 previous error

@@ -1,6 +1,6 @@
 use super::{RawTensor, Scalar, Tensor, TensorInner};
 use crate::backend::Backend;
-use crate::dtype::FloatDType;
+use crate::dtype::{DType, FloatDType};
 use crate::error::{Result, ShapeError};
 use crate::shape::ShapeSpec;
 use std::cell::Cell;
@@ -40,7 +40,7 @@ impl Drop for NoGradGuard {
 
 pub(crate) struct AutogradMeta<E, B>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     id: u64,
@@ -52,7 +52,7 @@ where
 
 impl<E, B> AutogradMeta<E, B>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     pub(crate) fn leaf() -> Self {
@@ -77,7 +77,7 @@ where
 #[derive(Clone)]
 pub(crate) struct AnyTensor<E, B>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     inner: Arc<TensorInner<E, B>>,
@@ -85,7 +85,7 @@ where
 
 impl<E, B> AnyTensor<E, B>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     pub(crate) fn from_shape<S>(tensor: &Tensor<S, E, B>) -> Self
@@ -103,11 +103,45 @@ type Backward<E, B> =
 
 pub(crate) struct GradFn<E, B>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     pub(crate) parents: Vec<AnyTensor<E, B>>,
     pub(crate) backward: Box<Backward<E, B>>,
+}
+
+impl<S, E, B> Tensor<S, E, B>
+where
+    S: ShapeSpec,
+    E: DType,
+    B: Backend<E>,
+{
+    pub(crate) fn autograd_output(
+        raw: RawTensor<E, B>,
+        parents: Vec<AnyTensor<E, B>>,
+        backward: impl Fn(&RawTensor<E, B>) -> Result<Vec<Option<RawTensor<E, B>>>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<Self> {
+        let requires_grad = is_grad_enabled()
+            && parents
+                .iter()
+                .any(|parent| parent.inner.autograd.requires_grad.load(Ordering::Relaxed));
+        let out = Self::from_raw_non_leaf(raw)?;
+        if requires_grad {
+            out.inner
+                .autograd
+                .requires_grad
+                .store(true, Ordering::Relaxed);
+            *out.inner.autograd.grad_fn.lock().expect("grad_fn poisoned") =
+                Some(Arc::new(GradFn {
+                    parents,
+                    backward: Box::new(backward),
+                }));
+        }
+        Ok(out)
+    }
 }
 
 impl<S, E, B> Tensor<S, E, B>
@@ -165,30 +199,6 @@ where
             .into());
         }
         self.run_backward(seed.raw().clone())
-    }
-
-    pub(crate) fn autograd_output(
-        raw: RawTensor<E, B>,
-        parents: Vec<AnyTensor<E, B>>,
-        backward: impl Fn(&RawTensor<E, B>) -> Result<Vec<Option<RawTensor<E, B>>>>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Result<Self> {
-        let requires_grad = is_grad_enabled()
-            && parents
-                .iter()
-                .any(|parent| parent.inner.autograd.requires_grad.load(Ordering::Relaxed));
-        let out = Self::from_raw_non_leaf(raw)?;
-        if requires_grad {
-            out.set_requires_grad(true);
-            *out.inner.autograd.grad_fn.lock().expect("grad_fn poisoned") =
-                Some(Arc::new(GradFn {
-                    parents,
-                    backward: Box::new(backward),
-                }));
-        }
-        Ok(out)
     }
 
     fn run_backward(&self, seed: RawTensor<E, B>) -> Result<()> {
@@ -307,7 +317,7 @@ where
 
 pub(crate) fn raw_add<E, B>(lhs: &RawTensor<E, B>, rhs: &RawTensor<E, B>) -> Result<RawTensor<E, B>>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     let lhs_data = lhs.to_vec()?;
@@ -327,7 +337,7 @@ pub(crate) fn raw_from_vec_like<E, B>(
     data: Vec<E>,
 ) -> Result<RawTensor<E, B>>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     RawTensor::from_vec_on(like.device().clone(), data, like.shape().clone())
@@ -335,7 +345,7 @@ where
 
 pub(crate) fn raw_full_like<E, B>(like: &RawTensor<E, B>, value: E) -> Result<RawTensor<E, B>>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     raw_from_vec_like(like, vec![value; like.numel()])
@@ -563,7 +573,7 @@ mod tests {
         let b = Tensor1D::<3>::from_vec(vec![3.0, 4.0, 5.0])
             .unwrap()
             .with_requires_grad(true);
-        a.cat1::<C<3>, 5>(&b)
+        a.cat::<C<3>, 5>(&b)
             .unwrap()
             .sum()
             .unwrap()

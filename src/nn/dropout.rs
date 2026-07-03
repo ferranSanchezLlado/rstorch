@@ -36,14 +36,14 @@ where
     type Output = Tensor<S, E, B>;
 }
 
-impl<S, E, B, Ctx> Module<Tensor<S, E, B>, Ctx> for Dropout<E>
+impl<S, E, B, Context> Module<Tensor<S, E, B>, Context> for Dropout<E>
 where
     S: ShapeSpec,
     E: FloatDType,
     B: Backend<E>,
-    Ctx: TrainingMode + RngSource,
+    Context: TrainingMode + RngSource,
 {
-    fn forward(&self, input: &Tensor<S, E, B>, ctx: &mut Ctx) -> Result<Self::Output> {
+    fn forward(&self, input: &Tensor<S, E, B>, ctx: &mut Context) -> Result<Self::Output> {
         if !ctx.is_training() || self.p <= E::ZERO {
             return Ok(input.clone());
         }
@@ -53,7 +53,7 @@ where
         let keep = (0..input.numel())
             .map(|_| rng.uniform(E::ZERO, E::ONE) < keep_prob)
             .collect();
-        let mask = Mask::<S>::from_vec_with_shape(keep, input.shape().clone())?;
+        let mask = Mask::<S, B>::from_vec_with_shape(keep, input.shape().clone())?;
         let zeros = Tensor::<S, E, B>::zeros_with_shape(input.shape().clone())?;
         input
             .mul_scalar(E::ONE / keep_prob)?
@@ -66,7 +66,17 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, _out: &mut Vec<ParameterRef<'a, E, B>>) {}
+    fn visit_parameters<'a>(
+        &'a self,
+        _prefix: &str,
+        _visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+    }
 
-    fn parameters_mut<'a>(&'a mut self, _out: &mut Vec<ParameterRefMut<'a, E, B>>) {}
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        _prefix: &str,
+        _visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+    }
 }

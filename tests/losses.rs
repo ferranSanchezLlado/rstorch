@@ -1,13 +1,15 @@
 use rstorch::prelude::*;
 
 #[test]
-fn cross_entropy_ignore_index_matches_value_and_gradient_rules() {
+fn cross_entropy_options_ignore_index_matches_value_and_gradient_rules() {
     let logits = Tensor2D::<3, 3>::from_vec(vec![1.0, 2.0, 3.0, 9.0, 8.0, 7.0, 0.5, 1.0, -0.5])
         .unwrap()
         .with_requires_grad(true);
     let targets = [2, 99, 1];
 
-    let loss = cross_entropy_ignore_index(&logits, &targets, 99).unwrap();
+    let mut opts = CrossEntropyOpts::default();
+    opts.ignore_index = Some(99);
+    let loss = logits.cross_entropy_with(&targets, opts).unwrap();
     let expected = (row_loss(&[1.0, 2.0, 3.0], 2) + row_loss(&[0.5, 1.0, -0.5], 1)) / 2.0;
     assert_close(loss.to_vec().unwrap()[0], expected, 1e-6);
 
@@ -22,13 +24,13 @@ fn cross_entropy_ignore_index_matches_value_and_gradient_rules() {
     minus[0] -= eps;
     let plus_loss = Tensor2D::<3, 3>::from_vec(plus)
         .unwrap()
-        .cross_entropy_ignore_index(&targets, 99)
+        .cross_entropy_with(&targets, opts)
         .unwrap()
         .to_vec()
         .unwrap()[0];
     let minus_loss = Tensor2D::<3, 3>::from_vec(minus)
         .unwrap()
-        .cross_entropy_ignore_index(&targets, 99)
+        .cross_entropy_with(&targets, opts)
         .unwrap()
         .to_vec()
         .unwrap()[0];

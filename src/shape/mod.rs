@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 
 mod layout;
 
-pub use layout::Layout;
+pub(crate) use layout::Layout;
 
 mod sealed {
     pub trait SealedDim {}

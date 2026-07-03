@@ -360,9 +360,8 @@ mod tests {
         const _: usize =
             const_check::known_size_eq(Some(12), Some(12), "reshape", "source", "target");
         const _: usize = const_check::known_size_eq(None, Some(12), "reshape", "source", "target");
-        const _: usize = const_check::sum_eq(2, 3, 5, "cat1", "lhs", "rhs", "out");
-        const _: usize =
-            const_check::known_sum_eq(Some(2), Some(3), 5, "cat1", "lhs", "rhs", "out");
+        const _: usize = const_check::sum_eq(2, 3, 5, "cat", "lhs", "rhs", "out");
+        const _: usize = const_check::known_sum_eq(Some(2), Some(3), 5, "cat", "lhs", "rhs", "out");
         const _: usize = const_check::sum_nonzero(1, 0, "xavier", "in", "out", "sum");
         const _: usize = const_check::mul_eq(2, 4, 8, "heads", "heads", "dim", "embed");
         const _: usize = const_check::mul_fits(2, 4, "init", "lhs", "rhs");

@@ -37,19 +37,19 @@ fn reductions_softmax_and_cross_entropy_work() {
         .with_requires_grad(true);
 
     assert_eq!(
-        logits.sum_axis0().unwrap().to_vec().unwrap(),
+        logits.sum_leading().unwrap().to_vec().unwrap(),
         vec![2.0, 2.0, 2.0]
     );
     assert_eq!(
-        logits.mean_axis1().unwrap().to_vec().unwrap(),
+        logits.mean_last().unwrap().to_vec().unwrap(),
         vec![2.0, 0.0]
     );
 
-    let softmax = logits.softmax_axis1().unwrap().to_vec().unwrap();
+    let softmax = logits.softmax_last().unwrap().to_vec().unwrap();
     assert_close(softmax[0] + softmax[1] + softmax[2], 1.0, 1e-6);
     assert_close(softmax[3] + softmax[4] + softmax[5], 1.0, 1e-6);
 
-    let loss = cross_entropy(&logits, &[2, 0]).unwrap();
+    let loss = logits.cross_entropy(&[2, 0]).unwrap();
     assert_close(loss.to_vec().unwrap()[0], 0.407_605_95, 1e-6);
     loss.backward().unwrap();
 
@@ -62,12 +62,12 @@ fn reductions_softmax_and_cross_entropy_work() {
 fn cross_entropy_and_log_softmax_stay_finite_on_extreme_logits() {
     let extreme = Tensor2D::<1, 2>::from_vec(vec![0.0, -1000.0]).unwrap();
     assert_close(
-        cross_entropy(&extreme, &[1]).unwrap().to_vec().unwrap()[0],
+        extreme.cross_entropy(&[1]).unwrap().to_vec().unwrap()[0],
         1000.0,
         1e-3,
     );
     assert_close(
-        extreme.log_softmax_axis1().unwrap().to_vec().unwrap()[1],
+        extreme.log_softmax_last().unwrap().to_vec().unwrap()[1],
         -1000.0,
         1e-3,
     );
@@ -80,14 +80,19 @@ fn broadcasts_masks_and_indexing_have_gradients() {
         .with_requires_grad(true);
     let col = Tensor1D::<2>::from_vec(vec![10.0, 20.0]).unwrap();
     assert_eq!(
-        x.add_col(&col).unwrap().to_vec().unwrap(),
+        x.add_leading_dim(&col).unwrap().to_vec().unwrap(),
         vec![11.0, 12.0, 13.0, 24.0, 25.0, 26.0]
     );
 
     let row = Tensor1D::<3>::from_vec(vec![1.0, 2.0, 3.0])
         .unwrap()
         .with_requires_grad(true);
-    x.mul_row(&row).unwrap().sum().unwrap().backward().unwrap();
+    x.mul_last_dim(&row)
+        .unwrap()
+        .sum()
+        .unwrap()
+        .backward()
+        .unwrap();
     assert_eq!(row.grad().unwrap().to_vec().unwrap(), vec![5.0, 7.0, 9.0]);
     x.zero_grad();
 
@@ -149,7 +154,7 @@ fn gelu_softmax_and_log_softmax_gradients_match_finite_difference() {
     let x = Tensor2D::<2, 3, f64>::from_vec(data.clone())
         .unwrap()
         .with_requires_grad(true);
-    x.softmax_axis1()
+    x.softmax_last()
         .unwrap()
         .mul(&weights)
         .unwrap()
@@ -162,7 +167,7 @@ fn gelu_softmax_and_log_softmax_gradients_match_finite_difference() {
         let numerical = finite_difference(&data, idx, 1e-6, |values| {
             Tensor2D::<2, 3, f64>::from_vec(values.to_vec())
                 .unwrap()
-                .softmax_axis1()
+                .softmax_last()
                 .unwrap()
                 .mul(&weights)
                 .unwrap()
@@ -177,7 +182,7 @@ fn gelu_softmax_and_log_softmax_gradients_match_finite_difference() {
     let x = Tensor2D::<2, 3, f64>::from_vec(data.clone())
         .unwrap()
         .with_requires_grad(true);
-    x.log_softmax_axis1()
+    x.log_softmax_last()
         .unwrap()
         .mul(&weights)
         .unwrap()
@@ -190,7 +195,7 @@ fn gelu_softmax_and_log_softmax_gradients_match_finite_difference() {
         let numerical = finite_difference(&data, idx, 1e-6, |values| {
             Tensor2D::<2, 3, f64>::from_vec(values.to_vec())
                 .unwrap()
-                .log_softmax_axis1()
+                .log_softmax_last()
                 .unwrap()
                 .mul(&weights)
                 .unwrap()

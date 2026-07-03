@@ -1,4 +1,4 @@
-use super::Backend;
+use super::{Backend, sealed};
 use crate::dtype::{DType, f16};
 use std::error;
 use std::fmt;
@@ -29,6 +29,7 @@ pub struct WgpuStorage {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum WgpuError {
     NoAdapter,
     MissingFeature(&'static str),
@@ -96,6 +97,8 @@ impl fmt::Display for WgpuError {
 }
 
 impl error::Error for WgpuError {}
+
+impl sealed::SealedBackend for Wgpu {}
 
 trait WgpuDType: DType {
     const FEATURES: wgpu_rs::Features;

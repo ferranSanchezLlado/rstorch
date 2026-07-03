@@ -1,45 +1,8 @@
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
-use crate::error::Result;
 use crate::nn::{HasParameters, Layer, Module, ParameterRef, ParameterRefMut};
 use crate::shape::ShapeSpec;
 use crate::tensor::Tensor;
-
-pub fn relu<S, E, B>(input: &Tensor<S, E, B>) -> Result<Tensor<S, E, B>>
-where
-    S: ShapeSpec,
-    E: FloatDType,
-    B: Backend<E>,
-{
-    input.relu()
-}
-
-pub fn sigmoid<S, E, B>(input: &Tensor<S, E, B>) -> Result<Tensor<S, E, B>>
-where
-    S: ShapeSpec,
-    E: FloatDType,
-    B: Backend<E>,
-{
-    input.sigmoid()
-}
-
-pub fn tanh<S, E, B>(input: &Tensor<S, E, B>) -> Result<Tensor<S, E, B>>
-where
-    S: ShapeSpec,
-    E: FloatDType,
-    B: Backend<E>,
-{
-    input.tanh()
-}
-
-pub fn gelu<S, E, B>(input: &Tensor<S, E, B>) -> Result<Tensor<S, E, B>>
-where
-    S: ShapeSpec,
-    E: FloatDType,
-    B: Backend<E>,
-{
-    input.gelu()
-}
 
 /// Defines a stateless activation `Module` that forwards to a tensor method.
 ///
@@ -64,14 +27,14 @@ macro_rules! activation_module {
             type Output = Tensor<S, E, B>;
         }
 
-        impl<S, E, B, Ctx> Module<Tensor<S, E, B>, Ctx> for $name
+        impl<S, E, B, Context> Module<Tensor<S, E, B>, Context> for $name
         where
             S: ShapeSpec,
             E: FloatDType,
             B: Backend<E>,
         {
 
-            fn forward(&self, input: &Tensor<S, E, B>, _ctx: &mut Ctx) -> Result<Self::Output> {
+            fn forward(&self, input: &Tensor<S, E, B>, _ctx: &mut Context) -> crate::error::Result<Self::Output> {
                 input.$method()
             }
         }
@@ -81,20 +44,30 @@ macro_rules! activation_module {
             E: FloatDType,
             B: Backend<E>,
         {
-            fn parameters<'a>(&'a self, _out: &mut Vec<ParameterRef<'a, E, B>>) {}
+            fn visit_parameters<'a>(
+                &'a self,
+                _prefix: &str,
+                _visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+            ) {
+            }
 
-            fn parameters_mut<'a>(&'a mut self, _out: &mut Vec<ParameterRefMut<'a, E, B>>) {}
+            fn visit_parameters_mut<'a>(
+                &'a mut self,
+                _prefix: &str,
+                _visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+            ) {
+            }
         }
     };
 }
 
 activation_module!(
-    /// Rectified linear unit module form of [`relu`].
+    /// Rectified linear unit module form of [`Tensor::relu`](crate::tensor::Tensor::relu).
     Relu => relu;
-    /// Logistic sigmoid module form of [`sigmoid`].
+    /// Logistic sigmoid module form of [`Tensor::sigmoid`](crate::tensor::Tensor::sigmoid).
     Sigmoid => sigmoid;
-    /// Hyperbolic tangent module form of [`tanh`].
+    /// Hyperbolic tangent module form of [`Tensor::tanh`](crate::tensor::Tensor::tanh).
     Tanh => tanh;
-    /// Gaussian error linear unit module form of [`gelu`].
+    /// Gaussian error linear unit module form of [`Tensor::gelu`](crate::tensor::Tensor::gelu).
     Gelu => gelu;
 );

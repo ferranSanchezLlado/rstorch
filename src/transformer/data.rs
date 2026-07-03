@@ -1,3 +1,4 @@
+use crate::backend::Cpu;
 use crate::data::Dataset;
 use crate::error::{DataError, Result, const_check};
 use crate::shape::{C, D2};
@@ -76,7 +77,7 @@ impl<const SEQ: usize> Dataset for TextSequenceDataset<SEQ> {
 pub struct PaddedCausalLmBatch<const BATCH: usize, const SEQ: usize> {
     pub input: [[usize; SEQ]; BATCH],
     pub target: [[usize; SEQ]; BATCH],
-    pub padding_mask: Mask<D2<C<BATCH>, C<SEQ>>>,
+    pub padding_mask: Mask<D2<C<BATCH>, C<SEQ>>, Cpu>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,8 +86,14 @@ pub struct PaddedCausalLmCollator<const BATCH: usize, const SEQ: usize> {
 }
 
 impl<const BATCH: usize, const SEQ: usize> PaddedCausalLmCollator<BATCH, SEQ> {
-    pub fn new(pad_id: usize) -> Self {
-        Self { pad_id }
+    pub fn new<T>(tokenizer: &T) -> Result<Self>
+    where
+        T: Tokenizer,
+    {
+        let pad_id = tokenizer
+            .pad_id()
+            .ok_or(DataError::MissingSpecialToken { token: "pad" })?;
+        Ok(Self { pad_id })
     }
 
     pub fn collate(&self, sequences: Vec<Vec<usize>>) -> Result<PaddedCausalLmBatch<BATCH, SEQ>> {

@@ -146,8 +146,12 @@ impl<D, S, C> DataLoader<D, S, C> {
         C: Collate<D::Item>,
         C::Error: Into<Error>,
     {
-        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed);
+        let epoch = self.epoch.load(Ordering::Relaxed);
         self.iter_epoch(epoch)
+    }
+
+    pub fn set_epoch(&self, epoch: u64) {
+        self.epoch.store(epoch, Ordering::Relaxed);
     }
 
     pub fn iter_epoch(&self, epoch: u64) -> DataLoaderIter<'_, D, S, C>
@@ -214,8 +218,12 @@ impl<D, S, C, const BATCH: usize> StaticDataLoader<D, S, C, BATCH> {
         C: Collate<D::Item>,
         C::Error: Into<Error>,
     {
-        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed);
+        let epoch = self.epoch.load(Ordering::Relaxed);
         self.iter_epoch(epoch)
+    }
+
+    pub fn set_epoch(&self, epoch: u64) {
+        self.epoch.store(epoch, Ordering::Relaxed);
     }
 
     pub fn iter_epoch(&self, epoch: u64) -> StaticDataLoaderIter<'_, D, S, C, BATCH>
@@ -411,7 +419,7 @@ mod tests {
         static_features,
     };
     use crate::error::Error;
-    use crate::nn::{Ctx, HasParameters, Linear, Module, mse_loss};
+    use crate::nn::{HasParameters, Linear, Module, TrainContext, mse_loss};
     use crate::optim::{Optimizer, Sgd};
     use crate::shape::{C, D2, Sym};
     use crate::tensor::Tensor;
@@ -463,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn dataloader_advances_shuffle_epoch_between_passes() {
+    fn dataloader_iter_uses_stable_epoch_between_passes() {
         let dataset = VecDataset::new((0..8).map(|value| vec![value as f32]).collect());
         let sampler = ShuffleSampler::new(7);
         let loader =
@@ -472,11 +480,14 @@ mod tests {
         let first = loader.iter().next().unwrap().unwrap().to_vec().unwrap();
         let second = loader.iter().next().unwrap().unwrap().to_vec().unwrap();
         let expected_first: Vec<_> = sampler.indices(8, 0).map(|v| v as f32).collect();
-        let expected_second: Vec<_> = sampler.indices(8, 1).map(|v| v as f32).collect();
 
         assert_eq!(first, expected_first);
-        assert_eq!(second, expected_second);
-        assert_ne!(first, second);
+        assert_eq!(second, expected_first);
+
+        loader.set_epoch(1);
+        let third = loader.iter().next().unwrap().unwrap().to_vec().unwrap();
+        let expected_third: Vec<_> = sampler.indices(8, 1).map(|v| v as f32).collect();
+        assert_eq!(third, expected_third);
     }
 
     #[test]
@@ -532,7 +543,7 @@ mod tests {
 
             for batch in &loader {
                 let (x, y) = batch.unwrap();
-                let pred = model.forward(&x, &mut Ctx::eval()).unwrap();
+                let pred = model.forward(&x, &mut TrainContext::eval()).unwrap();
                 mse_loss(&pred, &y).unwrap().backward().unwrap();
             }
 
@@ -559,7 +570,7 @@ mod tests {
         let mut total = 0.0;
         for batch in loader {
             let (x, y) = batch.unwrap();
-            total += mse_loss(&model.forward(&x, &mut Ctx::eval()).unwrap(), &y)
+            total += mse_loss(&model.forward(&x, &mut TrainContext::eval()).unwrap(), &y)
                 .unwrap()
                 .to_vec()
                 .unwrap()[0];

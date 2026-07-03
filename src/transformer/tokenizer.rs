@@ -4,13 +4,31 @@ const SPECIALS: usize = 4;
 const BYTE_BASE: usize = 256;
 
 pub trait Tokenizer {
+    /// Encodes text into token ids.
+    ///
+    /// Implementations keep this infallible. Unknown input should be substituted
+    /// with an implementation-defined unknown token when one exists, or encoded
+    /// by the tokenizer's native fallback strategy.
     fn encode(&self, text: &str, add_special_tokens: bool) -> Vec<usize>;
+
+    /// Decodes token ids into text.
+    ///
+    /// Implementations keep this infallible and may be lossy for invalid byte
+    /// sequences or ids that do not map to text.
     fn decode(&self, ids: &[usize]) -> String;
     fn vocab_size(&self) -> usize;
-    fn pad_id(&self) -> usize;
-    fn unk_id(&self) -> usize;
-    fn bos_id(&self) -> usize;
-    fn eos_id(&self) -> usize;
+    fn pad_id(&self) -> Option<usize> {
+        None
+    }
+    fn unk_id(&self) -> Option<usize> {
+        None
+    }
+    fn bos_id(&self) -> Option<usize> {
+        None
+    }
+    fn eos_id(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,20 +68,20 @@ impl CharTokenizer {
         self.chars.len() + 4
     }
 
-    pub fn pad_id(&self) -> usize {
-        self.pad_id
+    pub fn pad_id(&self) -> Option<usize> {
+        Some(self.pad_id)
     }
 
-    pub fn unk_id(&self) -> usize {
-        self.unk_id
+    pub fn unk_id(&self) -> Option<usize> {
+        Some(self.unk_id)
     }
 
-    pub fn bos_id(&self) -> usize {
-        self.bos_id
+    pub fn bos_id(&self) -> Option<usize> {
+        Some(self.bos_id)
     }
 
-    pub fn eos_id(&self) -> usize {
-        self.eos_id
+    pub fn eos_id(&self) -> Option<usize> {
+        Some(self.eos_id)
     }
 
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Vec<usize> {
@@ -111,19 +129,19 @@ impl Tokenizer for CharTokenizer {
         CharTokenizer::vocab_size(self)
     }
 
-    fn pad_id(&self) -> usize {
+    fn pad_id(&self) -> Option<usize> {
         CharTokenizer::pad_id(self)
     }
 
-    fn unk_id(&self) -> usize {
+    fn unk_id(&self) -> Option<usize> {
         CharTokenizer::unk_id(self)
     }
 
-    fn bos_id(&self) -> usize {
+    fn bos_id(&self) -> Option<usize> {
         CharTokenizer::bos_id(self)
     }
 
-    fn eos_id(&self) -> usize {
+    fn eos_id(&self) -> Option<usize> {
         CharTokenizer::eos_id(self)
     }
 }
@@ -175,8 +193,8 @@ impl BpeTokenizer {
 impl Tokenizer for BpeTokenizer {
     fn encode(&self, text: &str, add_special_tokens: bool) -> Vec<usize> {
         let mut out = Vec::new();
-        if add_special_tokens {
-            out.push(self.bos_id());
+        if add_special_tokens && let Some(bos_id) = self.bos_id() {
+            out.push(bos_id);
         }
         let mut symbols: Vec<usize> = text.bytes().map(byte_id).collect();
         for &pair in &self.merges {
@@ -184,8 +202,8 @@ impl Tokenizer for BpeTokenizer {
             symbols = apply_pair_merge(&symbols, pair, merged_id);
         }
         out.extend(symbols);
-        if add_special_tokens {
-            out.push(self.eos_id());
+        if add_special_tokens && let Some(eos_id) = self.eos_id() {
+            out.push(eos_id);
         }
         out
     }
@@ -193,7 +211,7 @@ impl Tokenizer for BpeTokenizer {
     fn decode(&self, ids: &[usize]) -> String {
         let mut bytes = Vec::new();
         for &id in ids {
-            if id == self.pad_id() || id == self.bos_id() || id == self.eos_id() {
+            if Some(id) == self.pad_id() || Some(id) == self.bos_id() || Some(id) == self.eos_id() {
                 continue;
             }
             if let Some(piece) = self.token_bytes.get(id) {
@@ -207,20 +225,20 @@ impl Tokenizer for BpeTokenizer {
         self.token_bytes.len()
     }
 
-    fn pad_id(&self) -> usize {
-        0
+    fn pad_id(&self) -> Option<usize> {
+        Some(0)
     }
 
-    fn unk_id(&self) -> usize {
-        1
+    fn unk_id(&self) -> Option<usize> {
+        Some(1)
     }
 
-    fn bos_id(&self) -> usize {
-        2
+    fn bos_id(&self) -> Option<usize> {
+        Some(2)
     }
 
-    fn eos_id(&self) -> usize {
-        3
+    fn eos_id(&self) -> Option<usize> {
+        Some(3)
     }
 }
 

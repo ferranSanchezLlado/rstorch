@@ -14,6 +14,11 @@ impl SmallRng {
         low + (high - low) * E::from_f64(self.next_unit())
     }
 
+    /// Samples uniformly from `0..upper`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `upper == 0`.
     pub fn gen_range(&mut self, upper: usize) -> usize {
         assert!(upper > 0, "upper bound must be greater than zero");
         ((self.next_u64() as u128 * upper as u128) >> 64) as usize

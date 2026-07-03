@@ -121,8 +121,8 @@ pub trait Layer<Input: ?Sized> {
     type Output;
 }
 
-pub trait Module<Input: ?Sized, Ctx>: Layer<Input> {
-    fn forward(&self, input: &Input, ctx: &mut Ctx) -> Result<Self::Output>;
+pub trait Module<Input: ?Sized, Context>: Layer<Input> {
+    fn forward(&self, input: &Input, ctx: &mut Context) -> Result<Self::Output>;
 }
 
 pub trait HasParameters<E, B>
@@ -130,8 +130,33 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>);
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>);
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    );
+
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    );
+
+    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
+        self.visit_parameters("", &mut |_, param| out.push(param));
+    }
+
+    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
+        self.visit_parameters_mut("", &mut |_, param| out.push(param));
+    }
+}
+
+pub(crate) fn parameter_path(prefix: &str, segment: &str) -> String {
+    if prefix.is_empty() {
+        segment.to_owned()
+    } else {
+        format!("{prefix}.{segment}")
+    }
 }
 
 pub struct ParameterRef<'a, E, B>
@@ -173,18 +198,33 @@ where
         self.inner.id()
     }
 
+    /// Returns parameter data through the current host round-trip path.
+    ///
+    /// This data-access surface is intentionally unstable for external
+    /// optimizer implementors until backend parity settles the device-resident
+    /// optimizer kernel set. Built-in CPU optimizers may continue using this
+    /// path in the interim.
     pub fn data(&self) -> Result<Vec<E>> {
         self.inner.data()
     }
 
+    /// Returns gradient data through the current host round-trip path.
+    ///
+    /// See [`Self::data`] for the optimizer data-access stability note.
     pub fn grad(&self) -> Result<Option<Vec<E>>> {
         self.inner.grad()
     }
 
+    /// Sets gradient data through the current host round-trip path.
+    ///
+    /// See [`Self::data`] for the optimizer data-access stability note.
     pub fn set_grad(&mut self, grad: Vec<E>) -> Result<()> {
         self.inner.set_grad(grad)
     }
 
+    /// Sets parameter data through the current host round-trip path.
+    ///
+    /// See [`Self::data`] for the optimizer data-access stability note.
     pub fn set_data(&mut self, data: Vec<E>) -> Result<()> {
         self.inner.set_data(data)
     }

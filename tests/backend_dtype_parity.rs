@@ -112,13 +112,13 @@ where
     let cat_lhs = Tensor::<D1<C<2>>, E, B>::from_vec(values(&[1.0, 2.0])).unwrap();
     let cat_rhs = Tensor1D::<3, E, B>::from_vec(values(&[3.0, 4.0, 5.0])).unwrap();
     assert_vec_eq(
-        cat_lhs.cat1::<C<3>, 5>(&cat_rhs).unwrap().to_vec().unwrap(),
+        cat_lhs.cat::<C<3>, 5>(&cat_rhs).unwrap().to_vec().unwrap(),
         &[1.0, 2.0, 3.0, 4.0, 5.0],
     );
 
     let row = Tensor1D::<3, E, B>::from_vec(values(&[10.0, 20.0, 30.0])).unwrap();
     assert_vec_eq(
-        mat_lhs.add_row(&row).unwrap().to_vec().unwrap(),
+        mat_lhs.add_last_dim(&row).unwrap().to_vec().unwrap(),
         &[11.0, 22.0, 33.0, 14.0, 25.0, 36.0],
     );
 
@@ -203,17 +203,17 @@ fn to_and_cast_convert_dtype_and_detach_from_autograd() {
 }
 
 #[test]
-fn to_changes_dtype_and_device_while_cast_and_to_device_are_specific() {
+fn cast_and_to_backend_convert_dtype_or_backend_and_detach() {
     let source = Tensor1D::<4, f32, Cpu>::from_vec(vec![1.0, 2.0, 3.0, 4.0])
         .unwrap()
         .with_requires_grad(true);
 
-    let same_dtype: Tensor1D<4, f32, Cpu> = source.to_device::<Cpu>().unwrap();
+    let same_dtype: Tensor1D<4, f32, Cpu> = source.to_backend::<Cpu>().unwrap();
     assert_eq!(same_dtype.dtype(), DTypeId::F32);
     assert_eq!(same_dtype.to_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
     assert!(!same_dtype.requires_grad());
 
-    let changed_dtype: Tensor1D<4, f64, Cpu> = source.to::<f64, Cpu>().unwrap();
+    let changed_dtype: Tensor1D<4, f64, Cpu> = source.cast::<f64>().unwrap();
     assert_eq!(changed_dtype.dtype(), DTypeId::F64);
     assert_eq!(changed_dtype.to_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
     assert!(!changed_dtype.requires_grad());
@@ -335,25 +335,25 @@ fn cuda_transfers_dtype_and_device() {
     }
 
     let cpu = Tensor1D::<4, f32, Cpu>::from_vec(vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-    let cuda: Tensor1D<4, f32, Cuda> = cpu.to::<f32, Cuda>().unwrap();
+    let cuda: Tensor1D<4, f32, Cuda> = cpu.to_backend::<Cuda>().unwrap();
     assert_eq!(cuda.dtype(), DTypeId::F32);
     assert_eq!(cuda.to_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 
-    let back: Tensor1D<4, f32, Cpu> = cuda.to_device::<Cpu>().unwrap();
+    let back: Tensor1D<4, f32, Cpu> = cuda.to_backend::<Cpu>().unwrap();
     assert_eq!(back.to_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 
-    let half: Tensor1D<4, f16, Cuda> = cpu.to::<f16, Cuda>().unwrap();
+    let half: Tensor1D<4, f16, Cuda> = cpu.cast::<f16>().unwrap().to_backend::<Cuda>().unwrap();
     assert_eq!(half.dtype(), DTypeId::F16);
     assert_eq!(half.to_vec().unwrap(), values::<f16>(&[1.0, 2.0, 3.0, 4.0]));
 
-    let bfloat: Tensor1D<4, bf16, Cuda> = half.to::<bf16, Cuda>().unwrap();
+    let bfloat: Tensor1D<4, bf16, Cuda> = half.cast::<bf16>().unwrap();
     assert_eq!(bfloat.dtype(), DTypeId::BF16);
     assert_eq!(
         bfloat.to_vec().unwrap(),
         values::<bf16>(&[1.0, 2.0, 3.0, 4.0])
     );
 
-    let double: Tensor1D<4, f64, Cuda> = bfloat.to::<f64, Cuda>().unwrap();
+    let double: Tensor1D<4, f64, Cuda> = bfloat.cast::<f64>().unwrap();
     assert_eq!(double.dtype(), DTypeId::F64);
     assert_eq!(double.to_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 }
@@ -416,14 +416,14 @@ fn metal_transfers_dtype_and_device() {
     }
 
     let cpu = Tensor1D::<4, f32, Cpu>::from_vec(vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-    let metal: Tensor1D<4, f16, Metal> = cpu.to::<f16, Metal>().unwrap();
+    let metal: Tensor1D<4, f16, Metal> = cpu.cast::<f16>().unwrap().to_backend::<Metal>().unwrap();
     assert_eq!(metal.dtype(), DTypeId::F16);
     assert_eq!(
         metal.to_vec().unwrap(),
         values::<f16>(&[1.0, 2.0, 3.0, 4.0])
     );
 
-    let back: Tensor1D<4, f32, Cpu> = metal.to::<f32, Cpu>().unwrap();
+    let back: Tensor1D<4, f32, Cpu> = metal.cast::<f32>().unwrap().to_backend::<Cpu>().unwrap();
     assert_eq!(back.to_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 }
 
@@ -485,10 +485,10 @@ fn wgpu_transfers_dtype_and_device_when_shader_f16_is_available() {
     }
 
     let cpu = Tensor1D::<4, f32, Cpu>::from_vec(vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-    let wgpu: Tensor1D<4, f16, Wgpu> = cpu.to::<f16, Wgpu>().unwrap();
+    let wgpu: Tensor1D<4, f16, Wgpu> = cpu.cast::<f16>().unwrap().to_backend::<Wgpu>().unwrap();
     assert_eq!(wgpu.dtype(), DTypeId::F16);
     assert_eq!(wgpu.to_vec().unwrap(), values::<f16>(&[1.0, 2.0, 3.0, 4.0]));
 
-    let back: Tensor1D<4, f32, Cpu> = wgpu.to::<f32, Cpu>().unwrap();
+    let back: Tensor1D<4, f32, Cpu> = wgpu.cast::<f32>().unwrap().to_backend::<Cpu>().unwrap();
     assert_eq!(back.to_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 }

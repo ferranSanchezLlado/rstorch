@@ -2,6 +2,7 @@ use std::error;
 use std::fmt;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DataError {
     IndexOutOfBounds {
         index: usize,
@@ -22,6 +23,9 @@ pub enum DataError {
     },
     InvalidTensorDataset {
         reason: &'static str,
+    },
+    MissingSpecialToken {
+        token: &'static str,
     },
     Io {
         source: std::io::Error,
@@ -53,6 +57,9 @@ impl fmt::Display for DataError {
                 "inconsistent sample shape at index {index}: expected {expected:?}, found {found:?}"
             ),
             Self::InvalidTensorDataset { reason } => write!(f, "invalid tensor dataset: {reason}"),
+            Self::MissingSpecialToken { token } => {
+                write!(f, "tokenizer does not define required {token} token")
+            }
             Self::Io { source } => write!(f, "io error: {source}"),
             Self::Parse { source } => write!(f, "parse error: {source}"),
         }

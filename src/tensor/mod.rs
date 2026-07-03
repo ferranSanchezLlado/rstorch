@@ -3,9 +3,9 @@ mod ops;
 mod raw;
 
 use crate::backend::{Backend, Cpu};
-use crate::dtype::{DTypeId, FloatDType};
+use crate::dtype::{DType, DTypeId, FloatDType};
 use crate::error::Result;
-use crate::shape::{C, D0, D1, D2, D3, D4, Layout, Shape, ShapeSpec, StaticShape};
+use crate::shape::{C, D0, D1, D2, D3, D4, Shape, ShapeSpec, StaticShape};
 pub use autograd::{NoGradGuard, is_grad_enabled, no_grad};
 use raw::RawTensor;
 use std::fmt::Debug;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 pub struct Tensor<S, E = f32, B = Cpu>
 where
     S: ShapeSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     inner: Arc<TensorInner<E, B>>,
@@ -24,7 +24,7 @@ where
 
 struct TensorInner<E, B>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     raw: RawTensor<E, B>,
@@ -45,17 +45,24 @@ pub type Tensor4D<
     B = Cpu,
 > = Tensor<D4<C<N>, C<CH>, C<H>, C<W>>, E, B>;
 
+/// Boolean mask with shape and backend markers.
+///
+/// The current implementation stores host `bool` values internally. The
+/// backend type parameter is part of the public type now so a future bool-dtype
+/// or backend-owned mask representation can be added without a structural API
+/// change.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Mask<S>
+pub struct Mask<S, B = Cpu>
 where
     S: ShapeSpec,
 {
     shape: Shape,
     values: Vec<bool>,
     _shape: PhantomData<S>,
+    _backend: PhantomData<B>,
 }
 
-impl<S> Mask<S>
+impl<S, B> Mask<S, B>
 where
     S: ShapeSpec,
 {
@@ -74,6 +81,7 @@ where
             shape,
             values,
             _shape: PhantomData,
+            _backend: PhantomData,
         })
     }
 
@@ -81,12 +89,12 @@ where
         &self.shape
     }
 
-    pub fn values(&self) -> &[bool] {
-        &self.values
+    pub fn to_vec(&self) -> Result<Vec<bool>> {
+        Ok(self.values.clone())
     }
 }
 
-impl<S> Mask<S>
+impl<S, B> Mask<S, B>
 where
     S: StaticShape,
 {
@@ -98,7 +106,7 @@ where
 impl<S, E, B> Clone for Tensor<S, E, B>
 where
     S: ShapeSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     fn clone(&self) -> Self {
@@ -112,7 +120,7 @@ where
 impl<S, E, B> Debug for Tensor<S, E, B>
 where
     S: ShapeSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
     B::Device: Debug,
 {
@@ -128,7 +136,7 @@ where
 impl<S, E, B> Tensor<S, E, B>
 where
     S: StaticShape,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     pub fn zeros() -> Result<Self> {
@@ -147,7 +155,7 @@ where
 impl<S, E, B> Tensor<S, E, B>
 where
     S: ShapeSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     pub fn zeros_with_shape(shape: impl Into<Shape>) -> Result<Self> {
@@ -174,7 +182,7 @@ where
         self.raw().shape()
     }
 
-    pub fn layout(&self) -> &Layout {
+    pub(crate) fn layout(&self) -> &crate::shape::Layout {
         self.raw().layout()
     }
 
@@ -190,62 +198,51 @@ where
         self.raw().to_vec()
     }
 
-    pub fn to<F, C>(&self) -> Result<Tensor<S, F, C>>
-    where
-        F: FloatDType,
-        C: Backend<F>,
-    {
-        let device = C::default_device().map_err(crate::error::Error::backend)?;
-        self.to_on::<F, C>(device)
-    }
-
+    /// Casts this tensor to another floating dtype and returns a detached leaf.
+    ///
+    /// Conversion methods intentionally detach from autograd graphs. Graphs are
+    /// single-dtype and single-backend; compose `cast`, `to_backend`, and
+    /// `to_backend_on` before enabling gradients for converted tensors.
     pub fn cast<F>(&self) -> Result<Tensor<S, F, B>>
     where
+        E: FloatDType,
         F: FloatDType,
         B: Backend<F, Device = <B as Backend<E>>::Device>,
-    {
-        self.to_on::<F, B>(self.device().clone())
-    }
-
-    pub fn to_device<C>(&self) -> Result<Tensor<S, E, C>>
-    where
-        C: Backend<E>,
-    {
-        self.to::<E, C>()
-    }
-
-    pub fn to_backend<C>(&self) -> Result<Tensor<S, E, C>>
-    where
-        C: Backend<E>,
-    {
-        self.to_device::<C>()
-    }
-
-    pub fn to_device_on<C>(&self, device: C::Device) -> Result<Tensor<S, E, C>>
-    where
-        C: Backend<E>,
-    {
-        self.to_on::<E, C>(device)
-    }
-
-    pub fn to_on<F, C>(&self, device: C::Device) -> Result<Tensor<S, F, C>>
-    where
-        F: FloatDType,
-        C: Backend<F>,
     {
         let data = self
             .to_vec()?
             .into_iter()
             .map(|value| F::from_f64(value.to_f64()))
             .collect();
-        let raw = RawTensor::<F, C>::from_vec_on(device, data, self.shape().clone())?;
-        Tensor::<S, F, C>::from_raw(raw)
+        let raw =
+            RawTensor::<F, B>::from_vec_on(self.device().clone(), data, self.shape().clone())?;
+        Tensor::<S, F, B>::from_raw(raw)
     }
 
-    pub(crate) fn replace_data(&mut self, data: Vec<E>) -> Result<()> {
-        let raw = RawTensor::from_vec_on(self.device().clone(), data, self.shape().clone())?;
-        *self = Self::from_raw(raw)?.with_requires_grad(true);
-        Ok(())
+    /// Moves this tensor to another backend's default device as a detached leaf.
+    ///
+    /// Conversion methods intentionally detach from autograd graphs. Graphs are
+    /// single-dtype and single-backend; compose `cast`, `to_backend`, and
+    /// `to_backend_on` before enabling gradients for converted tensors.
+    pub fn to_backend<C>(&self) -> Result<Tensor<S, E, C>>
+    where
+        C: Backend<E>,
+    {
+        let device = C::default_device().map_err(crate::error::Error::backend)?;
+        self.to_backend_on::<C>(device)
+    }
+
+    /// Moves this tensor to an explicit backend device as a detached leaf.
+    ///
+    /// Conversion methods intentionally detach from autograd graphs. Graphs are
+    /// single-dtype and single-backend; compose `cast`, `to_backend`, and
+    /// `to_backend_on` before enabling gradients for converted tensors.
+    pub fn to_backend_on<C>(&self, device: C::Device) -> Result<Tensor<S, E, C>>
+    where
+        C: Backend<E>,
+    {
+        let raw = RawTensor::<E, C>::from_vec_on(device, self.to_vec()?, self.shape().clone())?;
+        Tensor::<S, E, C>::from_raw(raw)
     }
 
     pub fn is_contiguous(&self) -> bool {
@@ -302,9 +299,23 @@ where
     }
 }
 
+impl<S, E, B> Tensor<S, E, B>
+where
+    S: ShapeSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    pub(crate) fn replace_data(&mut self, data: Vec<E>) -> Result<()> {
+        let raw = RawTensor::from_vec_on(self.device().clone(), data, self.shape().clone())?;
+        *self = Self::from_raw(raw)?.with_requires_grad(true);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 pub(super) mod test_support {
     use super::*;
+    use crate::backend::sealed;
     use crate::dtype::DType;
     use std::error;
     use std::fmt;
@@ -334,6 +345,8 @@ pub(super) mod test_support {
     }
 
     impl error::Error for TestBackendError {}
+
+    impl sealed::SealedBackend for TestBackend {}
 
     impl<E: DType> Backend<E> for TestBackend {
         type Device = TestDevice;
@@ -506,6 +519,8 @@ pub(super) mod test_support {
     }
 
     impl error::Error for FailingBackendError {}
+
+    impl sealed::SealedBackend for FailingBackend {}
 
     impl<E: DType> Backend<E> for FailingBackend {
         type Device = TestDevice;

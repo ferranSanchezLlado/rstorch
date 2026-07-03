@@ -3,16 +3,36 @@
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;
 use crate::dtype::FloatDType;
-use crate::error::{Result, const_check};
+use crate::error::{Error, Result, const_check};
 use crate::nn::{
-    Embedding, HasParameters, Layer, LayerNorm, Linear, Module, MultiHeadAttention, ParameterRef,
-    ParameterRefMut, PositionalEmbedding, ensure_head_shape,
+    CrossEntropyOpts, Embedding, HasParameters, Layer, LayerNorm, Linear, Module,
+    MultiHeadAttention, ParameterRef, ParameterRefMut, PositionalEmbedding, Reduction,
+    ensure_head_shape,
 };
 use crate::no_grad;
 use crate::random::SmallRng;
 use crate::shape::{AnyDim, C, D2, D3, Sym};
 use crate::tensor::{Scalar, Tensor};
 use crate::transformer::Tokenizer;
+
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct TransformerConfig<E> {
+    pub norm_eps: E,
+    pub init_std: E,
+}
+
+impl<E> Default for TransformerConfig<E>
+where
+    E: FloatDType,
+{
+    fn default() -> Self {
+        Self {
+            norm_eps: E::from_f64(1e-5),
+            init_std: E::from_f64(0.02),
+        }
+    }
+}
 
 pub struct TransformerBlock<
     const SEQ: usize,
@@ -46,11 +66,15 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    pub fn new(rng: &mut SmallRng, eps: E) -> Result<Self> {
+    pub fn new(rng: &mut SmallRng) -> Result<Self> {
+        Self::with_config(rng, TransformerConfig::default())
+    }
+
+    pub fn with_config(rng: &mut SmallRng, config: TransformerConfig<E>) -> Result<Self> {
         Ok(Self {
-            norm1: LayerNorm::new(eps)?,
+            norm1: LayerNorm::new(config.norm_eps)?,
             attention: MultiHeadAttention::xavier_uniform(rng)?,
-            norm2: LayerNorm::new(eps)?,
+            norm2: LayerNorm::new(config.norm_eps)?,
             fc1: Linear::xavier_uniform(rng)?,
             fc2: Linear::xavier_uniform(rng)?,
         })
@@ -94,8 +118,8 @@ impl<
     const FF: usize,
     E,
     B,
-    Ctx,
-> Module<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>, Ctx>
+    Context,
+> Module<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>, Context>
     for TransformerBlock<SEQ, EMBED, HEADS, HEAD_DIM, FF, E, B>
 where
     E: FloatDType,
@@ -104,7 +128,7 @@ where
     fn forward(
         &self,
         input: &Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>,
-        _ctx: &mut Ctx,
+        _ctx: &mut Context,
     ) -> Result<Self::Output> {
         self.forward(input)
     }
@@ -123,20 +147,38 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
-        self.norm1.parameters(out);
-        self.attention.parameters(out);
-        self.norm2.parameters(out);
-        self.fc1.parameters(out);
-        self.fc2.parameters(out);
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+        self.norm1
+            .visit_parameters(&crate::nn::parameter_path(prefix, "norm1"), visit);
+        self.attention
+            .visit_parameters(&crate::nn::parameter_path(prefix, "attention"), visit);
+        self.norm2
+            .visit_parameters(&crate::nn::parameter_path(prefix, "norm2"), visit);
+        self.fc1
+            .visit_parameters(&crate::nn::parameter_path(prefix, "fc1"), visit);
+        self.fc2
+            .visit_parameters(&crate::nn::parameter_path(prefix, "fc2"), visit);
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
-        self.norm1.parameters_mut(out);
-        self.attention.parameters_mut(out);
-        self.norm2.parameters_mut(out);
-        self.fc1.parameters_mut(out);
-        self.fc2.parameters_mut(out);
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+        self.norm1
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "norm1"), visit);
+        self.attention
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "attention"), visit);
+        self.norm2
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "norm2"), visit);
+        self.fc1
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "fc1"), visit);
+        self.fc2
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "fc2"), visit);
     }
 }
 
@@ -176,27 +218,43 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    pub fn new(rng: &mut SmallRng, eps: E) -> Result<Self> {
+    pub fn new(rng: &mut SmallRng) -> Result<Self> {
+        Self::with_config(rng, TransformerConfig::default())
+    }
+
+    pub fn with_config(rng: &mut SmallRng, config: TransformerConfig<E>) -> Result<Self> {
         ensure_head_shape::<EMBED, HEADS, HEAD_DIM>()?;
-        let emb_limit = E::from_f64(0.02);
+        let emb_limit = config.init_std;
         let mut blocks = Vec::with_capacity(LAYERS);
         for _ in 0..LAYERS {
-            blocks.push(TransformerBlock::new(rng, eps)?);
+            blocks.push(TransformerBlock::with_config(rng, config)?);
         }
         let blocks = match blocks.try_into() {
             Ok(blocks) => blocks,
+            // The vector is built with exactly one push for each value in 0..LAYERS.
             Err(_) => unreachable!("constructed exactly LAYERS transformer blocks"),
         };
         Ok(Self {
             token_embedding: Embedding::uniform(rng, -emb_limit, emb_limit)?,
             position_embedding: PositionalEmbedding::uniform(rng, -emb_limit, emb_limit)?,
             blocks,
-            final_norm: LayerNorm::new(eps)?,
+            final_norm: LayerNorm::new(config.norm_eps)?,
             lm_head: Linear::xavier_uniform(rng)?,
         })
     }
 
-    pub fn new_with_tokenizer<T>(rng: &mut SmallRng, eps: E, tokenizer: &T) -> Result<Self>
+    pub fn new_with_tokenizer<T>(rng: &mut SmallRng, tokenizer: &T) -> Result<Self>
+    where
+        T: Tokenizer,
+    {
+        Self::with_tokenizer_config(rng, tokenizer, TransformerConfig::default())
+    }
+
+    pub fn with_tokenizer_config<T>(
+        rng: &mut SmallRng,
+        tokenizer: &T,
+        config: TransformerConfig<E>,
+    ) -> Result<Self>
     where
         T: Tokenizer,
     {
@@ -207,7 +265,7 @@ where
             }
             .into());
         }
-        Self::new(rng, eps)
+        Self::with_config(rng, config)
     }
 
     pub fn forward(
@@ -243,7 +301,13 @@ where
         let targets: Vec<_> = targets.iter().flat_map(|row| row.iter().copied()).collect();
         logits
             .reshape_with_shape::<D2<AnyDim, C<VOCAB>>>([input_ids.len() * SEQ, VOCAB])?
-            .cross_entropy_ignore_index(&targets, ignore_index)
+            .cross_entropy_with(
+                &targets,
+                CrossEntropyOpts {
+                    reduction: Reduction::Mean,
+                    ignore_index: Some(ignore_index),
+                },
+            )
     }
 
     /// Greedy generation over a fixed `SEQ` context window. Each new token runs
@@ -256,7 +320,12 @@ where
     pub fn generate(&self, prompt_ids: &[usize], max_new_tokens: usize) -> Result<Vec<usize>> {
         const { const_check::nonzero(SEQ, "generate", "SEQ") };
 
-        assert!(!prompt_ids.is_empty(), "prompt must not be empty");
+        if prompt_ids.is_empty() {
+            return Err(Error::InvalidInput {
+                op: "generate",
+                reason: "prompt must not be empty",
+            });
+        }
         let _guard = no_grad();
         let mut ids = prompt_ids.to_vec();
         for _ in 0..max_new_tokens {
@@ -312,14 +381,14 @@ impl<
     const LAYERS: usize,
     E,
     B,
-    Ctx,
-> Module<[[usize; SEQ]], Ctx>
+    Context,
+> Module<[[usize; SEQ]], Context>
     for DecoderOnlyTransformer<VOCAB, SEQ, EMBED, HEADS, HEAD_DIM, FF, LAYERS, E, B>
 where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn forward(&self, input: &[[usize; SEQ]], _ctx: &mut Ctx) -> Result<Self::Output> {
+    fn forward(&self, input: &[[usize; SEQ]], _ctx: &mut Context) -> Result<Self::Output> {
         self.forward(input)
     }
 }
@@ -340,24 +409,50 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
-        self.token_embedding.parameters(out);
-        self.position_embedding.parameters(out);
-        for block in &self.blocks {
-            block.parameters(out);
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+        self.token_embedding
+            .visit_parameters(&crate::nn::parameter_path(prefix, "token_embedding"), visit);
+        self.position_embedding.visit_parameters(
+            &crate::nn::parameter_path(prefix, "position_embedding"),
+            visit,
+        );
+        for (idx, block) in self.blocks.iter().enumerate() {
+            block.visit_parameters(
+                &crate::nn::parameter_path(prefix, &format!("blocks.{idx}")),
+                visit,
+            );
         }
-        self.final_norm.parameters(out);
-        self.lm_head.parameters(out);
+        self.final_norm
+            .visit_parameters(&crate::nn::parameter_path(prefix, "final_norm"), visit);
+        self.lm_head
+            .visit_parameters(&crate::nn::parameter_path(prefix, "lm_head"), visit);
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
-        self.token_embedding.parameters_mut(out);
-        self.position_embedding.parameters_mut(out);
-        for block in &mut self.blocks {
-            block.parameters_mut(out);
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+        self.token_embedding
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "token_embedding"), visit);
+        self.position_embedding.visit_parameters_mut(
+            &crate::nn::parameter_path(prefix, "position_embedding"),
+            visit,
+        );
+        for (idx, block) in self.blocks.iter_mut().enumerate() {
+            block.visit_parameters_mut(
+                &crate::nn::parameter_path(prefix, &format!("blocks.{idx}")),
+                visit,
+            );
         }
-        self.final_norm.parameters_mut(out);
-        self.lm_head.parameters_mut(out);
+        self.final_norm
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "final_norm"), visit);
+        self.lm_head
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "lm_head"), visit);
     }
 }
 

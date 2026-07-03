@@ -6,8 +6,9 @@ use super::autograd::{
 };
 use super::{Mask, RawTensor, Scalar, Tensor, Tensor1D, Tensor4D};
 use crate::backend::Backend;
-use crate::dtype::FloatDType;
+use crate::dtype::{DType, FloatDType};
 use crate::error::{DataError, DeviceError, Error, Result, ShapeError, const_check};
+use crate::nn::CrossEntropyOpts;
 use crate::shape::{
     C, D0, D1, D2, D3, D4, DimEntry, DimSpec, Shape, ShapeSpec, StaticShape, bind_and_check,
 };
@@ -31,7 +32,7 @@ type ScalarKernel<E, B> =
 impl<S, E, B> Tensor<S, E, B>
 where
     S: ShapeSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     pub fn reshape<T>(&self) -> Result<Tensor<T, E, B>>
@@ -143,7 +144,14 @@ where
     pub fn flatten<const N: usize>(&self) -> Result<Tensor<D1<C<N>>, E, B>> {
         self.reshape1::<N>()
     }
+}
 
+impl<S, E, B> Tensor<S, E, B>
+where
+    S: ShapeSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
     pub fn add(&self, rhs: &Self) -> Result<Self> {
         self.binary_same_shape(rhs, "add", B::add, |grad, _lhs, _rhs| {
             Ok((grad.clone(), grad.clone()))
@@ -256,14 +264,14 @@ where
     /// Computes elementwise square root. Gradients follow the mathematical
     /// derivative and may produce infinities or NaNs at non-positive inputs.
     pub fn sqrt(&self) -> Result<Self> {
-        self.unary_map(|x| x.sqrt(), |x, _y| E::HALF / x.sqrt())
+        self.unary_map(|x| x.sqrt(), |x, _y| half::<E>() / x.sqrt())
     }
 
     /// Computes elementwise reciprocal square root. Gradients follow the
     /// mathematical derivative and may produce infinities or NaNs at
     /// non-positive inputs.
     pub fn rsqrt(&self) -> Result<Self> {
-        self.unary_map(|x| E::ONE / x.sqrt(), |x, _y| -E::HALF / (x * x.sqrt()))
+        self.unary_map(|x| E::ONE / x.sqrt(), |x, _y| -half::<E>() / (x * x.sqrt()))
     }
 
     pub fn clamp(&self, min: E, max: E) -> Result<Self> {
@@ -287,56 +295,60 @@ where
         self.unary_map(
             move |x| {
                 let x3 = x * x * x;
-                E::HALF * x * (E::ONE + (E::GELU_K * (x + E::GELU_C * x3)).tanh())
+                half::<E>() * x * (E::ONE + (gelu_k::<E>() * (x + gelu_c::<E>() * x3)).tanh())
             },
             move |x, _y| {
                 let x2 = x * x;
-                let inner = E::GELU_K * (x + E::GELU_C * x * x2);
+                let inner = gelu_k::<E>() * (x + gelu_c::<E>() * x * x2);
                 let t = inner.tanh();
                 let sech2 = E::ONE - t * t;
-                E::HALF * (E::ONE + t)
-                    + E::HALF * x * sech2 * E::GELU_K * (E::ONE + E::THREE * E::GELU_C * x2)
+                half::<E>() * (E::ONE + t)
+                    + half::<E>()
+                        * x
+                        * sech2
+                        * gelu_k::<E>()
+                        * (E::ONE + three::<E>() * gelu_c::<E>() * x2)
             },
         )
     }
 
-    pub fn gt_scalar(&self, rhs: E) -> Result<Mask<S>> {
+    pub fn gt_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
         self.compare_scalar(rhs, |a, b| a > b)
     }
 
-    pub fn ge_scalar(&self, rhs: E) -> Result<Mask<S>> {
+    pub fn ge_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
         self.compare_scalar(rhs, |a, b| a >= b)
     }
 
-    pub fn lt_scalar(&self, rhs: E) -> Result<Mask<S>> {
+    pub fn lt_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
         self.compare_scalar(rhs, |a, b| a < b)
     }
 
-    pub fn le_scalar(&self, rhs: E) -> Result<Mask<S>> {
+    pub fn le_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
         self.compare_scalar(rhs, |a, b| a <= b)
     }
 
-    pub fn eq_scalar(&self, rhs: E) -> Result<Mask<S>> {
+    pub fn eq_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
         self.compare_scalar(rhs, |a, b| a == b)
     }
 
-    pub fn masked_fill(&self, mask: &Mask<S>, value: E) -> Result<Self> {
+    pub fn masked_fill(&self, mask: &Mask<S, B>, value: E) -> Result<Self> {
         if self.shape() != mask.shape() {
             return Err(ShapeError::LengthMismatch {
                 expected: self.numel(),
-                found: mask.values().len(),
+                found: mask.to_vec()?.len(),
             }
             .into());
         }
+        let mask_values = mask.to_vec()?;
         let values = self
             .to_vec()?
             .into_iter()
-            .zip(mask.values())
+            .zip(&mask_values)
             .map(|(x, &m)| if m { value } else { x })
             .collect();
         let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
         let input_raw = self.raw().clone();
-        let mask_values = mask.values().to_vec();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad_values = grad
                 .to_vec()?
@@ -348,27 +360,27 @@ where
         })
     }
 
-    pub fn where_mask(&self, mask: &Mask<S>, other: &Self) -> Result<Self> {
+    pub fn where_mask(&self, mask: &Mask<S, B>, other: &Self) -> Result<Self> {
         self.ensure_same_device(other, "where_mask")?;
         if self.shape() != mask.shape() || other.shape() != mask.shape() {
             return Err(ShapeError::LengthMismatch {
                 expected: self.numel(),
-                found: mask.values().len(),
+                found: mask.to_vec()?.len(),
             }
             .into());
         }
+        let mask_values = mask.to_vec()?;
         let lhs_values = self.to_vec()?;
         let rhs_values = other.to_vec()?;
         let values = lhs_values
             .into_iter()
             .zip(rhs_values)
-            .zip(mask.values())
+            .zip(&mask_values)
             .map(|((a, b), &m)| if m { a } else { b })
             .collect();
         let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
         let lhs_raw = self.raw().clone();
         let rhs_raw = other.raw().clone();
-        let mask_values = mask.values().to_vec();
         Self::autograd_output(
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(other)],
@@ -505,7 +517,7 @@ where
         })
     }
 
-    fn compare_scalar(&self, rhs: E, compare: impl Fn(E, E) -> bool) -> Result<Mask<S>> {
+    fn compare_scalar(&self, rhs: E, compare: impl Fn(E, E) -> bool) -> Result<Mask<S, B>> {
         Mask::from_vec_with_shape(
             self.to_vec()?
                 .into_iter()
@@ -519,10 +531,10 @@ where
 impl<A, E, B> Tensor<D1<A>, E, B>
 where
     A: DimSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
-    pub fn cat1<R, const N: usize>(&self, rhs: &Tensor<D1<R>, E, B>) -> Result<Tensor1D<N, E, B>>
+    pub fn cat<R, const N: usize>(&self, rhs: &Tensor<D1<R>, E, B>) -> Result<Tensor1D<N, E, B>>
     where
         R: DimSpec,
     {
@@ -531,14 +543,14 @@ where
                 A::KNOWN,
                 R::KNOWN,
                 N,
-                "cat1",
+                "cat",
                 "lhs length",
                 "rhs length",
                 "output length",
             );
         };
 
-        ensure_same_device::<E, B>(self.device(), rhs.device(), "cat1")?;
+        ensure_same_device::<E, B>(self.device(), rhs.device(), "cat")?;
         let found =
             self.numel()
                 .checked_add(rhs.numel())
@@ -575,15 +587,16 @@ where
         )
     }
 
-    pub fn stack0<R>(&self, rhs: &Tensor<D1<R>, E, B>) -> Result<Tensor<D2<C<2>, A>, E, B>>
+    /// Stacks two 1-D tensors along a new leading axis of length 2.
+    pub fn stack<R>(&self, rhs: &Tensor<D1<R>, E, B>) -> Result<Tensor<D2<C<2>, A>, E, B>>
     where
         R: DimSpec,
     {
-        ensure_same_device::<E, B>(self.device(), rhs.device(), "stack0")?;
+        ensure_same_device::<E, B>(self.device(), rhs.device(), "stack")?;
         let len = self.shape().dims()[0];
         let rhs_len = rhs.shape().dims()[0];
         bind_and_check(
-            "stack0",
+            "stack",
             [
                 (DimEntry::of::<A>(0, 0), len),
                 (DimEntry::of::<R>(1, 0), rhs_len),
@@ -591,7 +604,7 @@ where
         )?;
         if len != rhs_len {
             return Err(ShapeError::DimMismatch {
-                op: "stack0",
+                op: "stack",
                 operand: 1,
                 axis: 0,
                 expected: len,
@@ -617,11 +630,11 @@ where
         )
     }
 
-    pub fn unsqueeze0(&self) -> Result<Tensor<D2<C<1>, A>, E, B>> {
+    pub fn unsqueeze_leading(&self) -> Result<Tensor<D2<C<1>, A>, E, B>> {
         self.reshape_with_shape::<D2<C<1>, A>>([1, self.shape().dims()[0]])
     }
 
-    pub fn unsqueeze1(&self) -> Result<Tensor<D2<A, C<1>>, E, B>> {
+    pub fn unsqueeze_last(&self) -> Result<Tensor<D2<A, C<1>>, E, B>> {
         self.reshape_with_shape::<D2<A, C<1>>>([self.shape().dims()[0], 1])
     }
 }
@@ -630,7 +643,7 @@ impl<A, K, E, B> Tensor<D2<A, K>, E, B>
 where
     A: DimSpec,
     K: DimSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     pub fn transpose(&self) -> Result<Tensor<D2<K, A>, E, B>> {
@@ -641,7 +654,15 @@ where
             )])
         })
     }
+}
 
+impl<A, K, E, B> Tensor<D2<A, K>, E, B>
+where
+    A: DimSpec,
+    K: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
     pub fn matmul<Cc>(&self, rhs: &Tensor<D2<K, Cc>, E, B>) -> Result<Tensor<D2<A, Cc>, E, B>>
     where
         Cc: DimSpec,
@@ -712,13 +733,13 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    pub fn add_row(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
-        ensure_same_device::<E, B>(self.device(), rhs.device(), "add_row")?;
+    pub fn add_last_dim(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
+        ensure_same_device::<E, B>(self.device(), rhs.device(), "add_last_dim")?;
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
         bind_and_check(
-            "add_row",
+            "add_last_dim",
             [
                 (DimEntry::of::<A>(0, 0), rows),
                 (DimEntry::of::<N>(0, 1), cols),
@@ -727,7 +748,7 @@ where
         )?;
         if rhs.shape().dims()[0] != cols {
             return Err(ShapeError::DimMismatch {
-                op: "add_row",
+                op: "add_last_dim",
                 operand: 1,
                 axis: 0,
                 expected: cols,
@@ -765,52 +786,70 @@ where
         )
     }
 
-    pub fn sub_row(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
-        self.broadcast_row(rhs, "sub_row", |a, b| a - b, |_a, _b, g| g, |_a, _b, g| -g)
-    }
-
-    pub fn mul_row(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
+    pub fn sub_last_dim(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
         self.broadcast_row(
             rhs,
-            "mul_row",
+            "sub_last_dim",
+            |a, b| a - b,
+            |_a, _b, g| g,
+            |_a, _b, g| -g,
+        )
+    }
+
+    pub fn mul_last_dim(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
+        self.broadcast_row(
+            rhs,
+            "mul_last_dim",
             |a, b| a * b,
             |_a, b, g| g * b,
             |a, _b, g| g * a,
         )
     }
 
-    pub fn div_row(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
+    pub fn div_last_dim(&self, rhs: &Tensor<D1<N>, E, B>) -> Result<Self> {
         self.broadcast_row(
             rhs,
-            "div_row",
+            "div_last_dim",
             |a, b| a / b,
             |_a, b, g| g / b,
             |a, b, g| -(g * a) / (b * b),
         )
     }
 
-    pub fn add_col(&self, rhs: &Tensor<D1<A>, E, B>) -> Result<Self> {
-        self.broadcast_col(rhs, "add_col", |a, b| a + b, |_a, _b, g| g, |_a, _b, g| g)
-    }
-
-    pub fn sub_col(&self, rhs: &Tensor<D1<A>, E, B>) -> Result<Self> {
-        self.broadcast_col(rhs, "sub_col", |a, b| a - b, |_a, _b, g| g, |_a, _b, g| -g)
-    }
-
-    pub fn mul_col(&self, rhs: &Tensor<D1<A>, E, B>) -> Result<Self> {
+    pub fn add_leading_dim(&self, rhs: &Tensor<D1<A>, E, B>) -> Result<Self> {
         self.broadcast_col(
             rhs,
-            "mul_col",
+            "add_leading_dim",
+            |a, b| a + b,
+            |_a, _b, g| g,
+            |_a, _b, g| g,
+        )
+    }
+
+    pub fn sub_leading_dim(&self, rhs: &Tensor<D1<A>, E, B>) -> Result<Self> {
+        self.broadcast_col(
+            rhs,
+            "sub_leading_dim",
+            |a, b| a - b,
+            |_a, _b, g| g,
+            |_a, _b, g| -g,
+        )
+    }
+
+    pub fn mul_leading_dim(&self, rhs: &Tensor<D1<A>, E, B>) -> Result<Self> {
+        self.broadcast_col(
+            rhs,
+            "mul_leading_dim",
             |a, b| a * b,
             |_a, b, g| g * b,
             |a, _b, g| g * a,
         )
     }
 
-    pub fn div_col(&self, rhs: &Tensor<D1<A>, E, B>) -> Result<Self> {
+    pub fn div_leading_dim(&self, rhs: &Tensor<D1<A>, E, B>) -> Result<Self> {
         self.broadcast_col(
             rhs,
-            "div_col",
+            "div_leading_dim",
             |a, b| a / b,
             |_a, b, g| g / b,
             |a, b, g| -(g * a) / (b * b),
@@ -819,7 +858,7 @@ where
 
     /// Reduces rows and returns a rank-1 tensor. This uses `keepdim = false`;
     /// callers can re-expand with explicit broadcasts.
-    pub fn sum_axis0(&self) -> Result<Tensor<D1<N>, E, B>> {
+    pub fn sum_leading(&self) -> Result<Tensor<D1<N>, E, B>> {
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
@@ -848,7 +887,7 @@ where
 
     /// Reduces columns and returns a rank-1 tensor. This uses `keepdim = false`;
     /// callers can re-expand with explicit broadcasts.
-    pub fn sum_axis1(&self) -> Result<Tensor<D1<A>, E, B>> {
+    pub fn sum_last(&self) -> Result<Tensor<D1<A>, E, B>> {
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
@@ -875,29 +914,29 @@ where
         )
     }
 
-    pub fn mean_axis0(&self) -> Result<Tensor<D1<N>, E, B>> {
-        const { const_check::known_nonzero(A::KNOWN, "mean_axis0", "axis 0") };
-        ensure_nonzero_dim("mean_axis0", 0, self.shape().dims()[0])?;
-        self.sum_axis0()?
+    pub fn mean_leading(&self) -> Result<Tensor<D1<N>, E, B>> {
+        const { const_check::known_nonzero(A::KNOWN, "mean_leading", "leading axis") };
+        ensure_nonzero_dim("mean_leading", 0, self.shape().dims()[0])?;
+        self.sum_leading()?
             .div_scalar(E::from_usize(self.shape().dims()[0]))
     }
 
-    pub fn mean_axis1(&self) -> Result<Tensor<D1<A>, E, B>> {
-        const { const_check::known_nonzero(N::KNOWN, "mean_axis1", "axis 1") };
-        ensure_nonzero_dim("mean_axis1", 1, self.shape().dims()[1])?;
-        self.sum_axis1()?
+    pub fn mean_last(&self) -> Result<Tensor<D1<A>, E, B>> {
+        const { const_check::known_nonzero(N::KNOWN, "mean_last", "last axis") };
+        ensure_nonzero_dim("mean_last", 1, self.shape().dims()[1])?;
+        self.sum_last()?
             .div_scalar(E::from_usize(self.shape().dims()[1]))
     }
 
     /// Reduces columns with max. Backward splits gradient evenly across tied
     /// maxima instead of selecting the first maximum.
-    pub fn max_axis1(&self) -> Result<Tensor<D1<A>, E, B>> {
-        const { const_check::known_nonzero(N::KNOWN, "max_axis1", "axis 1") };
+    pub fn max_last(&self) -> Result<Tensor<D1<A>, E, B>> {
+        const { const_check::known_nonzero(N::KNOWN, "max_last", "last axis") };
 
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
-        ensure_nonzero_dim("max_axis1", 1, cols)?;
+        ensure_nonzero_dim("max_last", 1, cols)?;
         let values = self.to_vec()?;
         let mut out = Vec::with_capacity(rows);
         for row in 0..rows {
@@ -936,13 +975,13 @@ where
         )
     }
 
-    pub fn logsumexp_axis1(&self) -> Result<Tensor<D1<A>, E, B>> {
-        const { const_check::known_nonzero(N::KNOWN, "logsumexp_axis1", "axis 1") };
+    pub fn logsumexp_last(&self) -> Result<Tensor<D1<A>, E, B>> {
+        const { const_check::known_nonzero(N::KNOWN, "logsumexp_last", "last axis") };
 
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
-        ensure_nonzero_dim("logsumexp_axis1", 1, cols)?;
+        ensure_nonzero_dim("logsumexp_last", 1, cols)?;
         let values = self.to_vec()?;
         let mut softmax = vec![E::ZERO; rows * cols];
         let mut out = Vec::with_capacity(rows);
@@ -978,13 +1017,13 @@ where
         )
     }
 
-    pub fn softmax_axis1(&self) -> Result<Self> {
-        const { const_check::known_nonzero(N::KNOWN, "softmax_axis1", "axis 1") };
+    pub fn softmax_last(&self) -> Result<Self> {
+        const { const_check::known_nonzero(N::KNOWN, "softmax_last", "last axis") };
 
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
-        ensure_nonzero_dim("softmax_axis1", 1, cols)?;
+        ensure_nonzero_dim("softmax_last", 1, cols)?;
         let values = stable_row_softmax(&self.to_vec()?, rows, cols);
         let raw =
             RawTensor::from_vec_on(self.device().clone(), values.clone(), self.shape().clone())?;
@@ -1005,13 +1044,13 @@ where
         })
     }
 
-    pub fn log_softmax_axis1(&self) -> Result<Self> {
-        const { const_check::known_nonzero(N::KNOWN, "log_softmax_axis1", "axis 1") };
+    pub fn log_softmax_last(&self) -> Result<Self> {
+        const { const_check::known_nonzero(N::KNOWN, "log_softmax_last", "last axis") };
 
         let dims = self.shape().dims();
         let rows = dims[0];
         let cols = dims[1];
-        ensure_nonzero_dim("log_softmax_axis1", 1, cols)?;
+        ensure_nonzero_dim("log_softmax_last", 1, cols)?;
         let input = self.to_vec()?;
         let softmax = stable_row_softmax(&input, rows, cols);
         let values = stable_row_log_softmax(&input, rows, cols);
@@ -1032,13 +1071,13 @@ where
     }
 
     pub fn cross_entropy(&self, targets: &[usize]) -> Result<Scalar<E, B>> {
-        self.cross_entropy_ignore_index(targets, usize::MAX)
+        self.cross_entropy_with(targets, CrossEntropyOpts::default())
     }
 
-    pub fn cross_entropy_ignore_index(
+    pub fn cross_entropy_with(
         &self,
         targets: &[usize],
-        ignore_index: usize,
+        opts: CrossEntropyOpts,
     ) -> Result<Scalar<E, B>> {
         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
 
@@ -1054,7 +1093,7 @@ where
             .into());
         }
         for &target in targets {
-            if target == ignore_index {
+            if Some(target) == opts.ignore_index {
                 continue;
             }
             if target >= cols {
@@ -1070,16 +1109,19 @@ where
         let log_probs = stable_row_log_softmax(&input, rows, cols);
         let valid_count = targets
             .iter()
-            .filter(|&&target| target != ignore_index)
+            .filter(|&&target| Some(target) != opts.ignore_index)
             .count();
         let loss_sum = targets
             .iter()
             .enumerate()
-            .filter(|&(_, &target)| target != ignore_index)
+            .filter(|&(_, &target)| Some(target) != opts.ignore_index)
             .fold(E::ZERO, |acc, (row, &target)| {
                 acc - log_probs[row * cols + target]
             });
-        let scale = E::from_usize(valid_count);
+        let scale = match opts.reduction {
+            crate::nn::Reduction::Mean => E::from_usize(valid_count),
+            crate::nn::Reduction::Sum => E::ONE,
+        };
         let loss = if valid_count == 0 {
             E::ZERO
         } else {
@@ -1095,7 +1137,7 @@ where
                 return Ok(vec![Some(raw_from_vec_like(&input_raw, values)?)]);
             }
             for row in 0..rows {
-                if targets[row] == ignore_index {
+                if Some(targets[row]) == opts.ignore_index {
                     continue;
                 }
                 for col in 0..cols {
@@ -1103,7 +1145,7 @@ where
                 }
             }
             for row in 0..rows {
-                if targets[row] == ignore_index {
+                if Some(targets[row]) == opts.ignore_index {
                     continue;
                 }
                 values[row * cols + targets[row]] -= E::ONE;
@@ -1314,10 +1356,10 @@ where
 impl<N, E, B> Tensor<D2<C<1>, N>, E, B>
 where
     N: DimSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
-    pub fn squeeze0(&self) -> Result<Tensor<D1<N>, E, B>> {
+    pub fn squeeze_leading(&self) -> Result<Tensor<D1<N>, E, B>> {
         self.reshape_with_shape::<D1<N>>([self.shape().dims()[1]])
     }
 }
@@ -1327,7 +1369,7 @@ where
     Batch: DimSpec,
     M: DimSpec,
     K: DimSpec,
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     pub fn transpose_last2(&self) -> Result<Tensor<D3<Batch, K, M>, E, B>> {
@@ -1344,7 +1386,16 @@ where
             },
         )
     }
+}
 
+impl<Batch, M, K, E, B> Tensor<D3<Batch, M, K>, E, B>
+where
+    Batch: DimSpec,
+    M: DimSpec,
+    K: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
     pub fn bmm<N>(
         &self,
         rhs: &Tensor<D3<Batch, K, N>, E, B>,
@@ -1448,13 +1499,13 @@ where
     E: FloatDType,
     BackendT: Backend<E>,
 {
-    pub fn softmax_axis2(&self) -> Result<Self> {
-        const { const_check::known_nonzero(Cc::KNOWN, "softmax_axis2", "axis 2") };
+    pub fn softmax_last(&self) -> Result<Self> {
+        const { const_check::known_nonzero(Cc::KNOWN, "softmax_last", "last axis") };
 
         let dims = self.shape().dims();
         let rows = dims[0] * dims[1];
         let cols = dims[2];
-        ensure_nonzero_dim("softmax_axis2", 2, cols)?;
+        ensure_nonzero_dim("softmax_last", 2, cols)?;
         let values = stable_row_softmax(&self.to_vec()?, rows, cols);
         let raw =
             RawTensor::from_vec_on(self.device().clone(), values.clone(), self.shape().clone())?;
@@ -1577,10 +1628,10 @@ where
     BDim: DimSpec,
     Cc: DimSpec,
     Dd: DimSpec,
-    E: FloatDType,
+    E: DType,
     BackendT: Backend<E>,
 {
-    pub fn transpose_axes12(&self) -> Result<Tensor<D4<A, Cc, BDim, Dd>, E, BackendT>> {
+    pub fn transpose_middle2(&self) -> Result<Tensor<D4<A, Cc, BDim, Dd>, E, BackendT>> {
         let raw = self
             .raw()
             .view_with_layout(self.layout().transpose_axes(1, 2)?)?;
@@ -1598,7 +1649,7 @@ where
 
 fn ensure_same_device<E, B>(lhs: &B::Device, rhs: &B::Device, op: &'static str) -> Result<()>
 where
-    E: FloatDType,
+    E: DType,
     B: Backend<E>,
 {
     if lhs != rhs {
@@ -1641,6 +1692,22 @@ where
     )
     .map_err(Error::backend)?;
     RawTensor::from_storage_on(lhs.device().clone(), storage, Shape::known([m, n]))
+}
+
+fn half<E: FloatDType>() -> E {
+    E::from_f64(0.5)
+}
+
+fn three<E: FloatDType>() -> E {
+    E::from_f64(3.0)
+}
+
+fn gelu_k<E: FloatDType>() -> E {
+    E::from_f64(0.797_884_560_802_865_4)
+}
+
+fn gelu_c<E: FloatDType>() -> E {
+    E::from_f64(0.044_715)
 }
 
 fn row_max<E: FloatDType>(values: &[E]) -> E {
@@ -1924,22 +1991,22 @@ mod tests {
     fn zero_reduction_axes_are_rejected_for_runtime_shapes() {
         let cols =
             Tensor::<D2<C<2>, AnyDim>>::from_vec_with_shape(Vec::<f32>::new(), [2, 0]).unwrap();
-        let err = cols.softmax_axis1().unwrap_err();
+        let err = cols.softmax_last().unwrap_err();
         assert!(matches!(
             err,
             Error::Shape(ShapeError::ZeroDimension {
-                op: "softmax_axis1",
+                op: "softmax_last",
                 axis: 1,
             })
         ));
 
         let rows =
             Tensor::<D2<AnyDim, C<3>>>::from_vec_with_shape(Vec::<f32>::new(), [0, 3]).unwrap();
-        let err = rows.mean_axis0().unwrap_err();
+        let err = rows.mean_leading().unwrap_err();
         assert!(matches!(
             err,
             Error::Shape(ShapeError::ZeroDimension {
-                op: "mean_axis0",
+                op: "mean_leading",
                 axis: 0,
             })
         ));
@@ -2002,15 +2069,15 @@ mod tests {
     }
 
     #[test]
-    fn cat1_concatenates_1d_tensors_with_static_target() {
+    fn cat_concatenates_1d_tensors_with_static_target() {
         let lhs = Tensor::<D1<Sym<Batch>>>::from_vec_with_shape(vec![1.0, 2.0], [2]).unwrap();
         let rhs = Tensor1D::<3>::from_vec(vec![3.0, 4.0, 5.0]).unwrap();
-        let out = lhs.cat1::<C<3>, 5>(&rhs).unwrap();
+        let out = lhs.cat::<C<3>, 5>(&rhs).unwrap();
 
         assert_eq!(out.shape().dims(), &[5]);
         assert_eq!(out.to_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
 
-        let err = lhs.cat1::<C<3>, 4>(&rhs).unwrap_err();
+        let err = lhs.cat::<C<3>, 4>(&rhs).unwrap_err();
         assert!(matches!(
             err,
             Error::Shape(ShapeError::LengthMismatch {

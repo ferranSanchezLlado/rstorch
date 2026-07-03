@@ -8,20 +8,29 @@ fn tiny_cross_entropy_classifier_loss_decreases() {
     let targets = [0, 1, 0, 1];
     let mut layer = Linear::<2, 2>::zeros().unwrap();
     let mut opt = Sgd::new(0.2);
-    let mut ctx = Ctx::training(0);
+    let mut ctx = TrainContext::training(0);
 
-    let first = cross_entropy(&layer.forward(&input, &mut ctx).unwrap(), &targets)
+    let first = layer
+        .forward(&input, &mut ctx)
+        .unwrap()
+        .cross_entropy(&targets)
         .unwrap()
         .to_vec()
         .unwrap()[0];
     for _ in 0..20 {
-        cross_entropy(&layer.forward(&input, &mut ctx).unwrap(), &targets)
+        layer
+            .forward(&input, &mut ctx)
+            .unwrap()
+            .cross_entropy(&targets)
             .unwrap()
             .backward()
             .unwrap();
         sgd_step_and_zero(&mut layer, &mut opt);
     }
-    let last = cross_entropy(&layer.forward(&input, &mut ctx).unwrap(), &targets)
+    let last = layer
+        .forward(&input, &mut ctx)
+        .unwrap()
+        .cross_entropy(&targets)
         .unwrap()
         .to_vec()
         .unwrap()[0];
@@ -46,19 +55,26 @@ fn typed_sequential_mlp_trains_on_synthetic_classification() {
     let mut model = Sequential::new(Linear::<4, 8>::xavier_uniform(&mut rng).unwrap(), Relu)
         .add_module(Linear::<8, 2>::xavier_uniform(&mut rng).unwrap());
     let mut opt = Sgd::new(0.5);
-    let mut ctx = Ctx::training(0);
+    let mut ctx = TrainContext::training(0);
 
-    let first = cross_entropy(&model.forward(&input, &mut ctx).unwrap(), &targets)
+    let first = model
+        .forward(&input, &mut ctx)
+        .unwrap()
+        .cross_entropy(&targets)
         .unwrap()
         .to_vec()
         .unwrap()[0];
     for _ in 0..100 {
-        let loss = cross_entropy(&model.forward(&input, &mut ctx).unwrap(), &targets).unwrap();
+        let loss = model
+            .forward(&input, &mut ctx)
+            .unwrap()
+            .cross_entropy(&targets)
+            .unwrap();
         loss.backward().unwrap();
         sgd_step_and_zero(&mut model, &mut opt);
     }
     let logits = model.forward(&input, &mut ctx).unwrap();
-    let last = cross_entropy(&logits, &targets).unwrap().to_vec().unwrap()[0];
+    let last = logits.cross_entropy(&targets).unwrap().to_vec().unwrap()[0];
 
     assert!(
         last < first,
@@ -88,21 +104,28 @@ fn typed_sequential_mlp_learns_on_mnist() {
     let mut model = Sequential::new(Linear::<784, 128>::kaiming_uniform(&mut rng).unwrap(), Relu)
         .add_module(Linear::<128, 10>::kaiming_uniform(&mut rng).unwrap());
     let mut opt = Sgd::new(0.1);
-    let mut ctx = Ctx::training(0);
+    let mut ctx = TrainContext::training(0);
 
-    let first = cross_entropy(&model.forward(&images, &mut ctx).unwrap(), &targets)
+    let first = model
+        .forward(&images, &mut ctx)
+        .unwrap()
+        .cross_entropy(&targets)
         .unwrap()
         .to_vec()
         .unwrap()[0];
     // Overfitting one real batch is a reliable architecture smoke test: it drives
     // the full collate -> Sequential -> cross_entropy -> SGD loop end to end.
     for _ in 0..300 {
-        let loss = cross_entropy(&model.forward(&images, &mut ctx).unwrap(), &targets).unwrap();
+        let loss = model
+            .forward(&images, &mut ctx)
+            .unwrap()
+            .cross_entropy(&targets)
+            .unwrap();
         loss.backward().unwrap();
         sgd_step_and_zero(&mut model, &mut opt);
     }
     let logits = model.forward(&images, &mut ctx).unwrap();
-    let last = cross_entropy(&logits, &targets).unwrap().to_vec().unwrap()[0];
+    let last = logits.cross_entropy(&targets).unwrap().to_vec().unwrap()[0];
     let predictions = argmax_rows(&logits.to_vec().unwrap(), 10);
     let correct = predictions
         .iter()

@@ -16,12 +16,17 @@ pub use shape::ShapeError;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Shape(ShapeError),
     Backend(Box<dyn error::Error + Send + Sync + 'static>),
     Device(DeviceError),
     DType(DTypeError),
     Data(DataError),
+    InvalidInput {
+        op: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl Error {
@@ -41,6 +46,7 @@ impl fmt::Display for Error {
             Self::Device(err) => write!(f, "device error: {err}"),
             Self::DType(err) => write!(f, "dtype error: {err}"),
             Self::Data(err) => write!(f, "data error: {err}"),
+            Self::InvalidInput { op, reason } => write!(f, "{op} invalid input: {reason}"),
         }
     }
 }

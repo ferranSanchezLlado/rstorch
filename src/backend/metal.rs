@@ -1,4 +1,4 @@
-use super::Backend;
+use super::{Backend, sealed};
 use crate::dtype::{DType, f16};
 use std::error;
 use std::ffi::c_void;
@@ -26,6 +26,7 @@ pub struct MetalStorage {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum MetalError {
     NoDevice,
     LibraryCompile(String),
@@ -96,6 +97,8 @@ impl fmt::Display for MetalError {
 }
 
 impl error::Error for MetalError {}
+
+impl sealed::SealedBackend for Metal {}
 
 trait MetalDType: DType {
     const SHADERS: &'static str;

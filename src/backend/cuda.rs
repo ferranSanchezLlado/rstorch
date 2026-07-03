@@ -1,4 +1,4 @@
-use super::Backend;
+use super::{Backend, sealed};
 use crate::dtype::{DType, bf16, f16};
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, LaunchConfig,
@@ -57,6 +57,7 @@ trait CudaElement: DType + DeviceRepr + ValidAsZeroBits {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CudaError {
     Driver(String),
     LengthMismatch {
@@ -120,6 +121,8 @@ impl fmt::Display for CudaError {
 }
 
 impl error::Error for CudaError {}
+
+impl sealed::SealedBackend for Cuda {}
 
 macro_rules! cuda_backend_impl {
     ($element:ty) => {

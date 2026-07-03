@@ -8,12 +8,12 @@ pub trait RngSource {
     fn rng(&mut self) -> &mut SmallRng;
 }
 
-pub struct Ctx {
+pub struct TrainContext {
     training: bool,
     rng: SmallRng,
 }
 
-impl Ctx {
+impl TrainContext {
     pub fn training(seed: u64) -> Self {
         Self {
             training: true,
@@ -29,13 +29,13 @@ impl Ctx {
     }
 }
 
-impl TrainingMode for Ctx {
+impl TrainingMode for TrainContext {
     fn is_training(&self) -> bool {
         self.training
     }
 }
 
-impl RngSource for Ctx {
+impl RngSource for TrainContext {
     fn rng(&mut self) -> &mut SmallRng {
         &mut self.rng
     }

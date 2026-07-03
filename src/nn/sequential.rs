@@ -20,7 +20,7 @@ use crate::nn::{HasParameters, Layer, Module, ParameterRef, ParameterRefMut};
 /// ```ignore
 /// let model = Sequential::new(Linear::<784, 128>::zeros()?, Relu)
 ///     .add_module(Linear::<128, 10>::zeros()?);
-/// let mut ctx = Ctx::training(0);
+/// let mut ctx = TrainContext::training(0);
 /// let logits = model.forward(&images, &mut ctx)?; // pins the input type
 /// ```
 /// Builds a [`Sequential`] stack from two or more modules.
@@ -102,11 +102,11 @@ where
     type Output = <M as Layer<In>>::Output;
 }
 
-impl<M, In, Ctx> Module<In, Ctx> for Sequential<M, In>
+impl<M, In, Context> Module<In, Context> for Sequential<M, In>
 where
-    M: Module<In, Ctx>,
+    M: Module<In, Context>,
 {
-    fn forward(&self, input: &In, ctx: &mut Ctx) -> Result<Self::Output> {
+    fn forward(&self, input: &In, ctx: &mut Context) -> Result<Self::Output> {
         self.module.forward(input, ctx)
     }
 }
@@ -117,12 +117,20 @@ where
     B: Backend<E>,
     M: HasParameters<E, B>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
-        self.module.parameters(out);
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+        self.module.visit_parameters(prefix, visit);
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
-        self.module.parameters_mut(out);
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+        self.module.visit_parameters_mut(prefix, visit);
     }
 }
 
@@ -139,12 +147,12 @@ where
     type Output = <B as Layer<<A as Layer<Input>>::Output>>::Output;
 }
 
-impl<Input, Ctx, A, B> Module<Input, Ctx> for (A, B)
+impl<Input, Context, A, B> Module<Input, Context> for (A, B)
 where
-    A: Module<Input, Ctx>,
-    B: Module<<A as Layer<Input>>::Output, Ctx>,
+    A: Module<Input, Context>,
+    B: Module<<A as Layer<Input>>::Output, Context>,
 {
-    fn forward(&self, input: &Input, ctx: &mut Ctx) -> Result<Self::Output> {
+    fn forward(&self, input: &Input, ctx: &mut Context) -> Result<Self::Output> {
         let hidden = self.0.forward(input, ctx)?;
         self.1.forward(&hidden, ctx)
     }
@@ -157,14 +165,26 @@ where
     A: HasParameters<E, Bk>,
     B: HasParameters<E, Bk>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, Bk>>) {
-        self.0.parameters(out);
-        self.1.parameters(out);
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, Bk>),
+    ) {
+        self.0
+            .visit_parameters(&crate::nn::parameter_path(prefix, "0"), visit);
+        self.1
+            .visit_parameters(&crate::nn::parameter_path(prefix, "1"), visit);
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, Bk>>) {
-        self.0.parameters_mut(out);
-        self.1.parameters_mut(out);
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, Bk>),
+    ) {
+        self.0
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "0"), visit);
+        self.1
+            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "1"), visit);
     }
 }
 
@@ -172,7 +192,7 @@ where
 mod tests {
     use super::Sequential;
     use crate::backend::Cpu;
-    use crate::nn::{Ctx, Dropout, HasParameters, Linear, Module, ParameterRef, Relu};
+    use crate::nn::{Dropout, HasParameters, Linear, Module, ParameterRef, Relu, TrainContext};
     use crate::shape::{C, D2, Sym};
     use crate::tensor::{Tensor, Tensor1D, Tensor2D};
 
@@ -195,7 +215,7 @@ mod tests {
         let five =
             Tensor::<D2<Sym<Batch>, C<2>>>::from_vec_with_shape(vec![0.0; 10], [5, 2]).unwrap();
 
-        let mut ctx = Ctx::eval();
+        let mut ctx = TrainContext::eval();
         let out_two = model.forward(&two, &mut ctx).unwrap();
         let out_five = model.forward(&five, &mut ctx).unwrap();
 
@@ -214,7 +234,7 @@ mod tests {
         ];
 
         let input = Tensor2D::<2, 2>::from_vec(vec![1.0, -2.0, 3.0, 4.0]).unwrap();
-        let mut ctx = Ctx::eval();
+        let mut ctx = TrainContext::eval();
         let output = model.forward(&input, &mut ctx).unwrap();
         assert_eq!(output.shape().dims(), &[2, 1]);
 
@@ -230,7 +250,7 @@ mod tests {
             .add_module(Linear::<3, 1>::zeros().unwrap());
 
         let input = Tensor2D::<2, 2>::from_vec(vec![1.0, -2.0, 3.0, 4.0]).unwrap();
-        let mut ctx = Ctx::eval();
+        let mut ctx = TrainContext::eval();
         let output = model.forward(&input, &mut ctx).unwrap();
         assert_eq!(output.shape().dims(), &[2, 1]);
 
@@ -245,7 +265,7 @@ mod tests {
         let model = seq![Relu, Dropout::new(0.5), Relu];
         let input = Tensor1D::<4>::ones().unwrap();
 
-        let mut train_ctx = Ctx::training(7);
+        let mut train_ctx = TrainContext::training(7);
         let train = model
             .forward(&input, &mut train_ctx)
             .unwrap()
@@ -253,7 +273,7 @@ mod tests {
             .unwrap();
         assert!(train.iter().all(|&value| value == 0.0 || value == 2.0));
 
-        let mut eval_ctx = Ctx::eval();
+        let mut eval_ctx = TrainContext::eval();
         let eval = model
             .forward(&input, &mut eval_ctx)
             .unwrap()

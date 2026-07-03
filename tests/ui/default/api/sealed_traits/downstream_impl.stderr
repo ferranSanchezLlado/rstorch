@@ -1,0 +1,545 @@
+error[E0277]: the trait bound `RogueDType: dtype::sealed::SealedDType` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | impl DType for RogueDType {
+  |                ^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `dtype::sealed::SealedDType` is not implemented for `RogueDType`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueDType(f32);
+  | ^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `dtype::sealed::SealedDType`
+ --> src/dtype.rs
+  |
+  | impl sealed::SealedDType for f32 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `f32`
+...
+  | impl sealed::SealedDType for f16 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `rstorch::f16`
+...
+  | impl sealed::SealedDType for bf16 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `bf16`
+...
+  | impl sealed::SealedDType for f64 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `f64`
+note: required by a bound in `rstorch::DType`
+ --> src/dtype.rs
+  |
+  | pub trait DType:
+  |           ----- required by a bound in this trait
+  |     sealed::SealedDType
+  |     ^^^^^^^^^^^^^^^^^^^ required by this bound in `DType`
+  = note: `DType` is a "sealed trait", because to implement it you also need to implement `rstorch::dtype::sealed::SealedDType`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            f32
+            rstorch::f16
+            rstorch::bf16
+            f64
+
+error[E0277]: the trait bound `RogueDType: dtype::sealed::SealedDType` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | impl FloatDType for RogueDType {
+  |                     ^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `dtype::sealed::SealedDType` is not implemented for `RogueDType`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueDType(f32);
+  | ^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `dtype::sealed::SealedDType`
+ --> src/dtype.rs
+  |
+  | impl sealed::SealedDType for f32 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `f32`
+...
+  | impl sealed::SealedDType for f16 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `rstorch::f16`
+...
+  | impl sealed::SealedDType for bf16 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `bf16`
+...
+  | impl sealed::SealedDType for f64 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `f64`
+  = note: required for `RogueDType` to implement `rstorch::DType`
+note: required by a bound in `FloatDType`
+ --> src/dtype.rs
+  |
+  | pub trait FloatDType: DType + Neg<Output = Self> {
+  |                       ^^^^^ required by this bound in `FloatDType`
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  |     fn default_device() -> Result<Self::Device, Self::Error> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  |     fn zeros(_device: &Self::Device, len: usize) -> Result<Self::Storage, Self::Error> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  |     fn ones(_device: &Self::Device, len: usize) -> Result<Self::Storage, Self::Error> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  |     fn from_vec(_device: &Self::Device, data: Vec<f32>) -> Result<Self::Storage, Self::Error> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  |     fn to_vec(_device: &Self::Device, storage: &Self::Storage) -> Result<Vec<f32>, Self::Error> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  |     fn storage_len(storage: &Self::Storage) -> usize {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn matmul(
+  | |         _device: &Self::Device,
+  | |         _lhs: &Self::Storage,
+  | |         _rhs: &Self::Storage,
+... |
+  | |         n: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn add(
+  | |         _device: &Self::Device,
+  | |         lhs: &Self::Storage,
+  | |         _rhs: &Self::Storage,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn sub(
+  | |         _device: &Self::Device,
+  | |         lhs: &Self::Storage,
+  | |         _rhs: &Self::Storage,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn mul(
+  | |         _device: &Self::Device,
+  | |         lhs: &Self::Storage,
+  | |         _rhs: &Self::Storage,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn div(
+  | |         _device: &Self::Device,
+  | |         lhs: &Self::Storage,
+  | |         _rhs: &Self::Storage,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn add_scalar(
+  | |         _device: &Self::Device,
+  | |         input: &Self::Storage,
+  | |         _rhs: f32,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn sub_scalar(
+  | |         _device: &Self::Device,
+  | |         input: &Self::Storage,
+  | |         _rhs: f32,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn mul_scalar(
+  | |         _device: &Self::Device,
+  | |         input: &Self::Storage,
+  | |         _rhs: f32,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn div_scalar(
+  | |         _device: &Self::Device,
+  | |         input: &Self::Storage,
+  | |         _rhs: f32,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | /     fn sum(
+  | |         _device: &Self::Device,
+  | |         _input: &Self::Storage,
+  | |         _len: usize,
+  | |     ) -> Result<Self::Storage, Self::Error> {
+  | |___________________________________________^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu
+
+error[E0277]: the trait bound `RogueBackend: backend::sealed::SealedBackend` is not satisfied
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | impl Backend<f32> for RogueBackend {
+  |                       ^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `backend::sealed::SealedBackend` is not implemented for `RogueBackend`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | struct RogueBackend;
+  | ^^^^^^^^^^^^^^^^^^^
+help: the trait `backend::sealed::SealedBackend` is implemented for `rstorch::Cpu`
+ --> src/backend/cpu.rs
+  |
+  | impl sealed::SealedBackend for Cpu {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `rstorch::Backend`
+ --> src/backend/mod.rs
+  |
+  | pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
+  |                              ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Backend`
+  = note: `Backend` is a "sealed trait", because to implement it you also need to implement `rstorch::backend::sealed::SealedBackend`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following type implements the trait:
+            rstorch::Cpu

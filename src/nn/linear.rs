@@ -79,8 +79,8 @@ where
     type Output = Tensor<D2<Batch, C<OUT>>, E, B>;
 }
 
-impl<Batch, const IN: usize, const OUT: usize, E, B, Ctx>
-    Module<Tensor<D2<Batch, C<IN>>, E, B>, Ctx> for Linear<IN, OUT, E, B>
+impl<Batch, const IN: usize, const OUT: usize, E, B, Context>
+    Module<Tensor<D2<Batch, C<IN>>, E, B>, Context> for Linear<IN, OUT, E, B>
 where
     Batch: DimSpec,
     E: FloatDType,
@@ -89,11 +89,11 @@ where
     fn forward(
         &self,
         input: &Tensor<D2<Batch, C<IN>>, E, B>,
-        _ctx: &mut Ctx,
+        _ctx: &mut Context,
     ) -> Result<Self::Output> {
         input
             .matmul(self.weight.tensor())?
-            .add_row(self.bias.tensor())
+            .add_last_dim(self.bias.tensor())
     }
 }
 
@@ -102,13 +102,33 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn parameters<'a>(&'a self, out: &mut Vec<ParameterRef<'a, E, B>>) {
-        out.push(self.weight.as_ref());
-        out.push(self.bias.as_ref());
+    fn visit_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
+    ) {
+        visit(
+            &crate::nn::parameter_path(prefix, "weight"),
+            self.weight.as_ref(),
+        );
+        visit(
+            &crate::nn::parameter_path(prefix, "bias"),
+            self.bias.as_ref(),
+        );
     }
 
-    fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
-        out.push(self.weight.as_mut());
-        out.push(self.bias.as_mut());
+    fn visit_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
+    ) {
+        visit(
+            &crate::nn::parameter_path(prefix, "weight"),
+            self.weight.as_mut(),
+        );
+        visit(
+            &crate::nn::parameter_path(prefix, "bias"),
+            self.bias.as_mut(),
+        );
     }
 }

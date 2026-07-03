@@ -1,20 +1,20 @@
 error[E0080]: evaluation panicked: cross_entropy: axis 1=0 must be greater than 0
-    --> src/tensor/ops.rs:1043:17
+    --> src/tensor/ops.rs:1082:17
      |
-1043 |         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
-     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<0>>>>::cross_entropy_ignore_index::{constant#0}` failed here
+1082 |         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<0>>>>::cross_entropy_with::{constant#0}` failed here
 
 note: erroneous constant encountered
-    --> src/tensor/ops.rs:1043:9
+    --> src/tensor/ops.rs:1082:9
      |
-1043 |         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
+1082 |         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `<instantiation>`
-    --> src/tensor/ops.rs:1035:9
+    --> src/tensor/ops.rs:1074:9
      |
-1035 |         self.cross_entropy_ignore_index(targets, usize::MAX)
-     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1074 |         self.cross_entropy_with(targets, CrossEntropyOpts::default())
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For more information about this error, try `rustc --explain E0080`.
 error: could not compile `default-tensor-invalid-values-cross-entropy-zero-axis` (bin "default-tensor-invalid-values-cross-entropy-zero-axis") due to 1 previous error
