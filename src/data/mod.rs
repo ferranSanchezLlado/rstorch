@@ -8,7 +8,8 @@ mod sampler;
 pub use collate::{
     Batch, Collate, DynamicFeatures, Features, ImageBatch, StackDynVecCollate, StackImageCollate,
     StackVecCollate, StaticFeatures, StaticImageBatch, StaticStackImageCollate,
-    StaticStackVecCollate, dynamic_features, features, images, static_features, static_images,
+    StaticStackVecCollate, dynamic_features, features, images, normalize_image_sample,
+    static_features, static_images,
 };
 pub use dataloader::{
     DataLoader, DataLoaderBuilder, DataLoaderIter, StaticDataLoader, StaticDataLoaderBuilder,

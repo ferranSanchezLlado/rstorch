@@ -1,7 +1,8 @@
 use std::fmt::Debug;
 
 use rstorch::{
-    Backend, C, Cpu, D1, D2, DType, DTypeId, FloatDType, Sym, Tensor, Tensor1D, Tensor2D, bf16, f16,
+    Backend, C, Conv2dOptions, Cpu, D1, D2, DType, DTypeId, FloatDType, Padding2d, Pool2dOptions,
+    Sym, Tensor, Tensor1D, Tensor2D, Tensor4D, bf16, f16,
 };
 
 struct Batch;
@@ -127,6 +128,52 @@ where
         relu.relu().unwrap().to_vec().unwrap(),
         &[0.0, 0.0, 3.0, 0.0],
     );
+
+    let image = Tensor4D::<1, 1, 2, 2, E, B>::from_vec(values(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+    assert_vec_eq(
+        image
+            .pad2d::<4, 4>(Padding2d::new(1, 1))
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ],
+    );
+    let weight = Tensor4D::<1, 1, 2, 2, E, B>::from_vec(values(&[1.0, 0.0, 0.0, 1.0])).unwrap();
+    assert_vec_eq(
+        image
+            .conv2d::<C<1>, C<2>, C<2>, 1, 1>(&weight, Conv2dOptions::default())
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[5.0],
+    );
+    let bias = Tensor1D::<1, E, B>::from_vec(values(&[10.0])).unwrap();
+    assert_vec_eq(
+        image.add_channel_dim(&bias).unwrap().to_vec().unwrap(),
+        &[11.0, 12.0, 13.0, 14.0],
+    );
+    assert_vec_eq(
+        image.flatten_spatial::<4>().unwrap().to_vec().unwrap(),
+        &[1.0, 2.0, 3.0, 4.0],
+    );
+    assert_vec_eq(
+        image
+            .max_pool2d::<1, 1>(Pool2dOptions::new(2, 2))
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[4.0],
+    );
+    assert_vec_eq(
+        image
+            .avg_pool2d::<1, 1>(Pool2dOptions::new(2, 2))
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[2.5],
+    );
 }
 
 fn autograd_parity_for_backend<E, B>()
@@ -152,6 +199,28 @@ where
         &[11.0, 15.0, 11.0, 15.0],
     );
     assert_vec_eq(rhs.grad().unwrap().to_vec().unwrap(), &[4.0, 4.0, 6.0, 6.0]);
+
+    let image = Tensor4D::<1, 1, 2, 2, E, B>::from_vec(values(&[1.0, 2.0, 3.0, 4.0]))
+        .unwrap()
+        .with_requires_grad(true);
+    let weight = Tensor4D::<1, 1, 2, 2, E, B>::from_vec(values(&[1.0, 1.0, 1.0, 1.0]))
+        .unwrap()
+        .with_requires_grad(true);
+    image
+        .conv2d::<C<1>, C<2>, C<2>, 1, 1>(&weight, Conv2dOptions::default())
+        .unwrap()
+        .sum()
+        .unwrap()
+        .backward()
+        .unwrap();
+    assert_vec_eq(
+        image.grad().unwrap().to_vec().unwrap(),
+        &[1.0, 1.0, 1.0, 1.0],
+    );
+    assert_vec_eq(
+        weight.grad().unwrap().to_vec().unwrap(),
+        &[1.0, 2.0, 3.0, 4.0],
+    );
 }
 
 #[test]

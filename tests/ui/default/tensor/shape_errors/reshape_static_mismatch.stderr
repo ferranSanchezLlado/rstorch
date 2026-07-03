@@ -1,31 +1,31 @@
 error[E0080]: evaluation panicked: reshape: source elements=12 must equal target elements=10
-  --> src/tensor/ops.rs:43:13
-   |
-43 | /             const_check::known_size_eq(
-44 | |                 S::KNOWN_NUMEL,
-45 | |                 T::KNOWN_NUMEL,
-46 | |                 "reshape",
-47 | |                 "source elements",
-48 | |                 "target elements",
-49 | |             );
-   | |_____________^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<6>>>>::reshape::<rstorch::D2<rstorch::C<5>, rstorch::C<2>>>::{constant#0}` failed here
+   --> src/tensor/ops.rs:174:13
+    |
+174 | /             const_check::known_size_eq(
+175 | |                 S::KNOWN_NUMEL,
+176 | |                 T::KNOWN_NUMEL,
+177 | |                 "reshape",
+178 | |                 "source elements",
+179 | |                 "target elements",
+180 | |             );
+    | |_____________^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<6>>>>::reshape::<rstorch::D2<rstorch::C<5>, rstorch::C<2>>>::{constant#0}` failed here
 
 note: erroneous constant encountered
-  --> src/tensor/ops.rs:42:9
-   |
-42 | /         const {
-43 | |             const_check::known_size_eq(
-44 | |                 S::KNOWN_NUMEL,
-45 | |                 T::KNOWN_NUMEL,
-...  |
-49 | |             );
-50 | |         };
-   | |_________^
+   --> src/tensor/ops.rs:173:9
+    |
+173 | /         const {
+174 | |             const_check::known_size_eq(
+175 | |                 S::KNOWN_NUMEL,
+176 | |                 T::KNOWN_NUMEL,
+...   |
+180 | |             );
+181 | |         };
+    | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`
-   --> src/tensor/ops.rs:129:9
+   --> src/tensor/ops.rs:260:9
     |
-129 |         self.reshape::<D2<C<M>, C<N>>>()
+260 |         self.reshape::<D2<C<M>, C<N>>>()
     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For more information about this error, try `rustc --explain E0080`.

@@ -7,6 +7,7 @@ use crate::dtype::{DType, DTypeId, FloatDType};
 use crate::error::Result;
 use crate::shape::{C, D0, D1, D2, D3, D4, Shape, ShapeSpec, StaticShape};
 pub use autograd::{NoGradGuard, is_grad_enabled, no_grad};
+pub use ops::{Conv2dOptions, Padding2d, Pool2dOptions};
 use raw::RawTensor;
 use std::fmt::Debug;
 use std::marker::PhantomData;

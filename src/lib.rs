@@ -33,7 +33,8 @@ pub use data::{
     IntoTensorDataset, RandomSampler, SequentialSampler, ShuffleSampler, StackDynVecCollate,
     StackImageCollate, StackVecCollate, StaticDataLoader, StaticFeatures, StaticImageBatch,
     StaticStackImageCollate, StaticStackVecCollate, Subset, TensorDataset, Transform, VecDataset,
-    dynamic_features, features, images, loader, static_features, static_images, static_loader,
+    dynamic_features, features, images, loader, normalize_image_sample, static_features,
+    static_images, static_loader,
 };
 #[cfg(feature = "hub")]
 pub use data::{
@@ -43,10 +44,11 @@ pub use data::{
 pub use dtype::{DType, DTypeId, FloatDType, bf16, f16};
 pub use error::{DTypeError, DataError, DeviceError, Error, Result, ShapeError};
 pub use nn::{
-    CrossEntropyOpts, Dropout, Embedding, Gelu, HasParameters, Layer, LayerNorm, Linear, Module,
-    MultiHeadAttention, Parameter, ParameterId, PositionalEmbedding, Reduction, Relu, RngSource,
-    Sequential, Sigmoid, Tanh, TrainContext, TrainingMode, causal_attention_mask,
-    causal_attention_mask_for_backend, mse_loss, scaled_dot_product_attention,
+    AvgPool2d, Conv2d, CrossEntropyOpts, Dropout, Embedding, Flatten, Gelu, HasParameters, Layer,
+    LayerNorm, Linear, MaxPool2d, Module, MultiHeadAttention, Parameter, ParameterId,
+    PositionalEmbedding, Reduction, Relu, RngSource, Sequential, Sigmoid, Tanh, TrainContext,
+    TrainingMode, causal_attention_mask, causal_attention_mask_for_backend, mse_loss,
+    scaled_dot_product_attention,
 };
 pub use optim::{
     Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr, clip_grad_norm,
@@ -54,8 +56,8 @@ pub use optim::{
 pub use random::SmallRng;
 pub use shape::{AnyDim, C, D0, D1, D2, D3, D4, DimSpec, Shape, ShapeSpec, StaticShape, Sym};
 pub use tensor::{
-    Mask, NoGradGuard, Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D, Tensor4D, is_grad_enabled,
-    no_grad,
+    Conv2dOptions, Mask, NoGradGuard, Padding2d, Pool2dOptions, Scalar, Tensor, Tensor1D, Tensor2D,
+    Tensor3D, Tensor4D, is_grad_enabled, no_grad,
 };
 pub use transformer::{
     BpeTokenizer, CausalLmBatch, CausalLmSample, CharTokenizer, DecoderOnlyTransformer,
@@ -76,8 +78,8 @@ pub mod prelude {
         IntoTensorDataset, RandomSampler, SequentialSampler, ShuffleSampler, StackDynVecCollate,
         StackImageCollate, StackVecCollate, StaticDataLoader, StaticFeatures, StaticImageBatch,
         StaticStackImageCollate, StaticStackVecCollate, Subset, TensorDataset, Transform,
-        VecDataset, dynamic_features, features, images, loader, static_features, static_images,
-        static_loader,
+        VecDataset, dynamic_features, features, images, loader, normalize_image_sample,
+        static_features, static_images, static_loader,
     };
     #[cfg(feature = "hub")]
     pub use crate::data::{
@@ -87,10 +89,11 @@ pub mod prelude {
     pub use crate::dtype::{DType, FloatDType, bf16, f16};
     pub use crate::error::Result;
     pub use crate::nn::{
-        CrossEntropyOpts, Dropout, Embedding, Gelu, HasParameters, Layer, LayerNorm, Linear,
-        Module, MultiHeadAttention, Parameter, PositionalEmbedding, Reduction, Relu, RngSource,
-        Sequential, Sigmoid, Tanh, TrainContext, TrainingMode, causal_attention_mask,
-        causal_attention_mask_for_backend, mse_loss, scaled_dot_product_attention,
+        AvgPool2d, Conv2d, CrossEntropyOpts, Dropout, Embedding, Flatten, Gelu, HasParameters,
+        Layer, LayerNorm, Linear, MaxPool2d, Module, MultiHeadAttention, Parameter,
+        PositionalEmbedding, Reduction, Relu, RngSource, Sequential, Sigmoid, Tanh, TrainContext,
+        TrainingMode, causal_attention_mask, causal_attention_mask_for_backend, mse_loss,
+        scaled_dot_product_attention,
     };
     pub use crate::optim::{
         Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr,
@@ -100,7 +103,8 @@ pub mod prelude {
     pub use crate::seq;
     pub use crate::shape::{AnyDim, C, D0, D1, D2, D3, D4, DimSpec, ShapeSpec, StaticShape, Sym};
     pub use crate::tensor::{
-        Mask, Scalar, Tensor, Tensor1D, Tensor2D, Tensor3D, Tensor4D, is_grad_enabled, no_grad,
+        Conv2dOptions, Mask, Padding2d, Pool2dOptions, Scalar, Tensor, Tensor1D, Tensor2D,
+        Tensor3D, Tensor4D, is_grad_enabled, no_grad,
     };
     pub use crate::transformer::{
         BpeTokenizer, CausalLmBatch, CausalLmSample, CharTokenizer, DecoderOnlyTransformer,

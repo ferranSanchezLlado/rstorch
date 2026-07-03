@@ -46,6 +46,12 @@ pub enum ShapeError {
         op: &'static str,
         reason: &'static str,
     },
+    InvalidSpatialParam {
+        op: &'static str,
+        param: &'static str,
+        value: usize,
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for ShapeError {
@@ -100,6 +106,15 @@ impl fmt::Display for ShapeError {
             Self::ViewIncompatible { op, reason } => {
                 write!(f, "{op} view incompatible: {reason}")
             }
+            Self::InvalidSpatialParam {
+                op,
+                param,
+                value,
+                reason,
+            } => write!(
+                f,
+                "{op} invalid spatial parameter {param}={value}: {reason}"
+            ),
         }
     }
 }

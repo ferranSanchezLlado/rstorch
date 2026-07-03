@@ -44,6 +44,35 @@ pub fn static_images<const BATCH: usize, const CH: usize, const H: usize, const 
     StaticStackImageCollate::new()
 }
 
+/// Normalizes a flattened CHW image sample with per-channel mean and stddev.
+pub fn normalize_image_sample<const CH: usize, const H: usize, const W: usize, E>(
+    sample: Vec<E>,
+    mean: [E; CH],
+    std: [E; CH],
+) -> Result<Vec<E>>
+where
+    E: FloatDType,
+{
+    let expected = CH * H * W;
+    if sample.len() != expected {
+        return Err(DataError::InconsistentSampleShape {
+            index: 0,
+            expected: vec![CH, H, W],
+            found: vec![sample.len()],
+        }
+        .into());
+    }
+
+    let mut out = Vec::with_capacity(expected);
+    for ch in 0..CH {
+        for offset in 0..H * W {
+            let value = sample[ch * H * W + offset];
+            out.push((value - mean[ch]) / std[ch]);
+        }
+    }
+    Ok(out)
+}
+
 /// Converts a list of samples into a batch.
 ///
 /// Built-in collators only produce dynamic runtime batch axes (`Sym<Batch>`),
