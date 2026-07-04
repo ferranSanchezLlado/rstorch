@@ -49,6 +49,10 @@ fn reductions_softmax_and_cross_entropy_work() {
     assert_close(softmax[0] + softmax[1] + softmax[2], 1.0, 1e-6);
     assert_close(softmax[3] + softmax[4] + softmax[5], 1.0, 1e-6);
 
+    assert_eq!(logits.argmax_last().unwrap(), vec![2, 0]);
+    assert_eq!(logits.correct_count(&[2, 1]).unwrap(), 1);
+    assert_close_f64(logits.accuracy(&[2, 0]).unwrap(), 1.0, 1e-12);
+
     let loss = logits.cross_entropy(&[2, 0]).unwrap();
     assert_close(loss.to_vec().unwrap()[0], 0.407_605_95, 1e-6);
     loss.backward().unwrap();
@@ -56,6 +60,36 @@ fn reductions_softmax_and_cross_entropy_work() {
     let grad = logits.grad().unwrap().to_vec().unwrap();
     assert_close(grad[2], (softmax[2] - 1.0) / 2.0, 1e-6);
     assert_close(grad[3], (softmax[3] - 1.0) / 2.0, 1e-6);
+}
+
+#[test]
+fn static_shape_operators_and_display_are_ergonomic() {
+    let lhs = Tensor1D::<3>::from_vec(vec![1.0, 2.0, 3.0]).unwrap();
+    let rhs = Tensor1D::<3>::from_vec(vec![4.0, 5.0, 6.0]).unwrap();
+
+    assert_eq!(
+        (&lhs + &rhs).unwrap().to_vec().unwrap(),
+        vec![5.0, 7.0, 9.0]
+    );
+    assert_eq!(
+        (&rhs - &lhs).unwrap().to_vec().unwrap(),
+        vec![3.0, 3.0, 3.0]
+    );
+    assert_eq!((&lhs * 2.0).unwrap().to_vec().unwrap(), vec![2.0, 4.0, 6.0]);
+    assert_eq!(
+        (rhs.clone() / 2.0).unwrap().to_vec().unwrap(),
+        vec![2.0, 2.5, 3.0]
+    );
+    assert_eq!((-&lhs).unwrap().to_vec().unwrap(), vec![-1.0, -2.0, -3.0]);
+
+    let displayed = format!(
+        "{}",
+        Tensor1D::<12>::from_vec((0..12).map(|x| x as f32).collect()).unwrap()
+    );
+    assert_eq!(
+        displayed,
+        "Tensor(shape=[12], dtype=F32, values=[0, 1, 2, 3, 4, 5, ..., 10, 11])"
+    );
 }
 
 #[test]

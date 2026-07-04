@@ -1,13 +1,13 @@
 error[E0080]: evaluation panicked: softmax_last: last axis=0 must be greater than 0
-    --> src/tensor/ops.rs:1152:17
+    --> src/tensor/ops.rs:1221:17
      |
-1152 |         const { const_check::known_nonzero(N::KNOWN, "softmax_last", "last axis") };
+1221 |         const { const_check::known_nonzero(N::KNOWN, "softmax_last", "last axis") };
      |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<0>>>>::softmax_last::{constant#0}` failed here
 
 note: erroneous constant encountered
-    --> src/tensor/ops.rs:1152:9
+    --> src/tensor/ops.rs:1221:9
      |
-1152 |         const { const_check::known_nonzero(N::KNOWN, "softmax_last", "last axis") };
+1221 |         const { const_check::known_nonzero(N::KNOWN, "softmax_last", "last axis") };
      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `<instantiation>`

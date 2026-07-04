@@ -11,6 +11,7 @@ description = "Implementation from scratch of a neural network framework in Rust
 keywords = ["neural-network", "machine-learning", "deep-learning", "pytorch", "rust"]
 categories = ["science", "mathematics", "algorithms"]
 edition = "2024"
+rust-version = "1.88"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]

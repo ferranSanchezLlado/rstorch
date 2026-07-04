@@ -5,6 +5,8 @@ use crate::error::{Result, ShapeError};
 use crate::shape::ShapeSpec;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -14,22 +16,39 @@ thread_local! {
     static GRAD_ENABLED: Cell<bool> = const { Cell::new(true) };
 }
 
+/// Returns whether newly created differentiable tensors should attach autograd
+/// history on the current thread.
+///
+/// Grad mode is thread-local. Calling [`no_grad`] in one thread does not change
+/// this value in another thread, even when tensors are shared across threads.
 pub fn is_grad_enabled() -> bool {
     GRAD_ENABLED.with(Cell::get)
 }
 
+/// Disables autograd history recording on the current thread until the returned
+/// guard is dropped.
+///
+/// Grad mode is thread-local: the guard only affects work performed on the
+/// thread that created it. Tensor gradient slots are internally mutex-guarded,
+/// so sharing tensors across threads is safe when their backend storage is
+/// `Send + Sync`, but concurrent gradient accumulation order is not specified.
 pub fn no_grad() -> NoGradGuard {
     let previous = GRAD_ENABLED.with(|enabled| {
         let previous = enabled.get();
         enabled.set(false);
         previous
     });
-    NoGradGuard { previous }
+    NoGradGuard {
+        previous,
+        _not_send: PhantomData,
+    }
 }
 
 #[must_use]
+/// Restores the previous thread-local grad mode when dropped.
 pub struct NoGradGuard {
     previous: bool,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl Drop for NoGradGuard {
@@ -439,6 +458,26 @@ mod tests {
         let detached = y.detach();
         assert!(!detached.requires_grad());
         assert_eq!(detached.to_vec().unwrap(), vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn grad_mode_is_thread_local() {
+        assert!(super::is_grad_enabled());
+        let guard = super::no_grad();
+        assert!(!super::is_grad_enabled());
+
+        let handle = std::thread::spawn(|| {
+            assert!(super::is_grad_enabled());
+            let thread_guard = super::no_grad();
+            assert!(!super::is_grad_enabled());
+            drop(thread_guard);
+            assert!(super::is_grad_enabled());
+        });
+        handle.join().unwrap();
+
+        assert!(!super::is_grad_enabled());
+        drop(guard);
+        assert!(super::is_grad_enabled());
     }
 
     #[test]

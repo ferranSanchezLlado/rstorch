@@ -1,25 +1,25 @@
 error[E0080]: evaluation panicked: flatten_spatial: channels * height * width=24 must equal OUT=23
-    --> src/tensor/ops.rs:1883:13
+    --> src/tensor/ops.rs:1952:13
      |
-1883 | /             const_check::known_size_eq(
-1884 | |                 crate::shape::known_numel([Channels::KNOWN, Height::KNOWN, Width::KNOWN]),
-1885 | |                 Some(OUT),
-1886 | |                 "flatten_spatial",
-1887 | |                 "channels * height * width",
-1888 | |                 "OUT",
-1889 | |             );
+1952 | /             const_check::known_size_eq(
+1953 | |                 crate::shape::known_numel([Channels::KNOWN, Height::KNOWN, Width::KNOWN]),
+1954 | |                 Some(OUT),
+1955 | |                 "flatten_spatial",
+1956 | |                 "channels * height * width",
+1957 | |                 "OUT",
+1958 | |             );
      | |_____________^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D4<rstorch::C<1>, rstorch::C<2>, rstorch::C<3>, rstorch::C<4>>>>::flatten_spatial::<23>::{constant#0}` failed here
 
 note: erroneous constant encountered
-    --> src/tensor/ops.rs:1882:9
+    --> src/tensor/ops.rs:1951:9
      |
-1882 | /         const {
-1883 | |             const_check::known_size_eq(
-1884 | |                 crate::shape::known_numel([Channels::KNOWN, Height::KNOWN, Width::KNOWN]),
-1885 | |                 Some(OUT),
+1951 | /         const {
+1952 | |             const_check::known_size_eq(
+1953 | |                 crate::shape::known_numel([Channels::KNOWN, Height::KNOWN, Width::KNOWN]),
+1954 | |                 Some(OUT),
 ...    |
-1889 | |             );
-1890 | |         };
+1958 | |             );
+1959 | |         };
      | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`
@@ -53,9 +53,9 @@ note: erroneous constant encountered
     | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`
-    --> src/tensor/ops.rs:1902:9
+    --> src/tensor/ops.rs:1971:9
      |
-1902 |         self.reshape_with_shape::<D2<Batch, C<OUT>>>([batch, OUT])
+1971 |         self.reshape_with_shape::<D2<Batch, C<OUT>>>([batch, OUT])
      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For more information about this error, try `rustc --explain E0080`.

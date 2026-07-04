@@ -785,6 +785,75 @@ where
             )])
         })
     }
+
+    /// Returns the index of the first maximum value along the last/class axis.
+    pub fn argmax_last(&self) -> Result<Vec<usize>> {
+        const { const_check::known_nonzero(K::KNOWN, "argmax_last", "last axis") };
+
+        let dims = self.shape().dims();
+        let rows = dims[0];
+        let cols = dims[1];
+        ensure_nonzero_dim("argmax_last", 1, cols)?;
+        let values = self.to_vec()?;
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let start = row * cols;
+            let mut best = 0usize;
+            let mut best_value = values[start];
+            for col in 1..cols {
+                let value = values[start + col];
+                if value > best_value {
+                    best = col;
+                    best_value = value;
+                }
+            }
+            out.push(best);
+        }
+        Ok(out)
+    }
+
+    /// Counts predictions matching `targets` after [`Self::argmax_last`].
+    pub fn correct_count(&self, targets: &[usize]) -> Result<usize> {
+        let dims = self.shape().dims();
+        let rows = dims[0];
+        let cols = dims[1];
+        if targets.len() != rows {
+            return Err(ShapeError::LengthMismatch {
+                expected: rows,
+                found: targets.len(),
+            }
+            .into());
+        }
+        for &target in targets {
+            if target >= cols {
+                return Err(DataError::IndexOutOfBounds {
+                    index: target,
+                    len: cols,
+                }
+                .into());
+            }
+        }
+
+        Ok(self
+            .argmax_last()?
+            .into_iter()
+            .zip(targets.iter().copied())
+            .filter(|(predicted, target)| predicted == target)
+            .count())
+    }
+
+    /// Returns classification accuracy over `targets` after [`Self::argmax_last`].
+    pub fn accuracy(&self, targets: &[usize]) -> Result<f64> {
+        let rows = self.shape().dims()[0];
+        let correct = self.correct_count(targets)?;
+        if rows == 0 {
+            return Err(Error::InvalidInput {
+                op: "accuracy",
+                reason: "target set must not be empty",
+            });
+        }
+        Ok(correct as f64 / rows as f64)
+    }
 }
 
 impl<A, K, E, B> Tensor<D2<A, K>, E, B>

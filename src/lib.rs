@@ -5,6 +5,22 @@
 //! return new leaf tensors because autograd graphs are single-dtype and
 //! single-backend.
 //!
+//! Static-shape tensor operators (`+`, `-`, `*`, `/`, unary `-`) are ergonomic
+//! wrappers around the fallible method forms. They return [`Result`] instead of
+//! panicking because backend kernels can still fail even when the type system has
+//! removed the shape mismatch case.
+//!
+//! Autograd grad mode is thread-local: [`no_grad`] only affects the thread that
+//! creates its non-`Send` guard, and [`is_grad_enabled`] reports the current
+//! thread's mode. Tensor gradient state is internally mutex-guarded, so tensors
+//! can be shared across threads when their backend storage is `Send + Sync`, but
+//! concurrent gradient accumulation order is not specified.
+//!
+//! Public APIs return structured [`Error`] values for expected failures. Public
+//! panics are limited to documented precondition violations such as
+//! [`SmallRng::gen_range`] with a zero upper bound, internal invariant failures,
+//! and poisoned synchronization primitives.
+//!
 //! Optimizer parameter data access through [`nn::ParameterRefMut`] currently
 //! uses host `Vec<E>` round trips. That surface is intentionally unstable for
 //! external optimizer implementors until the device-resident optimizer path is

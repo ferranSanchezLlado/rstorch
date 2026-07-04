@@ -347,17 +347,10 @@ where
             window[..recent.len()].copy_from_slice(recent);
             let batch = [window];
             let logits = self.forward(&batch)?;
-            let values = logits.to_vec()?;
-            let base = read_pos * VOCAB;
-            let mut best = 0usize;
-            let mut best_value = values[base];
-            for token in 1..VOCAB {
-                if values[base + token] > best_value {
-                    best = token;
-                    best_value = values[base + token];
-                }
-            }
-            ids.push(best);
+            let predictions = logits
+                .reshape_with_shape::<D2<AnyDim, C<VOCAB>>>([SEQ, VOCAB])?
+                .argmax_last()?;
+            ids.push(predictions[read_pos]);
         }
         Ok(ids)
     }

@@ -5,29 +5,6 @@ use crate::dtype::FloatDType;
 use crate::error::Result;
 use crate::nn::{HasParameters, Layer, Module, ParameterRef, ParameterRefMut};
 
-/// A type-checked stack of modules that consumes a fixed `Input` type.
-///
-/// `Sequential` pins the network input type up front (via [`sequential`]) and
-/// carries `M`, the composed module built so far. Because the input type is
-/// known, [`add_module`](Self::add_module) can require the next stage to
-/// implement `Layer` for the *current* output type: appending a layer whose
-/// input shape does not match — or a value that is not a module at all, such as
-/// an integer — is a compile error at that call site, not later at `forward`.
-///
-/// The composite is itself a [`Module`] and forwards [`HasParameters`] to its
-/// stages, so it plugs straight into the optimizer loop.
-///
-/// Parameter names are part of the persistence contract. A two-stage tuple uses
-/// `0` and `1` as path segments, so `Sequential::new(Linear, Relu)` exposes
-/// names such as `0.weight` and `0.bias`; additional `.add_module` calls nest
-/// another tuple and preserve deterministic left-to-right order.
-///
-/// ```ignore
-/// let model = Sequential::new(Linear::<784, 128>::zeros()?, Relu)
-///     .add_module(Linear::<128, 10>::zeros()?);
-/// let mut ctx = TrainContext::training(0);
-/// let logits = model.forward(&images, &mut ctx)?; // pins the input type
-/// ```
 /// Builds a [`Sequential`] stack from two or more modules.
 ///
 /// `seq![a, b, c]` expands to `Sequential::new(a, b).add_module(c)`, so the same
@@ -51,6 +28,29 @@ macro_rules! seq {
     };
 }
 
+/// A type-checked stack of modules that consumes a fixed `Input` type.
+///
+/// `Sequential` pins the network input type up front and carries `M`, the
+/// composed module built so far. Because the input type is known,
+/// [`add_module`](Self::add_module) can require the next stage to implement
+/// `Layer` for the current output type: appending a layer whose input shape does
+/// not match, or a value that is not a module at all, is a compile error at that
+/// call site.
+///
+/// The composite is itself a [`Module`] and forwards [`HasParameters`] to its
+/// stages, so it plugs straight into the optimizer loop.
+///
+/// Parameter names are part of the persistence contract. A two-stage tuple uses
+/// `0` and `1` as path segments, so `Sequential::new(Linear, Relu)` exposes
+/// names such as `0.weight` and `0.bias`; additional `.add_module` calls nest
+/// another tuple and preserve deterministic left-to-right order.
+///
+/// ```ignore
+/// let model = Sequential::new(Linear::<784, 128>::zeros()?, Relu)
+///     .add_module(Linear::<128, 10>::zeros()?);
+/// let mut ctx = TrainContext::training(0);
+/// let logits = model.forward(&images, &mut ctx)?;
+/// ```
 pub struct Sequential<M, In> {
     module: M,
     _in: PhantomData<fn() -> In>,

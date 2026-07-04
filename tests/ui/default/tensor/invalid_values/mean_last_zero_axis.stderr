@@ -1,13 +1,13 @@
 error[E0080]: evaluation panicked: mean_last: last axis=0 must be greater than 0
-    --> src/tensor/ops.rs:1056:17
+    --> src/tensor/ops.rs:1125:17
      |
-1056 |         const { const_check::known_nonzero(N::KNOWN, "mean_last", "last axis") };
+1125 |         const { const_check::known_nonzero(N::KNOWN, "mean_last", "last axis") };
      |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<0>>>>::mean_last::{constant#0}` failed here
 
 note: erroneous constant encountered
-    --> src/tensor/ops.rs:1056:9
+    --> src/tensor/ops.rs:1125:9
      |
-1056 |         const { const_check::known_nonzero(N::KNOWN, "mean_last", "last axis") };
+1125 |         const { const_check::known_nonzero(N::KNOWN, "mean_last", "last axis") };
      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `<instantiation>`

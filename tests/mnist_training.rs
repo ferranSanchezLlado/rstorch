@@ -80,7 +80,7 @@ fn typed_sequential_mlp_trains_on_synthetic_classification() {
         last < first,
         "expected CE loss to decrease from {first} to {last}"
     );
-    assert_eq!(argmax_rows(&logits.to_vec().unwrap(), 2), targets.to_vec());
+    assert_eq!(logits.argmax_last().unwrap(), targets.to_vec());
 }
 
 #[cfg(feature = "hub")]
@@ -126,12 +126,7 @@ fn typed_sequential_mlp_learns_on_mnist() {
     }
     let logits = model.forward(&images, &mut ctx).unwrap();
     let last = logits.cross_entropy(&targets).unwrap().to_vec().unwrap()[0];
-    let predictions = argmax_rows(&logits.to_vec().unwrap(), 10);
-    let correct = predictions
-        .iter()
-        .zip(&targets)
-        .filter(|(prediction, target)| prediction == target)
-        .count();
+    let correct = logits.correct_count(&targets).unwrap();
     let accuracy = correct as f64 / targets.len() as f64;
 
     assert!(
@@ -160,17 +155,4 @@ where
     for param in &refs {
         param.zero_grad();
     }
-}
-
-fn argmax_rows(values: &[f32], cols: usize) -> Vec<usize> {
-    values
-        .chunks(cols)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .unwrap()
-                .0
-        })
-        .collect()
 }

@@ -1,0 +1,14 @@
+error[E0277]: cannot add `&Tensor<D2<C<2>, C<4>>>` to `&Tensor<D2<C<2>, C<3>>>`
+ --> tests/ui/default/tensor/shape_errors/operator_static_mismatch.rs
+  |
+  |     let _ = &lhs + &rhs;
+  |                  ^ no implementation for `&Tensor<D2<C<2>, C<3>>> + &Tensor<D2<C<2>, C<4>>>`
+  |
+  = help: the trait `Add<&Tensor<D2<C<2>, C<4>>>>` is not implemented for `&Tensor<D2<C<2>, C<3>>>`
+  = help: the following other types implement trait `Add<Rhs>`:
+            `&Tensor<S, E, B>` implements `Add<E>`
+            `&Tensor<S, E, B>` implements `Add<Tensor<S, E, B>>`
+            `&Tensor<S, E, B>` implements `Add`
+            `Tensor<S, E, B>` implements `Add<&Tensor<S, E, B>>`
+            `Tensor<S, E, B>` implements `Add<E>`
+            `Tensor<S, E, B>` implements `Add`
