@@ -1,11 +1,13 @@
 use super::{Backend, sealed};
 use crate::dtype::{DType, f16};
+use std::collections::HashMap;
 use std::error;
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ::metal as metal_rs;
+use metal_rs::objc::rc::autoreleasepool;
 
 const SHADERS_F32: &str = include_str!("kernels/metal_f32.metal");
 const SHADERS_F16: &str = include_str!("kernels/metal_f16.metal");
@@ -16,6 +18,8 @@ pub struct Metal;
 #[derive(Clone)]
 pub struct MetalDevice {
     raw: Arc<metal_rs::Device>,
+    queue: Arc<metal_rs::CommandQueue>,
+    pipelines: Arc<Mutex<HashMap<&'static str, Arc<metal_rs::ComputePipelineState>>>>,
     registry_id: u64,
 }
 
@@ -25,7 +29,7 @@ pub struct MetalStorage {
     len: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum MetalError {
     NoDevice,
@@ -133,12 +137,8 @@ where
     type Error = MetalError;
 
     fn default_device() -> std::result::Result<Self::Device, Self::Error> {
-        let raw = metal_rs::Device::system_default().ok_or(MetalError::NoDevice)?;
-        let registry_id = raw.registry_id();
-        Ok(MetalDevice {
-            raw: Arc::new(raw),
-            registry_id,
-        })
+        static DEVICE: OnceLock<std::result::Result<MetalDevice, MetalError>> = OnceLock::new();
+        DEVICE.get_or_init(create_default_device).clone()
     }
 
     fn zeros(device: &Self::Device, len: usize) -> std::result::Result<Self::Storage, Self::Error> {
@@ -375,22 +375,44 @@ fn scalar<E: MetalDType>(
     Ok(output)
 }
 
+fn create_default_device() -> std::result::Result<MetalDevice, MetalError> {
+    let raw = metal_rs::Device::system_default().ok_or(MetalError::NoDevice)?;
+    let registry_id = raw.registry_id();
+    let queue = raw.new_command_queue();
+    Ok(MetalDevice {
+        raw: Arc::new(raw),
+        queue: Arc::new(queue),
+        pipelines: Arc::new(Mutex::new(HashMap::new())),
+        registry_id,
+    })
+}
+
 fn pipeline<E: MetalDType>(
     device: &MetalDevice,
-    name: &str,
-) -> std::result::Result<metal_rs::ComputePipelineState, MetalError> {
-    let options = metal_rs::CompileOptions::new();
-    let library = device
-        .raw
-        .new_library_with_source(E::SHADERS, &options)
-        .map_err(MetalError::LibraryCompile)?;
-    let function = library
-        .get_function(name, None)
-        .map_err(MetalError::Pipeline)?;
-    device
-        .raw
-        .new_compute_pipeline_state_with_function(&function)
-        .map_err(MetalError::Pipeline)
+    name: &'static str,
+) -> std::result::Result<Arc<metal_rs::ComputePipelineState>, MetalError> {
+    let mut cache = device.pipelines.lock().expect("pipeline cache poisoned");
+    if let Some(pipeline) = cache.get(name) {
+        return Ok(Arc::clone(pipeline));
+    }
+
+    let pipeline = autoreleasepool(|| {
+        let options = metal_rs::CompileOptions::new();
+        let library = device
+            .raw
+            .new_library_with_source(E::SHADERS, &options)
+            .map_err(MetalError::LibraryCompile)?;
+        let function = library
+            .get_function(name, None)
+            .map_err(MetalError::Pipeline)?;
+        device
+            .raw
+            .new_compute_pipeline_state_with_function(&function)
+            .map_err(MetalError::Pipeline)
+    })?;
+    let pipeline = Arc::new(pipeline);
+    cache.insert(name, Arc::clone(&pipeline));
+    Ok(pipeline)
 }
 
 fn encode_and_wait(
@@ -399,29 +421,33 @@ fn encode_and_wait(
     len: usize,
     set_args: impl FnOnce(&metal_rs::ComputeCommandEncoderRef),
 ) -> std::result::Result<(), MetalError> {
-    let queue = device.raw.new_command_queue();
-    let command_buffer = queue.new_command_buffer();
-    let encoder = command_buffer.new_compute_command_encoder();
-    encoder.set_compute_pipeline_state(pipeline);
-    set_args(encoder);
+    // Command buffers and encoders are autoreleased Objective-C objects; the
+    // pool keeps sustained op streams (training loops) from accumulating them
+    // until command submission fails.
+    autoreleasepool(|| {
+        let command_buffer = device.queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(pipeline);
+        set_args(encoder);
 
-    let width = pipeline
-        .thread_execution_width()
-        .min(pipeline.max_total_threads_per_threadgroup())
-        .max(1);
-    let groups = len.div_ceil(width as usize) as u64;
-    encoder.dispatch_thread_groups(
-        metal_rs::MTLSize::new(groups, 1, 1),
-        metal_rs::MTLSize::new(width, 1, 1),
-    );
-    encoder.end_encoding();
-    command_buffer.commit();
-    command_buffer.wait_until_completed();
+        let width = pipeline
+            .thread_execution_width()
+            .min(pipeline.max_total_threads_per_threadgroup())
+            .max(1);
+        let groups = len.div_ceil(width as usize) as u64;
+        encoder.dispatch_thread_groups(
+            metal_rs::MTLSize::new(groups, 1, 1),
+            metal_rs::MTLSize::new(width, 1, 1),
+        );
+        encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
 
-    if command_buffer.status() == metal_rs::MTLCommandBufferStatus::Error {
-        return Err(MetalError::Command("command buffer failed".to_string()));
-    }
-    Ok(())
+        if command_buffer.status() == metal_rs::MTLCommandBufferStatus::Error {
+            return Err(MetalError::Command("command buffer failed".to_string()));
+        }
+        Ok(())
+    })
 }
 
 fn empty_storage<E>(device: &MetalDevice, len: usize) -> MetalStorage {

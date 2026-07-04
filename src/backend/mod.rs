@@ -22,9 +22,13 @@ pub(crate) mod sealed {
 
 /// Tensor storage and kernel backend.
 ///
-/// Backend implementation is not a supported downstream extension point yet.
-/// The trait is sealed until the backend-parity work settles the final kernel
-/// surface and any future trait split before 1.0.
+/// Backend implementation is not a supported downstream extension point.
+/// The trait is sealed through 1.0: the Epoch 16 backend claims decision
+/// demoted every GPU backend to experimental, so no stable implementor
+/// surface is justified yet. Unsealing (or a capability-trait split) is
+/// reconsidered when a backend is promoted to a supported training path,
+/// which requires the device-resident work recorded in
+/// `docs/backend-dtype-support.md`.
 pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'static {
     type Device: Clone + Send + Sync + PartialEq + std::fmt::Debug + 'static;
     type Storage: Clone + Send + Sync + 'static;

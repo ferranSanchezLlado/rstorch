@@ -10,6 +10,7 @@ error[E0599]: the associated function or constant `zeros` exists for struct `Ten
   |         ---------------------------------------------------------------------- doesn't satisfy `D2<Sym<Batch>, C<784>>: StaticShape`
   |
 note: if you're trying to build a new `Tensor<D2<Sym<Batch>, C<784>>>` consider using one of the following associated functions:
+      persistence::<impl Tensor<S, E>>::load
       Tensor::<S, E, B>::zeros_with_shape
       Tensor::<S, E, B>::ones_with_shape
       Tensor::<S, E, B>::from_vec_with_shape
@@ -23,5 +24,10 @@ note: if you're trying to build a new `Tensor<D2<Sym<Batch>, C<784>>>` consider 
 ...
   |     pub fn from_vec_with_shape(data: Vec<E>, shape: impl Into<Shape>) -> Result<Self> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+ ::: src/persistence.rs
+  |
+  |     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = note: the following trait bounds were not satisfied:
           `D2<Sym<Batch>, C<784>>: StaticShape`

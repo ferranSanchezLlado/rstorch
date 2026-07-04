@@ -1,5 +1,19 @@
 //! RsTorch typed tensor facade and CPU-first neural-network utilities.
 //!
+//! # Backends and feature flags
+//!
+//! The default build is CPU-only, and CPU is the only supported training
+//! path. The optional GPU backends behind the `metal`, `wgpu`, and `cuda`
+//! features are **experimental**: each owns real device storage and kernels
+//! for constructors, same-shape and scalar arithmetic, `matmul`, and `sum`,
+//! while every other tensor op executes as reference code through documented
+//! host round trips, so none of them is a supported training path. Metal and
+//! WGPU are parity-tested against CPU on real hardware; CUDA compiles and has
+//! typed device errors but has never been verified on a real device — treat
+//! it as untested. The audited support matrix, the 1.0 backend claims
+//! decision, and the promotion path for experimental backends are recorded in
+//! `docs/backend-dtype-support.md`.
+//!
 //! Tensor conversions are explicit and intentionally detach from autograd:
 //! [`Tensor::cast`], [`Tensor::to_backend`], and [`Tensor::to_backend_on`]
 //! return new leaf tensors because autograd graphs are single-dtype and

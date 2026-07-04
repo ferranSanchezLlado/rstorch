@@ -330,7 +330,10 @@ pub(crate) const fn known_nonzero(value: Option<usize>, op: &str, name: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{self as const_check, ConstWriter};
+    // `use super::{self as ...}` fails to resolve on the 1.88 MSRV toolchain,
+    // so the module alias goes through the crate path instead.
+    use super::ConstWriter;
+    use crate::error::const_check;
 
     #[test]
     fn const_writer_formats_strings_and_usize_values() {

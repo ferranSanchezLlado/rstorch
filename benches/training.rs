@@ -1,13 +1,16 @@
 //! End-to-end model benchmarks: transformer forward and training step at the
 //! tiny test config, an MNIST-style MLP training epoch on synthetic data,
-//! autograd overhead (forward-only vs forward+backward on the same graph), and
-//! Conv2d/pooling forward and backward at small image sizes.
+//! autograd overhead (forward-only vs forward+backward on the same graph),
+//! Conv2d/pooling forward and backward at small image sizes, and a per-backend
+//! MLP training step (`backend_step`) comparing CPU against feature-enabled
+//! GPU backends.
 //!
 //! Inputs are deterministic (seeded [`SmallRng`]) and never touch disk or the
 //! network. Models mutate across iterations in training benchmarks; that is
 //! the steady state a real training loop measures.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::measurement::WallTime;
+use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main};
 use rstorch::prelude::*;
 use std::hint::black_box;
 
@@ -22,7 +25,12 @@ struct Rows;
 /// vocab 6, seq 3, embed 4, 2 heads of dim 2, FFN 8, 2 layers.
 type TinyTransformer = DecoderOnlyTransformer<6, 3, 4, 2, 2, 8, 2>;
 
-fn zero_grads<M: HasParameters<f32, Cpu>>(model: &M) {
+fn zero_grads<E, B, M>(model: &M)
+where
+    E: FloatDType,
+    B: Backend<E>,
+    M: HasParameters<E, B>,
+{
     let mut refs = Vec::new();
     model.parameters(&mut refs);
     for parameter in &refs {
@@ -204,11 +212,74 @@ fn bench_conv_pool(c: &mut Criterion) {
     group.finish();
 }
 
+/// One SGD training step (batch 64, 784 -> 128 -> 10) plus a bare 256x256
+/// matmul, for one backend. Outside constructors, same-shape/scalar
+/// arithmetic, `matmul`, and `sum`, every tensor op is a typed-layer reference
+/// implementation, so on a GPU backend the step crosses host round trips at
+/// every activation, reduction, and optimizer update. The cpu-vs-GPU ratio
+/// here quantifies what "supported via host round trip" means in practice for
+/// the backend claims decision in
+/// [Backend And DType Support](../docs/backend-dtype-support.md).
+fn bench_step_for_backend<B: Backend<f32>>(group: &mut BenchmarkGroup<'_, WallTime>, name: &str) {
+    let mut rng = SmallRng::seed_from_u64(3);
+    let mut model = Sequential::new(
+        Linear::<784, 128, f32, B>::kaiming_uniform(&mut rng).unwrap(),
+        Relu,
+    )
+    .add_module(Linear::<128, 10, f32, B>::kaiming_uniform(&mut rng).unwrap());
+    let mut opt = Sgd::new(0.01);
+    let mut ctx = TrainContext::training(0);
+    let input = Tensor2D::<64, 784, f32, B>::from_vec(uniform_f32(&mut rng, 64 * 784)).unwrap();
+    let targets: Vec<usize> = (0..64).map(|sample| sample % 10).collect();
+
+    group.bench_function(format!("train_step_sgd/{name}"), |b| {
+        b.iter(|| {
+            let loss = model
+                .forward(&input, &mut ctx)
+                .unwrap()
+                .cross_entropy(&targets)
+                .unwrap();
+            loss.backward().unwrap();
+            let mut params = Vec::new();
+            model.parameters_mut(&mut params);
+            opt.step(&mut params).unwrap();
+            drop(params);
+            zero_grads(&model);
+        });
+    });
+
+    let lhs = Tensor2D::<256, 256, f32, B>::from_vec(uniform_f32(&mut rng, 256 * 256)).unwrap();
+    let rhs = Tensor2D::<256, 256, f32, B>::from_vec(uniform_f32(&mut rng, 256 * 256)).unwrap();
+    group.bench_function(format!("matmul_256/{name}"), |b| {
+        b.iter(|| black_box(lhs.matmul(black_box(&rhs)).unwrap()));
+    });
+}
+
+fn bench_backend_step(c: &mut Criterion) {
+    let mut group = c.benchmark_group("backend_step");
+    group.sample_size(10);
+
+    bench_step_for_backend::<Cpu>(&mut group, "cpu");
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    if <Metal as Backend<f32>>::default_device().is_ok() {
+        bench_step_for_backend::<Metal>(&mut group, "metal");
+    }
+
+    #[cfg(feature = "wgpu")]
+    if <Wgpu as Backend<f32>>::default_device().is_ok() {
+        bench_step_for_backend::<Wgpu>(&mut group, "wgpu");
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_transformer,
     bench_mlp_epoch,
     bench_autograd_overhead,
     bench_conv_pool,
+    bench_backend_step,
 );
 criterion_main!(benches);

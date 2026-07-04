@@ -39,6 +39,12 @@ name = "data_pipeline"
 harness = false
 
 [features]
+# The GPU backend features are experimental: native kernels cover only
+# constructors, same-shape/scalar arithmetic, matmul, and sum; every other
+# tensor op runs as reference code through host round trips, and none of them
+# is a supported training path. CUDA has never been hardware-verified. See
+# docs/backend-dtype-support.md for the audited matrix and the 1.0 backend
+# claims decision.
 metal = ["dep:metal"]
 wgpu = ["dep:pollster", "dep:wgpu"]
 cuda = ["dep:cudarc"]
