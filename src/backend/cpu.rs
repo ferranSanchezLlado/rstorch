@@ -105,14 +105,19 @@ impl<E: DType> Backend<E> for Cpu {
             });
         }
 
+        // Iteration order keeps the inner loop unit-stride over `rhs` and the
+        // output row instead of striding `rhs` by `n` per step. Each output
+        // element still accumulates its `k` terms in ascending-`inner` order,
+        // so results are bitwise identical to the naive row/col/inner loop.
         let mut out = vec![E::ZERO; m.saturating_mul(n)];
         for row in 0..m {
-            for col in 0..n {
-                let mut acc = E::ZERO;
-                for inner in 0..k {
-                    acc += lhs[row * k + inner] * rhs[inner * n + col];
+            let out_row = &mut out[row * n..(row + 1) * n];
+            for inner in 0..k {
+                let scale = lhs[row * k + inner];
+                let rhs_row = &rhs[inner * n..(inner + 1) * n];
+                for (acc, &value) in out_row.iter_mut().zip(rhs_row) {
+                    *acc += scale * value;
                 }
-                out[row * n + col] = acc;
             }
         }
         Ok(out)

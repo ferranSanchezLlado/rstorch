@@ -2453,10 +2453,22 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    let lhs_input: RawTensor<E, B> =
-        RawTensor::from_vec_on(lhs.device().clone(), lhs.to_vec()?, lhs.shape().clone())?;
-    let rhs_input: RawTensor<E, B> =
-        RawTensor::from_vec_on(rhs.device().clone(), rhs.to_vec()?, rhs.shape().clone())?;
+    // The backend kernel expects operand storage of exactly `m * k` and
+    // `k * n` elements in row-major order; operands that already satisfy that
+    // (typically incoming gradients) share storage instead of round-tripping
+    // through the host.
+    let materialize = |input: &RawTensor<E, B>| -> Result<RawTensor<E, B>> {
+        if input.is_contiguous() && B::storage_len(input.storage()) == input.numel() {
+            return Ok(input.clone());
+        }
+        RawTensor::from_vec_on(
+            input.device().clone(),
+            input.to_vec()?,
+            input.shape().clone(),
+        )
+    };
+    let lhs_input = materialize(lhs)?;
+    let rhs_input = materialize(rhs)?;
     let m = lhs.shape().dims()[0];
     let k = lhs.shape().dims()[1];
     let n = rhs.shape().dims()[1];

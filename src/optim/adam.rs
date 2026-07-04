@@ -57,7 +57,7 @@ where
         let Some(grad) = param.grad()? else {
             continue;
         };
-        let data = param.data()?;
+        let mut data = param.data()?;
         let moments = state.entry(param.id()).or_insert_with(|| AdamState {
             m: vec![E::ZERO; grad.len()],
             v: vec![E::ZERO; grad.len()],
@@ -67,9 +67,8 @@ where
             moments.v = vec![E::ZERO; grad.len()];
         }
 
-        let mut next = Vec::with_capacity(data.len());
         for ((value, &g), (m, v)) in data
-            .into_iter()
+            .iter_mut()
             .zip(&grad)
             .zip(moments.m.iter_mut().zip(moments.v.iter_mut()))
         {
@@ -77,10 +76,10 @@ where
             *v = config.beta2 * *v + (one - config.beta2) * g * g;
             let m_hat = *m / (one - beta1_pow);
             let v_hat = *v / (one - beta2_pow);
-            let decayed = value - config.lr * config.weight_decay * value;
-            next.push(decayed - config.lr * m_hat / (v_hat.sqrt() + config.eps));
+            let decayed = *value - config.lr * config.weight_decay * *value;
+            *value = decayed - config.lr * m_hat / (v_hat.sqrt() + config.eps);
         }
-        param.set_data(next)?;
+        param.set_data(data)?;
     }
     Ok(())
 }

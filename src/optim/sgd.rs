@@ -57,8 +57,8 @@ where
             let Some(grad) = param.grad()? else {
                 continue;
             };
-            let data = param.data()?;
-            let update = if let Some(momentum) = self.momentum {
+            let mut data = param.data()?;
+            if let Some(momentum) = self.momentum {
                 let velocity = self
                     .velocity
                     .entry(param.id())
@@ -69,16 +69,15 @@ where
                 for (v, &g) in velocity.iter_mut().zip(&grad) {
                     *v = *v * momentum + g;
                 }
-                velocity.clone()
+                for (value, &v) in data.iter_mut().zip(velocity.iter()) {
+                    *value -= self.lr * v;
+                }
             } else {
-                grad
-            };
-            let next = data
-                .into_iter()
-                .zip(update)
-                .map(|(value, grad)| value - self.lr * grad)
-                .collect();
-            param.set_data(next)?;
+                for (value, &g) in data.iter_mut().zip(&grad) {
+                    *value -= self.lr * g;
+                }
+            }
+            param.set_data(data)?;
         }
         Ok(())
     }

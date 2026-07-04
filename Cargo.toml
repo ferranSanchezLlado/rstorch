@@ -23,7 +23,20 @@ ureq = { version = "2", optional = true }
 wgpu = { version = "25", optional = true }
 
 [dev-dependencies]
+criterion = "0.8.2"
 trybuild = "1"
+
+[[bench]]
+name = "tensor_ops"
+harness = false
+
+[[bench]]
+name = "training"
+harness = false
+
+[[bench]]
+name = "data_pipeline"
+harness = false
 
 [features]
 metal = ["dep:metal"]

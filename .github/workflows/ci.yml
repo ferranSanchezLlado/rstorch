@@ -19,6 +19,14 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - run: cargo test
 
+  benches:
+    name: Benchmarks compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo bench --no-run
+
   docs:
     name: Rustdoc
     runs-on: ubuntu-latest

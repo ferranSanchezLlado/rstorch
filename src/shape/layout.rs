@@ -64,10 +64,20 @@ impl Layout {
     }
 
     pub(crate) fn is_contiguous(&self) -> bool {
-        let Ok(contiguous) = Self::contiguous(self.shape.clone()) else {
+        if self.offset != 0 {
             return false;
-        };
-        self.offset == 0 && self.strides == contiguous.strides
+        }
+        let mut expected = 1usize;
+        for (&dim, &stride) in self.shape.dims().iter().zip(self.strides.iter()).rev() {
+            if stride != expected {
+                return false;
+            }
+            let Some(next) = expected.checked_mul(dim) else {
+                return false;
+            };
+            expected = next;
+        }
+        true
     }
 
     pub(crate) fn numel(&self) -> usize {
@@ -115,16 +125,21 @@ impl Layout {
     }
 
     pub(crate) fn storage_span_len(&self) -> Result<usize> {
-        let positions = self.storage_positions()?;
-        let Some(max) = positions.into_iter().max() else {
+        if self.shape.numel()? == 0 {
             return Ok(0);
+        }
+
+        // With every dimension non-zero, the maximal storage position is
+        // reached at the last coordinate along every axis.
+        let overflow = || ShapeError::NumelOverflow {
+            dims: self.shape.dims().into(),
         };
-        max.checked_add(1).ok_or_else(|| {
-            ShapeError::NumelOverflow {
-                dims: self.shape.dims().into(),
-            }
-            .into()
-        })
+        let mut max = self.offset;
+        for (&dim, &stride) in self.shape.dims().iter().zip(self.strides.iter()) {
+            let contribution = (dim - 1).checked_mul(stride).ok_or_else(overflow)?;
+            max = max.checked_add(contribution).ok_or_else(overflow)?;
+        }
+        max.checked_add(1).ok_or_else(|| overflow().into())
     }
 
     pub(crate) fn validate_in_storage(&self, storage_len: usize) -> Result<()> {
