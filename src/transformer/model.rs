@@ -34,6 +34,11 @@ where
     }
 }
 
+/// Decoder transformer block.
+///
+/// Parameter names are part of the persistence contract. Child modules are
+/// named `norm1`, `attention`, `norm2`, `fc1`, and `fc2`; their own parameter
+/// names are appended, for example `attention.q_proj.weight` or `fc2.bias`.
 pub struct TransformerBlock<
     const SEQ: usize,
     const EMBED: usize,
@@ -182,6 +187,12 @@ where
     }
 }
 
+/// Minimal decoder-only language model.
+///
+/// Parameter names are part of the persistence contract. Top-level names are
+/// `token_embedding`, `position_embedding`, `blocks.{i}`, `final_norm`, and
+/// `lm_head`; child module names are appended, for example
+/// `blocks.0.attention.q_proj.weight` and `lm_head.bias`.
 pub struct DecoderOnlyTransformer<
     const VOCAB: usize,
     const SEQ: usize,

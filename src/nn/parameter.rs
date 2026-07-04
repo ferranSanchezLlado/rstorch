@@ -1,5 +1,5 @@
 use crate::backend::{Backend, Cpu};
-use crate::dtype::FloatDType;
+use crate::dtype::{DTypeId, FloatDType};
 use crate::error::Result;
 use crate::shape::ShapeSpec;
 use crate::tensor::Tensor;
@@ -65,6 +65,9 @@ where
     B: Backend<E>,
 {
     fn id(&self) -> ParameterId;
+    fn dtype(&self) -> DTypeId;
+    fn dims(&self) -> Vec<usize>;
+    fn data(&self) -> Result<Vec<E>>;
     fn zero_grad(&self);
 }
 
@@ -73,7 +76,6 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn data(&self) -> Result<Vec<E>>;
     fn grad(&self) -> Result<Option<Vec<E>>>;
     fn set_grad(&mut self, data: Vec<E>) -> Result<()>;
     fn set_data(&mut self, data: Vec<E>) -> Result<()>;
@@ -89,6 +91,18 @@ where
         self.id()
     }
 
+    fn dtype(&self) -> DTypeId {
+        self.tensor.dtype()
+    }
+
+    fn dims(&self) -> Vec<usize> {
+        self.tensor.shape().dims().to_vec()
+    }
+
+    fn data(&self) -> Result<Vec<E>> {
+        self.tensor.to_vec()
+    }
+
     fn zero_grad(&self) {
         self.zero_grad();
     }
@@ -100,10 +114,6 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    fn data(&self) -> Result<Vec<E>> {
-        self.tensor.to_vec()
-    }
-
     fn grad(&self) -> Result<Option<Vec<E>>> {
         self.grad().map(|grad| grad.to_vec()).transpose()
     }
@@ -176,6 +186,18 @@ where
         self.inner.id()
     }
 
+    pub fn dtype(&self) -> DTypeId {
+        self.inner.dtype()
+    }
+
+    pub fn dims(&self) -> Vec<usize> {
+        self.inner.dims()
+    }
+
+    pub fn data(&self) -> Result<Vec<E>> {
+        self.inner.data()
+    }
+
     pub fn zero_grad(&self) {
         self.inner.zero_grad();
     }
@@ -196,6 +218,14 @@ where
 {
     pub fn id(&self) -> ParameterId {
         self.inner.id()
+    }
+
+    pub fn dtype(&self) -> DTypeId {
+        self.inner.dtype()
+    }
+
+    pub fn dims(&self) -> Vec<usize> {
+        self.inner.dims()
     }
 
     /// Returns parameter data through the current host round-trip path.

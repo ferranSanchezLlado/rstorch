@@ -16,6 +16,7 @@ pub mod dtype;
 pub mod error;
 pub mod nn;
 pub mod optim;
+pub mod persistence;
 pub mod random;
 pub mod shape;
 pub mod tensor;
@@ -42,7 +43,7 @@ pub use data::{
     MnistSample, MnistSplit, TINY_SHAKESPEARE, TinyShakespeare,
 };
 pub use dtype::{DType, DTypeId, FloatDType, bf16, f16};
-pub use error::{DTypeError, DataError, DeviceError, Error, Result, ShapeError};
+pub use error::{DTypeError, DataError, DeviceError, Error, PersistenceError, Result, ShapeError};
 pub use nn::{
     AvgPool2d, Conv2d, CrossEntropyOpts, Dropout, Embedding, Flatten, Gelu, HasParameters, Layer,
     LayerNorm, Linear, MaxPool2d, Module, MultiHeadAttention, Parameter, ParameterId,
@@ -52,6 +53,11 @@ pub use nn::{
 };
 pub use optim::{
     Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr, clip_grad_norm,
+};
+pub use persistence::{
+    Checkpoint, OptimizerKind, OptimizerParameterState, OptimizerState, OptimizerStateDict,
+    ScalarRecord, StateDict, TensorRecord, load_checkpoint, load_tensor, save_checkpoint,
+    save_tensor,
 };
 pub use random::SmallRng;
 pub use shape::{AnyDim, C, D0, D1, D2, D3, D4, DimSpec, Shape, ShapeSpec, StaticShape, Sym};
@@ -98,6 +104,10 @@ pub mod prelude {
     pub use crate::optim::{
         Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr,
         clip_grad_norm,
+    };
+    pub use crate::persistence::{
+        Checkpoint, OptimizerKind, OptimizerState, OptimizerStateDict, StateDict, TensorRecord,
+        load_checkpoint, load_tensor, save_checkpoint, save_tensor,
     };
     pub use crate::random::SmallRng;
     pub use crate::seq;

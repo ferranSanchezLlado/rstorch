@@ -6,11 +6,13 @@ pub(crate) mod const_check;
 mod data;
 mod device;
 mod dtype;
+mod persistence;
 mod shape;
 
 pub use data::DataError;
 pub use device::DeviceError;
 pub use dtype::DTypeError;
+pub use persistence::PersistenceError;
 pub use shape::ShapeError;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -23,6 +25,7 @@ pub enum Error {
     Device(DeviceError),
     DType(DTypeError),
     Data(DataError),
+    Persistence(PersistenceError),
     InvalidInput {
         op: &'static str,
         reason: &'static str,
@@ -46,6 +49,7 @@ impl fmt::Display for Error {
             Self::Device(err) => write!(f, "device error: {err}"),
             Self::DType(err) => write!(f, "dtype error: {err}"),
             Self::Data(err) => write!(f, "data error: {err}"),
+            Self::Persistence(err) => write!(f, "persistence error: {err}"),
             Self::InvalidInput { op, reason } => write!(f, "{op} invalid input: {reason}"),
         }
     }
@@ -56,6 +60,7 @@ impl error::Error for Error {
         match self {
             Self::Backend(err) => Some(err.as_ref()),
             Self::Data(err) => err.source(),
+            Self::Persistence(err) => err.source(),
             _ => None,
         }
     }
@@ -82,6 +87,12 @@ impl From<DTypeError> for Error {
 impl From<DataError> for Error {
     fn from(err: DataError) -> Self {
         Self::Data(err)
+    }
+}
+
+impl From<PersistenceError> for Error {
+    fn from(err: PersistenceError) -> Self {
+        Self::Persistence(err)
     }
 }
 

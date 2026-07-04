@@ -39,8 +39,12 @@ pub trait DType:
     + PartialOrd
 {
     const ID: DTypeId;
+    const BYTE_SIZE: usize;
     const ZERO: Self;
     const ONE: Self;
+
+    fn write_le_bytes(self, out: &mut Vec<u8>);
+    fn read_le_bytes(bytes: &[u8]) -> Option<Self>;
 
     fn zero() -> Self {
         Self::ZERO
@@ -84,16 +88,36 @@ impl sealed::SealedDType for f32 {}
 
 impl DType for f32 {
     const ID: DTypeId = DTypeId::F32;
+    const BYTE_SIZE: usize = 4;
     const ZERO: Self = 0.0;
     const ONE: Self = 1.0;
+
+    fn write_le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_le_bytes());
+    }
+
+    fn read_le_bytes(bytes: &[u8]) -> Option<Self> {
+        let bytes: [u8; 4] = bytes.try_into().ok()?;
+        Some(Self::from_le_bytes(bytes))
+    }
 }
 
 impl sealed::SealedDType for f16 {}
 
 impl DType for f16 {
     const ID: DTypeId = DTypeId::F16;
+    const BYTE_SIZE: usize = 2;
     const ZERO: Self = f16::ZERO;
     const ONE: Self = f16::ONE;
+
+    fn write_le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_bits().to_le_bytes());
+    }
+
+    fn read_le_bytes(bytes: &[u8]) -> Option<Self> {
+        let bytes: [u8; 2] = bytes.try_into().ok()?;
+        Some(Self::from_bits(u16::from_le_bytes(bytes)))
+    }
 }
 
 impl FloatDType for f16 {
@@ -142,8 +166,18 @@ impl sealed::SealedDType for bf16 {}
 
 impl DType for bf16 {
     const ID: DTypeId = DTypeId::BF16;
+    const BYTE_SIZE: usize = 2;
     const ZERO: Self = bf16::ZERO;
     const ONE: Self = bf16::ONE;
+
+    fn write_le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_bits().to_le_bytes());
+    }
+
+    fn read_le_bytes(bytes: &[u8]) -> Option<Self> {
+        let bytes: [u8; 2] = bytes.try_into().ok()?;
+        Some(Self::from_bits(u16::from_le_bytes(bytes)))
+    }
 }
 
 impl FloatDType for bf16 {
@@ -234,8 +268,18 @@ impl sealed::SealedDType for f64 {}
 
 impl DType for f64 {
     const ID: DTypeId = DTypeId::F64;
+    const BYTE_SIZE: usize = 8;
     const ZERO: Self = 0.0;
     const ONE: Self = 1.0;
+
+    fn write_le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_le_bytes());
+    }
+
+    fn read_le_bytes(bytes: &[u8]) -> Option<Self> {
+        let bytes: [u8; 8] = bytes.try_into().ok()?;
+        Some(Self::from_le_bytes(bytes))
+    }
 }
 
 impl FloatDType for f64 {

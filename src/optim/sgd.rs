@@ -1,9 +1,14 @@
 use super::Optimizer;
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
-use crate::error::Result;
-use crate::nn::{ParameterId, ParameterRefMut};
+use crate::error::{PersistenceError, Result};
+use crate::nn::{HasParameters, ParameterId, ParameterRefMut};
 use crate::no_grad;
+use crate::persistence::{
+    OptimizerKind, OptimizerState, OptimizerStateDict, TensorRecord, collect_parameter_snapshots,
+    optimizer_parameter_state, scalar_record, validate_optimizer_kind,
+    validate_optimizer_parameters,
+};
 use std::collections::HashMap;
 
 pub struct Sgd<E> {
@@ -75,6 +80,75 @@ where
                 .collect();
             param.set_data(next)?;
         }
+        Ok(())
+    }
+}
+
+impl<E, B> OptimizerState<E, B> for Sgd<E>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn state_dict<M>(&self, module: &M) -> Result<OptimizerStateDict>
+    where
+        M: HasParameters<E, B>,
+    {
+        let parameters = collect_parameter_snapshots(module)?
+            .into_iter()
+            .map(|meta| {
+                let tensors = match self.velocity.get(&meta.id) {
+                    Some(velocity) => {
+                        vec![TensorRecord::from_values(
+                            "velocity",
+                            meta.dims.clone(),
+                            velocity,
+                        )?]
+                    }
+                    None => Vec::new(),
+                };
+                optimizer_parameter_state::<E>(&meta, tensors)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut hyperparameters = vec![scalar_record("lr", self.lr)];
+        if let Some(momentum) = self.momentum {
+            hyperparameters.push(scalar_record("momentum", momentum));
+        }
+
+        OptimizerStateDict::new(OptimizerKind::Sgd, E::ID, 0, hyperparameters, parameters)
+    }
+
+    fn load_state_dict<M>(&mut self, module: &M, state: &OptimizerStateDict) -> Result<()>
+    where
+        M: HasParameters<E, B>,
+    {
+        validate_optimizer_kind(state, OptimizerKind::Sgd)?;
+        let snapshots = validate_optimizer_parameters::<E, B, M>(module, state)?;
+        let lr = state.hyper_value("lr")?;
+        let momentum = state.optional_hyper_value("momentum")?;
+        let mut velocity_by_id = HashMap::new();
+
+        for (snapshot, saved) in snapshots.into_iter().zip(state.parameters()) {
+            let mut velocity = None;
+            for tensor in saved.tensors() {
+                match tensor.name() {
+                    "velocity" => velocity = Some(tensor.to_values::<E>()?),
+                    name => {
+                        return Err(PersistenceError::UnexpectedTensor {
+                            name: format!("{}.{}", snapshot.name, name),
+                        }
+                        .into());
+                    }
+                }
+            }
+            if let Some(velocity) = velocity {
+                velocity_by_id.insert(snapshot.id, velocity);
+            }
+        }
+
+        self.lr = lr;
+        self.momentum = momentum;
+        self.velocity = velocity_by_id;
         Ok(())
     }
 }

@@ -17,6 +17,11 @@ use crate::nn::{HasParameters, Layer, Module, ParameterRef, ParameterRefMut};
 /// The composite is itself a [`Module`] and forwards [`HasParameters`] to its
 /// stages, so it plugs straight into the optimizer loop.
 ///
+/// Parameter names are part of the persistence contract. A two-stage tuple uses
+/// `0` and `1` as path segments, so `Sequential::new(Linear, Relu)` exposes
+/// names such as `0.weight` and `0.bias`; additional `.add_module` calls nest
+/// another tuple and preserve deterministic left-to-right order.
+///
 /// ```ignore
 /// let model = Sequential::new(Linear::<784, 128>::zeros()?, Relu)
 ///     .add_module(Linear::<128, 10>::zeros()?);

@@ -1,3 +1,13 @@
+error[E0046]: not all trait items implemented, missing: `BYTE_SIZE`, `write_le_bytes`, `read_le_bytes`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | impl DType for RogueDType {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^ missing `BYTE_SIZE`, `write_le_bytes`, `read_le_bytes` in implementation
+  |
+  = help: implement the missing item: `const BYTE_SIZE: usize = 42;`
+  = help: implement the missing item: `fn write_le_bytes(self, _: &mut Vec<u8>) { todo!() }`
+  = help: implement the missing item: `fn read_le_bytes(_: &[u8]) -> Option<Self> { todo!() }`
+
 error[E0277]: the trait bound `RogueDType: dtype::sealed::SealedDType` is not satisfied
  --> tests/ui/default/api/sealed_traits/downstream_impl.rs
   |

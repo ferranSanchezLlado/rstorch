@@ -9,6 +9,10 @@ use crate::random::SmallRng;
 use crate::shape::{AnyDim, C, D2, D3, Sym};
 use crate::tensor::Tensor;
 
+/// Learned token embedding table.
+///
+/// Parameter names are part of the persistence contract: `weight` has shape
+/// `[VOCAB, DIM]`.
 pub struct Embedding<const VOCAB: usize, const DIM: usize, E = f32, B = Cpu>
 where
     E: FloatDType,
@@ -80,6 +84,10 @@ where
     }
 }
 
+/// Learned positional embedding table.
+///
+/// Parameter names are part of the persistence contract: `weight` has shape
+/// `[SEQ, DIM]`.
 pub struct PositionalEmbedding<const SEQ: usize, const DIM: usize, E = f32, B = Cpu>
 where
     E: FloatDType,

@@ -53,6 +53,12 @@ where
     scores.softmax_last()?.bmm(v)
 }
 
+/// Causal multi-head self-attention block.
+///
+/// Parameter names are part of the persistence contract. The four projection
+/// submodules are named `q_proj`, `k_proj`, `v_proj`, and `out_proj`; each uses
+/// the [`Linear`] names beneath it, for example `q_proj.weight` and
+/// `out_proj.bias`.
 pub struct MultiHeadAttention<
     const SEQ: usize,
     const EMBED: usize,

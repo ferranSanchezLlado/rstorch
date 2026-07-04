@@ -1,13 +1,13 @@
 error[E0080]: evaluation panicked: kaiming_uniform: fan_in (IN)=0 must be greater than 0
-  --> src/nn/linear.rs:47:17
+  --> src/nn/linear.rs:51:17
    |
-47 |         const { const_check::nonzero(IN, "kaiming_uniform", "fan_in (IN)") };
+51 |         const { const_check::nonzero(IN, "kaiming_uniform", "fan_in (IN)") };
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::Linear::<0, 3>::kaiming_uniform::{constant#0}` failed here
 
 note: erroneous constant encountered
-  --> src/nn/linear.rs:47:9
+  --> src/nn/linear.rs:51:9
    |
-47 |         const { const_check::nonzero(IN, "kaiming_uniform", "fan_in (IN)") };
+51 |         const { const_check::nonzero(IN, "kaiming_uniform", "fan_in (IN)") };
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `<instantiation>`

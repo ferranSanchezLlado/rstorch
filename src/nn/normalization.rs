@@ -8,6 +8,8 @@ use crate::tensor::Tensor;
 /// Last-dimension layer normalization for 2D tensors.
 ///
 /// Variance is computed inside this layer from existing tensor operations.
+/// Parameter names are part of the persistence contract:
+/// `weight` and `bias` both have shape `[FEATURES]`.
 pub struct LayerNorm<const FEATURES: usize, E = f32, B = Cpu>
 where
     E: FloatDType,

@@ -6,6 +6,10 @@ use crate::random::SmallRng;
 use crate::shape::{C, D1, D2, DimSpec};
 use crate::tensor::Tensor;
 
+/// Fully connected affine layer.
+///
+/// Parameter names are part of the persistence contract:
+/// `weight` has shape `[IN, OUT]` and `bias` has shape `[OUT]`.
 pub struct Linear<const IN: usize, const OUT: usize, E = f32, B = Cpu>
 where
     E: FloatDType,

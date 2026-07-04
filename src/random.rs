@@ -10,6 +10,18 @@ impl SmallRng {
         Self { state: seed }
     }
 
+    pub fn from_state(state: u64) -> Self {
+        Self { state }
+    }
+
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+
+    pub fn set_state(&mut self, state: u64) {
+        self.state = state;
+    }
+
     pub fn uniform<E: FloatDType>(&mut self, low: E, high: E) -> E {
         low + (high - low) * E::from_f64(self.next_unit())
     }

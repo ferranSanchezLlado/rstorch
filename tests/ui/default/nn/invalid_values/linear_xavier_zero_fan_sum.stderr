@@ -1,25 +1,25 @@
 error[E0080]: evaluation panicked: xavier_uniform: fan_in (IN)=0 plus fan_out (OUT)=0 gives fan_in + fan_out (IN+OUT)=0, which must be greater than 0
-  --> src/nn/linear.rs:32:13
+  --> src/nn/linear.rs:36:13
    |
-32 | /             const_check::sum_nonzero(
-33 | |                 IN,
-34 | |                 OUT,
-35 | |                 "xavier_uniform",
+36 | /             const_check::sum_nonzero(
+37 | |                 IN,
+38 | |                 OUT,
+39 | |                 "xavier_uniform",
 ...  |
-38 | |                 "fan_in + fan_out (IN+OUT)",
-39 | |             );
+42 | |                 "fan_in + fan_out (IN+OUT)",
+43 | |             );
    | |_____________^ evaluation of `rstorch::Linear::<0, 0>::xavier_uniform::{constant#0}` failed here
 
 note: erroneous constant encountered
-  --> src/nn/linear.rs:31:9
+  --> src/nn/linear.rs:35:9
    |
-31 | /         const {
-32 | |             const_check::sum_nonzero(
-33 | |                 IN,
-34 | |                 OUT,
+35 | /         const {
+36 | |             const_check::sum_nonzero(
+37 | |                 IN,
+38 | |                 OUT,
 ...  |
-39 | |             );
-40 | |         };
+43 | |             );
+44 | |         };
    | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`

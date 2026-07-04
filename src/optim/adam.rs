@@ -1,9 +1,14 @@
 use super::Optimizer;
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
-use crate::error::Result;
-use crate::nn::{ParameterId, ParameterRefMut};
+use crate::error::{PersistenceError, Result};
+use crate::nn::{HasParameters, ParameterId, ParameterRefMut};
 use crate::no_grad;
+use crate::persistence::{
+    OptimizerKind, OptimizerState, OptimizerStateDict, TensorRecord, collect_parameter_snapshots,
+    optimizer_parameter_state, scalar_record, validate_optimizer_kind,
+    validate_optimizer_parameters,
+};
 use std::collections::HashMap;
 
 pub struct Adam<E> {
@@ -122,6 +127,51 @@ where
     }
 }
 
+impl<E, B> OptimizerState<E, B> for Adam<E>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn state_dict<M>(&self, module: &M) -> Result<OptimizerStateDict>
+    where
+        M: HasParameters<E, B>,
+    {
+        OptimizerStateDict::new(
+            OptimizerKind::Adam,
+            E::ID,
+            self.step,
+            vec![
+                scalar_record("lr", self.lr),
+                scalar_record("beta1", self.beta1),
+                scalar_record("beta2", self.beta2),
+                scalar_record("eps", self.eps),
+            ],
+            adam_parameter_states::<E, B, M>(&self.state, module)?,
+        )
+    }
+
+    fn load_state_dict<M>(&mut self, module: &M, state: &OptimizerStateDict) -> Result<()>
+    where
+        M: HasParameters<E, B>,
+    {
+        validate_optimizer_kind(state, OptimizerKind::Adam)?;
+        let lr = state.hyper_value("lr")?;
+        let beta1 = state.hyper_value("beta1")?;
+        let beta2 = state.hyper_value("beta2")?;
+        let eps = state.hyper_value("eps")?;
+        let step = state.step();
+        let moments = load_adam_parameter_states::<E, B, M>(module, state)?;
+
+        self.lr = lr;
+        self.beta1 = beta1;
+        self.beta2 = beta2;
+        self.eps = eps;
+        self.step = step;
+        self.state = moments;
+        Ok(())
+    }
+}
+
 fn pow<E: FloatDType>(value: E, n: usize) -> E {
     (0..n).fold(E::ONE, |acc, _| acc * value)
 }
@@ -181,4 +231,124 @@ where
         };
         adam_step(&config, self.step, &mut self.state, params)
     }
+}
+
+impl<E, B> OptimizerState<E, B> for AdamW<E>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn state_dict<M>(&self, module: &M) -> Result<OptimizerStateDict>
+    where
+        M: HasParameters<E, B>,
+    {
+        OptimizerStateDict::new(
+            OptimizerKind::AdamW,
+            E::ID,
+            self.step,
+            vec![
+                scalar_record("lr", self.lr),
+                scalar_record("beta1", self.beta1),
+                scalar_record("beta2", self.beta2),
+                scalar_record("eps", self.eps),
+                scalar_record("weight_decay", self.weight_decay),
+            ],
+            adam_parameter_states::<E, B, M>(&self.state, module)?,
+        )
+    }
+
+    fn load_state_dict<M>(&mut self, module: &M, state: &OptimizerStateDict) -> Result<()>
+    where
+        M: HasParameters<E, B>,
+    {
+        validate_optimizer_kind(state, OptimizerKind::AdamW)?;
+        let lr = state.hyper_value("lr")?;
+        let beta1 = state.hyper_value("beta1")?;
+        let beta2 = state.hyper_value("beta2")?;
+        let eps = state.hyper_value("eps")?;
+        let weight_decay = state.hyper_value("weight_decay")?;
+        let step = state.step();
+        let moments = load_adam_parameter_states::<E, B, M>(module, state)?;
+
+        self.lr = lr;
+        self.beta1 = beta1;
+        self.beta2 = beta2;
+        self.eps = eps;
+        self.weight_decay = weight_decay;
+        self.step = step;
+        self.state = moments;
+        Ok(())
+    }
+}
+
+fn adam_parameter_states<E, B, M>(
+    state: &HashMap<ParameterId, AdamState<E>>,
+    module: &M,
+) -> Result<Vec<crate::persistence::OptimizerParameterState>>
+where
+    E: FloatDType,
+    B: Backend<E>,
+    M: HasParameters<E, B>,
+{
+    collect_parameter_snapshots(module)?
+        .into_iter()
+        .map(|meta| {
+            let tensors = match state.get(&meta.id) {
+                Some(moments) => vec![
+                    TensorRecord::from_values("m", meta.dims.clone(), &moments.m)?,
+                    TensorRecord::from_values("v", meta.dims.clone(), &moments.v)?,
+                ],
+                None => Vec::new(),
+            };
+            optimizer_parameter_state::<E>(&meta, tensors)
+        })
+        .collect()
+}
+
+fn load_adam_parameter_states<E, B, M>(
+    module: &M,
+    state: &OptimizerStateDict,
+) -> Result<HashMap<ParameterId, AdamState<E>>>
+where
+    E: FloatDType,
+    B: Backend<E>,
+    M: HasParameters<E, B>,
+{
+    let snapshots = validate_optimizer_parameters::<E, B, M>(module, state)?;
+    let mut out = HashMap::new();
+    for (snapshot, saved) in snapshots.into_iter().zip(state.parameters()) {
+        let mut m = None;
+        let mut v = None;
+        for tensor in saved.tensors() {
+            match tensor.name() {
+                "m" => m = Some(tensor.to_values::<E>()?),
+                "v" => v = Some(tensor.to_values::<E>()?),
+                name => {
+                    return Err(PersistenceError::UnexpectedTensor {
+                        name: format!("{}.{}", snapshot.name, name),
+                    }
+                    .into());
+                }
+            }
+        }
+        match (m, v) {
+            (Some(m), Some(v)) => {
+                out.insert(snapshot.id, AdamState { m, v });
+            }
+            (None, None) => {}
+            (Some(_), None) => {
+                return Err(PersistenceError::MissingTensor {
+                    name: format!("{}.v", snapshot.name),
+                }
+                .into());
+            }
+            (None, Some(_)) => {
+                return Err(PersistenceError::MissingTensor {
+                    name: format!("{}.m", snapshot.name),
+                }
+                .into());
+            }
+        }
+    }
+    Ok(out)
 }

@@ -6,6 +6,11 @@ use crate::random::SmallRng;
 use crate::shape::{C, D1, D4, DimSpec};
 use crate::tensor::{Conv2dOptions, Tensor};
 
+/// Two-dimensional NCHW convolution layer.
+///
+/// Parameter names are part of the persistence contract: `weight` has shape
+/// `[OUT_CH, IN_CH, K_H, K_W]`, and `bias` has shape `[OUT_CH]` when bias is
+/// enabled. Bias-less convolutions do not expose a `bias` parameter name.
 pub struct Conv2d<
     const IN_CH: usize,
     const OUT_CH: usize,
