@@ -1,6 +1,6 @@
 #![allow(clippy::type_complexity)]
 
-use super::parameter::{HasParameters, Parameter, ParameterRef, ParameterRefMut};
+use super::parameter::Parameter;
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;
 use crate::dtype::FloatDType;
@@ -56,31 +56,13 @@ where
     }
 }
 
-impl<const VOCAB: usize, const DIM: usize, E, B> HasParameters<E, B> for Embedding<VOCAB, DIM, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_ref(),
-        );
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_mut(),
-        );
+crate::nn::has_parameters! {
+    impl[const VOCAB: usize, const DIM: usize, E, B] Embedding<VOCAB, DIM, E, B>
+    where { }
+    {
+        params { weight }
+        children { }
+        transparent_children { }
     }
 }
 
@@ -119,31 +101,12 @@ where
     }
 }
 
-impl<const SEQ: usize, const DIM: usize, E, B> HasParameters<E, B>
-    for PositionalEmbedding<SEQ, DIM, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_ref(),
-        );
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_mut(),
-        );
+crate::nn::has_parameters! {
+    impl[const SEQ: usize, const DIM: usize, E, B] PositionalEmbedding<SEQ, DIM, E, B>
+    where { }
+    {
+        params { weight }
+        children { }
+        transparent_children { }
     }
 }

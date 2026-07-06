@@ -215,6 +215,18 @@ pub trait ShapeSpec: sealed::SealedShape + Send + Sync + 'static {
     }
 }
 
+pub trait LastAxis: ShapeSpec {
+    type Last: DimSpec;
+    type Reduced: ShapeSpec;
+    type Row: ShapeSpec;
+}
+
+pub trait LeadingAxis: ShapeSpec {
+    type Leading: DimSpec;
+    type Reduced: ShapeSpec;
+    type Col: ShapeSpec;
+}
+
 pub trait StaticShape: ShapeSpec {
     const DIMS: &'static [usize];
     const NUMEL: usize;
@@ -332,6 +344,26 @@ macro_rules! impl_dims {
             const NUMEL: usize = static_numel([$($prev,)* $head]);
         }
 
+        impl<$($prev,)* $head> LastAxis for $rank<$($prev,)* $head>
+        where
+            $($prev: DimSpec,)*
+            $head: DimSpec,
+        {
+            type Last = $head;
+            type Reduced = impl_dims!(@shape [$($prev),*]);
+            type Row = D1<$head>;
+        }
+
+        impl<$($prev,)* $head> LeadingAxis for $rank<$($prev,)* $head>
+        where
+            $($prev: DimSpec,)*
+            $head: DimSpec,
+        {
+            type Leading = impl_dims!(@first $($prev,)* $head);
+            type Reduced = impl_dims!(@shape_tail $($prev,)* $head);
+            type Col = D1<impl_dims!(@first $($prev,)* $head)>;
+        }
+
         impl_dims!(@emit [$($rest_ranks)*] [$($prev,)* $head] ; $($tail),*);
     };
 
@@ -343,6 +375,38 @@ macro_rules! impl_dims {
 
     (@one $dim:ident) => {
         1usize
+    };
+
+    (@first $head:ident $(, $tail:ident)*) => {
+        $head
+    };
+
+    (@shape []) => {
+        D0
+    };
+
+    (@shape [$head:ident]) => {
+        D1<$head>
+    };
+
+    (@shape [$head:ident, $($tail:ident),+]) => {
+        impl_dims!(@shape_nonempty [D2 D3 D4 D5 D6 D7 D8] [$head] ; $($tail),+)
+    };
+
+    (@shape_tail $head:ident) => {
+        D0
+    };
+
+    (@shape_tail $head:ident, $($tail:ident),+) => {
+        impl_dims!(@shape [$($tail),+])
+    };
+
+    (@shape_nonempty [$rank:ident $($rest_ranks:ident)*] [$($prev:ident),+] ; $head:ident) => {
+        $rank<$($prev,)* $head>
+    };
+
+    (@shape_nonempty [$rank:ident $($rest_ranks:ident)*] [$($prev:ident),+] ; $head:ident, $($tail:ident),+) => {
+        impl_dims!(@shape_nonempty [$($rest_ranks)*] [$($prev,)* $head] ; $($tail),+)
     };
 }
 

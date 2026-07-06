@@ -1,4 +1,4 @@
-use super::parameter::{HasParameters, Layer, Module, ParameterRef, ParameterRefMut};
+use super::parameter::{Layer, Module};
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
 use crate::error::Result;
@@ -195,23 +195,13 @@ where
 
 macro_rules! empty_parameters {
     ($name:ident<$($const_name:ident),+>) => {
-        impl<$(const $const_name: usize,)+ E, B> HasParameters<E, B> for $name<$($const_name,)+>
-        where
-            E: FloatDType,
-            B: Backend<E>,
-        {
-            fn visit_parameters<'a>(
-                &'a self,
-                _prefix: &str,
-                _visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-            ) {
-            }
-
-            fn visit_parameters_mut<'a>(
-                &'a mut self,
-                _prefix: &str,
-                _visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-            ) {
+        crate::nn::has_parameters! {
+            impl[$(const $const_name: usize,)+ E, B] $name<$($const_name,)+>
+            where { }
+            {
+                params { }
+                children { }
+                transparent_children { }
             }
         }
     };

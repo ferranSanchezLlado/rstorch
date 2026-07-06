@@ -1,6 +1,6 @@
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
-use crate::nn::{HasParameters, Layer, Module, ParameterRef, ParameterRefMut};
+use crate::nn::{Layer, Module};
 use crate::shape::ShapeSpec;
 use crate::tensor::Tensor;
 
@@ -39,23 +39,13 @@ macro_rules! activation_module {
             }
         }
 
-        impl<E, B> HasParameters<E, B> for $name
-        where
-            E: FloatDType,
-            B: Backend<E>,
-        {
-            fn visit_parameters<'a>(
-                &'a self,
-                _prefix: &str,
-                _visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-            ) {
-            }
-
-            fn visit_parameters_mut<'a>(
-                &'a mut self,
-                _prefix: &str,
-                _visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-            ) {
+        crate::nn::has_parameters! {
+            impl[E, B] $name
+            where { }
+            {
+                params { }
+                children { }
+                transparent_children { }
             }
         }
     };

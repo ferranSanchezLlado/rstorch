@@ -1,0 +1,579 @@
+use super::autograd::{AnyTensor, raw_from_vec_like};
+use super::{RawTensor, Tensor};
+use crate::backend::Backend;
+use crate::dtype::{DType, FloatDType};
+use crate::error::{DeviceError, Result, ShapeError, const_check};
+use crate::shape::{DimSpec, LastAxis, LeadingAxis, Shape, ShapeSpec, bind_and_check};
+
+impl<S, E, B> Tensor<S, E, B>
+where
+    S: LastAxis,
+    E: DType,
+    B: Backend<E>,
+{
+    /// Returns the index of the first maximum value along the last axis.
+    pub fn argmax_last(&self) -> Result<Vec<usize>> {
+        const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "argmax_last", "last axis") };
+
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let rows = product(&dims[..last_axis]);
+        let cols = dims[last_axis];
+        ensure_nonzero_dim("argmax_last", last_axis, cols)?;
+        let values = self.to_vec()?;
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let start = row * cols;
+            let mut best = 0usize;
+            let mut best_value = values[start];
+            for col in 1..cols {
+                let value = values[start + col];
+                if value > best_value {
+                    best = col;
+                    best_value = value;
+                }
+            }
+            out.push(best);
+        }
+        Ok(out)
+    }
+}
+
+impl<S, E, B> Tensor<S, E, B>
+where
+    S: LastAxis,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    pub fn add_last_dim(&self, rhs: &Tensor<S::Row, E, B>) -> Result<Self> {
+        self.broadcast_last_axis(
+            rhs,
+            "add_last_dim",
+            |a, b| a + b,
+            |_a, _b, g| g,
+            |_a, _b, g| g,
+        )
+    }
+
+    pub fn sub_last_dim(&self, rhs: &Tensor<S::Row, E, B>) -> Result<Self> {
+        self.broadcast_last_axis(
+            rhs,
+            "sub_last_dim",
+            |a, b| a - b,
+            |_a, _b, g| g,
+            |_a, _b, g| -g,
+        )
+    }
+
+    pub fn mul_last_dim(&self, rhs: &Tensor<S::Row, E, B>) -> Result<Self> {
+        self.broadcast_last_axis(
+            rhs,
+            "mul_last_dim",
+            |a, b| a * b,
+            |_a, b, g| g * b,
+            |a, _b, g| g * a,
+        )
+    }
+
+    pub fn div_last_dim(&self, rhs: &Tensor<S::Row, E, B>) -> Result<Self> {
+        self.broadcast_last_axis(
+            rhs,
+            "div_last_dim",
+            |a, b| a / b,
+            |_a, b, g| g / b,
+            |a, b, g| -(g * a) / (b * b),
+        )
+    }
+
+    /// Reduces the last axis with `keepdim = false`.
+    pub fn sum_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let rows = product(&dims[..last_axis]);
+        let cols = dims[last_axis];
+        let values = self.to_vec()?;
+        let mut out = vec![E::ZERO; rows];
+        for row in 0..rows {
+            for col in 0..cols {
+                out[row] += values[row * cols + col];
+            }
+        }
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            out,
+            Shape::known(dims[..last_axis].to_vec()),
+        )?;
+        let input_raw = self.raw().clone();
+        Tensor::<S::Reduced, E, B>::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self)],
+            move |grad| {
+                let seed = grad.to_vec()?;
+                let mut values = Vec::with_capacity(rows * cols);
+                for &g in &seed {
+                    values.extend(std::iter::repeat_n(g, cols));
+                }
+                Ok(vec![Some(raw_from_vec_like(&input_raw, values)?)])
+            },
+        )
+    }
+
+    pub fn mean_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "mean_last", "last axis") };
+        let axis = S::RANK - 1;
+        let cols = self.shape().dims()[axis];
+        ensure_nonzero_dim("mean_last", axis, cols)?;
+        self.sum_last()?.div_scalar(E::from_usize(cols))
+    }
+
+    /// Reduces the last axis with max. Backward splits gradient evenly across
+    /// tied maxima instead of selecting the first maximum.
+    pub fn max_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "max_last", "last axis") };
+
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let rows = product(&dims[..last_axis]);
+        let cols = dims[last_axis];
+        ensure_nonzero_dim("max_last", last_axis, cols)?;
+        let values = self.to_vec()?;
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let start = row * cols;
+            let mut max = values[start];
+            for &value in &values[start + 1..start + cols] {
+                if value > max {
+                    max = value;
+                }
+            }
+            out.push(max);
+        }
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            out.clone(),
+            Shape::known(dims[..last_axis].to_vec()),
+        )?;
+        let input_raw = self.raw().clone();
+        Tensor::<S::Reduced, E, B>::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self)],
+            move |grad| {
+                let seed = grad.to_vec()?;
+                let mut grad_values = vec![E::ZERO; rows * cols];
+                for row in 0..rows {
+                    let start = row * cols;
+                    let count = values[start..start + cols]
+                        .iter()
+                        .filter(|&&value| value == out[row])
+                        .count();
+                    let each = seed[row] / E::from_usize(count);
+                    for col in 0..cols {
+                        if values[start + col] == out[row] {
+                            grad_values[start + col] = each;
+                        }
+                    }
+                }
+                Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
+            },
+        )
+    }
+
+    pub fn logsumexp_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "logsumexp_last", "last axis") };
+
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let rows = product(&dims[..last_axis]);
+        let cols = dims[last_axis];
+        ensure_nonzero_dim("logsumexp_last", last_axis, cols)?;
+        let values = self.to_vec()?;
+        let mut softmax = vec![E::ZERO; rows * cols];
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let start = row * cols;
+            let max = row_max(&values[start..start + cols]);
+            let mut sum = E::ZERO;
+            for col in 0..cols {
+                let exp = (values[start + col] - max).exp();
+                sum += exp;
+                softmax[start + col] = exp;
+            }
+            for col in 0..cols {
+                softmax[start + col] /= sum;
+            }
+            out.push(max + sum.ln());
+        }
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            out,
+            Shape::known(dims[..last_axis].to_vec()),
+        )?;
+        let input_raw = self.raw().clone();
+        Tensor::<S::Reduced, E, B>::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self)],
+            move |grad| {
+                let seed = grad.to_vec()?;
+                let mut grad_values = vec![E::ZERO; rows * cols];
+                for row in 0..rows {
+                    for col in 0..cols {
+                        grad_values[row * cols + col] = seed[row] * softmax[row * cols + col];
+                    }
+                }
+                Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
+            },
+        )
+    }
+
+    pub fn softmax_last(&self) -> Result<Self> {
+        const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "softmax_last", "last axis") };
+
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let rows = product(&dims[..last_axis]);
+        let cols = dims[last_axis];
+        ensure_nonzero_dim("softmax_last", last_axis, cols)?;
+        let values = stable_row_softmax(&self.to_vec()?, rows, cols);
+        let raw =
+            RawTensor::from_vec_on(self.device().clone(), values.clone(), self.shape().clone())?;
+        let input_raw = self.raw().clone();
+        Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let grad = grad.to_vec()?;
+            let mut out = vec![E::ZERO; rows * cols];
+            for row in 0..rows {
+                let start = row * cols;
+                let dot = (0..cols).fold(E::ZERO, |acc, col| {
+                    acc + grad[start + col] * values[start + col]
+                });
+                for col in 0..cols {
+                    out[start + col] = values[start + col] * (grad[start + col] - dot);
+                }
+            }
+            Ok(vec![Some(raw_from_vec_like(&input_raw, out)?)])
+        })
+    }
+
+    pub fn log_softmax_last(&self) -> Result<Self> {
+        const {
+            const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "log_softmax_last", "last axis")
+        };
+
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let rows = product(&dims[..last_axis]);
+        let cols = dims[last_axis];
+        ensure_nonzero_dim("log_softmax_last", last_axis, cols)?;
+        let input = self.to_vec()?;
+        let softmax = stable_row_softmax(&input, rows, cols);
+        let values = stable_row_log_softmax(&input, rows, cols);
+        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let input_raw = self.raw().clone();
+        Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let grad = grad.to_vec()?;
+            let mut out = vec![E::ZERO; rows * cols];
+            for row in 0..rows {
+                let start = row * cols;
+                let row_sum = (0..cols).fold(E::ZERO, |acc, col| acc + grad[start + col]);
+                for col in 0..cols {
+                    out[start + col] = grad[start + col] - softmax[start + col] * row_sum;
+                }
+            }
+            Ok(vec![Some(raw_from_vec_like(&input_raw, out)?)])
+        })
+    }
+
+    fn broadcast_last_axis(
+        &self,
+        rhs: &Tensor<S::Row, E, B>,
+        op: &'static str,
+        forward: impl Fn(E, E) -> E + Copy + Send + Sync + 'static,
+        lhs_backward: impl Fn(E, E, E) -> E + Copy + Send + Sync + 'static,
+        rhs_backward: impl Fn(E, E, E) -> E + Copy + Send + Sync + 'static,
+    ) -> Result<Self> {
+        ensure_same_device::<E, B>(self.device(), rhs.device(), op)?;
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let rows = product(&dims[..last_axis]);
+        let cols = dims[last_axis];
+        let rhs_dims = rhs.shape().dims();
+        let rhs_cols = rhs_dims[0];
+        bind_and_check(
+            op,
+            S::dim_entries(0)
+                .into_iter()
+                .zip(dims.iter().copied())
+                .chain(
+                    <S::Row as ShapeSpec>::dim_entries(1)
+                        .into_iter()
+                        .zip(rhs_dims.iter().copied()),
+                ),
+        )?;
+        if rhs_cols != cols {
+            return Err(ShapeError::DimMismatch {
+                op,
+                operand: 1,
+                axis: 0,
+                expected: cols,
+                found: rhs_cols,
+            }
+            .into());
+        }
+        let lhs_values = self.to_vec()?;
+        let rhs_values = rhs.to_vec()?;
+        let values = lhs_values
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, value)| forward(value, rhs_values[idx % cols]))
+            .collect();
+        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let lhs_raw = self.raw().clone();
+        let rhs_raw = rhs.raw().clone();
+        Self::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
+            move |grad| {
+                let grad_values = grad.to_vec()?;
+                let mut lhs_grad = Vec::with_capacity(rows * cols);
+                let mut rhs_grad = vec![E::ZERO; cols];
+                for idx in 0..rows * cols {
+                    let col = idx % cols;
+                    let g = grad_values[idx];
+                    lhs_grad.push(lhs_backward(lhs_values[idx], rhs_values[col], g));
+                    rhs_grad[col] += rhs_backward(lhs_values[idx], rhs_values[col], g);
+                }
+                Ok(vec![
+                    Some(raw_from_vec_like(&lhs_raw, lhs_grad)?),
+                    Some(raw_from_vec_like(&rhs_raw, rhs_grad)?),
+                ])
+            },
+        )
+    }
+}
+
+impl<S, E, B> Tensor<S, E, B>
+where
+    S: LeadingAxis,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    pub fn add_leading_dim(&self, rhs: &Tensor<S::Col, E, B>) -> Result<Self> {
+        self.broadcast_leading_axis(
+            rhs,
+            "add_leading_dim",
+            |a, b| a + b,
+            |_a, _b, g| g,
+            |_a, _b, g| g,
+        )
+    }
+
+    pub fn sub_leading_dim(&self, rhs: &Tensor<S::Col, E, B>) -> Result<Self> {
+        self.broadcast_leading_axis(
+            rhs,
+            "sub_leading_dim",
+            |a, b| a - b,
+            |_a, _b, g| g,
+            |_a, _b, g| -g,
+        )
+    }
+
+    pub fn mul_leading_dim(&self, rhs: &Tensor<S::Col, E, B>) -> Result<Self> {
+        self.broadcast_leading_axis(
+            rhs,
+            "mul_leading_dim",
+            |a, b| a * b,
+            |_a, b, g| g * b,
+            |a, _b, g| g * a,
+        )
+    }
+
+    pub fn div_leading_dim(&self, rhs: &Tensor<S::Col, E, B>) -> Result<Self> {
+        self.broadcast_leading_axis(
+            rhs,
+            "div_leading_dim",
+            |a, b| a / b,
+            |_a, b, g| g / b,
+            |a, b, g| -(g * a) / (b * b),
+        )
+    }
+
+    /// Reduces the leading axis with `keepdim = false`.
+    pub fn sum_leading(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        let dims = self.shape().dims();
+        let leading = dims[0];
+        let inner = product(&dims[1..]);
+        let values = self.to_vec()?;
+        let mut out = vec![E::ZERO; inner];
+        for row in 0..leading {
+            for col in 0..inner {
+                out[col] += values[row * inner + col];
+            }
+        }
+        let raw =
+            RawTensor::from_vec_on(self.device().clone(), out, Shape::known(dims[1..].to_vec()))?;
+        let input_raw = self.raw().clone();
+        Tensor::<S::Reduced, E, B>::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self)],
+            move |grad| {
+                let seed = grad.to_vec()?;
+                let mut values = Vec::with_capacity(leading * inner);
+                for _ in 0..leading {
+                    values.extend(seed.iter().copied());
+                }
+                Ok(vec![Some(raw_from_vec_like(&input_raw, values)?)])
+            },
+        )
+    }
+
+    pub fn mean_leading(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        const {
+            const_check::known_nonzero(
+                <S::Leading as DimSpec>::KNOWN,
+                "mean_leading",
+                "leading axis",
+            )
+        };
+        let leading = self.shape().dims()[0];
+        ensure_nonzero_dim("mean_leading", 0, leading)?;
+        self.sum_leading()?.div_scalar(E::from_usize(leading))
+    }
+
+    fn broadcast_leading_axis(
+        &self,
+        rhs: &Tensor<S::Col, E, B>,
+        op: &'static str,
+        forward: impl Fn(E, E) -> E + Copy + Send + Sync + 'static,
+        lhs_backward: impl Fn(E, E, E) -> E + Copy + Send + Sync + 'static,
+        rhs_backward: impl Fn(E, E, E) -> E + Copy + Send + Sync + 'static,
+    ) -> Result<Self> {
+        ensure_same_device::<E, B>(self.device(), rhs.device(), op)?;
+        let dims = self.shape().dims();
+        let leading = dims[0];
+        let inner = product(&dims[1..]);
+        let rhs_dims = rhs.shape().dims();
+        let rhs_leading = rhs_dims[0];
+        bind_and_check(
+            op,
+            S::dim_entries(0)
+                .into_iter()
+                .zip(dims.iter().copied())
+                .chain(
+                    <S::Col as ShapeSpec>::dim_entries(1)
+                        .into_iter()
+                        .zip(rhs_dims.iter().copied()),
+                ),
+        )?;
+        if rhs_leading != leading {
+            return Err(ShapeError::DimMismatch {
+                op,
+                operand: 1,
+                axis: 0,
+                expected: leading,
+                found: rhs_leading,
+            }
+            .into());
+        }
+        let lhs_values = self.to_vec()?;
+        let rhs_values = rhs.to_vec()?;
+        let values = lhs_values
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, value)| forward(value, rhs_values[idx / inner]))
+            .collect();
+        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let lhs_raw = self.raw().clone();
+        let rhs_raw = rhs.raw().clone();
+        Self::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
+            move |grad| {
+                let grad_values = grad.to_vec()?;
+                let mut lhs_grad = Vec::with_capacity(leading * inner);
+                let mut rhs_grad = vec![E::ZERO; leading];
+                for idx in 0..leading * inner {
+                    let row = idx / inner;
+                    let g = grad_values[idx];
+                    lhs_grad.push(lhs_backward(lhs_values[idx], rhs_values[row], g));
+                    rhs_grad[row] += rhs_backward(lhs_values[idx], rhs_values[row], g);
+                }
+                Ok(vec![
+                    Some(raw_from_vec_like(&lhs_raw, lhs_grad)?),
+                    Some(raw_from_vec_like(&rhs_raw, rhs_grad)?),
+                ])
+            },
+        )
+    }
+}
+
+fn ensure_same_device<E, B>(lhs: &B::Device, rhs: &B::Device, op: &'static str) -> Result<()>
+where
+    E: DType,
+    B: Backend<E>,
+{
+    if lhs != rhs {
+        return Err(DeviceError::Mismatch {
+            op,
+            lhs: format!("{lhs:?}"),
+            rhs: format!("{rhs:?}"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn ensure_nonzero_dim(op: &'static str, axis: usize, size: usize) -> Result<()> {
+    if size == 0 {
+        return Err(ShapeError::ZeroDimension { op, axis }.into());
+    }
+    Ok(())
+}
+
+fn product(dims: &[usize]) -> usize {
+    dims.iter().copied().product()
+}
+
+fn row_max<E: FloatDType>(values: &[E]) -> E {
+    let mut max = values[0];
+    for &value in &values[1..] {
+        if value > max {
+            max = value;
+        }
+    }
+    max
+}
+
+fn stable_row_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize) -> Vec<E> {
+    let mut out = vec![E::ZERO; rows * cols];
+    for row in 0..rows {
+        let start = row * cols;
+        let max = row_max(&values[start..start + cols]);
+        let mut sum = E::ZERO;
+        for col in 0..cols {
+            let exp = (values[start + col] - max).exp();
+            sum += exp;
+            out[start + col] = exp;
+        }
+        for col in 0..cols {
+            out[start + col] /= sum;
+        }
+    }
+    out
+}
+
+fn stable_row_log_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize) -> Vec<E> {
+    let mut out = vec![E::ZERO; rows * cols];
+    for row in 0..rows {
+        let start = row * cols;
+        let max = row_max(&values[start..start + cols]);
+        let sum = (0..cols)
+            .map(|col| (values[start + col] - max).exp())
+            .fold(E::ZERO, |acc, value| acc + value);
+        let logsumexp = max + sum.ln();
+        for col in 0..cols {
+            out[start + col] = values[start + col] - logsumexp;
+        }
+    }
+    out
+}

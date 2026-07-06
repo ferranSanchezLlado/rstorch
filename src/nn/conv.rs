@@ -1,4 +1,4 @@
-use super::parameter::{HasParameters, Layer, Module, Parameter, ParameterRef, ParameterRefMut};
+use super::parameter::{Layer, Module, Parameter};
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatDType;
 use crate::error::{Result, ShapeError};
@@ -170,46 +170,22 @@ where
     }
 }
 
-impl<
-    const IN_CH: usize,
-    const OUT_CH: usize,
-    const K_H: usize,
-    const K_W: usize,
-    const OUT_H: usize,
-    const OUT_W: usize,
-    E,
-    B,
-> HasParameters<E, B> for Conv2d<IN_CH, OUT_CH, K_H, K_W, OUT_H, OUT_W, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_ref(),
-        );
-        if let Some(bias) = &self.bias {
-            visit(&crate::nn::parameter_path(prefix, "bias"), bias.as_ref());
-        }
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_mut(),
-        );
-        if let Some(bias) = &mut self.bias {
-            visit(&crate::nn::parameter_path(prefix, "bias"), bias.as_mut());
-        }
+crate::nn::has_parameters! {
+    impl[
+        const IN_CH: usize,
+        const OUT_CH: usize,
+        const K_H: usize,
+        const K_W: usize,
+        const OUT_H: usize,
+        const OUT_W: usize,
+        E,
+        B,
+    ] Conv2d<IN_CH, OUT_CH, K_H, K_W, OUT_H, OUT_W, E, B>
+    where { }
+    {
+        params { weight, bias? }
+        children { }
+        transparent_children { }
     }
 }
 

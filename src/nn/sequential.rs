@@ -1,9 +1,7 @@
 use std::marker::PhantomData;
 
-use crate::backend::Backend;
-use crate::dtype::FloatDType;
 use crate::error::Result;
-use crate::nn::{HasParameters, Layer, Module, ParameterRef, ParameterRefMut};
+use crate::nn::{HasParameters, Layer, Module};
 
 /// Builds a [`Sequential`] stack from two or more modules.
 ///
@@ -116,26 +114,13 @@ where
     }
 }
 
-impl<M, In, E, B> HasParameters<E, B> for Sequential<M, In>
-where
-    E: FloatDType,
-    B: Backend<E>,
-    M: HasParameters<E, B>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        self.module.visit_parameters(prefix, visit);
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        self.module.visit_parameters_mut(prefix, visit);
+crate::nn::has_parameters! {
+    impl[M, In, E, B] Sequential<M, In>
+    where { M: HasParameters<E, B>, }
+    {
+        params { }
+        children { }
+        transparent_children { module }
     }
 }
 
@@ -163,33 +148,16 @@ where
     }
 }
 
-impl<A, B, E, Bk> HasParameters<E, Bk> for (A, B)
-where
-    E: FloatDType,
-    Bk: Backend<E>,
-    A: HasParameters<E, Bk>,
-    B: HasParameters<E, Bk>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, Bk>),
-    ) {
-        self.0
-            .visit_parameters(&crate::nn::parameter_path(prefix, "0"), visit);
-        self.1
-            .visit_parameters(&crate::nn::parameter_path(prefix, "1"), visit);
+crate::nn::has_parameters! {
+    impl[A, C, E, B] (A, C)
+    where {
+        A: HasParameters<E, B>,
+        C: HasParameters<E, B>,
     }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, Bk>),
-    ) {
-        self.0
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "0"), visit);
-        self.1
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "1"), visit);
+    {
+        params { }
+        children { 0, 1 }
+        transparent_children { }
     }
 }
 

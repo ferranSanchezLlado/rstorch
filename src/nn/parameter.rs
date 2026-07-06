@@ -169,6 +169,201 @@ pub(crate) fn parameter_path(prefix: &str, segment: &str) -> String {
     }
 }
 
+macro_rules! has_parameters {
+    (
+        impl[$($generics:tt)*] $ty:ty
+        where { $($where_clause:tt)* }
+        {
+            params { $($params:tt)* }
+            children { $($children:tt)* }
+            transparent_children { $($transparent:tt)* }
+        }
+    ) => {
+        impl<$($generics)*> $crate::nn::HasParameters<E, B> for $ty
+        where
+            E: $crate::dtype::FloatDType,
+            B: $crate::backend::Backend<E>,
+            $($where_clause)*
+        {
+            fn visit_parameters<'a>(
+                &'a self,
+                prefix: &str,
+                visit: &mut dyn FnMut(&str, $crate::nn::ParameterRef<'a, E, B>),
+            ) {
+                let _ = prefix;
+                let _ = &mut *visit;
+                $crate::nn::has_parameters!(@visit_params self prefix visit; $($params)*);
+                $crate::nn::has_parameters!(@visit_children self prefix visit; $($children)*);
+                $crate::nn::has_parameters!(@visit_transparent_children self prefix visit; $($transparent)*);
+            }
+
+            fn visit_parameters_mut<'a>(
+                &'a mut self,
+                prefix: &str,
+                visit: &mut dyn FnMut(&str, $crate::nn::ParameterRefMut<'a, E, B>),
+            ) {
+                let _ = prefix;
+                let _ = &mut *visit;
+                $crate::nn::has_parameters!(@visit_params_mut self prefix visit; $($params)*);
+                $crate::nn::has_parameters!(@visit_children_mut self prefix visit; $($children)*);
+                $crate::nn::has_parameters!(@visit_transparent_children_mut self prefix visit; $($transparent)*);
+            }
+        }
+    };
+
+    (@visit_params $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_params $self:ident $prefix:ident $visit:ident; $field:ident ?, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_param $self $prefix $visit $field ?);
+        $crate::nn::has_parameters!(@visit_params $self $prefix $visit; $($rest)*);
+    };
+    (@visit_params $self:ident $prefix:ident $visit:ident; $field:ident ?) => {
+        $crate::nn::has_parameters!(@visit_param $self $prefix $visit $field ?);
+    };
+    (@visit_params $self:ident $prefix:ident $visit:ident; $field:ident, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_param $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_params $self $prefix $visit; $($rest)*);
+    };
+    (@visit_params $self:ident $prefix:ident $visit:ident; $field:ident) => {
+        $crate::nn::has_parameters!(@visit_param $self $prefix $visit $field);
+    };
+
+    (@visit_params_mut $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_params_mut $self:ident $prefix:ident $visit:ident; $field:ident ?, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_param_mut $self $prefix $visit $field ?);
+        $crate::nn::has_parameters!(@visit_params_mut $self $prefix $visit; $($rest)*);
+    };
+    (@visit_params_mut $self:ident $prefix:ident $visit:ident; $field:ident ?) => {
+        $crate::nn::has_parameters!(@visit_param_mut $self $prefix $visit $field ?);
+    };
+    (@visit_params_mut $self:ident $prefix:ident $visit:ident; $field:ident, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_param_mut $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_params_mut $self $prefix $visit; $($rest)*);
+    };
+    (@visit_params_mut $self:ident $prefix:ident $visit:ident; $field:ident) => {
+        $crate::nn::has_parameters!(@visit_param_mut $self $prefix $visit $field);
+    };
+
+    (@visit_param $self:ident $prefix:ident $visit:ident $field:ident) => {
+        $visit(
+            &$crate::nn::parameter_path($prefix, stringify!($field)),
+            $self.$field.as_ref(),
+        );
+    };
+
+    (@visit_param $self:ident $prefix:ident $visit:ident $field:ident ?) => {
+        if let Some(param) = &$self.$field {
+            $visit(
+                &$crate::nn::parameter_path($prefix, stringify!($field)),
+                param.as_ref(),
+            );
+        }
+    };
+
+    (@visit_param_mut $self:ident $prefix:ident $visit:ident $field:ident) => {
+        $visit(
+            &$crate::nn::parameter_path($prefix, stringify!($field)),
+            $self.$field.as_mut(),
+        );
+    };
+
+    (@visit_param_mut $self:ident $prefix:ident $visit:ident $field:ident ?) => {
+        if let Some(param) = &mut $self.$field {
+            $visit(
+                &$crate::nn::parameter_path($prefix, stringify!($field)),
+                param.as_mut(),
+            );
+        }
+    };
+
+    (@visit_children $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_children $self:ident $prefix:ident $visit:ident; $field:ident [], $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_child $self $prefix $visit $field []);
+        $crate::nn::has_parameters!(@visit_children $self $prefix $visit; $($rest)*);
+    };
+    (@visit_children $self:ident $prefix:ident $visit:ident; $field:ident []) => {
+        $crate::nn::has_parameters!(@visit_child $self $prefix $visit $field []);
+    };
+    (@visit_children $self:ident $prefix:ident $visit:ident; $field:tt, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_child $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_children $self $prefix $visit; $($rest)*);
+    };
+    (@visit_children $self:ident $prefix:ident $visit:ident; $field:tt) => {
+        $crate::nn::has_parameters!(@visit_child $self $prefix $visit $field);
+    };
+
+    (@visit_children_mut $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_children_mut $self:ident $prefix:ident $visit:ident; $field:ident [], $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_child_mut $self $prefix $visit $field []);
+        $crate::nn::has_parameters!(@visit_children_mut $self $prefix $visit; $($rest)*);
+    };
+    (@visit_children_mut $self:ident $prefix:ident $visit:ident; $field:ident []) => {
+        $crate::nn::has_parameters!(@visit_child_mut $self $prefix $visit $field []);
+    };
+    (@visit_children_mut $self:ident $prefix:ident $visit:ident; $field:tt, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_child_mut $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_children_mut $self $prefix $visit; $($rest)*);
+    };
+    (@visit_children_mut $self:ident $prefix:ident $visit:ident; $field:tt) => {
+        $crate::nn::has_parameters!(@visit_child_mut $self $prefix $visit $field);
+    };
+
+    (@visit_child $self:ident $prefix:ident $visit:ident $field:ident []) => {
+        for (idx, child) in $self.$field.iter().enumerate() {
+            let segment = format!("{}.{idx}", stringify!($field));
+            let path = $crate::nn::parameter_path($prefix, &segment);
+            child.visit_parameters(&path, $visit);
+        }
+    };
+
+    (@visit_child $self:ident $prefix:ident $visit:ident $field:tt) => {
+        $self.$field
+            .visit_parameters(&$crate::nn::parameter_path($prefix, stringify!($field)), $visit);
+    };
+
+    (@visit_child_mut $self:ident $prefix:ident $visit:ident $field:ident []) => {
+        for (idx, child) in $self.$field.iter_mut().enumerate() {
+            let segment = format!("{}.{idx}", stringify!($field));
+            let path = $crate::nn::parameter_path($prefix, &segment);
+            child.visit_parameters_mut(&path, $visit);
+        }
+    };
+
+    (@visit_child_mut $self:ident $prefix:ident $visit:ident $field:tt) => {
+        $self.$field.visit_parameters_mut(
+            &$crate::nn::parameter_path($prefix, stringify!($field)),
+            $visit,
+        );
+    };
+
+    (@visit_transparent_children $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_transparent_children $self:ident $prefix:ident $visit:ident; $field:ident, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_transparent_child $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_transparent_children $self $prefix $visit; $($rest)*);
+    };
+    (@visit_transparent_children $self:ident $prefix:ident $visit:ident; $field:ident) => {
+        $crate::nn::has_parameters!(@visit_transparent_child $self $prefix $visit $field);
+    };
+
+    (@visit_transparent_children_mut $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_transparent_children_mut $self:ident $prefix:ident $visit:ident; $field:ident, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_transparent_child_mut $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_transparent_children_mut $self $prefix $visit; $($rest)*);
+    };
+    (@visit_transparent_children_mut $self:ident $prefix:ident $visit:ident; $field:ident) => {
+        $crate::nn::has_parameters!(@visit_transparent_child_mut $self $prefix $visit $field);
+    };
+
+    (@visit_transparent_child $self:ident $prefix:ident $visit:ident $field:ident) => {
+        $self.$field.visit_parameters($prefix, $visit);
+    };
+
+    (@visit_transparent_child_mut $self:ident $prefix:ident $visit:ident $field:ident) => {
+        $self.$field.visit_parameters_mut($prefix, $visit);
+    };
+}
+
+pub(crate) use has_parameters;
+
 pub struct ParameterRef<'a, E, B>
 where
     E: FloatDType,

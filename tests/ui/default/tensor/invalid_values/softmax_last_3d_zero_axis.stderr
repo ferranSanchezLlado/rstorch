@@ -1,14 +1,14 @@
 error[E0080]: evaluation panicked: softmax_last: last axis=0 must be greater than 0
-    --> src/tensor/ops.rs:1703:17
-     |
-1703 |         const { const_check::known_nonzero(Cc::KNOWN, "softmax_last", "last axis") };
-     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D3<rstorch::C<2>, rstorch::C<3>, rstorch::C<0>>>>::softmax_last::{constant#0}` failed here
+   --> src/tensor/axis_ops.rs:229:17
+    |
+229 |         const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "softmax_last", "last axis") };
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::axis_ops::<impl rstorch::Tensor<rstorch::D3<rstorch::C<2>, rstorch::C<3>, rstorch::C<0>>>>::softmax_last::{constant#0}` failed here
 
 note: erroneous constant encountered
-    --> src/tensor/ops.rs:1703:9
-     |
-1703 |         const { const_check::known_nonzero(Cc::KNOWN, "softmax_last", "last axis") };
-     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> src/tensor/axis_ops.rs:229:9
+    |
+229 |         const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "softmax_last", "last axis") };
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `<instantiation>`
  --> src/main.rs:8:13

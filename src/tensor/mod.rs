@@ -1,4 +1,5 @@
 mod autograd;
+mod axis_ops;
 mod ergonomics;
 mod ops;
 mod raw;
@@ -315,6 +316,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(super) mod test_support {
     use super::*;
     use crate::backend::sealed;

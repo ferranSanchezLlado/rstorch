@@ -1,7 +1,7 @@
 //! Forward and autograd behavior of the typed tensor op surface.
 
-use rstorch::Tensor;
 use rstorch::prelude::*;
+use rstorch::{Error, ShapeError, Tensor};
 
 #[test]
 fn numeric_ops_are_differentiable() {
@@ -158,6 +158,55 @@ fn bmm_computes_batched_matmul() {
         lhs.bmm(&rhs).unwrap().to_vec().unwrap(),
         vec![4.0, 5.0, 10.0, 11.0, 3.0, 1.0, 0.0, 2.0]
     );
+}
+
+#[test]
+fn generic_axis_ops_cover_higher_ranks() {
+    let x = Tensor::<D3<C<2>, C<2>, C<3>>>::from_vec((1..=12).map(|value| value as f32).collect())
+        .unwrap();
+
+    assert_eq!(
+        x.sum_last().unwrap().to_vec().unwrap(),
+        vec![6.0, 15.0, 24.0, 33.0]
+    );
+    assert_eq!(x.mean_last().unwrap().shape().dims(), &[2, 2]);
+    assert_eq!(x.argmax_last().unwrap(), vec![2, 2, 2, 2]);
+
+    let row = Tensor1D::<3>::from_vec(vec![1.0, 10.0, 100.0]).unwrap();
+    assert_eq!(
+        x.add_last_dim(&row).unwrap().to_vec().unwrap(),
+        vec![
+            2.0, 12.0, 103.0, 5.0, 15.0, 106.0, 8.0, 18.0, 109.0, 11.0, 21.0, 112.0
+        ]
+    );
+
+    let y = Tensor::<D4<C<1>, C<2>, C<2>, C<3>>>::from_vec(
+        (1..=12).map(|value| value as f32).collect(),
+    )
+    .unwrap();
+    let softmax = y.softmax_last().unwrap().to_vec().unwrap();
+    for row in softmax.chunks_exact(3) {
+        assert_close(row.iter().sum(), 1.0, 1e-6);
+    }
+}
+
+#[test]
+fn generic_axis_broadcast_validates_symbols() {
+    #[derive(Debug)]
+    struct Hidden;
+
+    let x = Tensor::<D3<C<1>, C<2>, Sym<Hidden>>>::from_vec_with_shape(vec![1.0; 6], [1, 2, 3])
+        .unwrap();
+    let row = Tensor::<D1<Sym<Hidden>>>::from_vec_with_shape(vec![1.0; 4], [4]).unwrap();
+    let err = x.add_last_dim(&row).unwrap_err();
+
+    assert!(matches!(
+        err,
+        Error::Shape(ShapeError::SymbolMismatch {
+            op: "add_last_dim",
+            ..
+        })
+    ));
 }
 
 #[test]

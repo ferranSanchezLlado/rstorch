@@ -1,7 +1,7 @@
 #![allow(clippy::type_complexity)]
 
 use super::linear::Linear;
-use super::parameter::{HasParameters, Module, ParameterRef, ParameterRefMut};
+use super::parameter::Module;
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;
 use crate::dtype::FloatDType;
@@ -150,40 +150,14 @@ where
     }
 }
 
-impl<const SEQ: usize, const EMBED: usize, const HEADS: usize, const HEAD_DIM: usize, E, B>
-    HasParameters<E, B> for MultiHeadAttention<SEQ, EMBED, HEADS, HEAD_DIM, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        self.q_proj
-            .visit_parameters(&crate::nn::parameter_path(prefix, "q_proj"), visit);
-        self.k_proj
-            .visit_parameters(&crate::nn::parameter_path(prefix, "k_proj"), visit);
-        self.v_proj
-            .visit_parameters(&crate::nn::parameter_path(prefix, "v_proj"), visit);
-        self.out_proj
-            .visit_parameters(&crate::nn::parameter_path(prefix, "out_proj"), visit);
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        self.q_proj
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "q_proj"), visit);
-        self.k_proj
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "k_proj"), visit);
-        self.v_proj
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "v_proj"), visit);
-        self.out_proj
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "out_proj"), visit);
+crate::nn::has_parameters! {
+    impl[const SEQ: usize, const EMBED: usize, const HEADS: usize, const HEAD_DIM: usize, E, B]
+        MultiHeadAttention<SEQ, EMBED, HEADS, HEAD_DIM, E, B>
+    where { }
+    {
+        params { }
+        children { q_proj, k_proj, v_proj, out_proj }
+        transparent_children { }
     }
 }
 

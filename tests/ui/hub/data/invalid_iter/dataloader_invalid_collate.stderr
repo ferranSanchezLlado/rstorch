@@ -10,7 +10,7 @@ error[E0277]: the trait bound `usize: Collate<Vec<f32>>` is not satisfied
             `MnistImageCollate<E, B>` implements `Collate<MnistSample>`
             `StackDynVecCollate<E, B>` implements `Collate<(Vec<E>, L)>`
             `StackDynVecCollate<E, B>` implements `Collate<Vec<E>>`
-            `StackImageCollate<CH, H, W, E, B>` implements `Collate<(Vec<E>, L)>`
-            `StackImageCollate<CH, H, W, E, B>` implements `Collate<Vec<E>>`
-            `StackVecCollate<N, E, B>` implements `Collate<(Vec<E>, L)>`
-          and $N others
+            `StackFeatures<BD, N, E, B>` implements `Collate<(Vec<E>, L)>`
+            `StackFeatures<BD, N, E, B>` implements `Collate<Vec<E>>`
+            `StackImages<BD, CH, H, W, E, B>` implements `Collate<(Vec<E>, L)>`
+            `StackImages<BD, CH, H, W, E, B>` implements `Collate<Vec<E>>`

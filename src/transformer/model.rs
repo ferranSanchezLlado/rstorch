@@ -5,9 +5,8 @@ use crate::data::Batch;
 use crate::dtype::FloatDType;
 use crate::error::{Error, Result, const_check};
 use crate::nn::{
-    CrossEntropyOpts, Embedding, HasParameters, Layer, LayerNorm, Linear, Module,
-    MultiHeadAttention, ParameterRef, ParameterRefMut, PositionalEmbedding, Reduction,
-    ensure_head_shape,
+    CrossEntropyOpts, Embedding, Layer, LayerNorm, Linear, Module, MultiHeadAttention,
+    PositionalEmbedding, Reduction, ensure_head_shape,
 };
 use crate::no_grad;
 use crate::random::SmallRng;
@@ -139,51 +138,21 @@ where
     }
 }
 
-impl<
-    const SEQ: usize,
-    const EMBED: usize,
-    const HEADS: usize,
-    const HEAD_DIM: usize,
-    const FF: usize,
-    E,
-    B,
-> HasParameters<E, B> for TransformerBlock<SEQ, EMBED, HEADS, HEAD_DIM, FF, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        self.norm1
-            .visit_parameters(&crate::nn::parameter_path(prefix, "norm1"), visit);
-        self.attention
-            .visit_parameters(&crate::nn::parameter_path(prefix, "attention"), visit);
-        self.norm2
-            .visit_parameters(&crate::nn::parameter_path(prefix, "norm2"), visit);
-        self.fc1
-            .visit_parameters(&crate::nn::parameter_path(prefix, "fc1"), visit);
-        self.fc2
-            .visit_parameters(&crate::nn::parameter_path(prefix, "fc2"), visit);
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        self.norm1
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "norm1"), visit);
-        self.attention
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "attention"), visit);
-        self.norm2
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "norm2"), visit);
-        self.fc1
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "fc1"), visit);
-        self.fc2
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "fc2"), visit);
+crate::nn::has_parameters! {
+    impl[
+        const SEQ: usize,
+        const EMBED: usize,
+        const HEADS: usize,
+        const HEAD_DIM: usize,
+        const FF: usize,
+        E,
+        B,
+    ] TransformerBlock<SEQ, EMBED, HEADS, HEAD_DIM, FF, E, B>
+    where { }
+    {
+        params { }
+        children { norm1, attention, norm2, fc1, fc2 }
+        transparent_children { }
     }
 }
 
@@ -397,66 +366,23 @@ where
     }
 }
 
-impl<
-    const VOCAB: usize,
-    const SEQ: usize,
-    const EMBED: usize,
-    const HEADS: usize,
-    const HEAD_DIM: usize,
-    const FF: usize,
-    const LAYERS: usize,
-    E,
-    B,
-> HasParameters<E, B>
-    for DecoderOnlyTransformer<VOCAB, SEQ, EMBED, HEADS, HEAD_DIM, FF, LAYERS, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        self.token_embedding
-            .visit_parameters(&crate::nn::parameter_path(prefix, "token_embedding"), visit);
-        self.position_embedding.visit_parameters(
-            &crate::nn::parameter_path(prefix, "position_embedding"),
-            visit,
-        );
-        for (idx, block) in self.blocks.iter().enumerate() {
-            block.visit_parameters(
-                &crate::nn::parameter_path(prefix, &format!("blocks.{idx}")),
-                visit,
-            );
-        }
-        self.final_norm
-            .visit_parameters(&crate::nn::parameter_path(prefix, "final_norm"), visit);
-        self.lm_head
-            .visit_parameters(&crate::nn::parameter_path(prefix, "lm_head"), visit);
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        self.token_embedding
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "token_embedding"), visit);
-        self.position_embedding.visit_parameters_mut(
-            &crate::nn::parameter_path(prefix, "position_embedding"),
-            visit,
-        );
-        for (idx, block) in self.blocks.iter_mut().enumerate() {
-            block.visit_parameters_mut(
-                &crate::nn::parameter_path(prefix, &format!("blocks.{idx}")),
-                visit,
-            );
-        }
-        self.final_norm
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "final_norm"), visit);
-        self.lm_head
-            .visit_parameters_mut(&crate::nn::parameter_path(prefix, "lm_head"), visit);
+crate::nn::has_parameters! {
+    impl[
+        const VOCAB: usize,
+        const SEQ: usize,
+        const EMBED: usize,
+        const HEADS: usize,
+        const HEAD_DIM: usize,
+        const FF: usize,
+        const LAYERS: usize,
+        E,
+        B,
+    ] DecoderOnlyTransformer<VOCAB, SEQ, EMBED, HEADS, HEAD_DIM, FF, LAYERS, E, B>
+    where { }
+    {
+        params { }
+        children { token_embedding, position_embedding, blocks[], final_norm, lm_head }
+        transparent_children { }
     }
 }
 

@@ -1,9 +1,7 @@
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
 use crate::error::Result;
-use crate::nn::{
-    HasParameters, Layer, Module, ParameterRef, ParameterRefMut, RngSource, TrainingMode,
-};
+use crate::nn::{Layer, Module, RngSource, TrainingMode};
 use crate::shape::ShapeSpec;
 use crate::tensor::{Mask, Tensor};
 
@@ -61,22 +59,12 @@ where
     }
 }
 
-impl<E, B> HasParameters<E, B> for Dropout<E>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        _prefix: &str,
-        _visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        _prefix: &str,
-        _visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
+crate::nn::has_parameters! {
+    impl[E, B] Dropout<E>
+    where { }
+    {
+        params { }
+        children { }
+        transparent_children { }
     }
 }

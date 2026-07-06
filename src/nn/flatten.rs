@@ -1,4 +1,4 @@
-use super::parameter::{HasParameters, Layer, Module, ParameterRef, ParameterRefMut};
+use super::parameter::{Layer, Module};
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
 use crate::error::Result;
@@ -40,22 +40,12 @@ where
     }
 }
 
-impl<const OUT: usize, E, B> HasParameters<E, B> for Flatten<OUT>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        _prefix: &str,
-        _visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        _prefix: &str,
-        _visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
+crate::nn::has_parameters! {
+    impl[const OUT: usize, E, B] Flatten<OUT>
+    where { }
+    {
+        params { }
+        children { }
+        transparent_children { }
     }
 }

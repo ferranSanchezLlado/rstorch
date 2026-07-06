@@ -1,26 +1,26 @@
 error[E0080]: evaluation panicked: flatten_spatial: channels * height * width=24 must equal OUT=23
-    --> src/tensor/ops.rs:1952:13
-     |
-1952 | /             const_check::known_size_eq(
-1953 | |                 crate::shape::known_numel([Channels::KNOWN, Height::KNOWN, Width::KNOWN]),
-1954 | |                 Some(OUT),
-1955 | |                 "flatten_spatial",
-1956 | |                 "channels * height * width",
-1957 | |                 "OUT",
-1958 | |             );
-     | |_____________^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D4<rstorch::C<1>, rstorch::C<2>, rstorch::C<3>, rstorch::C<4>>>>::flatten_spatial::<23>::{constant#0}` failed here
+   --> src/tensor/ops/image.rs:267:13
+    |
+267 | /             const_check::known_size_eq(
+268 | |                 crate::shape::known_numel([Channels::KNOWN, Height::KNOWN, Width::KNOWN]),
+269 | |                 Some(OUT),
+270 | |                 "flatten_spatial",
+271 | |                 "channels * height * width",
+272 | |                 "OUT",
+273 | |             );
+    | |_____________^ evaluation of `rstorch::tensor::ops::image::<impl rstorch::Tensor<rstorch::D4<rstorch::C<1>, rstorch::C<2>, rstorch::C<3>, rstorch::C<4>>>>::flatten_spatial::<23>::{constant#0}` failed here
 
 note: erroneous constant encountered
-    --> src/tensor/ops.rs:1951:9
-     |
-1951 | /         const {
-1952 | |             const_check::known_size_eq(
-1953 | |                 crate::shape::known_numel([Channels::KNOWN, Height::KNOWN, Width::KNOWN]),
-1954 | |                 Some(OUT),
-...    |
-1958 | |             );
-1959 | |         };
-     | |_________^
+   --> src/tensor/ops/image.rs:266:9
+    |
+266 | /         const {
+267 | |             const_check::known_size_eq(
+268 | |                 crate::shape::known_numel([Channels::KNOWN, Height::KNOWN, Width::KNOWN]),
+269 | |                 Some(OUT),
+...   |
+273 | |             );
+274 | |         };
+    | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`
  --> src/main.rs:8:13
@@ -29,34 +29,34 @@ note: the above error was encountered while instantiating `<instantiation>`
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0080]: evaluation panicked: reshape_with_shape: source elements=24 must equal target elements=23
-   --> src/tensor/ops.rs:215:13
-    |
-215 | /             const_check::known_size_eq(
-216 | |                 S::KNOWN_NUMEL,
-217 | |                 T::KNOWN_NUMEL,
-218 | |                 "reshape_with_shape",
-219 | |                 "source elements",
-220 | |                 "target elements",
-221 | |             );
-    | |_____________^ evaluation of `rstorch::tensor::ops::<impl rstorch::Tensor<rstorch::D4<rstorch::C<1>, rstorch::C<2>, rstorch::C<3>, rstorch::C<4>>>>::reshape_with_shape::<rstorch::D2<rstorch::C<1>, rstorch::C<23>>, [usize; 2]>::{constant#0}` failed here
+  --> src/tensor/ops/shape_ops.rs:63:13
+   |
+63 | /             const_check::known_size_eq(
+64 | |                 S::KNOWN_NUMEL,
+65 | |                 T::KNOWN_NUMEL,
+66 | |                 "reshape_with_shape",
+67 | |                 "source elements",
+68 | |                 "target elements",
+69 | |             );
+   | |_____________^ evaluation of `rstorch::tensor::ops::shape_ops::<impl rstorch::Tensor<rstorch::D4<rstorch::C<1>, rstorch::C<2>, rstorch::C<3>, rstorch::C<4>>>>::reshape_with_shape::<rstorch::D2<rstorch::C<1>, rstorch::C<23>>, [usize; 2]>::{constant#0}` failed here
 
 note: erroneous constant encountered
-   --> src/tensor/ops.rs:214:9
-    |
-214 | /         const {
-215 | |             const_check::known_size_eq(
-216 | |                 S::KNOWN_NUMEL,
-217 | |                 T::KNOWN_NUMEL,
-...   |
-221 | |             );
-222 | |         };
-    | |_________^
+  --> src/tensor/ops/shape_ops.rs:62:9
+   |
+62 | /         const {
+63 | |             const_check::known_size_eq(
+64 | |                 S::KNOWN_NUMEL,
+65 | |                 T::KNOWN_NUMEL,
+...  |
+69 | |             );
+70 | |         };
+   | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`
-    --> src/tensor/ops.rs:1971:9
-     |
-1971 |         self.reshape_with_shape::<D2<Batch, C<OUT>>>([batch, OUT])
-     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> src/tensor/ops/image.rs:286:9
+    |
+286 |         self.reshape_with_shape::<D2<Batch, C<OUT>>>([batch, OUT])
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For more information about this error, try `rustc --explain E0080`.
 error: could not compile `default-tensor-shape-errors-flatten-spatial-static-mismatch` (bin "default-tensor-shape-errors-flatten-spatial-static-mismatch") due to 2 previous errors

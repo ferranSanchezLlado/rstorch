@@ -60,12 +60,13 @@ pub use backend::{Metal, MetalDevice, MetalError};
 #[cfg(feature = "wgpu")]
 pub use backend::{Wgpu, WgpuDevice, WgpuError};
 pub use data::{
-    Batch, Chain, Collate, DataLoader, Dataset, DynamicFeatures, Features, ImageBatch,
-    IntoTensorDataset, RandomSampler, SequentialSampler, ShuffleSampler, StackDynVecCollate,
-    StackImageCollate, StackVecCollate, StaticDataLoader, StaticFeatures, StaticImageBatch,
-    StaticStackImageCollate, StaticStackVecCollate, Subset, TensorDataset, Transform, VecDataset,
-    dynamic_features, features, images, loader, normalize_image_sample, static_features,
-    static_images, static_loader,
+    Batch, Chain, Collate, DataLoader, Dataset, DynamicFeatures, FeatureBatch, Features,
+    ImageBatch, ImageBatchWith, IntoTensorDataset, RandomSampler, SequentialSampler,
+    ShuffleSampler, StackDynVecCollate, StackFeatures, StackImageCollate, StackImages,
+    StackVecCollate, StaticDataLoader, StaticFeatures, StaticImageBatch, StaticStackImageCollate,
+    StaticStackVecCollate, Subset, TensorDataset, Transform, VecDataset, dynamic_features,
+    features, images, loader, normalize_image_sample, static_features, static_images,
+    static_loader,
 };
 #[cfg(feature = "hub")]
 pub use data::{
@@ -90,7 +91,10 @@ pub use persistence::{
     save_tensor,
 };
 pub use random::SmallRng;
-pub use shape::{AnyDim, C, D0, D1, D2, D3, D4, DimSpec, Shape, ShapeSpec, StaticShape, Sym};
+pub use shape::{
+    AnyDim, C, D0, D1, D2, D3, D4, DimSpec, LastAxis, LeadingAxis, Shape, ShapeSpec, StaticShape,
+    Sym,
+};
 pub use tensor::{
     Conv2dOptions, Mask, NoGradGuard, Padding2d, Pool2dOptions, Scalar, Tensor, Tensor1D, Tensor2D,
     Tensor3D, Tensor4D, is_grad_enabled, no_grad,
@@ -110,9 +114,10 @@ pub mod prelude {
     #[cfg(feature = "wgpu")]
     pub use crate::backend::{Wgpu, WgpuDevice, WgpuError};
     pub use crate::data::{
-        Batch, Chain, Collate, DataLoader, Dataset, DynamicFeatures, Features, ImageBatch,
-        IntoTensorDataset, RandomSampler, SequentialSampler, ShuffleSampler, StackDynVecCollate,
-        StackImageCollate, StackVecCollate, StaticDataLoader, StaticFeatures, StaticImageBatch,
+        Batch, Chain, Collate, DataLoader, Dataset, DynamicFeatures, FeatureBatch, Features,
+        ImageBatch, ImageBatchWith, IntoTensorDataset, RandomSampler, SequentialSampler,
+        ShuffleSampler, StackDynVecCollate, StackFeatures, StackImageCollate, StackImages,
+        StackVecCollate, StaticDataLoader, StaticFeatures, StaticImageBatch,
         StaticStackImageCollate, StaticStackVecCollate, Subset, TensorDataset, Transform,
         VecDataset, dynamic_features, features, images, loader, normalize_image_sample,
         static_features, static_images, static_loader,
@@ -141,7 +146,9 @@ pub mod prelude {
     };
     pub use crate::random::SmallRng;
     pub use crate::seq;
-    pub use crate::shape::{AnyDim, C, D0, D1, D2, D3, D4, DimSpec, ShapeSpec, StaticShape, Sym};
+    pub use crate::shape::{
+        AnyDim, C, D0, D1, D2, D3, D4, DimSpec, LastAxis, LeadingAxis, ShapeSpec, StaticShape, Sym,
+    };
     pub use crate::tensor::{
         Conv2dOptions, Mask, Padding2d, Pool2dOptions, Scalar, Tensor, Tensor1D, Tensor2D,
         Tensor3D, Tensor4D, is_grad_enabled, no_grad,

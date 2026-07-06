@@ -1,24 +1,24 @@
 error[E0080]: evaluation panicked: multi_head_attention: HEADS=3 times HEAD_DIM=2 gives 6, but EMBED=8
-   --> src/nn/attention.rs:196:9
+   --> src/nn/attention.rs:170:9
     |
-196 | /         const_check::mul_eq(
-197 | |             HEADS,
-198 | |             HEAD_DIM,
-199 | |             EMBED,
+170 | /         const_check::mul_eq(
+171 | |             HEADS,
+172 | |             HEAD_DIM,
+173 | |             EMBED,
 ...   |
-203 | |             "EMBED",
-204 | |         )
+177 | |             "EMBED",
+178 | |         )
     | |_________^ evaluation of `rstorch::nn::attention::ensure_head_shape::<8, 3, 2>::{constant#3}` failed here
 
 note: erroneous constant encountered
-   --> src/nn/attention.rs:195:5
+   --> src/nn/attention.rs:169:5
     |
-195 | /     const {
-196 | |         const_check::mul_eq(
-197 | |             HEADS,
-198 | |             HEAD_DIM,
+169 | /     const {
+170 | |         const_check::mul_eq(
+171 | |             HEADS,
+172 | |             HEAD_DIM,
 ...   |
-205 | |     };
+179 | |     };
     | |_____^
 
 note: the above error was encountered while instantiating `<instantiation>`

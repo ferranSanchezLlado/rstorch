@@ -1,4 +1,4 @@
-use super::parameter::{HasParameters, Layer, Module, Parameter, ParameterRef, ParameterRefMut};
+use super::parameter::{Layer, Module, Parameter};
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatDType;
 use crate::error::{Result, const_check};
@@ -101,38 +101,12 @@ where
     }
 }
 
-impl<const IN: usize, const OUT: usize, E, B> HasParameters<E, B> for Linear<IN, OUT, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_ref(),
-        );
-        visit(
-            &crate::nn::parameter_path(prefix, "bias"),
-            self.bias.as_ref(),
-        );
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_mut(),
-        );
-        visit(
-            &crate::nn::parameter_path(prefix, "bias"),
-            self.bias.as_mut(),
-        );
+crate::nn::has_parameters! {
+    impl[const IN: usize, const OUT: usize, E, B] Linear<IN, OUT, E, B>
+    where { }
+    {
+        params { weight, bias }
+        children { }
+        transparent_children { }
     }
 }

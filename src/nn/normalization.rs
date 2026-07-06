@@ -1,7 +1,7 @@
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatDType;
 use crate::error::Result;
-use crate::nn::{HasParameters, Layer, Module, Parameter, ParameterRef, ParameterRefMut};
+use crate::nn::{Layer, Module, Parameter};
 use crate::shape::{C, D1, D2, DimSpec};
 use crate::tensor::Tensor;
 
@@ -85,38 +85,12 @@ where
     }
 }
 
-impl<const FEATURES: usize, E, B> HasParameters<E, B> for LayerNorm<FEATURES, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    fn visit_parameters<'a>(
-        &'a self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRef<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_ref(),
-        );
-        visit(
-            &crate::nn::parameter_path(prefix, "bias"),
-            self.bias.as_ref(),
-        );
-    }
-
-    fn visit_parameters_mut<'a>(
-        &'a mut self,
-        prefix: &str,
-        visit: &mut dyn FnMut(&str, ParameterRefMut<'a, E, B>),
-    ) {
-        visit(
-            &crate::nn::parameter_path(prefix, "weight"),
-            self.weight.as_mut(),
-        );
-        visit(
-            &crate::nn::parameter_path(prefix, "bias"),
-            self.bias.as_mut(),
-        );
+crate::nn::has_parameters! {
+    impl[const FEATURES: usize, E, B] LayerNorm<FEATURES, E, B>
+    where { }
+    {
+        params { weight, bias }
+        children { }
+        transparent_children { }
     }
 }

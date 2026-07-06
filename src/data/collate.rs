@@ -1,7 +1,7 @@
 use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatDType;
 use crate::error::{DataError, Error, Result};
-use crate::shape::{AnyDim, C, D2, D4, Sym};
+use crate::shape::{AnyDim, C, D2, D4, DimSpec, Sym};
 use crate::tensor::Tensor;
 use std::marker::PhantomData;
 
@@ -23,8 +23,12 @@ pub type StaticImageBatch<
     B = Cpu,
 > = Tensor<D4<C<BATCH>, C<CH>, C<H>, C<W>>, E, B>;
 
+pub type FeatureBatch<BD, const N: usize, E = f32, B = Cpu> = Tensor<D2<BD, C<N>>, E, B>;
+pub type ImageBatchWith<BD, const CH: usize, const H: usize, const W: usize, E = f32, B = Cpu> =
+    Tensor<D4<BD, C<CH>, C<H>, C<W>>, E, B>;
+
 pub fn features<const N: usize>() -> StackVecCollate<N> {
-    StackVecCollate::new()
+    StackFeatures::new()
 }
 
 pub fn dynamic_features() -> StackDynVecCollate {
@@ -32,16 +36,16 @@ pub fn dynamic_features() -> StackDynVecCollate {
 }
 
 pub fn images<const CH: usize, const H: usize, const W: usize>() -> StackImageCollate<CH, H, W> {
-    StackImageCollate::new()
+    StackImages::new()
 }
 
 pub fn static_features<const BATCH: usize, const N: usize>() -> StaticStackVecCollate<BATCH, N> {
-    StaticStackVecCollate::new()
+    StackFeatures::new()
 }
 
 pub fn static_images<const BATCH: usize, const CH: usize, const H: usize, const W: usize>()
 -> StaticStackImageCollate<BATCH, CH, H, W> {
-    StaticStackImageCollate::new()
+    StackImages::new()
 }
 
 /// Normalizes a flattened CHW image sample with per-channel mean and stddev.
@@ -75,8 +79,9 @@ where
 
 /// Converts a list of samples into a batch.
 ///
-/// Built-in collators only produce dynamic runtime batch axes (`Sym<Batch>`),
-/// including the final partial batch when the loader does not drop it.
+/// Built-in collators produce either dynamic runtime batch axes (`Sym<Batch>`)
+/// or const batch axes through the `Static*` aliases. Dynamic collators include
+/// the final partial batch when the loader does not drop it.
 ///
 /// [`DataLoader`]: crate::data::DataLoader
 pub trait Collate<Item> {
@@ -147,13 +152,11 @@ where
     Ok(data)
 }
 
-/// Stacks `Vec<E>` samples into a `Tensor<D2<Sym<Batch>, C<N>>>` with a runtime
-/// batch dimension.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StackVecCollate<const N: usize, E = f32, B = Cpu>(PhantomData<(E, B)>);
+pub struct StackFeatures<BD: DimSpec, const N: usize, E = f32, B = Cpu>(PhantomData<(BD, E, B)>);
 
-impl<const N: usize, E, B> StackVecCollate<N, E, B>
+impl<BD, const N: usize, E, B> StackFeatures<BD, N, E, B>
 where
+    BD: DimSpec,
     E: FloatDType,
     B: Backend<E>,
 {
@@ -162,31 +165,82 @@ where
     }
 }
 
-impl<const N: usize, E, B> Collate<Vec<E>> for StackVecCollate<N, E, B>
+impl<BD, const N: usize, E, B> Default for StackFeatures<BD, N, E, B>
 where
+    BD: DimSpec,
     E: FloatDType,
     B: Backend<E>,
 {
-    type Batch = Features<N, E, B>;
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<BD, const N: usize, E, B> std::fmt::Debug for StackFeatures<BD, N, E, B>
+where
+    BD: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StackFeatures").finish()
+    }
+}
+
+impl<BD, const N: usize, E, B> Clone for StackFeatures<BD, N, E, B>
+where
+    BD: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<BD, const N: usize, E, B> Copy for StackFeatures<BD, N, E, B>
+where
+    BD: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+}
+
+impl<BD, const N: usize, E, B> Collate<Vec<E>> for StackFeatures<BD, N, E, B>
+where
+    BD: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    type Batch = FeatureBatch<BD, N, E, B>;
     type Error = Error;
 
     fn collate(&self, items: Vec<Vec<E>>) -> Result<Self::Batch> {
+        if let Some(expected) = BD::KNOWN
+            && items.len() != expected
+        {
+            return Err(DataError::WrongBatchSize {
+                expected,
+                found: items.len(),
+            }
+            .into());
+        }
         if items.is_empty() {
             return Err(DataError::EmptyBatch.into());
         }
-
         let batch = items.len();
         let data = flatten_vec_samples::<N, E>(items)?;
         Tensor::from_vec_with_shape(data, [batch, N])
     }
 }
 
-impl<const N: usize, E, B, L> Collate<(Vec<E>, L)> for StackVecCollate<N, E, B>
+impl<BD, const N: usize, E, B, L> Collate<(Vec<E>, L)> for StackFeatures<BD, N, E, B>
 where
+    BD: DimSpec,
     E: FloatDType,
     B: Backend<E>,
 {
-    type Batch = (Features<N, E, B>, Vec<L>);
+    type Batch = (FeatureBatch<BD, N, E, B>, Vec<L>);
     type Error = Error;
 
     fn collate(&self, items: Vec<(Vec<E>, L)>) -> Result<Self::Batch> {
@@ -194,6 +248,10 @@ where
         Ok((self.collate(features)?, labels))
     }
 }
+
+pub type StackVecCollate<const N: usize, E = f32, B = Cpu> = StackFeatures<Sym<Batch>, N, E, B>;
+pub type StaticStackVecCollate<const BATCH: usize, const N: usize, E = f32, B = Cpu> =
+    StackFeatures<C<BATCH>, N, E, B>;
 
 impl<I0, I1, C0, C1> Collate<(I0, I1)> for (C0, C1)
 where
@@ -258,15 +316,18 @@ where
     }
 }
 
-/// Stacks `Vec<E>` image samples into a `Tensor<D4<Sym<Batch>, C<CH>, C<H>,
-/// C<W>>>` with a runtime batch dimension.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StackImageCollate<const CH: usize, const H: usize, const W: usize, E = f32, B = Cpu>(
-    PhantomData<(E, B)>,
-);
+pub struct StackImages<
+    BD: DimSpec,
+    const CH: usize,
+    const H: usize,
+    const W: usize,
+    E = f32,
+    B = Cpu,
+>(PhantomData<(BD, E, B)>);
 
-impl<const CH: usize, const H: usize, const W: usize, E, B> StackImageCollate<CH, H, W, E, B>
+impl<BD, const CH: usize, const H: usize, const W: usize, E, B> StackImages<BD, CH, H, W, E, B>
 where
+    BD: DimSpec,
     E: FloatDType,
     B: Backend<E>,
 {
@@ -275,16 +336,71 @@ where
     }
 }
 
-impl<const CH: usize, const H: usize, const W: usize, E, B> Collate<Vec<E>>
-    for StackImageCollate<CH, H, W, E, B>
+impl<BD, const CH: usize, const H: usize, const W: usize, E, B> Default
+    for StackImages<BD, CH, H, W, E, B>
 where
+    BD: DimSpec,
     E: FloatDType,
     B: Backend<E>,
 {
-    type Batch = ImageBatch<CH, H, W, E, B>;
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<BD, const CH: usize, const H: usize, const W: usize, E, B> std::fmt::Debug
+    for StackImages<BD, CH, H, W, E, B>
+where
+    BD: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StackImages").finish()
+    }
+}
+
+impl<BD, const CH: usize, const H: usize, const W: usize, E, B> Clone
+    for StackImages<BD, CH, H, W, E, B>
+where
+    BD: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<BD, const CH: usize, const H: usize, const W: usize, E, B> Copy
+    for StackImages<BD, CH, H, W, E, B>
+where
+    BD: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+}
+
+impl<BD, const CH: usize, const H: usize, const W: usize, E, B> Collate<Vec<E>>
+    for StackImages<BD, CH, H, W, E, B>
+where
+    BD: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    type Batch = ImageBatchWith<BD, CH, H, W, E, B>;
     type Error = Error;
 
     fn collate(&self, items: Vec<Vec<E>>) -> Result<Self::Batch> {
+        if let Some(expected) = BD::KNOWN
+            && items.len() != expected
+        {
+            return Err(DataError::WrongBatchSize {
+                expected,
+                found: items.len(),
+            }
+            .into());
+        }
         if items.is_empty() {
             return Err(DataError::EmptyBatch.into());
         }
@@ -295,13 +411,14 @@ where
     }
 }
 
-impl<const CH: usize, const H: usize, const W: usize, E, B, L> Collate<(Vec<E>, L)>
-    for StackImageCollate<CH, H, W, E, B>
+impl<BD, const CH: usize, const H: usize, const W: usize, E, B, L> Collate<(Vec<E>, L)>
+    for StackImages<BD, CH, H, W, E, B>
 where
+    BD: DimSpec,
     E: FloatDType,
     B: Backend<E>,
 {
-    type Batch = (ImageBatch<CH, H, W, E, B>, Vec<L>);
+    type Batch = (ImageBatchWith<BD, CH, H, W, E, B>, Vec<L>);
     type Error = Error;
 
     fn collate(&self, items: Vec<(Vec<E>, L)>) -> Result<Self::Batch> {
@@ -309,118 +426,16 @@ where
         Ok((self.collate(images)?, labels))
     }
 }
-
-/// Stacks exactly `BATCH` `Vec<E>` samples into a fully static 2D tensor.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StaticStackVecCollate<const BATCH: usize, const N: usize, E = f32, B = Cpu>(
-    PhantomData<(E, B)>,
-);
-
-impl<const BATCH: usize, const N: usize, E, B> StaticStackVecCollate<BATCH, N, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    pub fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<const BATCH: usize, const N: usize, E, B> Collate<Vec<E>>
-    for StaticStackVecCollate<BATCH, N, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    type Batch = StaticFeatures<BATCH, N, E, B>;
-    type Error = Error;
-
-    fn collate(&self, items: Vec<Vec<E>>) -> Result<Self::Batch> {
-        if items.len() != BATCH {
-            return Err(DataError::WrongBatchSize {
-                expected: BATCH,
-                found: items.len(),
-            }
-            .into());
-        }
-
-        Tensor::from_vec(flatten_vec_samples::<N, E>(items)?)
-    }
-}
-
-impl<const BATCH: usize, const N: usize, E, B, L> Collate<(Vec<E>, L)>
-    for StaticStackVecCollate<BATCH, N, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    type Batch = (StaticFeatures<BATCH, N, E, B>, Vec<L>);
-    type Error = Error;
-
-    fn collate(&self, items: Vec<(Vec<E>, L)>) -> Result<Self::Batch> {
-        let (features, labels): (Vec<_>, Vec<_>) = items.into_iter().unzip();
-        Ok((self.collate(features)?, labels))
-    }
-}
-
-/// Stacks exactly `BATCH` image samples into a fully static 4D tensor.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StaticStackImageCollate<
+pub type StackImageCollate<const CH: usize, const H: usize, const W: usize, E = f32, B = Cpu> =
+    StackImages<Sym<Batch>, CH, H, W, E, B>;
+pub type StaticStackImageCollate<
     const BATCH: usize,
     const CH: usize,
     const H: usize,
     const W: usize,
     E = f32,
     B = Cpu,
->(PhantomData<(E, B)>);
-
-impl<const BATCH: usize, const CH: usize, const H: usize, const W: usize, E, B>
-    StaticStackImageCollate<BATCH, CH, H, W, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    pub fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<const BATCH: usize, const CH: usize, const H: usize, const W: usize, E, B> Collate<Vec<E>>
-    for StaticStackImageCollate<BATCH, CH, H, W, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    type Batch = StaticImageBatch<BATCH, CH, H, W, E, B>;
-    type Error = Error;
-
-    fn collate(&self, items: Vec<Vec<E>>) -> Result<Self::Batch> {
-        if items.len() != BATCH {
-            return Err(DataError::WrongBatchSize {
-                expected: BATCH,
-                found: items.len(),
-            }
-            .into());
-        }
-
-        Tensor::from_vec(flatten_image_samples(items, CH, H, W)?)
-    }
-}
-
-impl<const BATCH: usize, const CH: usize, const H: usize, const W: usize, E, B, L>
-    Collate<(Vec<E>, L)> for StaticStackImageCollate<BATCH, CH, H, W, E, B>
-where
-    E: FloatDType,
-    B: Backend<E>,
-{
-    type Batch = (StaticImageBatch<BATCH, CH, H, W, E, B>, Vec<L>);
-    type Error = Error;
-
-    fn collate(&self, items: Vec<(Vec<E>, L)>) -> Result<Self::Batch> {
-        let (images, labels): (Vec<_>, Vec<_>) = items.into_iter().unzip();
-        Ok((self.collate(images)?, labels))
-    }
-}
+> = StackImages<C<BATCH>, CH, H, W, E, B>;
 
 #[cfg(test)]
 mod tests {

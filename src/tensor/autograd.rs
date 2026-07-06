@@ -283,22 +283,29 @@ fn build_topo<E, B>(
     E: FloatDType,
     B: Backend<E>,
 {
-    if !visited.insert(node.inner.autograd.id) {
-        return;
-    }
-    if let Some(grad_fn) = node
-        .inner
-        .autograd
-        .grad_fn
-        .lock()
-        .expect("grad_fn poisoned")
-        .clone()
-    {
-        for parent in &grad_fn.parents {
-            build_topo(parent, visited, topo);
+    let mut stack = vec![(node.clone(), false)];
+    while let Some((node, expanded)) = stack.pop() {
+        if expanded {
+            topo.push(node);
+            continue;
+        }
+        if !visited.insert(node.inner.autograd.id) {
+            continue;
+        }
+        stack.push((node.clone(), true));
+        if let Some(grad_fn) = node
+            .inner
+            .autograd
+            .grad_fn
+            .lock()
+            .expect("grad_fn poisoned")
+            .clone()
+        {
+            for parent in grad_fn.parents.iter().rev() {
+                stack.push((parent.clone(), false));
+            }
         }
     }
-    topo.push(node.clone());
 }
 
 fn accumulate_slot<E, B>(inner: &TensorInner<E, B>, grad: &RawTensor<E, B>) -> Result<()>
@@ -641,5 +648,20 @@ mod tests {
             let numerical = (f_plus - f_minus) / (2.0 * eps);
             assert!((grad[idx] - numerical).abs() < 1e-8);
         }
+    }
+
+    #[test]
+    fn backward_handles_long_chains_without_recursive_topo() {
+        let x = Tensor1D::<1>::from_vec(vec![1.0])
+            .unwrap()
+            .with_requires_grad(true);
+        let mut y = x.clone();
+        for _ in 0..20_000 {
+            y = y.add_scalar(1.0).unwrap();
+        }
+
+        y.sum().unwrap().backward().unwrap();
+        assert_eq!(x.grad().unwrap().to_vec().unwrap(), vec![1.0]);
+        std::mem::forget(y);
     }
 }

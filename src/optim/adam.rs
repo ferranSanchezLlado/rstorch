@@ -17,6 +17,8 @@ pub struct Adam<E> {
     beta2: E,
     eps: E,
     step: usize,
+    beta1_pow: E,
+    beta2_pow: E,
     state: HashMap<ParameterId, AdamState<E>>,
 }
 
@@ -41,7 +43,8 @@ struct AdamConfig<E> {
 /// gradient, shared by [`Adam`] and [`AdamW`].
 fn adam_step<E, B>(
     config: &AdamConfig<E>,
-    step: usize,
+    beta1_pow: E,
+    beta2_pow: E,
     state: &mut HashMap<ParameterId, AdamState<E>>,
     params: &mut [ParameterRefMut<'_, E, B>],
 ) -> Result<()>
@@ -51,8 +54,6 @@ where
 {
     let _guard = no_grad();
     let one = E::ONE;
-    let beta1_pow = pow(config.beta1, step);
-    let beta2_pow = pow(config.beta2, step);
     for param in params {
         let Some(grad) = param.grad()? else {
             continue;
@@ -95,6 +96,8 @@ where
             beta2: E::from_f64(0.999),
             eps: E::from_f64(1e-8),
             step: 0,
+            beta1_pow: E::ONE,
+            beta2_pow: E::ONE,
             state: HashMap::new(),
         }
     }
@@ -115,6 +118,8 @@ where
 {
     fn step(&mut self, params: &mut [ParameterRefMut<'_, E, B>]) -> Result<()> {
         self.step += 1;
+        self.beta1_pow *= self.beta1;
+        self.beta2_pow *= self.beta2;
         let config = AdamConfig {
             lr: self.lr,
             beta1: self.beta1,
@@ -122,7 +127,13 @@ where
             eps: self.eps,
             weight_decay: E::ZERO,
         };
-        adam_step(&config, self.step, &mut self.state, params)
+        adam_step(
+            &config,
+            self.beta1_pow,
+            self.beta2_pow,
+            &mut self.state,
+            params,
+        )
     }
 }
 
@@ -166,6 +177,8 @@ where
         self.beta2 = beta2;
         self.eps = eps;
         self.step = step;
+        self.beta1_pow = pow(beta1, step);
+        self.beta2_pow = pow(beta2, step);
         self.state = moments;
         Ok(())
     }
@@ -182,6 +195,8 @@ pub struct AdamW<E> {
     eps: E,
     weight_decay: E,
     step: usize,
+    beta1_pow: E,
+    beta2_pow: E,
     state: HashMap<ParameterId, AdamState<E>>,
 }
 
@@ -197,6 +212,8 @@ where
             eps: E::from_f64(1e-8),
             weight_decay,
             step: 0,
+            beta1_pow: E::ONE,
+            beta2_pow: E::ONE,
             state: HashMap::new(),
         }
     }
@@ -221,6 +238,8 @@ where
 {
     fn step(&mut self, params: &mut [ParameterRefMut<'_, E, B>]) -> Result<()> {
         self.step += 1;
+        self.beta1_pow *= self.beta1;
+        self.beta2_pow *= self.beta2;
         let config = AdamConfig {
             lr: self.lr,
             beta1: self.beta1,
@@ -228,7 +247,13 @@ where
             eps: self.eps,
             weight_decay: self.weight_decay,
         };
-        adam_step(&config, self.step, &mut self.state, params)
+        adam_step(
+            &config,
+            self.beta1_pow,
+            self.beta2_pow,
+            &mut self.state,
+            params,
+        )
     }
 }
 
@@ -275,6 +300,8 @@ where
         self.eps = eps;
         self.weight_decay = weight_decay;
         self.step = step;
+        self.beta1_pow = pow(beta1, step);
+        self.beta2_pow = pow(beta2, step);
         self.state = moments;
         Ok(())
     }
@@ -350,4 +377,26 @@ where
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pow;
+
+    #[test]
+    fn pow_matches_repeated_multiply_for_small_steps() {
+        for step in 0..32 {
+            let expected = (0..step).fold(1.0f64, |acc, _| acc * 0.9);
+            assert_eq!(pow(0.9f64, step), expected);
+        }
+    }
+
+    #[test]
+    fn pow_preserves_checkpoint_reconstruction_order() {
+        let mut expected = 1.0f64;
+        for _ in 0..257 {
+            expected *= 0.999;
+        }
+        assert_eq!(pow(0.999f64, 257), expected);
+    }
 }
