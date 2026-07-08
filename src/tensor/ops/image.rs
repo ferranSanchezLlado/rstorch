@@ -1,9 +1,9 @@
 use super::super::autograd::{AnyTensor, raw_from_vec_like};
 use super::super::{RawTensor, Tensor};
 use super::ensure_same_device;
-use crate::backend::Backend;
+use crate::backend::{Backend, NativeBinaryOp};
 use crate::dtype::{DType, FloatDType};
-use crate::error::{Result, ShapeError, const_check};
+use crate::error::{Error, Result, ShapeError, const_check};
 use crate::shape::{C, D2, D4, DimEntry, DimSpec, Shape, bind_and_check};
 
 /// Symmetric zero-padding for NCHW rank-4 image tensors.
@@ -314,20 +314,38 @@ where
             .into());
         }
 
-        let lhs_values = self.host_values()?.into_owned();
-        let rhs_values = rhs.host_values()?.into_owned();
-        let mut values = Vec::with_capacity(lhs_values.len());
-        for n in 0..batch {
-            for (c, &channel_value) in rhs_values.iter().enumerate().take(channels) {
-                for h in 0..height {
-                    for w in 0..width {
-                        let idx = nchw_index(n, c, h, w, channels, height, width);
-                        values.push(lhs_values[idx] + channel_value);
+        let lhs_input = self.contiguous()?;
+        let rhs_input = rhs.contiguous()?;
+        let raw = if let Some(storage) = B::try_broadcast_channel(
+            lhs_input.device(),
+            lhs_input.raw().storage(),
+            rhs_input.raw().storage(),
+            batch,
+            channels,
+            height,
+            width,
+            NativeBinaryOp::Add,
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("broadcast_channel");
+            let lhs_values = lhs_input.host_values()?;
+            let rhs_values = rhs_input.host_values()?;
+            let mut values = Vec::with_capacity(lhs_values.len());
+            for n in 0..batch {
+                for (c, &channel_value) in rhs_values.iter().enumerate().take(channels) {
+                    for h in 0..height {
+                        for w in 0..width {
+                            let idx = nchw_index(n, c, h, w, channels, height, width);
+                            values.push(lhs_values[idx] + channel_value);
+                        }
                     }
                 }
             }
-        }
-        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+            RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?
+        };
         let lhs_raw = self.raw().clone();
         let rhs_raw = rhs.raw().clone();
         Self::autograd_output(

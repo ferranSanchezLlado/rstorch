@@ -22,6 +22,73 @@ pub(crate) mod sealed {
     pub trait SealedBackend {}
 }
 
+/// Test-only counter of native-dispatch fallbacks.
+///
+/// Every typed-layer op that has a `try_*` native hook records here when it
+/// takes the reference fallback path (the hook returned `None`). Parity tests
+/// on the Metal hardware lane assert an op ran native by checking its fall
+/// count is zero. The counter is thread-local so parallel tests do not
+/// interfere, and it compiles out entirely outside `cfg(test)`.
+#[cfg(test)]
+pub(crate) mod fall_counter {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    thread_local! {
+        static FALLS: RefCell<BTreeMap<&'static str, usize>> =
+            const { RefCell::new(BTreeMap::new()) };
+    }
+
+    pub(crate) fn record(op: &'static str) {
+        FALLS.with(|falls| *falls.borrow_mut().entry(op).or_insert(0) += 1);
+    }
+
+    pub(crate) fn reset() {
+        FALLS.with(|falls| falls.borrow_mut().clear());
+    }
+
+    pub(crate) fn count(op: &'static str) -> usize {
+        FALLS.with(|falls| falls.borrow().get(op).copied().unwrap_or(0))
+    }
+}
+
+/// Records a reference-path fallback in test builds; a no-op otherwise.
+#[inline]
+pub(crate) fn record_reference_fall(_op: &'static str) {
+    #[cfg(test)]
+    fall_counter::record(_op);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeUnaryOp {
+    Relu,
+    Neg,
+    Exp,
+    Ln,
+    Tanh,
+    Sigmoid,
+    Sqrt,
+    Abs,
+    Gelu,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeRowOp {
+    Softmax,
+    LogSoftmax,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
 /// Tensor storage and kernel backend.
 ///
 /// Backend implementation is not a supported downstream extension point.
@@ -125,4 +192,163 @@ pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'stat
         input: &Self::Storage,
         len: usize,
     ) -> std::result::Result<Self::Storage, Self::Error>;
+
+    fn try_unary(
+        _device: &Self::Device,
+        _input: &Self::Storage,
+        _len: usize,
+        _op: NativeUnaryOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_row_softmax(
+        _device: &Self::Device,
+        _input: &Self::Storage,
+        _rows: usize,
+        _cols: usize,
+        _op: NativeRowOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_sum_last(
+        _device: &Self::Device,
+        _input: &Self::Storage,
+        _rows: usize,
+        _cols: usize,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_bmm(
+        _device: &Self::Device,
+        _lhs: &Self::Storage,
+        _rhs: &Self::Storage,
+        _batch: usize,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_strided_matmul(
+        _device: &Self::Device,
+        _lhs: &Self::Storage,
+        _rhs: &Self::Storage,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+        _lhs_offset: usize,
+        _lhs_row_stride: usize,
+        _lhs_col_stride: usize,
+        _rhs_offset: usize,
+        _rhs_row_stride: usize,
+        _rhs_col_stride: usize,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_broadcast_last(
+        _device: &Self::Device,
+        _lhs: &Self::Storage,
+        _rhs: &Self::Storage,
+        _rows: usize,
+        _cols: usize,
+        _op: NativeBinaryOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_broadcast_leading(
+        _device: &Self::Device,
+        _lhs: &Self::Storage,
+        _rhs: &Self::Storage,
+        _leading: usize,
+        _inner: usize,
+        _op: NativeBinaryOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_broadcast_channel(
+        _device: &Self::Device,
+        _lhs: &Self::Storage,
+        _rhs: &Self::Storage,
+        _batch: usize,
+        _channels: usize,
+        _height: usize,
+        _width: usize,
+        _op: NativeBinaryOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_masked_fill(
+        _device: &Self::Device,
+        _input: &Self::Storage,
+        _mask: &[bool],
+        _value: E,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_where_mask(
+        _device: &Self::Device,
+        _lhs: &Self::Storage,
+        _mask: &[bool],
+        _rhs: &Self::Storage,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_index_select_rows(
+        _device: &Self::Device,
+        _input: &Self::Storage,
+        _indices: &[usize],
+        _rows: usize,
+        _cols: usize,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_cross_entropy(
+        _device: &Self::Device,
+        _logits: &Self::Storage,
+        _targets: &[usize],
+        _rows: usize,
+        _cols: usize,
+        _ignore_index: Option<usize>,
+        _label_smoothing: f64,
+        _mean_reduction: bool,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_layer_norm(
+        _device: &Self::Device,
+        _input: &Self::Storage,
+        _weight: &Self::Storage,
+        _bias: &Self::Storage,
+        _rows: usize,
+        _cols: usize,
+        _eps: f64,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
+
+    fn try_rms_norm(
+        _device: &Self::Device,
+        _input: &Self::Storage,
+        _weight: &Self::Storage,
+        _rows: usize,
+        _cols: usize,
+        _eps: f64,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        Ok(None)
+    }
 }

@@ -1,9 +1,9 @@
-use super::autograd::{AnyTensor, raw_from_vec_like};
+use super::autograd::{AnyTensor, is_grad_enabled, raw_from_vec_like};
 use super::{RawTensor, Tensor};
-use crate::backend::{Backend, parallel};
+use crate::backend::{Backend, NativeBinaryOp, NativeRowOp, parallel};
 use crate::dtype::{DType, FloatDType};
-use crate::error::{DeviceError, Result, ShapeError, const_check};
-use crate::shape::{DimSpec, LastAxis, LeadingAxis, Shape, ShapeSpec, bind_and_check};
+use crate::error::{DeviceError, Error, Result, ShapeError, const_check};
+use crate::shape::{D1, D2, DimSpec, LastAxis, LeadingAxis, Shape, ShapeSpec, bind_and_check};
 
 impl<S, E, B> Tensor<S, E, B>
 where
@@ -74,6 +74,7 @@ where
             |a, b| a + b,
             |_a, _b, g| g,
             |_a, _b, g| g,
+            NativeBinaryOp::Add,
         )
     }
 
@@ -84,6 +85,7 @@ where
             |a, b| a - b,
             |_a, _b, g| g,
             |_a, _b, g| -g,
+            NativeBinaryOp::Sub,
         )
     }
 
@@ -94,6 +96,7 @@ where
             |a, b| a * b,
             |_a, b, g| g * b,
             |a, _b, g| g * a,
+            NativeBinaryOp::Mul,
         )
     }
 
@@ -104,6 +107,7 @@ where
             |a, b| a / b,
             |_a, b, g| g / b,
             |a, b, g| -(g * a) / (b * b),
+            NativeBinaryOp::Div,
         )
     }
 
@@ -113,18 +117,24 @@ where
         let last_axis = S::RANK - 1;
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
-        let values = self.host_values()?;
-        let mut out = vec![E::ZERO; rows];
-        for row in 0..rows {
-            for col in 0..cols {
-                out[row] += values[row * cols + col];
+        let out_shape = Shape::known(dims[..last_axis].to_vec());
+        let input = self.contiguous()?;
+        let raw = if let Some(storage) =
+            B::try_sum_last(input.device(), input.raw().storage(), rows, cols)
+                .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, out_shape.clone())?
+        } else {
+            crate::backend::record_reference_fall("sum_last");
+            let values = input.host_values()?;
+            let mut out = vec![E::ZERO; rows];
+            for row in 0..rows {
+                for col in 0..cols {
+                    out[row] += values[row * cols + col];
+                }
             }
-        }
-        let raw = RawTensor::from_vec_on(
-            self.device().clone(),
-            out,
-            Shape::known(dims[..last_axis].to_vec()),
-        )?;
+            RawTensor::from_vec_on(self.device().clone(), out, out_shape)?
+        };
         let input_raw = self.raw().clone();
         Tensor::<S::Reduced, E, B>::autograd_output(
             raw,
@@ -365,9 +375,26 @@ where
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
         ensure_nonzero_dim("softmax_last", last_axis, cols)?;
-        let values = stable_row_softmax(&self.host_values()?, rows, cols);
-        let raw =
-            RawTensor::from_vec_on(self.device().clone(), values.clone(), self.shape().clone())?;
+        let input = self.contiguous()?;
+        let raw = if let Some(storage) = B::try_row_softmax(
+            input.device(),
+            input.raw().storage(),
+            rows,
+            cols,
+            NativeRowOp::Softmax,
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("softmax_last");
+            let values = stable_row_softmax(&input.host_values()?, rows, cols);
+            RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?
+        };
+        if !is_grad_enabled() || !self.requires_grad() {
+            return Self::from_raw_non_leaf(raw);
+        }
+        let values = raw.to_vec()?;
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad = grad.host_values()?;
@@ -399,10 +426,27 @@ where
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
         ensure_nonzero_dim("log_softmax_last", last_axis, cols)?;
-        let input = self.host_values()?;
-        let softmax = stable_row_softmax(&input, rows, cols);
-        let values = stable_row_log_softmax(&input, rows, cols);
-        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let input = self.contiguous()?;
+        let raw = if let Some(storage) = B::try_row_softmax(
+            input.device(),
+            input.raw().storage(),
+            rows,
+            cols,
+            NativeRowOp::LogSoftmax,
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("log_softmax_last");
+            let values = stable_row_log_softmax(&input.host_values()?, rows, cols);
+            RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?
+        };
+        if !is_grad_enabled() || !self.requires_grad() {
+            return Self::from_raw_non_leaf(raw);
+        }
+        let input_values = input.host_values()?;
+        let softmax = stable_row_softmax(&input_values, rows, cols);
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad = grad.host_values()?;
@@ -431,6 +475,7 @@ where
         forward: impl Fn(E, E) -> E + Copy + Send + Sync + 'static,
         lhs_backward: impl Fn(E, E, E) -> E + Copy + Send + Sync + 'static,
         rhs_backward: impl Fn(E, E, E) -> E + Copy + Send + Sync + 'static,
+        native_op: NativeBinaryOp,
     ) -> Result<Self> {
         ensure_same_device::<E, B>(self.device(), rhs.device(), op)?;
         let dims = self.shape().dims();
@@ -460,15 +505,33 @@ where
             }
             .into());
         }
-        let lhs_values = self.host_values()?.into_owned();
-        let rhs_values = rhs.host_values()?.into_owned();
-        let values = lhs_values
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(idx, value)| forward(value, rhs_values[idx % cols]))
-            .collect();
-        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let lhs_input = self.contiguous()?;
+        let rhs_input = rhs.contiguous()?;
+        let raw = if let Some(storage) = B::try_broadcast_last(
+            lhs_input.device(),
+            lhs_input.raw().storage(),
+            rhs_input.raw().storage(),
+            rows,
+            cols,
+            native_op,
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("broadcast_last");
+            let lhs_values = lhs_input.host_values()?;
+            let rhs_values = rhs_input.host_values()?;
+            let values = lhs_values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(idx, value)| forward(value, rhs_values[idx % cols]))
+                .collect();
+            RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?
+        };
+        let lhs_values = lhs_input.host_values()?.into_owned();
+        let rhs_values = rhs_input.host_values()?.into_owned();
         let lhs_raw = self.raw().clone();
         let rhs_raw = rhs.raw().clone();
         Self::autograd_output(
@@ -506,6 +569,7 @@ where
             |a, b| a + b,
             |_a, _b, g| g,
             |_a, _b, g| g,
+            NativeBinaryOp::Add,
         )
     }
 
@@ -516,6 +580,7 @@ where
             |a, b| a - b,
             |_a, _b, g| g,
             |_a, _b, g| -g,
+            NativeBinaryOp::Sub,
         )
     }
 
@@ -526,6 +591,7 @@ where
             |a, b| a * b,
             |_a, b, g| g * b,
             |a, _b, g| g * a,
+            NativeBinaryOp::Mul,
         )
     }
 
@@ -536,6 +602,7 @@ where
             |a, b| a / b,
             |_a, b, g| g / b,
             |a, b, g| -(g * a) / (b * b),
+            NativeBinaryOp::Div,
         )
     }
 
@@ -588,6 +655,7 @@ where
         forward: impl Fn(E, E) -> E + Copy + Send + Sync + 'static,
         lhs_backward: impl Fn(E, E, E) -> E + Copy + Send + Sync + 'static,
         rhs_backward: impl Fn(E, E, E) -> E + Copy + Send + Sync + 'static,
+        native_op: NativeBinaryOp,
     ) -> Result<Self> {
         ensure_same_device::<E, B>(self.device(), rhs.device(), op)?;
         let dims = self.shape().dims();
@@ -616,15 +684,33 @@ where
             }
             .into());
         }
-        let lhs_values = self.host_values()?.into_owned();
-        let rhs_values = rhs.host_values()?.into_owned();
-        let values = lhs_values
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(idx, value)| forward(value, rhs_values[idx / inner]))
-            .collect();
-        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let lhs_input = self.contiguous()?;
+        let rhs_input = rhs.contiguous()?;
+        let raw = if let Some(storage) = B::try_broadcast_leading(
+            lhs_input.device(),
+            lhs_input.raw().storage(),
+            rhs_input.raw().storage(),
+            leading,
+            inner,
+            native_op,
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("broadcast_leading");
+            let lhs_values = lhs_input.host_values()?;
+            let rhs_values = rhs_input.host_values()?;
+            let values = lhs_values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(idx, value)| forward(value, rhs_values[idx / inner]))
+                .collect();
+            RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?
+        };
+        let lhs_values = lhs_input.host_values()?.into_owned();
+        let rhs_values = rhs_input.host_values()?.into_owned();
         let lhs_raw = self.raw().clone();
         let rhs_raw = rhs.raw().clone();
         Self::autograd_output(
@@ -643,6 +729,214 @@ where
                 Ok(vec![
                     Some(raw_from_vec_like(&lhs_raw, lhs_grad)?),
                     Some(raw_from_vec_like(&rhs_raw, rhs_grad)?),
+                ])
+            },
+        )
+    }
+}
+
+impl<A, N, E, B> Tensor<D2<A, N>, E, B>
+where
+    A: DimSpec,
+    N: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    #[allow(clippy::needless_range_loop)]
+    pub fn layer_norm_last(
+        &self,
+        weight: &Tensor<D1<N>, E, B>,
+        bias: &Tensor<D1<N>, E, B>,
+        eps: E,
+    ) -> Result<Self> {
+        ensure_same_device::<E, B>(self.device(), weight.device(), "layer_norm_last")?;
+        ensure_same_device::<E, B>(self.device(), bias.device(), "layer_norm_last")?;
+        let dims = self.shape().dims();
+        let rows = dims[0];
+        let cols = dims[1];
+        if weight.shape().dims()[0] != cols || bias.shape().dims()[0] != cols {
+            return Err(ShapeError::LengthMismatch {
+                op: "layer_norm_last",
+                expected: cols,
+                found: weight.shape().dims()[0].min(bias.shape().dims()[0]),
+            }
+            .into());
+        }
+
+        let input = self.contiguous()?;
+        let weight_input = weight.contiguous()?;
+        let bias_input = bias.contiguous()?;
+        let input_values = input.host_values()?.into_owned();
+        let weight_values = weight_input.host_values()?.into_owned();
+        let bias_values = bias_input.host_values()?.into_owned();
+        let (x_hat, inv_std, reference_values) = layer_norm_values(
+            &input_values,
+            &weight_values,
+            Some(&bias_values),
+            rows,
+            cols,
+            eps.to_f64(),
+            false,
+        );
+        let raw = if let Some(storage) = B::try_layer_norm(
+            input.device(),
+            input.raw().storage(),
+            weight_input.raw().storage(),
+            bias_input.raw().storage(),
+            rows,
+            cols,
+            eps.to_f64(),
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("layer_norm_last");
+            RawTensor::from_vec_on(
+                self.device().clone(),
+                reference_values,
+                self.shape().clone(),
+            )?
+        };
+        let input_raw = self.raw().clone();
+        let weight_raw = weight.raw().clone();
+        let bias_raw = bias.raw().clone();
+        Self::autograd_output(
+            raw,
+            vec![
+                AnyTensor::from_shape(self),
+                AnyTensor::from_shape(weight),
+                AnyTensor::from_shape(bias),
+            ],
+            move |grad| {
+                let grad = grad.host_values()?;
+                let mut dx = vec![E::ZERO; rows * cols];
+                let mut dweight = vec![<E::Acc as DType>::ZERO; cols];
+                let mut dbias = vec![<E::Acc as DType>::ZERO; cols];
+                for row in 0..rows {
+                    let start = row * cols;
+                    let mut sum_dxhat = 0.0;
+                    let mut sum_dxhat_xhat = 0.0;
+                    for col in 0..cols {
+                        let idx = start + col;
+                        let g = grad[idx].to_f64();
+                        let xh = x_hat[idx];
+                        let dxh = g * weight_values[col].to_f64();
+                        sum_dxhat += dxh;
+                        sum_dxhat_xhat += dxh * xh;
+                        dweight[col] += E::Acc::from_f64(g * xh);
+                        dbias[col] += E::Acc::from_f64(g);
+                    }
+                    let denom = cols as f64;
+                    for col in 0..cols {
+                        let idx = start + col;
+                        let dxh = grad[idx].to_f64() * weight_values[col].to_f64();
+                        dx[idx] = E::from_f64(
+                            inv_std[row]
+                                * (dxh - sum_dxhat / denom - x_hat[idx] * sum_dxhat_xhat / denom),
+                        );
+                    }
+                }
+                Ok(vec![
+                    Some(raw_from_vec_like(&input_raw, dx)?),
+                    Some(raw_from_vec_like(
+                        &weight_raw,
+                        dweight
+                            .into_iter()
+                            .map(|v| E::from_f64(v.to_f64()))
+                            .collect(),
+                    )?),
+                    Some(raw_from_vec_like(
+                        &bias_raw,
+                        dbias.into_iter().map(|v| E::from_f64(v.to_f64())).collect(),
+                    )?),
+                ])
+            },
+        )
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    pub fn rms_norm_last(&self, weight: &Tensor<D1<N>, E, B>, eps: E) -> Result<Self> {
+        ensure_same_device::<E, B>(self.device(), weight.device(), "rms_norm_last")?;
+        let dims = self.shape().dims();
+        let rows = dims[0];
+        let cols = dims[1];
+        if weight.shape().dims()[0] != cols {
+            return Err(ShapeError::LengthMismatch {
+                op: "rms_norm_last",
+                expected: cols,
+                found: weight.shape().dims()[0],
+            }
+            .into());
+        }
+
+        let input = self.contiguous()?;
+        let weight_input = weight.contiguous()?;
+        let input_values = input.host_values()?.into_owned();
+        let weight_values = weight_input.host_values()?.into_owned();
+        let (scaled_input, inv_rms, reference_values) = layer_norm_values(
+            &input_values,
+            &weight_values,
+            None,
+            rows,
+            cols,
+            eps.to_f64(),
+            true,
+        );
+        let raw = if let Some(storage) = B::try_rms_norm(
+            input.device(),
+            input.raw().storage(),
+            weight_input.raw().storage(),
+            rows,
+            cols,
+            eps.to_f64(),
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("rms_norm_last");
+            RawTensor::from_vec_on(
+                self.device().clone(),
+                reference_values,
+                self.shape().clone(),
+            )?
+        };
+        let input_raw = self.raw().clone();
+        let weight_raw = weight.raw().clone();
+        Self::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self), AnyTensor::from_shape(weight)],
+            move |grad| {
+                let grad = grad.host_values()?;
+                let mut dx = vec![E::ZERO; rows * cols];
+                let mut dweight = vec![<E::Acc as DType>::ZERO; cols];
+                for row in 0..rows {
+                    let start = row * cols;
+                    let mut dot = 0.0;
+                    for col in 0..cols {
+                        let idx = start + col;
+                        let g = grad[idx].to_f64();
+                        dweight[col] += E::Acc::from_f64(g * scaled_input[idx]);
+                        dot += g * weight_values[col].to_f64() * input_values[idx].to_f64();
+                    }
+                    let coeff = inv_rms[row] * inv_rms[row] * inv_rms[row] * dot / cols as f64;
+                    for col in 0..cols {
+                        let idx = start + col;
+                        let dxhat = grad[idx].to_f64() * weight_values[col].to_f64();
+                        dx[idx] =
+                            E::from_f64(dxhat * inv_rms[row] - input_values[idx].to_f64() * coeff);
+                    }
+                }
+                Ok(vec![
+                    Some(raw_from_vec_like(&input_raw, dx)?),
+                    Some(raw_from_vec_like(
+                        &weight_raw,
+                        dweight
+                            .into_iter()
+                            .map(|v| E::from_f64(v.to_f64()))
+                            .collect(),
+                    )?),
                 ])
             },
         )
@@ -719,4 +1013,47 @@ fn stable_row_log_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize)
         }
     });
     out
+}
+
+#[allow(clippy::needless_range_loop)]
+fn layer_norm_values<E: FloatDType>(
+    input: &[E],
+    weight: &[E],
+    bias: Option<&[E]>,
+    rows: usize,
+    cols: usize,
+    eps: f64,
+    rms_only: bool,
+) -> (Vec<f64>, Vec<f64>, Vec<E>) {
+    let mut normalized = vec![0.0; rows * cols];
+    let mut inv = vec![0.0; rows];
+    let mut out = vec![E::ZERO; rows * cols];
+    for row in 0..rows {
+        let start = row * cols;
+        let mean = if rms_only {
+            0.0
+        } else {
+            input[start..start + cols]
+                .iter()
+                .map(|value| value.to_f64())
+                .sum::<f64>()
+                / cols as f64
+        };
+        let variance = input[start..start + cols]
+            .iter()
+            .map(|value| {
+                let diff = value.to_f64() - mean;
+                diff * diff
+            })
+            .sum::<f64>()
+            / cols as f64;
+        inv[row] = 1.0 / (variance + eps).sqrt();
+        for col in 0..cols {
+            let idx = start + col;
+            normalized[idx] = (input[idx].to_f64() - mean) * inv[row];
+            let bias = bias.map_or(0.0, |bias| bias[col].to_f64());
+            out[idx] = E::from_f64(normalized[idx] * weight[col].to_f64() + bias);
+        }
+    }
+    (normalized, inv, out)
 }

@@ -1,6 +1,8 @@
 mod autograd;
 mod axis_ops;
 mod ergonomics;
+#[cfg(test)]
+mod native_dispatch_tests;
 mod ops;
 mod raw;
 

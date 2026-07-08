@@ -1,10 +1,10 @@
-use super::super::autograd::{AnyTensor, raw_from_vec_like};
+use super::super::autograd::{AnyTensor, is_grad_enabled, raw_from_vec_like};
 use super::super::{RawTensor, Scalar, Tensor};
 use super::{ensure_nonzero_dim, ensure_same_device};
 use crate::backend::Backend;
 use crate::dtype::{DType, FloatDType};
 use crate::error::{DataError, Error, Result, ShapeError, const_check};
-use crate::nn::CrossEntropyOpts;
+use crate::nn::{CrossEntropyOpts, Reduction};
 use crate::shape::{D0, D1, D2, DimEntry, DimSpec, Shape, bind_and_check};
 
 impl<A, K, E, B> Tensor<D2<A, K>, E, B>
@@ -130,7 +130,8 @@ where
                 .into());
             }
         }
-        let input = self.host_values()?;
+        let input_tensor = self.contiguous()?;
+        let input = input_tensor.host_values()?;
         let softmax = stable_row_softmax(&input, rows, cols);
         let log_probs = stable_row_log_softmax(&input, rows, cols);
         let smoothing = E::from_f64(opts.label_smoothing);
@@ -168,7 +169,23 @@ where
         } else {
             E::from_f64((loss_sum / scale_acc).to_f64())
         };
-        let raw = RawTensor::from_vec_on(self.device().clone(), vec![loss], Shape::known([]))?;
+        let raw = if let Some(storage) = B::try_cross_entropy(
+            input_tensor.device(),
+            input_tensor.raw().storage(),
+            targets,
+            rows,
+            cols,
+            opts.ignore_index,
+            opts.label_smoothing,
+            matches!(opts.reduction, Reduction::Mean),
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, Shape::known([]))?
+        } else {
+            crate::backend::record_reference_fall("cross_entropy");
+            RawTensor::from_vec_on(self.device().clone(), vec![loss], Shape::known([]))?
+        };
         let input_raw = self.raw().clone();
         let targets = targets.to_vec();
         Tensor::<D0, E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
@@ -236,16 +253,37 @@ where
                 return Err(DataError::IndexOutOfBounds { index, len: rows }.into());
             }
         }
-        let input = self.host_values()?;
-        let mut values = Vec::with_capacity(indices.len() * cols);
-        for &index in indices {
-            values.extend_from_slice(&input[index * cols..(index + 1) * cols]);
+        let input_tensor = self.contiguous()?;
+        let raw = if let Some(storage) = B::try_index_select_rows(
+            input_tensor.device(),
+            input_tensor.raw().storage(),
+            indices,
+            rows,
+            cols,
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(
+                self.device().clone(),
+                storage,
+                Shape::known([indices.len(), cols]),
+            )?
+        } else {
+            crate::backend::record_reference_fall("index_select_rows");
+            let input = input_tensor.host_values()?;
+            let mut values = Vec::with_capacity(indices.len() * cols);
+            for &index in indices {
+                values.extend_from_slice(&input[index * cols..(index + 1) * cols]);
+            }
+            RawTensor::from_vec_on(
+                self.device().clone(),
+                values,
+                Shape::known([indices.len(), cols]),
+            )?
+        };
+        if !is_grad_enabled() || !self.requires_grad() {
+            return Tensor::<D2<T, N>, E, B>::from_raw_non_leaf(raw);
         }
-        let raw = RawTensor::from_vec_on(
-            self.device().clone(),
-            values,
-            Shape::known([indices.len(), cols]),
-        )?;
         let input_raw = self.raw().clone();
         let indices = indices.to_vec();
         Tensor::<D2<T, N>, E, B>::autograd_output(

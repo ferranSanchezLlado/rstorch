@@ -8,11 +8,11 @@ mod shape_ops;
 pub use image::{Conv2dOptions, Padding2d, Pool2dOptions};
 
 use super::autograd::{
-    AnyTensor, raw_div, raw_div_scalar, raw_from_vec_like, raw_full_like, raw_mul, raw_mul_scalar,
-    raw_neg,
+    AnyTensor, is_grad_enabled, raw_div, raw_div_scalar, raw_from_vec_like, raw_full_like, raw_mul,
+    raw_mul_scalar, raw_neg,
 };
 use super::{Mask, RawTensor, Scalar, Tensor};
-use crate::backend::Backend;
+use crate::backend::{Backend, NativeUnaryOp};
 use crate::dtype::{DType, FloatDType};
 use crate::error::{DeviceError, Error, Result, ShapeError};
 use crate::shape::ShapeSpec;
@@ -184,18 +184,26 @@ where
                     E::ZERO
                 }
             },
+            Some(NativeUnaryOp::Abs),
         )
     }
 
     pub fn relu(&self) -> Result<Self> {
-        let input = self.contiguous()?;
-        let values = input
-            .host_values()?
-            .iter()
-            .copied()
-            .map(|value| if value > E::ZERO { value } else { E::ZERO })
-            .collect();
-        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let raw = if let Some(raw) = self.native_unary(NativeUnaryOp::Relu)? {
+            raw
+        } else {
+            let input = self.contiguous()?;
+            let values = input
+                .host_values()?
+                .iter()
+                .copied()
+                .map(|value| if value > E::ZERO { value } else { E::ZERO })
+                .collect();
+            RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?
+        };
+        if !is_grad_enabled() || !self.requires_grad() {
+            return Self::from_raw_non_leaf(raw);
+        }
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let input_values = input_raw.host_values()?;
@@ -214,23 +222,31 @@ where
     }
 
     pub fn neg(&self) -> Result<Self> {
-        self.unary_map(|x| -x, |_x, _y| -E::ONE)
+        self.unary_map(|x| -x, |_x, _y| -E::ONE, Some(NativeUnaryOp::Neg))
     }
 
     pub fn exp(&self) -> Result<Self> {
-        self.unary_map(|x| x.exp(), |_x, y| y)
+        self.unary_map(|x| x.exp(), |_x, y| y, Some(NativeUnaryOp::Exp))
     }
 
     pub fn ln(&self) -> Result<Self> {
-        self.unary_map(|x| x.ln(), |x, _y| E::ONE / x)
+        self.unary_map(|x| x.ln(), |x, _y| E::ONE / x, Some(NativeUnaryOp::Ln))
     }
 
     pub fn tanh(&self) -> Result<Self> {
-        self.unary_map(|x| x.tanh(), |_x, y| E::ONE - y * y)
+        self.unary_map(
+            |x| x.tanh(),
+            |_x, y| E::ONE - y * y,
+            Some(NativeUnaryOp::Tanh),
+        )
     }
 
     pub fn sigmoid(&self) -> Result<Self> {
-        self.unary_map(|x| E::ONE / (E::ONE + (-x).exp()), |_x, y| y * (E::ONE - y))
+        self.unary_map(
+            |x| E::ONE / (E::ONE + (-x).exp()),
+            |_x, y| y * (E::ONE - y),
+            Some(NativeUnaryOp::Sigmoid),
+        )
     }
 
     /// Raises each element to `exponent`. Gradients follow the mathematical
@@ -240,20 +256,29 @@ where
         self.unary_map(
             move |x| x.powf(exponent),
             move |x, _y| exponent * x.powf(exponent - E::ONE),
+            None,
         )
     }
 
     /// Computes elementwise square root. Gradients follow the mathematical
     /// derivative and may produce infinities or NaNs at non-positive inputs.
     pub fn sqrt(&self) -> Result<Self> {
-        self.unary_map(|x| x.sqrt(), |x, _y| half::<E>() / x.sqrt())
+        self.unary_map(
+            |x| x.sqrt(),
+            |x, _y| half::<E>() / x.sqrt(),
+            Some(NativeUnaryOp::Sqrt),
+        )
     }
 
     /// Computes elementwise reciprocal square root. Gradients follow the
     /// mathematical derivative and may produce infinities or NaNs at
     /// non-positive inputs.
     pub fn rsqrt(&self) -> Result<Self> {
-        self.unary_map(|x| E::ONE / x.sqrt(), |x, _y| -half::<E>() / (x * x.sqrt()))
+        self.unary_map(
+            |x| E::ONE / x.sqrt(),
+            |x, _y| -half::<E>() / (x * x.sqrt()),
+            None,
+        )
     }
 
     pub fn clamp(&self, min: E, max: E) -> Result<Self> {
@@ -270,6 +295,7 @@ where
             move |x, _y| {
                 if x < min || x > max { E::ZERO } else { E::ONE }
             },
+            None,
         )
     }
 
@@ -291,6 +317,7 @@ where
                         * gelu_k::<E>()
                         * (E::ONE + three::<E>() * gelu_c::<E>() * x2)
             },
+            Some(NativeUnaryOp::Gelu),
         )
     }
 
@@ -304,14 +331,23 @@ where
             .into());
         }
         let mask_values = mask.to_vec()?;
-        let values = self
-            .host_values()?
-            .iter()
-            .copied()
-            .zip(&mask_values)
-            .map(|(x, &m)| if m { value } else { x })
-            .collect();
-        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let input = self.contiguous()?;
+        let raw = if let Some(storage) =
+            B::try_masked_fill(input.device(), input.raw().storage(), &mask_values, value)
+                .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("masked_fill");
+            let values = input
+                .host_values()?
+                .iter()
+                .copied()
+                .zip(&mask_values)
+                .map(|(x, &m)| if m { value } else { x })
+                .collect();
+            RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?
+        };
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad_values = grad
@@ -335,15 +371,29 @@ where
             .into());
         }
         let mask_values = mask.to_vec()?;
-        let lhs_values = self.host_values()?;
-        let rhs_values = other.host_values()?;
-        let values = lhs_values
-            .iter()
-            .zip(rhs_values.iter())
-            .zip(&mask_values)
-            .map(|((&a, &b), &m)| if m { a } else { b })
-            .collect();
-        let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
+        let lhs_input = self.contiguous()?;
+        let rhs_input = other.contiguous()?;
+        let raw = if let Some(storage) = B::try_where_mask(
+            lhs_input.device(),
+            lhs_input.raw().storage(),
+            &mask_values,
+            rhs_input.raw().storage(),
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?
+        } else {
+            crate::backend::record_reference_fall("where_mask");
+            let lhs_values = lhs_input.host_values()?;
+            let rhs_values = rhs_input.host_values()?;
+            let values = lhs_values
+                .iter()
+                .zip(rhs_values.iter())
+                .zip(&mask_values)
+                .map(|((&a, &b), &m)| if m { a } else { b })
+                .collect();
+            RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?
+        };
         let lhs_raw = self.raw().clone();
         let rhs_raw = other.raw().clone();
         Self::autograd_output(
@@ -453,18 +503,34 @@ where
         &self,
         forward: impl Fn(E) -> E + Copy + Send + Sync + 'static,
         backward: impl Fn(E, E) -> E + Copy + Send + Sync + 'static,
+        native: Option<NativeUnaryOp>,
     ) -> Result<Self> {
-        let input_values = self.host_values()?.into_owned();
-        let output_values = input_values
-            .iter()
-            .copied()
-            .map(forward)
-            .collect::<Vec<_>>();
-        let raw = RawTensor::from_vec_on(
-            self.device().clone(),
-            output_values.clone(),
-            self.shape().clone(),
-        )?;
+        let raw = if let Some(op) = native {
+            self.native_unary(op)?
+        } else {
+            None
+        };
+        let (raw, input_values, output_values) = if let Some(raw) = raw {
+            if !is_grad_enabled() || !self.requires_grad() {
+                return Self::from_raw_non_leaf(raw);
+            }
+            let input_values = self.host_values()?.into_owned();
+            let output_values = raw.to_vec()?;
+            (raw, input_values, output_values)
+        } else {
+            let input_values = self.host_values()?.into_owned();
+            let output_values = input_values
+                .iter()
+                .copied()
+                .map(forward)
+                .collect::<Vec<_>>();
+            let raw = RawTensor::from_vec_on(
+                self.device().clone(),
+                output_values.clone(),
+                self.shape().clone(),
+            )?;
+            (raw, input_values, output_values)
+        };
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad_values = grad
@@ -480,6 +546,17 @@ where
                 .collect();
             Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
         })
+    }
+
+    fn native_unary(&self, op: NativeUnaryOp) -> Result<Option<RawTensor<E, B>>> {
+        let input = self.contiguous()?;
+        let Some(storage) = B::try_unary(input.device(), input.raw().storage(), input.numel(), op)
+            .map_err(Error::backend)?
+        else {
+            crate::backend::record_reference_fall(native_unary_name(op));
+            return Ok(None);
+        };
+        RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone()).map(Some)
     }
 
     fn full_extreme(
@@ -579,6 +656,21 @@ fn ensure_nonzero_dim(op: &'static str, axis: usize, size: usize) -> Result<()> 
 
 fn half<E: FloatDType>() -> E {
     E::from_f64(0.5)
+}
+
+/// Stable per-op label for the native-dispatch fall counter.
+fn native_unary_name(op: NativeUnaryOp) -> &'static str {
+    match op {
+        NativeUnaryOp::Relu => "relu",
+        NativeUnaryOp::Neg => "neg",
+        NativeUnaryOp::Exp => "exp",
+        NativeUnaryOp::Ln => "ln",
+        NativeUnaryOp::Tanh => "tanh",
+        NativeUnaryOp::Sigmoid => "sigmoid",
+        NativeUnaryOp::Sqrt => "sqrt",
+        NativeUnaryOp::Abs => "abs",
+        NativeUnaryOp::Gelu => "gelu",
+    }
 }
 
 fn three<E: FloatDType>() -> E {

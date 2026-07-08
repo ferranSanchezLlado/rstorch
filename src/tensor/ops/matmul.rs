@@ -1,4 +1,4 @@
-use super::super::autograd::{AnyTensor, raw_from_vec_like};
+use super::super::autograd::{AnyTensor, is_grad_enabled, raw_from_vec_like};
 use super::super::{RawTensor, Tensor};
 use super::ensure_same_device;
 use crate::backend::Backend;
@@ -172,11 +172,32 @@ where
             }
             .into());
         }
-        let lhs_values = self.host_values()?.into_owned();
-        let rhs_values = rhs.host_values()?.into_owned();
-        let values = bmm_values(&lhs_values, &rhs_values, batch, m, k, n);
-        let raw =
-            RawTensor::from_vec_on(self.device().clone(), values, Shape::known([batch, m, n]))?;
+        let lhs_input = self.contiguous()?;
+        let rhs_input = rhs.contiguous()?;
+        let raw = if let Some(storage) = B::try_bmm(
+            lhs_input.device(),
+            lhs_input.raw().storage(),
+            rhs_input.raw().storage(),
+            batch,
+            m,
+            k,
+            n,
+        )
+        .map_err(Error::backend)?
+        {
+            RawTensor::from_storage_on(self.device().clone(), storage, Shape::known([batch, m, n]))?
+        } else {
+            crate::backend::record_reference_fall("bmm");
+            let lhs_values = lhs_input.host_values()?.into_owned();
+            let rhs_values = rhs_input.host_values()?.into_owned();
+            let values = bmm_values(&lhs_values, &rhs_values, batch, m, k, n);
+            RawTensor::from_vec_on(self.device().clone(), values, Shape::known([batch, m, n]))?
+        };
+        if !is_grad_enabled() || (!self.requires_grad() && !rhs.requires_grad()) {
+            return Tensor::<D3<Batch, M, N>, E, B>::from_raw_non_leaf(raw);
+        }
+        let lhs_values = lhs_input.host_values()?.into_owned();
+        let rhs_values = rhs_input.host_values()?.into_owned();
         let lhs_raw = self.raw().clone();
         let rhs_raw = rhs.raw().clone();
         Tensor::<D3<Batch, M, N>, E, B>::autograd_output(
@@ -231,9 +252,32 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    // The backend kernel expects operand storage of exactly `m * k` and
-    // `k * n` elements in row-major order; operands that already satisfy that
-    // (typically incoming gradients) share storage instead of round-tripping
+    let m = lhs.shape().dims()[0];
+    let k = lhs.shape().dims()[1];
+    let n = rhs.shape().dims()[1];
+    if let Some(storage) = B::try_strided_matmul(
+        lhs.device(),
+        lhs.storage(),
+        rhs.storage(),
+        m,
+        k,
+        n,
+        lhs.layout().offset(),
+        lhs.layout().strides()[0],
+        lhs.layout().strides()[1],
+        rhs.layout().offset(),
+        rhs.layout().strides()[0],
+        rhs.layout().strides()[1],
+    )
+    .map_err(Error::backend)?
+    {
+        return RawTensor::from_storage_on(lhs.device().clone(), storage, Shape::known([m, n]));
+    }
+    crate::backend::record_reference_fall("strided_matmul");
+
+    // The fallback backend kernel expects operand storage of exactly `m * k`
+    // and `k * n` elements in row-major order; operands that already satisfy
+    // that (typically incoming gradients) share storage instead of round-tripping
     // through the host.
     let materialize = |input: &RawTensor<E, B>| -> Result<RawTensor<E, B>> {
         if input.is_contiguous() && B::storage_len(input.storage()) == input.numel() {
@@ -247,9 +291,6 @@ where
     };
     let lhs_input = materialize(lhs)?;
     let rhs_input = materialize(rhs)?;
-    let m = lhs.shape().dims()[0];
-    let k = lhs.shape().dims()[1];
-    let n = rhs.shape().dims()[1];
     let storage = B::matmul(
         lhs.device(),
         lhs_input.storage(),

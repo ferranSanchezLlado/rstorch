@@ -1,4 +1,4 @@
-use super::{Backend, sealed};
+use super::{Backend, NativeBinaryOp, NativeRowOp, NativeUnaryOp, sealed};
 use crate::dtype::{DType, f16};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -111,6 +111,17 @@ trait MetalDType: DType {
     const SCALAR_KERNEL: &'static str;
     const MATMUL_KERNEL: &'static str;
     const SUM_KERNEL: &'static str;
+    const UNARY_KERNEL: &'static str;
+    const ROW_SOFTMAX_KERNEL: &'static str;
+    const SUM_LAST_KERNEL: &'static str;
+    const BMM_KERNEL: &'static str;
+    const STRIDED_MATMUL_KERNEL: &'static str;
+    const BROADCAST_KERNEL: &'static str;
+    const MASK_KERNEL: &'static str;
+    const INDEX_SELECT_ROWS_KERNEL: &'static str;
+    const CROSS_ENTROPY_KERNEL: &'static str;
+    const LAYER_NORM_KERNEL: &'static str;
+    const RMS_NORM_KERNEL: &'static str;
 }
 
 impl MetalDType for f32 {
@@ -119,6 +130,17 @@ impl MetalDType for f32 {
     const SCALAR_KERNEL: &'static str = "scalar_f32_kernel";
     const MATMUL_KERNEL: &'static str = "matmul_f32_kernel";
     const SUM_KERNEL: &'static str = "sum_f32_kernel";
+    const UNARY_KERNEL: &'static str = "unary_f32_kernel";
+    const ROW_SOFTMAX_KERNEL: &'static str = "row_softmax_f32_kernel";
+    const SUM_LAST_KERNEL: &'static str = "sum_last_f32_kernel";
+    const BMM_KERNEL: &'static str = "bmm_f32_kernel";
+    const STRIDED_MATMUL_KERNEL: &'static str = "strided_matmul_f32_kernel";
+    const BROADCAST_KERNEL: &'static str = "broadcast_f32_kernel";
+    const MASK_KERNEL: &'static str = "mask_f32_kernel";
+    const INDEX_SELECT_ROWS_KERNEL: &'static str = "index_select_rows_f32_kernel";
+    const CROSS_ENTROPY_KERNEL: &'static str = "cross_entropy_f32_kernel";
+    const LAYER_NORM_KERNEL: &'static str = "layer_norm_f32_kernel";
+    const RMS_NORM_KERNEL: &'static str = "rms_norm_f32_kernel";
 }
 
 impl MetalDType for f16 {
@@ -127,6 +149,17 @@ impl MetalDType for f16 {
     const SCALAR_KERNEL: &'static str = "scalar_f16_kernel";
     const MATMUL_KERNEL: &'static str = "matmul_f16_kernel";
     const SUM_KERNEL: &'static str = "sum_f16_kernel";
+    const UNARY_KERNEL: &'static str = "unary_f16_kernel";
+    const ROW_SOFTMAX_KERNEL: &'static str = "row_softmax_f16_kernel";
+    const SUM_LAST_KERNEL: &'static str = "sum_last_f16_kernel";
+    const BMM_KERNEL: &'static str = "bmm_f16_kernel";
+    const STRIDED_MATMUL_KERNEL: &'static str = "strided_matmul_f16_kernel";
+    const BROADCAST_KERNEL: &'static str = "broadcast_f16_kernel";
+    const MASK_KERNEL: &'static str = "mask_f16_kernel";
+    const INDEX_SELECT_ROWS_KERNEL: &'static str = "index_select_rows_f16_kernel";
+    const CROSS_ENTROPY_KERNEL: &'static str = "cross_entropy_f16_kernel";
+    const LAYER_NORM_KERNEL: &'static str = "layer_norm_f16_kernel";
+    const RMS_NORM_KERNEL: &'static str = "rms_norm_f16_kernel";
 }
 
 impl<E> Backend<E> for Metal
@@ -330,6 +363,499 @@ where
         })?;
         Ok(output)
     }
+
+    fn try_unary(
+        device: &Self::Device,
+        input: &Self::Storage,
+        len: usize,
+        op: NativeUnaryOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(input.len, len)?;
+        let output = empty_storage::<E>(device, len);
+        if len == 0 {
+            return Ok(Some(output));
+        }
+
+        let pipeline = pipeline::<E>(device, E::UNARY_KERNEL)?;
+        let len_u32 = checked_u32(len, "unary length")?;
+        encode_and_wait(device, &pipeline, len, |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&output.buffer), 0);
+            set_u32(encoder, 2, native_unary_op(op));
+            set_u32(encoder, 3, len_u32);
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_row_softmax(
+        device: &Self::Device,
+        input: &Self::Storage,
+        rows: usize,
+        cols: usize,
+        op: NativeRowOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        let len = rows.saturating_mul(cols);
+        ensure_len(input.len, len)?;
+        let output = empty_storage::<E>(device, len);
+        if len == 0 {
+            return Ok(Some(output));
+        }
+
+        let pipeline = pipeline::<E>(device, E::ROW_SOFTMAX_KERNEL)?;
+        let rows_u32 = checked_u32(rows, "row count")?;
+        let cols_u32 = checked_u32(cols, "column count")?;
+        encode_and_wait(device, &pipeline, rows, |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&output.buffer), 0);
+            set_u32(encoder, 2, rows_u32);
+            set_u32(encoder, 3, cols_u32);
+            set_u32(encoder, 4, native_row_op(op));
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_sum_last(
+        device: &Self::Device,
+        input: &Self::Storage,
+        rows: usize,
+        cols: usize,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(input.len, rows.saturating_mul(cols))?;
+        let output = empty_storage::<E>(device, rows);
+        if rows == 0 {
+            return Ok(Some(output));
+        }
+
+        let pipeline = pipeline::<E>(device, E::SUM_LAST_KERNEL)?;
+        let rows_u32 = checked_u32(rows, "row count")?;
+        let cols_u32 = checked_u32(cols, "column count")?;
+        encode_and_wait(device, &pipeline, rows, |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&output.buffer), 0);
+            set_u32(encoder, 2, rows_u32);
+            set_u32(encoder, 3, cols_u32);
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_bmm(
+        device: &Self::Device,
+        lhs: &Self::Storage,
+        rhs: &Self::Storage,
+        batch: usize,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(lhs.len, batch.saturating_mul(m).saturating_mul(k))?;
+        ensure_len(rhs.len, batch.saturating_mul(k).saturating_mul(n))?;
+        let len = batch.saturating_mul(m).saturating_mul(n);
+        let output = empty_storage::<E>(device, len);
+        if len == 0 {
+            return Ok(Some(output));
+        }
+
+        let pipeline = pipeline::<E>(device, E::BMM_KERNEL)?;
+        let batch_u32 = checked_u32(batch, "batch count")?;
+        let m_u32 = checked_u32(m, "m")?;
+        let k_u32 = checked_u32(k, "k")?;
+        let n_u32 = checked_u32(n, "n")?;
+        encode_and_wait(device, &pipeline, len, |encoder| {
+            encoder.set_buffer(0, Some(&lhs.buffer), 0);
+            encoder.set_buffer(1, Some(&rhs.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            set_u32(encoder, 3, batch_u32);
+            set_u32(encoder, 4, m_u32);
+            set_u32(encoder, 5, k_u32);
+            set_u32(encoder, 6, n_u32);
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_strided_matmul(
+        device: &Self::Device,
+        lhs: &Self::Storage,
+        rhs: &Self::Storage,
+        m: usize,
+        k: usize,
+        n: usize,
+        lhs_offset: usize,
+        lhs_row_stride: usize,
+        lhs_col_stride: usize,
+        rhs_offset: usize,
+        rhs_row_stride: usize,
+        rhs_col_stride: usize,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        let len = m.saturating_mul(n);
+        let output = empty_storage::<E>(device, len);
+        if len == 0 {
+            return Ok(Some(output));
+        }
+
+        let pipeline = pipeline::<E>(device, E::STRIDED_MATMUL_KERNEL)?;
+        encode_and_wait(device, &pipeline, len, |encoder| {
+            encoder.set_buffer(0, Some(&lhs.buffer), 0);
+            encoder.set_buffer(1, Some(&rhs.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            set_u32(
+                encoder,
+                3,
+                checked_u32(m, "m").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                4,
+                checked_u32(k, "k").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                5,
+                checked_u32(n, "n").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                6,
+                checked_u32(lhs_offset, "lhs offset").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                7,
+                checked_u32(lhs_row_stride, "lhs row stride").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                8,
+                checked_u32(lhs_col_stride, "lhs col stride").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                9,
+                checked_u32(rhs_offset, "rhs offset").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                10,
+                checked_u32(rhs_row_stride, "rhs row stride").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                11,
+                checked_u32(rhs_col_stride, "rhs col stride").expect("checked before dispatch"),
+            );
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_broadcast_last(
+        device: &Self::Device,
+        lhs: &Self::Storage,
+        rhs: &Self::Storage,
+        rows: usize,
+        cols: usize,
+        op: NativeBinaryOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        broadcast::<E>(device, lhs, rhs, rows.saturating_mul(cols), cols, 0, op).map(Some)
+    }
+
+    fn try_broadcast_leading(
+        device: &Self::Device,
+        lhs: &Self::Storage,
+        rhs: &Self::Storage,
+        leading: usize,
+        inner: usize,
+        op: NativeBinaryOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        broadcast::<E>(
+            device,
+            lhs,
+            rhs,
+            leading.saturating_mul(inner),
+            inner,
+            1,
+            op,
+        )
+        .map(Some)
+    }
+
+    fn try_broadcast_channel(
+        device: &Self::Device,
+        lhs: &Self::Storage,
+        rhs: &Self::Storage,
+        batch: usize,
+        channels: usize,
+        height: usize,
+        width: usize,
+        op: NativeBinaryOp,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        let total = batch
+            .saturating_mul(channels)
+            .saturating_mul(height)
+            .saturating_mul(width);
+        broadcast::<E>(device, lhs, rhs, total, height.saturating_mul(width), 2, op).map(Some)
+    }
+
+    fn try_masked_fill(
+        device: &Self::Device,
+        input: &Self::Storage,
+        mask: &[bool],
+        value: E,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(input.len, mask.len())?;
+        let output = empty_storage::<E>(device, input.len);
+        if input.len == 0 {
+            return Ok(Some(output));
+        }
+        let mask_storage = u8_storage(device, mask.iter().map(|&value| u8::from(value)).collect());
+        let pipeline = pipeline::<E>(device, E::MASK_KERNEL)?;
+        let len_u32 = checked_u32(input.len, "mask length")?;
+        encode_and_wait(device, &pipeline, input.len, |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&mask_storage.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            encoder.set_buffer(3, None, 0);
+            set_value(encoder, 4, value);
+            set_u32(encoder, 5, 0);
+            set_u32(encoder, 6, len_u32);
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_where_mask(
+        device: &Self::Device,
+        lhs: &Self::Storage,
+        mask: &[bool],
+        rhs: &Self::Storage,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(lhs.len, mask.len())?;
+        ensure_len(rhs.len, mask.len())?;
+        let output = empty_storage::<E>(device, lhs.len);
+        if lhs.len == 0 {
+            return Ok(Some(output));
+        }
+        let mask_storage = u8_storage(device, mask.iter().map(|&value| u8::from(value)).collect());
+        let pipeline = pipeline::<E>(device, E::MASK_KERNEL)?;
+        let len_u32 = checked_u32(lhs.len, "mask length")?;
+        encode_and_wait(device, &pipeline, lhs.len, |encoder| {
+            encoder.set_buffer(0, Some(&lhs.buffer), 0);
+            encoder.set_buffer(1, Some(&mask_storage.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            encoder.set_buffer(3, Some(&rhs.buffer), 0);
+            set_value(encoder, 4, E::ZERO);
+            set_u32(encoder, 5, 1);
+            set_u32(encoder, 6, len_u32);
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_index_select_rows(
+        device: &Self::Device,
+        input: &Self::Storage,
+        indices: &[usize],
+        rows: usize,
+        cols: usize,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(input.len, rows.saturating_mul(cols))?;
+        let output = empty_storage::<E>(device, indices.len().saturating_mul(cols));
+        if indices.is_empty() || cols == 0 {
+            return Ok(Some(output));
+        }
+        let index_storage =
+            u32_storage(device, checked_u32_vec(indices, "index_select_rows index")?);
+        let pipeline = pipeline::<E>(device, E::INDEX_SELECT_ROWS_KERNEL)?;
+        let len = indices.len().saturating_mul(cols);
+        let cols_u32 = checked_u32(cols, "column count")?;
+        let total_u32 = checked_u32(len, "index_select_rows output length")?;
+        encode_and_wait(device, &pipeline, len, |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&index_storage.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            set_u32(encoder, 3, cols_u32);
+            set_u32(encoder, 4, total_u32);
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_cross_entropy(
+        device: &Self::Device,
+        logits: &Self::Storage,
+        targets: &[usize],
+        rows: usize,
+        cols: usize,
+        ignore_index: Option<usize>,
+        label_smoothing: f64,
+        mean_reduction: bool,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(logits.len, rows.saturating_mul(cols))?;
+        let output = empty_storage::<E>(device, 1);
+        let mut target_values = checked_u32_vec(targets, "cross_entropy target")?;
+        let ignore = match ignore_index {
+            Some(value) => checked_u32(value, "ignore_index")?,
+            None => u32::MAX,
+        };
+        target_values.resize(rows, ignore);
+        let target_storage = u32_storage(device, target_values);
+        let pipeline = pipeline::<E>(device, E::CROSS_ENTROPY_KERNEL)?;
+        encode_and_wait(device, &pipeline, 1, |encoder| {
+            encoder.set_buffer(0, Some(&logits.buffer), 0);
+            encoder.set_buffer(1, Some(&target_storage.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            set_u32(
+                encoder,
+                3,
+                checked_u32(rows, "row count").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                4,
+                checked_u32(cols, "column count").expect("checked before dispatch"),
+            );
+            set_u32(encoder, 5, ignore);
+            set_f32(encoder, 6, label_smoothing as f32);
+            set_u32(encoder, 7, u32::from(mean_reduction));
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_layer_norm(
+        device: &Self::Device,
+        input: &Self::Storage,
+        weight: &Self::Storage,
+        bias: &Self::Storage,
+        rows: usize,
+        cols: usize,
+        eps: f64,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(input.len, rows.saturating_mul(cols))?;
+        ensure_len(weight.len, cols)?;
+        ensure_len(bias.len, cols)?;
+        let output = empty_storage::<E>(device, input.len);
+        if input.len == 0 {
+            return Ok(Some(output));
+        }
+        let pipeline = pipeline::<E>(device, E::LAYER_NORM_KERNEL)?;
+        encode_and_wait(device, &pipeline, rows, |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&weight.buffer), 0);
+            encoder.set_buffer(2, Some(&bias.buffer), 0);
+            encoder.set_buffer(3, Some(&output.buffer), 0);
+            set_u32(
+                encoder,
+                4,
+                checked_u32(rows, "row count").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                5,
+                checked_u32(cols, "column count").expect("checked before dispatch"),
+            );
+            set_f32(encoder, 6, eps as f32);
+        })?;
+        Ok(Some(output))
+    }
+
+    fn try_rms_norm(
+        device: &Self::Device,
+        input: &Self::Storage,
+        weight: &Self::Storage,
+        rows: usize,
+        cols: usize,
+        eps: f64,
+    ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
+        ensure_len(input.len, rows.saturating_mul(cols))?;
+        ensure_len(weight.len, cols)?;
+        let output = empty_storage::<E>(device, input.len);
+        if input.len == 0 {
+            return Ok(Some(output));
+        }
+        let pipeline = pipeline::<E>(device, E::RMS_NORM_KERNEL)?;
+        encode_and_wait(device, &pipeline, rows, |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&weight.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            set_u32(
+                encoder,
+                3,
+                checked_u32(rows, "row count").expect("checked before dispatch"),
+            );
+            set_u32(
+                encoder,
+                4,
+                checked_u32(cols, "column count").expect("checked before dispatch"),
+            );
+            set_f32(encoder, 5, eps as f32);
+        })?;
+        Ok(Some(output))
+    }
+}
+
+fn native_unary_op(op: NativeUnaryOp) -> u32 {
+    match op {
+        NativeUnaryOp::Relu => 0,
+        NativeUnaryOp::Neg => 1,
+        NativeUnaryOp::Exp => 2,
+        NativeUnaryOp::Ln => 3,
+        NativeUnaryOp::Tanh => 4,
+        NativeUnaryOp::Sigmoid => 5,
+        NativeUnaryOp::Sqrt => 6,
+        NativeUnaryOp::Abs => 7,
+        NativeUnaryOp::Gelu => 8,
+    }
+}
+
+fn native_row_op(op: NativeRowOp) -> u32 {
+    match op {
+        NativeRowOp::Softmax => 0,
+        NativeRowOp::LogSoftmax => 1,
+    }
+}
+
+fn native_binary_op(op: NativeBinaryOp) -> u32 {
+    match op {
+        NativeBinaryOp::Add => 0,
+        NativeBinaryOp::Sub => 1,
+        NativeBinaryOp::Mul => 2,
+        NativeBinaryOp::Div => 3,
+    }
+}
+
+fn broadcast<E: MetalDType>(
+    device: &MetalDevice,
+    lhs: &MetalStorage,
+    rhs: &MetalStorage,
+    total: usize,
+    period: usize,
+    mode: u32,
+    op: NativeBinaryOp,
+) -> std::result::Result<MetalStorage, MetalError> {
+    ensure_len(lhs.len, total)?;
+    let output = empty_storage::<E>(device, total);
+    if total == 0 {
+        return Ok(output);
+    }
+    let pipeline = pipeline::<E>(device, E::BROADCAST_KERNEL)?;
+    encode_and_wait(device, &pipeline, total, |encoder| {
+        encoder.set_buffer(0, Some(&lhs.buffer), 0);
+        encoder.set_buffer(1, Some(&rhs.buffer), 0);
+        encoder.set_buffer(2, Some(&output.buffer), 0);
+        set_u32(
+            encoder,
+            3,
+            checked_u32(total, "broadcast length").expect("checked before dispatch"),
+        );
+        set_u32(
+            encoder,
+            4,
+            checked_u32(period, "broadcast period").expect("checked before dispatch"),
+        );
+        set_u32(encoder, 5, mode);
+        set_u32(encoder, 6, native_binary_op(op));
+        set_u32(
+            encoder,
+            7,
+            checked_u32(rhs.len, "broadcast rhs length").expect("checked before dispatch"),
+        );
+    })?;
+    Ok(output)
 }
 
 fn binary<E: MetalDType>(
@@ -488,6 +1014,14 @@ fn set_u32(encoder: &metal_rs::ComputeCommandEncoderRef, index: u64, value: u32)
     );
 }
 
+fn set_f32(encoder: &metal_rs::ComputeCommandEncoderRef, index: u64, value: f32) {
+    encoder.set_bytes(
+        index,
+        std::mem::size_of::<f32>() as u64,
+        (&value as *const f32).cast::<c_void>(),
+    );
+}
+
 fn set_value<E>(encoder: &metal_rs::ComputeCommandEncoderRef, index: u64, value: E) {
     encoder.set_bytes(
         index,
@@ -498,6 +1032,45 @@ fn set_value<E>(encoder: &metal_rs::ComputeCommandEncoderRef, index: u64, value:
 
 fn buffer_byte_len<E>(len: usize) -> u64 {
     len.max(1).saturating_mul(std::mem::size_of::<E>()) as u64
+}
+
+fn u32_storage(device: &MetalDevice, values: Vec<u32>) -> MetalStorage {
+    raw_bytes_storage(device, values)
+}
+
+fn u8_storage(device: &MetalDevice, values: Vec<u8>) -> MetalStorage {
+    raw_bytes_storage(device, values)
+}
+
+fn raw_bytes_storage<T>(device: &MetalDevice, values: Vec<T>) -> MetalStorage {
+    let len = values.len();
+    let byte_len = len.max(1).saturating_mul(std::mem::size_of::<T>()) as u64;
+    let buffer = if len == 0 {
+        device
+            .raw
+            .new_buffer(byte_len, metal_rs::MTLResourceOptions::StorageModeShared)
+    } else {
+        device.raw.new_buffer_with_data(
+            values.as_ptr().cast::<c_void>(),
+            byte_len,
+            metal_rs::MTLResourceOptions::StorageModeShared,
+        )
+    };
+    MetalStorage {
+        buffer: Arc::new(buffer),
+        len,
+    }
+}
+
+fn checked_u32_vec(
+    values: &[usize],
+    name: &'static str,
+) -> std::result::Result<Vec<u32>, MetalError> {
+    values
+        .iter()
+        .copied()
+        .map(|value| checked_u32(value, name))
+        .collect()
 }
 
 #[cfg(test)]
@@ -511,10 +1084,32 @@ mod tests {
         assert!(SHADERS_F32.contains("kernel void scalar_f32_kernel"));
         assert!(SHADERS_F32.contains("kernel void matmul_f32_kernel"));
         assert!(SHADERS_F32.contains("kernel void sum_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void unary_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void row_softmax_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void sum_last_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void bmm_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void strided_matmul_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void broadcast_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void mask_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void index_select_rows_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void cross_entropy_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void layer_norm_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void rms_norm_f32_kernel"));
         assert!(SHADERS_F16.contains("half apply_op_f16"));
         assert!(SHADERS_F16.contains("kernel void binary_f16_kernel"));
         assert!(SHADERS_F16.contains("kernel void scalar_f16_kernel"));
         assert!(SHADERS_F16.contains("kernel void matmul_f16_kernel"));
         assert!(SHADERS_F16.contains("kernel void sum_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void unary_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void row_softmax_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void sum_last_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void bmm_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void strided_matmul_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void broadcast_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void mask_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void index_select_rows_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void cross_entropy_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void layer_norm_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void rms_norm_f16_kernel"));
     }
 }

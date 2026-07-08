@@ -5,12 +5,16 @@
 //! The default build is CPU-only, and CPU is the only supported training
 //! path. The optional GPU backends behind the `metal`, `wgpu`, and `cuda`
 //! features are **experimental**: each owns real device storage and kernels
-//! for constructors, same-shape and scalar arithmetic, `matmul`, and `sum`,
-//! while every other tensor op executes as reference code through documented
-//! host round trips, so none of them is a supported training path. Metal and
-//! WGPU are parity-tested against CPU on real hardware; CUDA compiles and has
-//! typed device errors but has never been verified on a real device — treat
-//! it as untested. The audited support matrix, the 1.0 backend claims
+//! for constructors, same-shape and scalar arithmetic, `matmul`, and `sum`;
+//! Metal additionally has native forward hooks for the Epoch 16.6 training
+//! set, including unaries, row softmax/log-softmax, `sum_last`, `bmm`,
+//! broadcasts, masks, row gather, cross-entropy forward, and fused
+//! LayerNorm/RMSNorm. Remaining tensor ops and most backward formulas still
+//! execute as reference code through documented host round trips, so none of
+//! the GPU backends is a supported training path. Metal and WGPU are
+//! parity-tested against CPU on real hardware; CUDA compiles and has typed
+//! device errors but has never been verified on a real device — treat it as
+//! untested. The audited support matrix, the 1.0 backend claims
 //! decision, and the promotion path for experimental backends are recorded in
 //! `docs/backend-dtype-support.md`.
 //!

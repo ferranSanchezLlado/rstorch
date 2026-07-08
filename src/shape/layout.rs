@@ -54,12 +54,10 @@ impl Layout {
         &self.shape
     }
 
-    #[cfg(test)]
     pub(crate) fn strides(&self) -> &[usize] {
         &self.strides
     }
 
-    #[cfg(test)]
     pub(crate) fn offset(&self) -> usize {
         self.offset
     }

@@ -4,11 +4,11 @@ error[E0277]: cannot add `&Tensor<D2<C<2>, C<4>>>` to `&Tensor<D2<C<2>, C<3>>>`
   |     let _ = &lhs + &rhs;
   |                  ^ no implementation for `&Tensor<D2<C<2>, C<3>>> + &Tensor<D2<C<2>, C<4>>>`
   |
-  = help: the trait `Add<&Tensor<D2<C<2>, C<4>>>>` is not implemented for `&Tensor<D2<C<2>, C<3>>>`
-  = help: the following other types implement trait `Add<Rhs>`:
-            `&Tensor<S, E, B>` implements `Add<E>`
-            `&Tensor<S, E, B>` implements `Add<Tensor<S, E, B>>`
-            `&Tensor<S, E, B>` implements `Add`
-            `Tensor<S, E, B>` implements `Add<&Tensor<S, E, B>>`
-            `Tensor<S, E, B>` implements `Add<E>`
-            `Tensor<S, E, B>` implements `Add`
+  = help: the trait `std::ops::Add<&Tensor<D2<C<2>, C<4>>>>` is not implemented for `&Tensor<D2<C<2>, C<3>>>`
+  = help: the following other types implement trait `std::ops::Add<Rhs>`:
+            `&Tensor<S, E, B>` implements `std::ops::Add<E>`
+            `&Tensor<S, E, B>` implements `std::ops::Add<Tensor<S, E, B>>`
+            `&Tensor<S, E, B>` implements `std::ops::Add`
+            `Tensor<S, E, B>` implements `std::ops::Add<&Tensor<S, E, B>>`
+            `Tensor<S, E, B>` implements `std::ops::Add<E>`
+            `Tensor<S, E, B>` implements `std::ops::Add`

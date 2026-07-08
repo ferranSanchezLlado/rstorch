@@ -54,14 +54,7 @@ where
     where
         A: DimSpec,
     {
-        let mean = input.mean_last()?;
-        let centered = input.sub_leading_dim(&mean)?;
-        let var = centered.mul(&centered)?.mean_last()?;
-        let denom = var.add_scalar(self.eps)?.sqrt()?;
-        centered
-            .div_leading_dim(&denom)?
-            .mul_last_dim(self.weight.tensor())?
-            .add_last_dim(self.bias.tensor())
+        input.layer_norm_last(self.weight.tensor(), self.bias.tensor(), self.eps)
     }
 }
 
@@ -152,12 +145,7 @@ where
         input: &Tensor<D2<A, C<FEATURES>>, E, B>,
         _ctx: &mut Context,
     ) -> Result<Self::Output> {
-        let sq = input.mul(input)?;
-        let mean_sq = sq.mean_last()?;
-        let rms = mean_sq.add_scalar(self.eps)?.sqrt()?;
-        input
-            .div_leading_dim(&rms)?
-            .mul_last_dim(self.weight.tensor())
+        input.rms_norm_last(self.weight.tensor(), self.eps)
     }
 }
 

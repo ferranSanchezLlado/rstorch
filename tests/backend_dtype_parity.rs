@@ -1,8 +1,8 @@
 use std::fmt::Debug;
 
 use rstorch::{
-    Backend, C, Conv2dOptions, Cpu, D1, D2, DType, DTypeId, FloatDType, Padding2d, Pool2dOptions,
-    Sym, Tensor, Tensor1D, Tensor2D, Tensor4D, bf16, f16,
+    Backend, C, Conv2dOptions, Cpu, CrossEntropyOpts, D1, D2, DType, DTypeId, FloatDType, Mask,
+    Padding2d, Pool2dOptions, Sym, Tensor, Tensor1D, Tensor2D, Tensor3D, Tensor4D, bf16, f16,
 };
 
 struct Batch;
@@ -16,6 +16,27 @@ where
     E: FloatDType + Debug,
 {
     assert_eq!(actual, values(expected));
+}
+
+fn assert_vec_close<E>(actual: Vec<E>, expected: &[f64])
+where
+    E: FloatDType + Debug,
+{
+    assert_eq!(actual.len(), expected.len());
+    let tolerance = match E::ID {
+        DTypeId::F16 | DTypeId::BF16 => 5e-3,
+        DTypeId::F32 => 1e-5,
+        DTypeId::F64 => 1e-5,
+        DTypeId::I64 => unreachable!("float parity helper is not used for i64"),
+        _ => 1e-5,
+    };
+    for (idx, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        let diff = (actual.to_f64() - expected).abs();
+        assert!(
+            diff <= tolerance,
+            "index {idx}: actual {actual:?}, expected {expected}, diff {diff}, tolerance {tolerance}"
+        );
+    }
 }
 
 fn parity_for_backend<E, B>()
@@ -122,11 +143,126 @@ where
         mat_lhs.add_last_dim(&row).unwrap().to_vec().unwrap(),
         &[11.0, 22.0, 33.0, 14.0, 25.0, 36.0],
     );
+    assert_vec_eq(mat_lhs.sum_last().unwrap().to_vec().unwrap(), &[6.0, 15.0]);
+
+    let logits =
+        Tensor2D::<2, 3, E, B>::from_vec(values(&[1.0, 2.0, 3.0, -1.0, 0.0, 1.0])).unwrap();
+    assert_vec_close(
+        logits.softmax_last().unwrap().to_vec().unwrap(),
+        &[
+            0.09003057, 0.24472847, 0.66524096, 0.09003057, 0.24472847, 0.66524096,
+        ],
+    );
+    assert_vec_close(
+        logits.log_softmax_last().unwrap().to_vec().unwrap(),
+        &[
+            -2.40760596,
+            -1.40760596,
+            -0.40760596,
+            -2.40760596,
+            -1.40760596,
+            -0.40760596,
+        ],
+    );
+    assert_vec_close(
+        logits.cross_entropy(&[2, 2]).unwrap().to_vec().unwrap(),
+        &[0.40760596],
+    );
+    // Exercises the native ignore_index path: row 1's target equals the ignore
+    // index, so only row 0 contributes and the mean divides by the valid count.
+    let mut ce_ignore = CrossEntropyOpts::default();
+    ce_ignore.ignore_index = Some(0);
+    assert_vec_close(
+        logits
+            .cross_entropy_with(&[2, 0], ce_ignore)
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[0.40760596],
+    );
+
+    assert_vec_eq(
+        mat_lhs
+            .index_select_rows::<C<3>>(&[1, 0, 1])
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[4.0, 5.0, 6.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    );
+
+    let col = Tensor1D::<2, E, B>::from_vec(values(&[100.0, 200.0])).unwrap();
+    assert_vec_eq(
+        mat_lhs.add_leading_dim(&col).unwrap().to_vec().unwrap(),
+        &[101.0, 102.0, 103.0, 204.0, 205.0, 206.0],
+    );
+
+    let norm_weight = Tensor1D::<3, E, B>::from_vec(values(&[1.0, 1.0, 1.0])).unwrap();
+    let norm_bias = Tensor1D::<3, E, B>::from_vec(values(&[0.0, 0.0, 0.0])).unwrap();
+    assert_vec_close(
+        mat_lhs
+            .layer_norm_last(&norm_weight, &norm_bias, E::from_f64(1e-5))
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[-1.2247356, 0.0, 1.2247356, -1.2247356, 0.0, 1.2247356],
+    );
+    assert_vec_close(
+        mat_lhs
+            .rms_norm_last(&norm_weight, E::from_f64(1e-6))
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[0.46291, 0.92582, 1.38873, 0.78954, 0.98693, 1.18431],
+    );
+
+    let bmm_lhs = Tensor3D::<2, 2, 3, E, B>::from_vec(values(&[
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 2.0, 0.0, 1.0, 3.0, 1.0, 2.0,
+    ]))
+    .unwrap();
+    let bmm_rhs = Tensor3D::<2, 3, 2, E, B>::from_vec(values(&[
+        7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+    ]))
+    .unwrap();
+    assert_vec_eq(
+        bmm_lhs.bmm(&bmm_rhs).unwrap().to_vec().unwrap(),
+        &[58.0, 64.0, 139.0, 154.0, 7.0, 10.0, 16.0, 22.0],
+    );
 
     let relu = Tensor1D::<4, E, B>::from_vec(values(&[-2.0, 0.0, 3.0, -4.0])).unwrap();
     assert_vec_eq(
         relu.relu().unwrap().to_vec().unwrap(),
         &[0.0, 0.0, 3.0, 0.0],
+    );
+    let unary = Tensor1D::<4, E, B>::from_vec(values(&[-1.0, 0.0, 1.0, 4.0])).unwrap();
+    assert_vec_eq(
+        unary.abs().unwrap().to_vec().unwrap(),
+        &[1.0, 0.0, 1.0, 4.0],
+    );
+    assert_vec_close(
+        unary.sigmoid().unwrap().to_vec().unwrap(),
+        &[0.26894142, 0.5, 0.73105858, 0.98201379],
+    );
+    assert_vec_close(
+        unary.tanh().unwrap().to_vec().unwrap(),
+        &[-0.76159416, 0.0, 0.76159416, 0.9993293],
+    );
+    assert_vec_close(
+        unary.gelu().unwrap().to_vec().unwrap(),
+        &[-0.158808, 0.0, 0.841192, 3.99993],
+    );
+    let mask = Mask::<D1<C<4>>, B>::from_vec(vec![true, false, false, true]).unwrap();
+    assert_vec_eq(
+        unary
+            .masked_fill(&mask, E::from_f64(9.0))
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        &[9.0, 0.0, 1.0, 9.0],
+    );
+    let other = Tensor1D::<4, E, B>::from_vec(values(&[10.0, 20.0, 30.0, 40.0])).unwrap();
+    assert_vec_eq(
+        unary.where_mask(&mask, &other).unwrap().to_vec().unwrap(),
+        &[-1.0, 20.0, 30.0, 4.0],
     );
 
     let image = Tensor4D::<1, 1, 2, 2, E, B>::from_vec(values(&[1.0, 2.0, 3.0, 4.0])).unwrap();
