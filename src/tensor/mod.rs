@@ -7,6 +7,7 @@ mod raw;
 use crate::backend::{Backend, Cpu};
 use crate::dtype::{DType, DTypeId, FloatDType};
 use crate::error::Result;
+use crate::random::SmallRng;
 use crate::shape::{C, D0, D1, D2, D3, D4, Shape, ShapeSpec, StaticShape};
 pub use autograd::{NoGradGuard, is_grad_enabled, no_grad};
 pub use ops::{Conv2dOptions, Padding2d, Pool2dOptions};
@@ -75,6 +76,7 @@ where
         let expected = shape.numel()?;
         if values.len() != expected {
             return Err(crate::error::ShapeError::LengthMismatch {
+                op: "mask_from_vec_with_shape",
                 expected,
                 found: values.len(),
             }
@@ -94,6 +96,66 @@ where
 
     pub fn to_vec(&self) -> Result<Vec<bool>> {
         Ok(self.values.clone())
+    }
+
+    pub fn and(&self, rhs: &Self) -> Result<Self> {
+        self.binary_mask(rhs, "mask_and", |lhs, rhs| lhs && rhs)
+    }
+
+    pub fn or(&self, rhs: &Self) -> Result<Self> {
+        self.binary_mask(rhs, "mask_or", |lhs, rhs| lhs || rhs)
+    }
+
+    pub fn not(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|value| !value).collect(),
+            _shape: PhantomData,
+            _backend: PhantomData,
+        }
+    }
+
+    fn binary_mask(
+        &self,
+        rhs: &Self,
+        op: &'static str,
+        f: impl Fn(bool, bool) -> bool,
+    ) -> Result<Self> {
+        if self.shape != rhs.shape {
+            return Err(crate::error::ShapeError::LengthMismatch {
+                op,
+                expected: self.values.len(),
+                found: rhs.values.len(),
+            }
+            .into());
+        }
+        Ok(Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .copied()
+                .zip(rhs.values.iter().copied())
+                .map(|(lhs, rhs)| f(lhs, rhs))
+                .collect(),
+            _shape: PhantomData,
+            _backend: PhantomData,
+        })
+    }
+}
+
+impl<A, N, B> Mask<D2<A, N>, B>
+where
+    A: crate::shape::DimSpec,
+    N: crate::shape::DimSpec,
+{
+    pub fn expand_leading<const R: usize>(&self) -> Result<Mask<D3<crate::shape::C<R>, A, N>, B>> {
+        let dims = self.shape.dims();
+        let mut values = Vec::with_capacity(R * self.values.len());
+        for _ in 0..R {
+            values.extend(self.values.iter().copied());
+        }
+        Mask::from_vec_with_shape(values, [R, dims[0], dims[1]])
     }
 }
 
@@ -150,8 +212,45 @@ where
         Self::from_raw(RawTensor::ones(S::static_shape())?)
     }
 
+    pub fn full(value: E) -> Result<Self> {
+        let shape = S::static_shape();
+        let len = shape.numel()?;
+        Self::from_raw(RawTensor::from_vec(vec![value; len], shape)?)
+    }
+
     pub fn from_vec(data: Vec<E>) -> Result<Self> {
         Self::from_raw(RawTensor::from_vec(data, S::static_shape())?)
+    }
+}
+
+impl<S, E, B> Tensor<S, E, B>
+where
+    S: StaticShape,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    pub fn rand(rng: &mut SmallRng) -> Result<Self> {
+        let shape = S::static_shape();
+        let len = shape.numel()?;
+        let values = (0..len).map(|_| rng.uniform(E::ZERO, E::ONE)).collect();
+        Self::from_raw(RawTensor::from_vec(values, shape)?)
+    }
+
+    pub fn randn(rng: &mut SmallRng) -> Result<Self> {
+        let shape = S::static_shape();
+        let len = shape.numel()?;
+        let values = (0..len).map(|_| rng.normal::<E>()).collect();
+        Self::from_raw(RawTensor::from_vec(values, shape)?)
+    }
+}
+
+impl<const N: usize, E, B> Tensor<D1<C<N>>, E, B>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    pub fn arange() -> Result<Self> {
+        Self::from_vec((0..N).map(E::from_usize).collect())
     }
 }
 
@@ -171,6 +270,12 @@ where
 
     pub fn from_vec_with_shape(data: Vec<E>, shape: impl Into<Shape>) -> Result<Self> {
         Self::from_raw(RawTensor::from_vec(data, shape.into())?)
+    }
+
+    pub fn full_with_shape(value: E, shape: impl Into<Shape>) -> Result<Self> {
+        let shape = shape.into();
+        let len = shape.numel()?;
+        Self::from_raw(RawTensor::from_vec(vec![value; len], shape)?)
     }
 
     pub fn dtype(&self) -> DTypeId {
@@ -302,12 +407,36 @@ where
     }
 }
 
+impl<E, B> Tensor<D0, E, B>
+where
+    E: DType,
+    B: Backend<E>,
+{
+    pub fn item(&self) -> Result<E> {
+        Ok(self.to_vec()?[0])
+    }
+}
+
 impl<S, E, B> Tensor<S, E, B>
 where
     S: ShapeSpec,
     E: FloatDType,
     B: Backend<E>,
 {
+    pub fn rand_with_shape(rng: &mut SmallRng, shape: impl Into<Shape>) -> Result<Self> {
+        let shape = shape.into();
+        let len = shape.numel()?;
+        let values = (0..len).map(|_| rng.uniform(E::ZERO, E::ONE)).collect();
+        Self::from_raw(RawTensor::from_vec(values, shape)?)
+    }
+
+    pub fn randn_with_shape(rng: &mut SmallRng, shape: impl Into<Shape>) -> Result<Self> {
+        let shape = shape.into();
+        let len = shape.numel()?;
+        let values = (0..len).map(|_| rng.normal::<E>()).collect();
+        Self::from_raw(RawTensor::from_vec(values, shape)?)
+    }
+
     pub(crate) fn replace_data(&mut self, data: Vec<E>) -> Result<()> {
         let raw = RawTensor::from_vec_on(self.device().clone(), data, self.shape().clone())?;
         *self = Self::from_raw(raw)?.with_requires_grad(true);
@@ -702,6 +831,7 @@ mod tests {
         assert!(matches!(
             err,
             Error::Shape(ShapeError::LengthMismatch {
+                op: "raw_from_vec_on",
                 expected: 6,
                 found: 5,
             })
@@ -712,6 +842,7 @@ mod tests {
         assert!(matches!(
             err,
             Error::Shape(ShapeError::LengthMismatch {
+                op: "raw_from_vec_on",
                 expected: 6,
                 found: 5,
             })

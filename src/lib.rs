@@ -79,8 +79,8 @@ pub use nn::{
     AvgPool2d, Conv2d, CrossEntropyOpts, Dropout, Embedding, Flatten, Gelu, HasParameters, Layer,
     LayerNorm, Linear, MaxPool2d, Module, MultiHeadAttention, Parameter, ParameterId,
     PositionalEmbedding, Reduction, Relu, RngSource, Sequential, Sigmoid, Tanh, TrainContext,
-    TrainingMode, causal_attention_mask, causal_attention_mask_for_backend, mse_loss,
-    scaled_dot_product_attention,
+    TrainingMode, bce_with_logits_loss, causal_attention_mask, causal_attention_mask_for_backend,
+    huber_loss, l1_loss, mse_loss, scaled_dot_product_attention,
 };
 pub use optim::{
     Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr, clip_grad_norm,
@@ -101,8 +101,8 @@ pub use tensor::{
 };
 pub use transformer::{
     BpeTokenizer, CausalLmBatch, CausalLmSample, CharTokenizer, DecoderOnlyTransformer,
-    PaddedCausalLmBatch, PaddedCausalLmCollator, TextSequenceDataset, Tokenizer, TransformerBlock,
-    TransformerConfig, text_sequence_dataset,
+    GenerateOpts, PaddedCausalLmBatch, PaddedCausalLmCollator, TextSequenceDataset, Tokenizer,
+    TransformerBlock, TransformerConfig, text_sequence_dataset,
 };
 
 pub mod prelude {
@@ -133,7 +133,8 @@ pub mod prelude {
         AvgPool2d, Conv2d, CrossEntropyOpts, Dropout, Embedding, Flatten, Gelu, HasParameters,
         Layer, LayerNorm, Linear, MaxPool2d, Module, MultiHeadAttention, Parameter,
         PositionalEmbedding, Reduction, Relu, RngSource, Sequential, Sigmoid, Tanh, TrainContext,
-        TrainingMode, causal_attention_mask, causal_attention_mask_for_backend, mse_loss,
+        TrainingMode, bce_with_logits_loss, causal_attention_mask,
+        causal_attention_mask_for_backend, huber_loss, l1_loss, mse_loss,
         scaled_dot_product_attention,
     };
     pub use crate::optim::{
@@ -155,7 +156,7 @@ pub mod prelude {
     };
     pub use crate::transformer::{
         BpeTokenizer, CausalLmBatch, CausalLmSample, CharTokenizer, DecoderOnlyTransformer,
-        PaddedCausalLmBatch, PaddedCausalLmCollator, TextSequenceDataset, Tokenizer,
+        GenerateOpts, PaddedCausalLmBatch, PaddedCausalLmCollator, TextSequenceDataset, Tokenizer,
         TransformerBlock, TransformerConfig, text_sequence_dataset,
     };
 }

@@ -1,25 +1,25 @@
 error[E0080]: evaluation panicked: cat: lhs length=2 plus rhs length=3 gives 5, but output length=4
-   --> src/tensor/ops/shape_ops.rs:139:13
+   --> src/tensor/ops/shape_ops.rs:141:13
     |
-139 | /             const_check::known_sum_eq(
-140 | |                 A::KNOWN,
-141 | |                 R::KNOWN,
-142 | |                 N,
+141 | /             const_check::known_sum_eq(
+142 | |                 A::KNOWN,
+143 | |                 R::KNOWN,
+144 | |                 N,
 ...   |
-146 | |                 "output length",
-147 | |             );
+148 | |                 "output length",
+149 | |             );
     | |_____________^ evaluation of `rstorch::tensor::ops::shape_ops::<impl rstorch::Tensor<rstorch::D1<rstorch::C<2>>>>::cat::<rstorch::C<3>, 4>::{constant#0}` failed here
 
 note: erroneous constant encountered
-   --> src/tensor/ops/shape_ops.rs:138:9
+   --> src/tensor/ops/shape_ops.rs:140:9
     |
-138 | /         const {
-139 | |             const_check::known_sum_eq(
-140 | |                 A::KNOWN,
-141 | |                 R::KNOWN,
+140 | /         const {
+141 | |             const_check::known_sum_eq(
+142 | |                 A::KNOWN,
+143 | |                 R::KNOWN,
 ...   |
-147 | |             );
-148 | |         };
+149 | |             );
+150 | |         };
     | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`

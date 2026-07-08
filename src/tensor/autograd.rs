@@ -212,6 +212,7 @@ where
     pub fn backward_with(&self, seed: &Self) -> Result<()> {
         if self.shape() != seed.shape() {
             return Err(ShapeError::LengthMismatch {
+                op: "backward_with",
                 expected: self.numel(),
                 found: seed.numel(),
             }

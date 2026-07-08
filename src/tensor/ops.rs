@@ -98,6 +98,95 @@ where
         })
     }
 
+    pub fn mean(&self) -> Result<Scalar<E, B>> {
+        if self.numel() == 0 {
+            return Err(ShapeError::ZeroDimension {
+                op: "mean",
+                axis: 0,
+            }
+            .into());
+        }
+        let input_values = self.to_vec()?;
+        let sum = input_values
+            .iter()
+            .fold(<E::Acc as DType>::ZERO, |acc, &value| {
+                acc + E::Acc::from_f64(value.to_f64())
+            });
+        let denom = E::Acc::from_usize(self.numel());
+        let mean = E::from_f64((sum / denom).to_f64());
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            vec![mean],
+            crate::shape::Shape::known([]),
+        )?;
+        let input_raw = self.raw().clone();
+        let numel = self.numel();
+        Scalar::<E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let seed = grad.to_vec()?[0] / E::from_usize(numel);
+            Ok(vec![Some(raw_full_like(&input_raw, seed)?)])
+        })
+    }
+
+    pub fn var(&self) -> Result<Scalar<E, B>> {
+        if self.numel() == 0 {
+            return Err(ShapeError::ZeroDimension { op: "var", axis: 0 }.into());
+        }
+        let values = self.to_vec()?;
+        let numel = self.numel();
+        let denom = E::Acc::from_usize(numel);
+        let mean_acc = values.iter().fold(<E::Acc as DType>::ZERO, |acc, &value| {
+            acc + E::Acc::from_f64(value.to_f64())
+        }) / denom;
+        let var_acc = values.iter().fold(<E::Acc as DType>::ZERO, |acc, &value| {
+            let diff = E::Acc::from_f64(value.to_f64()) - mean_acc;
+            acc + diff * diff
+        }) / denom;
+        let var = E::from_f64(var_acc.to_f64());
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            vec![var],
+            crate::shape::Shape::known([]),
+        )?;
+        let input_raw = self.raw().clone();
+        let mean = E::from_f64(mean_acc.to_f64());
+        Scalar::<E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let seed = grad.to_vec()?[0];
+            let scale = E::from_f64(2.0) / E::from_usize(numel);
+            let grad_values = values
+                .iter()
+                .map(|&value| seed * scale * (value - mean))
+                .collect();
+            Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
+        })
+    }
+
+    pub fn std(&self) -> Result<Scalar<E, B>> {
+        self.var()?.sqrt()
+    }
+
+    pub fn min(&self) -> Result<Scalar<E, B>> {
+        self.full_extreme("min", |value, best| value < best)
+    }
+
+    pub fn max(&self) -> Result<Scalar<E, B>> {
+        self.full_extreme("max", |value, best| value > best)
+    }
+
+    pub fn abs(&self) -> Result<Self> {
+        self.unary_map(
+            |x| if x < E::ZERO { -x } else { x },
+            |x, _y| {
+                if x < E::ZERO {
+                    -E::ONE
+                } else if x > E::ZERO {
+                    E::ONE
+                } else {
+                    E::ZERO
+                }
+            },
+        )
+    }
+
     pub fn relu(&self) -> Result<Self> {
         let input = self.contiguous()?;
         let values = input
@@ -226,6 +315,7 @@ where
     pub fn masked_fill(&self, mask: &Mask<S, B>, value: E) -> Result<Self> {
         if self.shape() != mask.shape() {
             return Err(ShapeError::LengthMismatch {
+                op: "masked_fill",
                 expected: self.numel(),
                 found: mask.to_vec()?.len(),
             }
@@ -255,6 +345,7 @@ where
         self.ensure_same_device(other, "where_mask")?;
         if self.shape() != mask.shape() || other.shape() != mask.shape() {
             return Err(ShapeError::LengthMismatch {
+                op: "where_mask",
                 expected: self.numel(),
                 found: mask.to_vec()?.len(),
             }
@@ -416,6 +507,39 @@ where
                 .collect(),
             self.shape().clone(),
         )
+    }
+
+    fn full_extreme(
+        &self,
+        op: &'static str,
+        better: impl Fn(E, E) -> bool + Copy + Send + Sync + 'static,
+    ) -> Result<Scalar<E, B>> {
+        if self.numel() == 0 {
+            return Err(ShapeError::ZeroDimension { op, axis: 0 }.into());
+        }
+        let values = self.to_vec()?;
+        let mut best = values[0];
+        for &value in &values[1..] {
+            if better(value, best) {
+                best = value;
+            }
+        }
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            vec![best],
+            crate::shape::Shape::known([]),
+        )?;
+        let input_raw = self.raw().clone();
+        Scalar::<E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
+            let seed = grad.to_vec()?[0];
+            let count = values.iter().filter(|&&value| value == best).count();
+            let each = seed / E::from_usize(count);
+            let grad_values = values
+                .iter()
+                .map(|&value| if value == best { each } else { E::ZERO })
+                .collect();
+            Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
+        })
     }
 }
 

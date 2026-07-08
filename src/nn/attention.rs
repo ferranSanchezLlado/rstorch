@@ -180,6 +180,7 @@ pub(crate) fn ensure_head_shape<const EMBED: usize, const HEADS: usize, const HE
 
     if HEADS == 0 || HEADS * HEAD_DIM != EMBED {
         return Err(ShapeError::LengthMismatch {
+            op: "multi_head_attention",
             expected: EMBED,
             found: HEADS * HEAD_DIM,
         }

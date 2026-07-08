@@ -60,6 +60,8 @@ pub trait DType:
 /// This trait is sealed for the same reason as [`DType`]: the set of required
 /// operations remains crate-owned until dtype and backend expansion settles.
 pub trait FloatDType: DType + Neg<Output = Self> {
+    type Acc: FloatDType;
+
     fn from_usize(value: usize) -> Self;
     fn from_f32(value: f32) -> Self {
         Self::from_f64(value as f64)
@@ -121,6 +123,8 @@ impl DType for f16 {
 }
 
 impl FloatDType for f16 {
+    type Acc = f32;
+
     fn from_usize(value: usize) -> Self {
         Self::from_f32(value as f32)
     }
@@ -181,6 +185,8 @@ impl DType for bf16 {
 }
 
 impl FloatDType for bf16 {
+    type Acc = f32;
+
     fn from_usize(value: usize) -> Self {
         Self::from_f32(value as f32)
     }
@@ -223,6 +229,8 @@ impl FloatDType for bf16 {
 }
 
 impl FloatDType for f32 {
+    type Acc = f32;
+
     fn from_usize(value: usize) -> Self {
         value as Self
     }
@@ -283,6 +291,8 @@ impl DType for f64 {
 }
 
 impl FloatDType for f64 {
+    type Acc = f64;
+
     fn from_usize(value: usize) -> Self {
         value as Self
     }

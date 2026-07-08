@@ -21,6 +21,13 @@ pub struct TransformerConfig<E> {
     pub init_std: E,
 }
 
+pub struct GenerateOpts<'a, E> {
+    pub temperature: E,
+    pub top_k: Option<usize>,
+    pub top_p: Option<E>,
+    pub rng: &'a mut SmallRng,
+}
+
 impl<E> Default for TransformerConfig<E>
 where
     E: FloatDType,
@@ -76,9 +83,9 @@ where
 
     pub fn with_config(rng: &mut SmallRng, config: TransformerConfig<E>) -> Result<Self> {
         Ok(Self {
-            norm1: LayerNorm::new(config.norm_eps)?,
+            norm1: LayerNorm::with_eps(config.norm_eps)?,
             attention: MultiHeadAttention::xavier_uniform(rng)?,
-            norm2: LayerNorm::new(config.norm_eps)?,
+            norm2: LayerNorm::with_eps(config.norm_eps)?,
             fc1: Linear::xavier_uniform(rng)?,
             fc2: Linear::xavier_uniform(rng)?,
         })
@@ -218,7 +225,7 @@ where
             token_embedding: Embedding::uniform(rng, -emb_limit, emb_limit)?,
             position_embedding: PositionalEmbedding::uniform(rng, -emb_limit, emb_limit)?,
             blocks,
-            final_norm: LayerNorm::new(config.norm_eps)?,
+            final_norm: LayerNorm::with_eps(config.norm_eps)?,
             lm_head: Linear::xavier_uniform(rng)?,
         })
     }
@@ -240,6 +247,7 @@ where
     {
         if tokenizer.vocab_size() != VOCAB {
             return Err(crate::error::ShapeError::LengthMismatch {
+                op: "with_tokenizer_config",
                 expected: VOCAB,
                 found: tokenizer.vocab_size(),
             }
@@ -286,6 +294,7 @@ where
                 CrossEntropyOpts {
                     reduction: Reduction::Mean,
                     ignore_index: Some(ignore_index),
+                    label_smoothing: 0.0,
                 },
             )
     }
@@ -298,6 +307,25 @@ where
     /// The logit is read at the last real position. Once the sequence grows to
     /// `SEQ` tokens the window slides left and all positions are real.
     pub fn generate(&self, prompt_ids: &[usize], max_new_tokens: usize) -> Result<Vec<usize>> {
+        let mut rng = SmallRng::seed_from_u64(0);
+        self.generate_with(
+            prompt_ids,
+            max_new_tokens,
+            GenerateOpts {
+                temperature: E::ZERO,
+                top_k: Some(1),
+                top_p: None,
+                rng: &mut rng,
+            },
+        )
+    }
+
+    pub fn generate_with(
+        &self,
+        prompt_ids: &[usize],
+        max_new_tokens: usize,
+        mut opts: GenerateOpts<'_, E>,
+    ) -> Result<Vec<usize>> {
         const { const_check::nonzero(SEQ, "generate", "SEQ") };
 
         if prompt_ids.is_empty() {
@@ -316,13 +344,99 @@ where
             window[..recent.len()].copy_from_slice(recent);
             let batch = [window];
             let logits = self.forward(&batch)?;
-            let predictions = logits
+            let logits = logits
                 .reshape_with_shape::<D2<AnyDim, C<VOCAB>>>([SEQ, VOCAB])?
-                .argmax_last()?;
-            ids.push(predictions[read_pos]);
+                .select_row(read_pos)?
+                .to_vec()?;
+            ids.push(sample_token(&logits, &mut opts)?);
         }
         Ok(ids)
     }
+}
+
+fn sample_token<E>(logits: &[E], opts: &mut GenerateOpts<'_, E>) -> Result<usize>
+where
+    E: FloatDType,
+{
+    if logits.is_empty() {
+        return Err(Error::InvalidInput {
+            op: "generate",
+            reason: "vocabulary must not be empty",
+        });
+    }
+    if opts.temperature <= E::ZERO || opts.top_k == Some(1) {
+        return Ok(argmax(logits));
+    }
+    let temperature = opts.temperature.to_f64();
+    if !temperature.is_finite() || temperature <= 0.0 {
+        return Err(Error::InvalidInput {
+            op: "generate",
+            reason: "temperature must be finite and positive",
+        });
+    }
+    let max = logits
+        .iter()
+        .map(|value| value.to_f64() / temperature)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut probs = logits
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| (idx, (value.to_f64() / temperature - max).exp()))
+        .collect::<Vec<_>>();
+    probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    if let Some(k) = opts.top_k {
+        if k == 0 {
+            return Err(Error::InvalidInput {
+                op: "generate",
+                reason: "top_k must be greater than zero",
+            });
+        }
+        probs.truncate(k.min(probs.len()));
+    }
+    if let Some(top_p) = opts.top_p {
+        let top_p = top_p.to_f64();
+        if !(0.0..=1.0).contains(&top_p) {
+            return Err(Error::InvalidInput {
+                op: "generate",
+                reason: "top_p must be in [0, 1]",
+            });
+        }
+        let total: f64 = probs.iter().map(|(_, prob)| *prob).sum();
+        let mut cumulative = 0.0;
+        let mut keep = 0usize;
+        for (_, prob) in &probs {
+            cumulative += *prob / total;
+            keep += 1;
+            if cumulative >= top_p {
+                break;
+            }
+        }
+        probs.truncate(keep.max(1));
+    }
+    let total: f64 = probs.iter().map(|(_, prob)| *prob).sum();
+    let mut draw = opts.rng.uniform(0.0f64, total);
+    for (idx, prob) in probs {
+        if draw < prob {
+            return Ok(idx);
+        }
+        draw -= prob;
+    }
+    Ok(logits.len() - 1)
+}
+
+fn argmax<E>(values: &[E]) -> usize
+where
+    E: FloatDType,
+{
+    let mut best = 0usize;
+    let mut best_value = values[0];
+    for (idx, &value) in values.iter().enumerate().skip(1) {
+        if value > best_value {
+            best = idx;
+            best_value = value;
+        }
+    }
+    best
 }
 
 impl<

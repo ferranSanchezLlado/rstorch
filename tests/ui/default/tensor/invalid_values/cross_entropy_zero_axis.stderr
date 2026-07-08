@@ -1,19 +1,19 @@
 error[E0080]: evaluation panicked: cross_entropy: axis 1=0 must be greater than 0
-  --> src/tensor/ops/indexing.rs:77:17
+  --> src/tensor/ops/indexing.rs:78:17
    |
-77 |         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
+78 |         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::ops::indexing::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<0>>>>::cross_entropy_with::{constant#0}` failed here
 
 note: erroneous constant encountered
-  --> src/tensor/ops/indexing.rs:77:9
+  --> src/tensor/ops/indexing.rs:78:9
    |
-77 |         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
+78 |         const { const_check::known_nonzero(N::KNOWN, "cross_entropy", "axis 1") };
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `<instantiation>`
-  --> src/tensor/ops/indexing.rs:69:9
+  --> src/tensor/ops/indexing.rs:70:9
    |
-69 |         self.cross_entropy_with(targets, CrossEntropyOpts::default())
+70 |         self.cross_entropy_with(targets, CrossEntropyOpts::default())
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For more information about this error, try `rustc --explain E0080`.

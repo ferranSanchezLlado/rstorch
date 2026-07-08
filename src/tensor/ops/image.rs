@@ -278,6 +278,7 @@ where
         let features = checked_product("flatten_spatial", &[dims[1], dims[2], dims[3]])?;
         if features != OUT {
             return Err(ShapeError::LengthMismatch {
+                op: "flatten_spatial",
                 expected: OUT,
                 found: features,
             }
@@ -634,7 +635,7 @@ where
 
         let input_values = self.to_vec()?;
         let mut counts = vec![0usize; batch * channels * OUT_H * OUT_W];
-        let mut values = vec![E::ZERO; batch * channels * OUT_H * OUT_W];
+        let mut values = vec![<E::Acc as DType>::ZERO; batch * channels * OUT_H * OUT_W];
         for n in 0..batch {
             for c in 0..channels {
                 for oh in 0..OUT_H {
@@ -664,8 +665,10 @@ where
                                 else {
                                     continue;
                                 };
-                                values[out_idx] +=
-                                    input_values[nchw_index(n, c, ih, iw, channels, height, width)];
+                                values[out_idx] += E::Acc::from_f64(
+                                    input_values[nchw_index(n, c, ih, iw, channels, height, width)]
+                                        .to_f64(),
+                                );
                                 counts[out_idx] += 1;
                             }
                         }
@@ -678,11 +681,15 @@ where
                             }
                             .into());
                         }
-                        values[out_idx] /= E::from_usize(counts[out_idx]);
+                        values[out_idx] /= E::Acc::from_usize(counts[out_idx]);
                     }
                 }
             }
         }
+        let values = values
+            .into_iter()
+            .map(|value| E::from_f64(value.to_f64()))
+            .collect();
         let raw = RawTensor::from_vec_on(
             self.device().clone(),
             values,
@@ -975,7 +982,7 @@ fn conv2d_values<E: FloatDType>(
         for oc in 0..out_channels {
             for oh in 0..out_h {
                 for ow in 0..out_w {
-                    let mut acc = E::ZERO;
+                    let mut acc = <E::Acc as DType>::ZERO;
                     for ic in 0..in_channels {
                         for kh in 0..kernel_h {
                             for kw in 0..kernel_w {
@@ -1001,20 +1008,24 @@ fn conv2d_values<E: FloatDType>(
                                 else {
                                     continue;
                                 };
-                                acc += input[nchw_index(n, ic, ih, iw, in_channels, height, width)]
-                                    * weight[oihw_index(
-                                        oc,
-                                        ic,
-                                        kh,
-                                        kw,
-                                        in_channels,
-                                        kernel_h,
-                                        kernel_w,
-                                    )];
+                                acc += E::Acc::from_f64(
+                                    (input[nchw_index(n, ic, ih, iw, in_channels, height, width)]
+                                        * weight[oihw_index(
+                                            oc,
+                                            ic,
+                                            kh,
+                                            kw,
+                                            in_channels,
+                                            kernel_h,
+                                            kernel_w,
+                                        )])
+                                    .to_f64(),
+                                );
                             }
                         }
                     }
-                    out[nchw_index(n, oc, oh, ow, out_channels, out_h, out_w)] = acc;
+                    out[nchw_index(n, oc, oh, ow, out_channels, out_h, out_w)] =
+                        E::from_f64(acc.to_f64());
                 }
             }
         }
@@ -1038,8 +1049,9 @@ fn conv2d_backward_values<E: FloatDType>(
     out_w: usize,
     options: Conv2dOptions,
 ) -> Result<(Vec<E>, Vec<E>)> {
-    let mut input_grad = vec![E::ZERO; batch * in_channels * height * width];
-    let mut weight_grad = vec![E::ZERO; out_channels * in_channels * kernel_h * kernel_w];
+    let mut input_grad = vec![<E::Acc as DType>::ZERO; batch * in_channels * height * width];
+    let mut weight_grad =
+        vec![<E::Acc as DType>::ZERO; out_channels * in_channels * kernel_h * kernel_w];
     for n in 0..batch {
         for oc in 0..out_channels {
             for oh in 0..out_h {
@@ -1074,8 +1086,10 @@ fn conv2d_backward_values<E: FloatDType>(
                                     nchw_index(n, ic, ih, iw, in_channels, height, width);
                                 let weight_idx =
                                     oihw_index(oc, ic, kh, kw, in_channels, kernel_h, kernel_w);
-                                input_grad[input_idx] += g * weight[weight_idx];
-                                weight_grad[weight_idx] += g * input[input_idx];
+                                input_grad[input_idx] +=
+                                    E::Acc::from_f64((g * weight[weight_idx]).to_f64());
+                                weight_grad[weight_idx] +=
+                                    E::Acc::from_f64((g * input[input_idx]).to_f64());
                             }
                         }
                     }
@@ -1083,5 +1097,14 @@ fn conv2d_backward_values<E: FloatDType>(
             }
         }
     }
-    Ok((input_grad, weight_grad))
+    Ok((
+        input_grad
+            .into_iter()
+            .map(|value| E::from_f64(value.to_f64()))
+            .collect(),
+        weight_grad
+            .into_iter()
+            .map(|value| E::from_f64(value.to_f64()))
+            .collect(),
+    ))
 }

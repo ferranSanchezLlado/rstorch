@@ -52,6 +52,7 @@ where
     }
 
     fn zeros_with_bias(options: Conv2dOptions, bias: bool) -> Result<Self> {
+        validate_constructor::<K_H, K_W, OUT_H, OUT_W>("conv2d_zeros", options)?;
         Ok(Self {
             weight: Parameter::new(Tensor::zeros()?),
             bias: bias
@@ -73,6 +74,7 @@ where
     }
 
     fn uniform(rng: &mut SmallRng, options: Conv2dOptions, bias: bool) -> Result<Self> {
+        validate_constructor::<K_H, K_W, OUT_H, OUT_W>("conv2d_kaiming_uniform", options)?;
         let fan_in = fan_in::<IN_CH, K_H, K_W>("conv2d_kaiming_uniform")?;
         let limit = (6.0 / (fan_in as f64)).sqrt();
         let weight_len = OUT_CH
@@ -106,6 +108,54 @@ where
     pub fn options(&self) -> Conv2dOptions {
         self.options
     }
+}
+
+fn validate_constructor<
+    const K_H: usize,
+    const K_W: usize,
+    const OUT_H: usize,
+    const OUT_W: usize,
+>(
+    op: &'static str,
+    options: Conv2dOptions,
+) -> Result<()> {
+    if K_H == 0 || K_W == 0 {
+        return Err(ShapeError::InvalidSpatialParam {
+            op,
+            param: "kernel",
+            value: K_H.min(K_W),
+            reason: "kernel size must be greater than 0",
+        }
+        .into());
+    }
+    if OUT_H == 0 || OUT_W == 0 {
+        return Err(ShapeError::InvalidSpatialParam {
+            op,
+            param: "output",
+            value: OUT_H.min(OUT_W),
+            reason: "output size must be greater than 0",
+        }
+        .into());
+    }
+    if options.stride_h == 0 || options.stride_w == 0 {
+        return Err(ShapeError::InvalidSpatialParam {
+            op,
+            param: "stride",
+            value: options.stride_h.min(options.stride_w),
+            reason: "stride must be greater than 0",
+        }
+        .into());
+    }
+    if options.dilation_h == 0 || options.dilation_w == 0 {
+        return Err(ShapeError::InvalidSpatialParam {
+            op,
+            param: "dilation",
+            value: options.dilation_h.min(options.dilation_w),
+            reason: "dilation must be greater than 0",
+        }
+        .into());
+    }
+    Ok(())
 }
 
 impl<

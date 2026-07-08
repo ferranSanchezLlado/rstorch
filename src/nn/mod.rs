@@ -24,7 +24,7 @@ pub use dropout::Dropout;
 pub use embedding::{Embedding, PositionalEmbedding};
 pub use flatten::Flatten;
 pub use linear::Linear;
-pub use loss::{CrossEntropyOpts, Reduction, mse_loss};
+pub use loss::{CrossEntropyOpts, Reduction, bce_with_logits_loss, huber_loss, l1_loss, mse_loss};
 pub use normalization::LayerNorm;
 pub(crate) use parameter::has_parameters;
 #[allow(unused_imports)]

@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn dropout_composes_in_sequential_and_uses_context_mode() {
-        let model = seq![Relu, Dropout::new(0.5), Relu];
+        let model = seq![Relu, Dropout::new(0.5).unwrap(), Relu];
         let input = Tensor1D::<4>::ones().unwrap();
 
         let mut train_ctx = TrainContext::training(7);

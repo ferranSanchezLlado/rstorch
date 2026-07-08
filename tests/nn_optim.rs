@@ -126,6 +126,22 @@ fn adam_first_step_matches_hand_computed_update() {
 }
 
 #[test]
+fn optimizer_weight_decay_updates_parameters_and_round_trips() {
+    let mut layer = Linear::<1, 1>::zeros().unwrap();
+    let mut params = Vec::new();
+    layer.parameters_mut(&mut params);
+    params[0].set_data(vec![2.0]).unwrap();
+    params[0].set_grad(vec![0.0]).unwrap();
+    Sgd::with_weight_decay(0.1, 0.5).step(&mut params).unwrap();
+    drop(params);
+    assert_close(layer.weight().tensor().to_vec().unwrap()[0], 1.9, 1e-6);
+
+    let opt = Adam::with_weight_decay(0.01, 0.25);
+    let state = opt.state_dict(&layer).unwrap();
+    assert_eq!(state.hyper_value::<f32>("weight_decay").unwrap(), 0.25);
+}
+
+#[test]
 fn optimizers_skip_parameters_without_gradients() {
     let mut layer = Linear::<1, 1>::zeros().unwrap();
     let mut opt = Sgd::new(0.1);

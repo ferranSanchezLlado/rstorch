@@ -36,6 +36,7 @@ impl Layout {
         let strides = strides.into();
         if strides.len() != shape.rank() {
             return Err(ShapeError::RankMismatch {
+                op: "layout_from_parts",
                 expected: shape.rank(),
                 found: strides.len(),
             }
@@ -168,6 +169,7 @@ impl Layout {
         let expected = shape.numel()?;
         if expected != self.numel() {
             return Err(ShapeError::LengthMismatch {
+                op: "reshape",
                 expected,
                 found: self.numel(),
             }
@@ -186,6 +188,7 @@ impl Layout {
     pub(crate) fn transpose2(&self) -> Result<Self> {
         if self.shape.rank() != 2 {
             return Err(ShapeError::RankMismatch {
+                op: "transpose",
                 expected: 2,
                 found: self.shape.rank(),
             }
@@ -202,6 +205,7 @@ impl Layout {
         let rank = self.shape.rank();
         if lhs >= rank || rhs >= rank {
             return Err(ShapeError::RankMismatch {
+                op: "transpose_axes",
                 expected: lhs.max(rhs) + 1,
                 found: rank,
             }

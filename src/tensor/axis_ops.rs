@@ -126,6 +126,63 @@ where
         self.sum_last()?.div_scalar(E::from_usize(cols))
     }
 
+    pub fn var_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "var_last", "last axis") };
+        let axis = S::RANK - 1;
+        let cols = self.shape().dims()[axis];
+        ensure_nonzero_dim("var_last", axis, cols)?;
+        let dims = self.shape().dims();
+        let rows = product(&dims[..axis]);
+        let values = self.to_vec()?;
+        let mut means = vec![E::ZERO; rows];
+        let mut out = vec![E::ZERO; rows];
+        for row in 0..rows {
+            let start = row * cols;
+            let mean_acc = values[start..start + cols]
+                .iter()
+                .fold(<E::Acc as crate::dtype::DType>::ZERO, |acc, &value| {
+                    acc + E::Acc::from_f64(value.to_f64())
+                })
+                / E::Acc::from_usize(cols);
+            let var_acc = values[start..start + cols].iter().fold(
+                <E::Acc as crate::dtype::DType>::ZERO,
+                |acc, &value| {
+                    let diff = E::Acc::from_f64(value.to_f64()) - mean_acc;
+                    acc + diff * diff
+                },
+            ) / E::Acc::from_usize(cols);
+            means[row] = E::from_f64(mean_acc.to_f64());
+            out[row] = E::from_f64(var_acc.to_f64());
+        }
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            out,
+            Shape::known(dims[..axis].to_vec()),
+        )?;
+        let input_raw = self.raw().clone();
+        Tensor::<S::Reduced, E, B>::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self)],
+            move |grad| {
+                let seed = grad.to_vec()?;
+                let mut grad_values = vec![E::ZERO; rows * cols];
+                let scale = E::from_f64(2.0) / E::from_usize(cols);
+                for row in 0..rows {
+                    let start = row * cols;
+                    for col in 0..cols {
+                        grad_values[start + col] =
+                            seed[row] * scale * (values[start + col] - means[row]);
+                    }
+                }
+                Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
+            },
+        )
+    }
+
+    pub fn std_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        self.var_last()?.sqrt()
+    }
+
     /// Reduces the last axis with max. Backward splits gradient evenly across
     /// tied maxima instead of selecting the first maximum.
     pub fn max_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
@@ -178,6 +235,56 @@ where
         )
     }
 
+    pub fn min_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
+        const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "min_last", "last axis") };
+
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let rows = product(&dims[..last_axis]);
+        let cols = dims[last_axis];
+        ensure_nonzero_dim("min_last", last_axis, cols)?;
+        let values = self.to_vec()?;
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let start = row * cols;
+            let mut min = values[start];
+            for &value in &values[start + 1..start + cols] {
+                if value < min {
+                    min = value;
+                }
+            }
+            out.push(min);
+        }
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            out.clone(),
+            Shape::known(dims[..last_axis].to_vec()),
+        )?;
+        let input_raw = self.raw().clone();
+        Tensor::<S::Reduced, E, B>::autograd_output(
+            raw,
+            vec![AnyTensor::from_shape(self)],
+            move |grad| {
+                let seed = grad.to_vec()?;
+                let mut grad_values = vec![E::ZERO; rows * cols];
+                for row in 0..rows {
+                    let start = row * cols;
+                    let count = values[start..start + cols]
+                        .iter()
+                        .filter(|&&value| value == out[row])
+                        .count();
+                    let each = seed[row] / E::from_usize(count);
+                    for col in 0..cols {
+                        if values[start + col] == out[row] {
+                            grad_values[start + col] = each;
+                        }
+                    }
+                }
+                Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
+            },
+        )
+    }
+
     pub fn logsumexp_last(&self) -> Result<Tensor<S::Reduced, E, B>> {
         const { const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "logsumexp_last", "last axis") };
 
@@ -192,16 +299,19 @@ where
         for row in 0..rows {
             let start = row * cols;
             let max = row_max(&values[start..start + cols]);
-            let mut sum = E::ZERO;
+            let mut sum = <E::Acc as DType>::ZERO;
             for col in 0..cols {
-                let exp = (values[start + col] - max).exp();
+                let exp = E::Acc::from_f64((values[start + col] - max).to_f64()).exp();
                 sum += exp;
-                softmax[start + col] = exp;
+                softmax[start + col] = E::from_f64(exp.to_f64());
             }
             for col in 0..cols {
-                softmax[start + col] /= sum;
+                softmax[start + col] =
+                    E::from_f64((E::Acc::from_f64(softmax[start + col].to_f64()) / sum).to_f64());
             }
-            out.push(max + sum.ln());
+            out.push(E::from_f64(
+                (E::Acc::from_f64(max.to_f64()) + sum.ln()).to_f64(),
+            ));
         }
         let raw = RawTensor::from_vec_on(
             self.device().clone(),
@@ -242,11 +352,15 @@ where
             let mut out = vec![E::ZERO; rows * cols];
             for row in 0..rows {
                 let start = row * cols;
-                let dot = (0..cols).fold(E::ZERO, |acc, col| {
-                    acc + grad[start + col] * values[start + col]
+                let dot = (0..cols).fold(<E::Acc as DType>::ZERO, |acc, col| {
+                    acc + E::Acc::from_f64((grad[start + col] * values[start + col]).to_f64())
                 });
                 for col in 0..cols {
-                    out[start + col] = values[start + col] * (grad[start + col] - dot);
+                    out[start + col] = E::from_f64(
+                        (E::Acc::from_f64(values[start + col].to_f64())
+                            * (E::Acc::from_f64(grad[start + col].to_f64()) - dot))
+                            .to_f64(),
+                    );
                 }
             }
             Ok(vec![Some(raw_from_vec_like(&input_raw, out)?)])
@@ -273,9 +387,15 @@ where
             let mut out = vec![E::ZERO; rows * cols];
             for row in 0..rows {
                 let start = row * cols;
-                let row_sum = (0..cols).fold(E::ZERO, |acc, col| acc + grad[start + col]);
+                let row_sum = (0..cols).fold(<E::Acc as DType>::ZERO, |acc, col| {
+                    acc + E::Acc::from_f64(grad[start + col].to_f64())
+                });
                 for col in 0..cols {
-                    out[start + col] = grad[start + col] - softmax[start + col] * row_sum;
+                    out[start + col] = E::from_f64(
+                        (E::Acc::from_f64(grad[start + col].to_f64())
+                            - E::Acc::from_f64(softmax[start + col].to_f64()) * row_sum)
+                            .to_f64(),
+                    );
                 }
             }
             Ok(vec![Some(raw_from_vec_like(&input_raw, out)?)])
@@ -549,14 +669,15 @@ fn stable_row_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize) -> 
     for row in 0..rows {
         let start = row * cols;
         let max = row_max(&values[start..start + cols]);
-        let mut sum = E::ZERO;
+        let mut sum = <E::Acc as DType>::ZERO;
         for col in 0..cols {
-            let exp = (values[start + col] - max).exp();
+            let exp = E::Acc::from_f64((values[start + col] - max).to_f64()).exp();
             sum += exp;
-            out[start + col] = exp;
+            out[start + col] = E::from_f64(exp.to_f64());
         }
         for col in 0..cols {
-            out[start + col] /= sum;
+            out[start + col] =
+                E::from_f64((E::Acc::from_f64(out[start + col].to_f64()) / sum).to_f64());
         }
     }
     out
@@ -568,11 +689,12 @@ fn stable_row_log_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize)
         let start = row * cols;
         let max = row_max(&values[start..start + cols]);
         let sum = (0..cols)
-            .map(|col| (values[start + col] - max).exp())
-            .fold(E::ZERO, |acc, value| acc + value);
-        let logsumexp = max + sum.ln();
+            .map(|col| E::Acc::from_f64((values[start + col] - max).to_f64()).exp())
+            .fold(<E::Acc as DType>::ZERO, |acc, value| acc + value);
+        let logsumexp = E::Acc::from_f64(max.to_f64()) + sum.ln();
         for col in 0..cols {
-            out[start + col] = values[start + col] - logsumexp;
+            out[start + col] =
+                E::from_f64((E::Acc::from_f64(values[start + col].to_f64()) - logsumexp).to_f64());
         }
     }
     out

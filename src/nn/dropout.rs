@@ -1,6 +1,6 @@
 use crate::backend::Backend;
 use crate::dtype::FloatDType;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::nn::{Layer, Module, RngSource, TrainingMode};
 use crate::shape::ShapeSpec;
 use crate::tensor::{Mask, Tensor};
@@ -16,8 +16,14 @@ impl<E> Dropout<E>
 where
     E: FloatDType,
 {
-    pub fn new(p: E) -> Self {
-        Self { p }
+    pub fn new(p: E) -> Result<Self> {
+        if p < E::ZERO || p >= E::ONE {
+            return Err(Error::InvalidInput {
+                op: "dropout",
+                reason: "p must be in [0, 1)",
+            });
+        }
+        Ok(Self { p })
     }
 
     pub fn p(&self) -> E {

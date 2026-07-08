@@ -69,6 +69,7 @@ where
         let expected = shape.numel()?;
         if data.len() != expected {
             return Err(ShapeError::LengthMismatch {
+                op: "raw_from_vec_on",
                 expected,
                 found: data.len(),
             }
@@ -88,6 +89,7 @@ where
         let found = B::storage_len(&storage);
         if found != numel {
             return Err(ShapeError::LengthMismatch {
+                op: "raw_from_storage_on",
                 expected: numel,
                 found,
             }

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 pub struct Sgd<E> {
     lr: E,
     momentum: Option<E>,
+    weight_decay: E,
     velocity: HashMap<ParameterId, Vec<E>>,
 }
 
@@ -25,6 +26,16 @@ where
         Self {
             lr,
             momentum: None,
+            weight_decay: E::ZERO,
+            velocity: HashMap::new(),
+        }
+    }
+
+    pub fn with_weight_decay(lr: E, weight_decay: E) -> Self {
+        Self {
+            lr,
+            momentum: None,
+            weight_decay,
             velocity: HashMap::new(),
         }
     }
@@ -33,6 +44,16 @@ where
         Self {
             lr,
             momentum: Some(momentum),
+            weight_decay: E::ZERO,
+            velocity: HashMap::new(),
+        }
+    }
+
+    pub fn with_momentum_and_weight_decay(lr: E, momentum: E, weight_decay: E) -> Self {
+        Self {
+            lr,
+            momentum: Some(momentum),
+            weight_decay,
             velocity: HashMap::new(),
         }
     }
@@ -43,6 +64,10 @@ where
 
     pub fn set_lr(&mut self, lr: E) {
         self.lr = lr;
+    }
+
+    pub fn weight_decay(&self) -> E {
+        self.weight_decay
     }
 }
 
@@ -58,6 +83,11 @@ where
                 continue;
             };
             let mut data = param.data()?;
+            if self.weight_decay != E::ZERO {
+                for value in &mut data {
+                    *value -= self.lr * self.weight_decay * *value;
+                }
+            }
             if let Some(momentum) = self.momentum {
                 let velocity = self
                     .velocity
@@ -113,6 +143,7 @@ where
         if let Some(momentum) = self.momentum {
             hyperparameters.push(scalar_record("momentum", momentum));
         }
+        hyperparameters.push(scalar_record("weight_decay", self.weight_decay));
 
         OptimizerStateDict::new(OptimizerKind::Sgd, E::ID, 0, hyperparameters, parameters)
     }
@@ -125,6 +156,9 @@ where
         let snapshots = validate_optimizer_parameters::<E, B, M>(module, state)?;
         let lr = state.hyper_value("lr")?;
         let momentum = state.optional_hyper_value("momentum")?;
+        let weight_decay = state
+            .optional_hyper_value("weight_decay")?
+            .unwrap_or(E::ZERO);
         let mut velocity_by_id = HashMap::new();
 
         for (snapshot, saved) in snapshots.into_iter().zip(state.parameters()) {
@@ -147,6 +181,7 @@ where
 
         self.lr = lr;
         self.momentum = momentum;
+        self.weight_decay = weight_decay;
         self.velocity = velocity_by_id;
         Ok(())
     }

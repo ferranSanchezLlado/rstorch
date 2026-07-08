@@ -23,9 +23,9 @@ note: erroneous constant encountered
    | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`
-   --> src/tensor/ops/shape_ops.rs:108:9
+   --> src/tensor/ops/shape_ops.rs:110:9
     |
-108 |         self.reshape::<D2<C<M>, C<N>>>()
+110 |         self.reshape::<D2<C<M>, C<N>>>()
     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For more information about this error, try `rustc --explain E0080`.

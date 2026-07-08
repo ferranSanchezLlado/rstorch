@@ -8,7 +8,7 @@ struct Batch;
 
 #[test]
 fn layer_norm_centers_each_row() {
-    let norm = LayerNorm::<3>::new(1e-5).unwrap();
+    let norm = LayerNorm::<3>::with_eps(1e-5).unwrap();
     let input = Tensor::<D2<Sym<Batch>, C<3>>>::from_vec_with_shape(
         vec![1.0, 2.0, 3.0, 2.0, 4.0, 6.0],
         [2, 3],
@@ -32,7 +32,7 @@ fn layer_norm_centers_each_row() {
 fn layer_norm_gradient_matches_finite_difference() {
     let input_data = vec![1.0, 2.0, 4.0, -1.0, 0.5, 3.0];
     let probe = Tensor2D::<2, 3, f64>::from_vec(vec![0.5, -0.2, 0.7, -0.4, 0.3, 0.1]).unwrap();
-    let norm = LayerNorm::<3, f64>::new(1e-5).unwrap();
+    let norm = LayerNorm::<3, f64>::with_eps(1e-5).unwrap();
     let input = Tensor2D::<2, 3, f64>::from_vec(input_data.clone())
         .unwrap()
         .with_requires_grad(true);
@@ -51,7 +51,7 @@ fn layer_norm_gradient_matches_finite_difference() {
     for (idx, &analytic) in grad.iter().enumerate() {
         let numerical = finite_difference(&input_data, idx, 1e-6, |values| {
             let mut ctx = TrainContext::eval();
-            LayerNorm::<3, f64>::new(1e-5)
+            LayerNorm::<3, f64>::with_eps(1e-5)
                 .unwrap()
                 .forward(
                     &Tensor2D::<2, 3, f64>::from_vec(values.to_vec()).unwrap(),
@@ -71,7 +71,7 @@ fn layer_norm_gradient_matches_finite_difference() {
 
 #[test]
 fn dropout_scales_in_training_and_is_identity_in_eval() {
-    let dropout = Dropout::new(0.5);
+    let dropout = Dropout::new(0.5).unwrap();
     let mut train_ctx = TrainContext::training(7);
     let dropped = dropout
         .forward(&Tensor1D::<4>::ones().unwrap(), &mut train_ctx)
@@ -182,6 +182,29 @@ fn conv2d_validates_stride_padding_dilation_kernel_and_output_shape() {
         .max_pool2d::<1, 1>(Pool2dOptions::new(2, 2).with_stride(0, 1))
         .unwrap_err();
     assert_invalid_spatial(err, "max_pool2d", "stride");
+}
+
+#[test]
+fn conv2d_constructors_validate_spatial_options() {
+    let Err(err) = Conv2d::<1, 1, 2, 2, 1, 1>::zeros(Conv2dOptions::default().with_stride(0, 1))
+    else {
+        panic!("expected invalid stride error");
+    };
+    assert_invalid_spatial(err, "conv2d_zeros", "stride");
+
+    let mut rng = SmallRng::seed_from_u64(1);
+    let Err(err) = Conv2d::<1, 1, 2, 2, 1, 1>::kaiming_uniform(
+        &mut rng,
+        Conv2dOptions::default().with_dilation(0, 1),
+    ) else {
+        panic!("expected invalid dilation error");
+    };
+    assert_invalid_spatial(err, "conv2d_kaiming_uniform", "dilation");
+
+    let Err(err) = Conv2d::<1, 1, 2, 2, 0, 1>::zeros(Conv2dOptions::default()) else {
+        panic!("expected invalid output error");
+    };
+    assert_invalid_spatial(err, "conv2d_zeros", "output");
 }
 
 #[test]

@@ -25,7 +25,11 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    pub fn new(eps: E) -> Result<Self> {
+    pub fn new() -> Result<Self> {
+        Self::with_eps(E::from_f64(1e-5))
+    }
+
+    pub fn with_eps(eps: E) -> Result<Self> {
         Ok(Self {
             weight: Parameter::new(Tensor::ones()?),
             bias: Parameter::new(Tensor::zeros()?),

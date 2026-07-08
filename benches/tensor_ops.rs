@@ -128,7 +128,7 @@ fn bench_softmax_family(c: &mut Criterion) {
 fn bench_layernorm(c: &mut Criterion) {
     let mut group = c.benchmark_group("layernorm");
 
-    let norm = LayerNorm::<256>::new(1e-5).unwrap();
+    let norm = LayerNorm::<256>::with_eps(1e-5).unwrap();
     let mut rng = SmallRng::seed_from_u64(5);
     let input = Tensor::<D2<Sym<Rows>, C<256>>>::from_vec_with_shape(
         uniform_f32(&mut rng, 64 * 256),

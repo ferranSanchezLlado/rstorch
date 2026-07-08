@@ -63,6 +63,70 @@ fn reductions_softmax_and_cross_entropy_work() {
 }
 
 #[test]
+fn random_constructors_full_reductions_item_and_d2_cat_stack_work() {
+    let mut rng_a = SmallRng::seed_from_u64(123);
+    let mut rng_b = SmallRng::seed_from_u64(123);
+    let rand_a = Tensor2D::<2, 2>::rand(&mut rng_a).unwrap();
+    let rand_b = Tensor2D::<2, 2>::rand(&mut rng_b).unwrap();
+    assert_eq!(rand_a.to_vec().unwrap(), rand_b.to_vec().unwrap());
+
+    let normal = Tensor1D::<128>::randn(&mut rng_a).unwrap();
+    assert_eq!(normal.shape().dims(), &[128]);
+    let dynamic = Tensor::<D2<AnyDim, C<2>>>::rand_with_shape(&mut rng_a, [3, 2]).unwrap();
+    assert_eq!(dynamic.shape().dims(), &[3, 2]);
+    assert_eq!(
+        Tensor1D::<4>::arange().unwrap().to_vec().unwrap(),
+        vec![0.0, 1.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        Tensor2D::<2, 2>::full(3.0).unwrap().to_vec().unwrap(),
+        vec![3.0; 4]
+    );
+
+    let values = Tensor2D::<2, 3>::from_vec(vec![1.0, -2.0, 3.0, 4.0, 5.0, -6.0]).unwrap();
+    assert_eq!(
+        values.abs().unwrap().to_vec().unwrap(),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
+    assert_eq!(values.min().unwrap().item().unwrap(), -6.0);
+    assert_eq!(values.max().unwrap().item().unwrap(), 5.0);
+    assert_close(values.mean().unwrap().item().unwrap(), 5.0 / 6.0, 1e-6);
+    assert_close(
+        values.var().unwrap().item().unwrap(),
+        86.833_336 / 6.0,
+        1e-5,
+    );
+    assert_eq!(values.var_last().unwrap().shape().dims(), &[2]);
+    assert_eq!(values.std_last().unwrap().shape().dims(), &[2]);
+
+    let lhs = Tensor2D::<2, 2>::from_vec(vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+    let rhs_rows = Tensor2D::<1, 2>::from_vec(vec![5.0, 6.0]).unwrap();
+    assert_eq!(
+        lhs.cat_leading::<C<1>, 3>(&rhs_rows)
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
+    let rhs_cols = Tensor2D::<2, 1>::from_vec(vec![7.0, 8.0]).unwrap();
+    assert_eq!(
+        lhs.cat_last::<C<1>, 3>(&rhs_cols)
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        vec![1.0, 2.0, 7.0, 3.0, 4.0, 8.0]
+    );
+    assert_eq!(lhs.stack(&lhs).unwrap().shape().dims(), &[2, 2, 2]);
+}
+
+#[test]
+fn f16_full_mean_uses_wide_accumulator() {
+    let input = Tensor1D::<4096, f16>::ones().unwrap();
+
+    assert_eq!(input.mean().unwrap().item().unwrap(), f16::ONE);
+}
+
+#[test]
 fn static_shape_operators_and_display_are_ergonomic() {
     let lhs = Tensor1D::<3>::from_vec(vec![1.0, 2.0, 3.0]).unwrap();
     let rhs = Tensor1D::<3>::from_vec(vec![4.0, 5.0, 6.0]).unwrap();
@@ -131,6 +195,19 @@ fn broadcasts_masks_and_indexing_have_gradients() {
     x.zero_grad();
 
     let mask = x.gt_scalar(3.0).unwrap();
+    let mask2 = x.lt_scalar(6.0).unwrap();
+    assert_eq!(
+        mask.and(&mask2).unwrap().to_vec().unwrap(),
+        vec![false, false, false, true, true, false]
+    );
+    assert_eq!(
+        mask.or(&mask2.not()).unwrap().to_vec().unwrap(),
+        vec![false, false, false, true, true, true]
+    );
+    assert_eq!(
+        mask.expand_leading::<2>().unwrap().shape().dims(),
+        &[2, 2, 3]
+    );
     assert_eq!(
         x.masked_fill(&mask, -1.0).unwrap().to_vec().unwrap(),
         vec![1.0, 2.0, 3.0, -1.0, -1.0, -1.0]

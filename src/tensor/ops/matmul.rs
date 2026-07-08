@@ -192,22 +192,28 @@ where
                     let grad_base = b * m * n;
                     for i in 0..m {
                         for kk in 0..k {
-                            let mut acc = E::ZERO;
+                            let mut acc = <E::Acc as DType>::ZERO;
                             for j in 0..n {
-                                acc +=
-                                    grad[grad_base + i * n + j] * rhs_values[rhs_base + kk * n + j];
+                                acc += E::Acc::from_f64(
+                                    (grad[grad_base + i * n + j]
+                                        * rhs_values[rhs_base + kk * n + j])
+                                        .to_f64(),
+                                );
                             }
-                            lhs_grad[lhs_base + i * k + kk] = acc;
+                            lhs_grad[lhs_base + i * k + kk] = E::from_f64(acc.to_f64());
                         }
                     }
                     for kk in 0..k {
                         for j in 0..n {
-                            let mut acc = E::ZERO;
+                            let mut acc = <E::Acc as DType>::ZERO;
                             for i in 0..m {
-                                acc +=
-                                    lhs_values[lhs_base + i * k + kk] * grad[grad_base + i * n + j];
+                                acc += E::Acc::from_f64(
+                                    (lhs_values[lhs_base + i * k + kk]
+                                        * grad[grad_base + i * n + j])
+                                        .to_f64(),
+                                );
                             }
-                            rhs_grad[rhs_base + kk * n + j] = acc;
+                            rhs_grad[rhs_base + kk * n + j] = E::from_f64(acc.to_f64());
                         }
                     }
                 }
@@ -271,11 +277,13 @@ fn bmm_values<E: FloatDType>(
         let out_base = b * m * n;
         for i in 0..m {
             for j in 0..n {
-                let mut acc = E::ZERO;
+                let mut acc = <E::Acc as DType>::ZERO;
                 for kk in 0..k {
-                    acc += lhs[lhs_base + i * k + kk] * rhs[rhs_base + kk * n + j];
+                    acc += E::Acc::from_f64(
+                        (lhs[lhs_base + i * k + kk] * rhs[rhs_base + kk * n + j]).to_f64(),
+                    );
                 }
-                out[out_base + i * n + j] = acc;
+                out[out_base + i * n + j] = E::from_f64(acc.to_f64());
             }
         }
     }

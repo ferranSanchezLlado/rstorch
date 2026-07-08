@@ -200,6 +200,7 @@ pub trait ShapeSpec: sealed::SealedShape + Send + Sync + 'static {
     fn validate(shape: &Shape) -> Result<()> {
         if shape.rank() != Self::RANK {
             return Err(ShapeError::RankMismatch {
+                op: "validate",
                 expected: Self::RANK,
                 found: shape.rank(),
             }

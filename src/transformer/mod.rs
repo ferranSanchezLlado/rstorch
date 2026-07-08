@@ -10,5 +10,5 @@ pub use data::{
     CausalLmBatch, CausalLmSample, PaddedCausalLmBatch, PaddedCausalLmCollator,
     TextSequenceDataset, text_sequence_dataset,
 };
-pub use model::{DecoderOnlyTransformer, TransformerBlock, TransformerConfig};
+pub use model::{DecoderOnlyTransformer, GenerateOpts, TransformerBlock, TransformerConfig};
 pub use tokenizer::{BpeTokenizer, CharTokenizer, Tokenizer};

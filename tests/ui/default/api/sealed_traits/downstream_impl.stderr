@@ -47,6 +47,14 @@ note: required by a bound in `rstorch::DType`
             rstorch::bf16
             f64
 
+error[E0046]: not all trait items implemented, missing: `Acc`
+ --> tests/ui/default/api/sealed_traits/downstream_impl.rs
+  |
+  | impl FloatDType for RogueDType {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `Acc` in implementation
+  |
+  = help: implement the missing item: `type Acc = /* Type */;`
+
 error[E0277]: the trait bound `RogueDType: dtype::sealed::SealedDType` is not satisfied
  --> tests/ui/default/api/sealed_traits/downstream_impl.rs
   |

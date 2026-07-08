@@ -16,6 +16,7 @@ pub struct Adam<E> {
     beta1: E,
     beta2: E,
     eps: E,
+    weight_decay: E,
     step: usize,
     beta1_pow: E,
     beta2_pow: E,
@@ -95,10 +96,18 @@ where
             beta1: E::from_f64(0.9),
             beta2: E::from_f64(0.999),
             eps: E::from_f64(1e-8),
+            weight_decay: E::ZERO,
             step: 0,
             beta1_pow: E::ONE,
             beta2_pow: E::ONE,
             state: HashMap::new(),
+        }
+    }
+
+    pub fn with_weight_decay(lr: E, weight_decay: E) -> Self {
+        Self {
+            weight_decay,
+            ..Self::new(lr)
         }
     }
 
@@ -108,6 +117,10 @@ where
 
     pub fn set_lr(&mut self, lr: E) {
         self.lr = lr;
+    }
+
+    pub fn weight_decay(&self) -> E {
+        self.weight_decay
     }
 }
 
@@ -125,7 +138,7 @@ where
             beta1: self.beta1,
             beta2: self.beta2,
             eps: self.eps,
-            weight_decay: E::ZERO,
+            weight_decay: self.weight_decay,
         };
         adam_step(
             &config,
@@ -155,6 +168,7 @@ where
                 scalar_record("beta1", self.beta1),
                 scalar_record("beta2", self.beta2),
                 scalar_record("eps", self.eps),
+                scalar_record("weight_decay", self.weight_decay),
             ],
             adam_parameter_states::<E, B, M>(&self.state, module)?,
         )
@@ -169,6 +183,9 @@ where
         let beta1 = state.hyper_value("beta1")?;
         let beta2 = state.hyper_value("beta2")?;
         let eps = state.hyper_value("eps")?;
+        let weight_decay = state
+            .optional_hyper_value("weight_decay")?
+            .unwrap_or(E::ZERO);
         let step = state.step();
         let moments = load_adam_parameter_states::<E, B, M>(module, state)?;
 
@@ -176,6 +193,7 @@ where
         self.beta1 = beta1;
         self.beta2 = beta2;
         self.eps = eps;
+        self.weight_decay = weight_decay;
         self.step = step;
         self.beta1_pow = pow(beta1, step);
         self.beta2_pow = pow(beta2, step);

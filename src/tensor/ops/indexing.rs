@@ -21,6 +21,7 @@ where
         let cols = dims[1];
         if targets.len() != rows {
             return Err(ShapeError::LengthMismatch {
+                op: "correct_count",
                 expected: rows,
                 found: targets.len(),
             }
@@ -82,6 +83,7 @@ where
         ensure_nonzero_dim("cross_entropy", 1, cols)?;
         if targets.len() != rows {
             return Err(ShapeError::LengthMismatch {
+                op: "cross_entropy",
                 expected: rows,
                 found: targets.len(),
             }
@@ -102,6 +104,13 @@ where
         let input = self.to_vec()?;
         let softmax = stable_row_softmax(&input, rows, cols);
         let log_probs = stable_row_log_softmax(&input, rows, cols);
+        let smoothing = E::from_f64(opts.label_smoothing);
+        if smoothing < E::ZERO || smoothing >= E::ONE {
+            return Err(Error::InvalidInput {
+                op: "cross_entropy",
+                reason: "label_smoothing must be in [0, 1)",
+            });
+        }
         let valid_count = targets
             .iter()
             .filter(|&&target| Some(target) != opts.ignore_index)
@@ -110,17 +119,25 @@ where
             .iter()
             .enumerate()
             .filter(|&(_, &target)| Some(target) != opts.ignore_index)
-            .fold(E::ZERO, |acc, (row, &target)| {
-                acc - log_probs[row * cols + target]
+            .fold(<E::Acc as DType>::ZERO, |acc, (row, &target)| {
+                let row_start = row * cols;
+                let nll = E::Acc::from_f64((-log_probs[row_start + target]).to_f64());
+                let smooth = -(0..cols)
+                    .map(|col| E::Acc::from_f64(log_probs[row_start + col].to_f64()))
+                    .fold(<E::Acc as DType>::ZERO, |acc, value| acc + value)
+                    / E::Acc::from_usize(cols);
+                acc + E::Acc::from_f64((E::ONE - smoothing).to_f64()) * nll
+                    + E::Acc::from_f64(smoothing.to_f64()) * smooth
             });
-        let scale = match opts.reduction {
-            crate::nn::Reduction::Mean => E::from_usize(valid_count),
-            crate::nn::Reduction::Sum => E::ONE,
+        let scale_acc = match opts.reduction {
+            crate::nn::Reduction::Mean => E::Acc::from_usize(valid_count),
+            crate::nn::Reduction::Sum => <E::Acc as DType>::ONE,
         };
+        let scale = E::from_f64(scale_acc.to_f64());
         let loss = if valid_count == 0 {
             E::ZERO
         } else {
-            loss_sum / scale
+            E::from_f64((loss_sum / scale_acc).to_f64())
         };
         let raw = RawTensor::from_vec_on(self.device().clone(), vec![loss], Shape::known([]))?;
         let input_raw = self.raw().clone();
@@ -135,15 +152,11 @@ where
                 if Some(targets[row]) == opts.ignore_index {
                     continue;
                 }
+                let smooth_target = smoothing / E::from_usize(cols);
                 for col in 0..cols {
-                    values[row * cols + col] = softmax[row * cols + col];
+                    values[row * cols + col] = softmax[row * cols + col] - smooth_target;
                 }
-            }
-            for row in 0..rows {
-                if Some(targets[row]) == opts.ignore_index {
-                    continue;
-                }
-                values[row * cols + targets[row]] -= E::ONE;
+                values[row * cols + targets[row]] -= E::ONE - smoothing;
             }
             for value in &mut values {
                 *value = *value * seed / scale;
@@ -237,14 +250,15 @@ fn stable_row_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize) -> 
     for row in 0..rows {
         let start = row * cols;
         let max = row_max(&values[start..start + cols]);
-        let mut sum = E::ZERO;
+        let mut sum = <E::Acc as DType>::ZERO;
         for col in 0..cols {
-            let exp = (values[start + col] - max).exp();
+            let exp = E::Acc::from_f64((values[start + col] - max).to_f64()).exp();
             sum += exp;
-            out[start + col] = exp;
+            out[start + col] = E::from_f64(exp.to_f64());
         }
         for col in 0..cols {
-            out[start + col] /= sum;
+            out[start + col] =
+                E::from_f64((E::Acc::from_f64(out[start + col].to_f64()) / sum).to_f64());
         }
     }
     out
@@ -256,11 +270,12 @@ fn stable_row_log_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize)
         let start = row * cols;
         let max = row_max(&values[start..start + cols]);
         let sum = (0..cols)
-            .map(|col| (values[start + col] - max).exp())
-            .fold(E::ZERO, |acc, value| acc + value);
-        let logsumexp = max + sum.ln();
+            .map(|col| E::Acc::from_f64((values[start + col] - max).to_f64()).exp())
+            .fold(<E::Acc as DType>::ZERO, |acc, value| acc + value);
+        let logsumexp = E::Acc::from_f64(max.to_f64()) + sum.ln();
         for col in 0..cols {
-            out[start + col] = values[start + col] - logsumexp;
+            out[start + col] =
+                E::from_f64((E::Acc::from_f64(values[start + col].to_f64()) - logsumexp).to_f64());
         }
     }
     out

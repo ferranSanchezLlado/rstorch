@@ -5,10 +5,12 @@ use std::fmt;
 #[non_exhaustive]
 pub enum ShapeError {
     LengthMismatch {
+        op: &'static str,
         expected: usize,
         found: usize,
     },
     RankMismatch {
+        op: &'static str,
         expected: usize,
         found: usize,
     },
@@ -57,11 +59,22 @@ pub enum ShapeError {
 impl fmt::Display for ShapeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LengthMismatch { expected, found } => {
-                write!(f, "length mismatch: expected {expected}, found {found}")
+            Self::LengthMismatch {
+                op,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "{op} length mismatch: expected {expected}, found {found}"
+                )
             }
-            Self::RankMismatch { expected, found } => {
-                write!(f, "rank mismatch: expected {expected}, found {found}")
+            Self::RankMismatch {
+                op,
+                expected,
+                found,
+            } => {
+                write!(f, "{op} rank mismatch: expected {expected}, found {found}")
             }
             Self::DimMismatch {
                 op,
