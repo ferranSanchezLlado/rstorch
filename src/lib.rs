@@ -81,11 +81,12 @@ pub use data::{
 pub use dtype::{DType, DTypeId, FloatDType, bf16, f16};
 pub use error::{DTypeError, DataError, DeviceError, Error, PersistenceError, Result, ShapeError};
 pub use nn::{
-    AvgPool2d, Conv2d, CrossEntropyOpts, Dropout, Embedding, Flatten, Gelu, HasParameters, Layer,
-    LayerNorm, Linear, MaxPool2d, Module, MultiHeadAttention, Parameter, ParameterId,
-    PositionalEmbedding, Reduction, Relu, RngSource, Sequential, Sigmoid, Tanh, TrainContext,
-    TrainingMode, bce_with_logits_loss, causal_attention_mask, causal_attention_mask_for_backend,
-    huber_loss, l1_loss, mse_loss, scaled_dot_product_attention,
+    AvgPool2d, BatchNorm2d, Buffer, BufferRef, Conv2d, CrossEntropyOpts, Dropout, Embedding,
+    Flatten, Gelu, HasParameters, Layer, LayerNorm, Linear, MaxPool2d, Module, MultiHeadAttention,
+    Parameter, ParameterId, ParameterRef, ParameterRefMut, PositionalEmbedding, RMSNorm, Reduction,
+    Relu, RngSource, Sequential, Sigmoid, Tanh, TrainContext, TrainingMode, bce_with_logits_loss,
+    causal_attention_mask, causal_attention_mask_for_backend, huber_loss, l1_loss, mse_loss,
+    scaled_dot_product_attention,
 };
 pub use optim::{
     Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr, clip_grad_norm,
@@ -135,12 +136,12 @@ pub mod prelude {
     pub use crate::dtype::{DType, FloatDType, bf16, f16};
     pub use crate::error::Result;
     pub use crate::nn::{
-        AvgPool2d, Conv2d, CrossEntropyOpts, Dropout, Embedding, Flatten, Gelu, HasParameters,
-        Layer, LayerNorm, Linear, MaxPool2d, Module, MultiHeadAttention, Parameter,
-        PositionalEmbedding, Reduction, Relu, RngSource, Sequential, Sigmoid, Tanh, TrainContext,
-        TrainingMode, bce_with_logits_loss, causal_attention_mask,
-        causal_attention_mask_for_backend, huber_loss, l1_loss, mse_loss,
-        scaled_dot_product_attention,
+        AvgPool2d, BatchNorm2d, Buffer, BufferRef, Conv2d, CrossEntropyOpts, Dropout, Embedding,
+        Flatten, Gelu, HasParameters, Layer, LayerNorm, Linear, MaxPool2d, Module,
+        MultiHeadAttention, Parameter, ParameterRef, ParameterRefMut, PositionalEmbedding, RMSNorm,
+        Reduction, Relu, RngSource, Sequential, Sigmoid, Tanh, TrainContext, TrainingMode,
+        bce_with_logits_loss, causal_attention_mask, causal_attention_mask_for_backend, huber_loss,
+        l1_loss, mse_loss, scaled_dot_product_attention,
     };
     pub use crate::optim::{
         Adam, AdamW, ConstantLr, CosineLr, LrSchedule, Optimizer, Sgd, StepLr, WarmupLr,

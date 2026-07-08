@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub mod mnist;
+mod sha256;
 pub mod tiny_shakespeare;
 
 pub use mnist::{Mnist, MnistCollate, MnistImageBatch, MnistImageCollate, MnistSample, MnistSplit};
@@ -19,6 +20,8 @@ pub struct DatasetResource {
     pub name: &'static str,
     pub url: &'static str,
     pub file_name: &'static str,
+    pub sha256: Option<&'static str>,
+    pub max_bytes: Option<u64>,
 }
 
 impl DatasetHub {
@@ -114,7 +117,23 @@ impl DatasetHub {
         let tmp = path.with_extension("tmp");
 
         let bytes = fetch(resource)?;
-        fs::write(&tmp, bytes).map_err(|source| DataError::Io { source })?;
+        if let Some(max) = resource.max_bytes
+            && bytes.len() as u64 > max
+        {
+            return Err(DataError::DownloadSizeCap { max_bytes: max }.into());
+        }
+        fs::write(&tmp, &bytes).map_err(|source| DataError::Io { source })?;
+        if let Some(expected) = resource.sha256 {
+            let found = sha256::sha256_hex(&bytes);
+            if found != expected {
+                let _ = fs::remove_file(&tmp);
+                return Err(DataError::ChecksumMismatch {
+                    expected: expected.to_owned(),
+                    found,
+                }
+                .into());
+            }
+        }
         fs::rename(&tmp, &path).map_err(|source| DataError::Io { source })?;
         Ok(path)
     }
@@ -147,6 +166,8 @@ mod tests {
             name: "test",
             url: "https://example.invalid/test",
             file_name: "test.bin",
+            sha256: None,
+            max_bytes: None,
         };
 
         let path = hub
@@ -154,6 +175,42 @@ mod tests {
             .unwrap();
 
         assert_eq!(fs::read(path).unwrap(), vec![1, 2, 3]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn checksum_mismatch_rejects_wrong_bytes() {
+        let root = std::env::temp_dir().join(format!("rstorch-hub-sha-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let hub = DatasetHub::new(&root);
+        let resource = DatasetResource {
+            name: "test",
+            url: "https://example.invalid/test",
+            file_name: "sha.bin",
+            sha256: Some("0000000000000000000000000000000000000000000000000000000000000000"),
+            max_bytes: None,
+        };
+        let result = hub.download_with("fixture", &resource, |_| Ok(vec![1, 2, 3]));
+        assert!(result.is_err(), "download must fail on checksum mismatch");
+        // tmp file must be cleaned up
+        assert!(!root.join("fixture/sha.bin.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn size_cap_rejects_large_payload() {
+        let root = std::env::temp_dir().join(format!("rstorch-hub-cap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let hub = DatasetHub::new(&root);
+        let resource = DatasetResource {
+            name: "test",
+            url: "https://example.invalid/test",
+            file_name: "cap.bin",
+            sha256: None,
+            max_bytes: Some(2),
+        };
+        let result = hub.download_with("fixture", &resource, |_| Ok(vec![1, 2, 3]));
+        assert!(result.is_err());
         let _ = fs::remove_dir_all(root);
     }
 }

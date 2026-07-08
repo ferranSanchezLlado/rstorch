@@ -1,7 +1,7 @@
 use crate::backend::{Backend, Cpu};
 use crate::dtype::{DTypeId, FloatDType};
 use crate::error::Result;
-use crate::shape::ShapeSpec;
+use crate::shape::{ShapeSpec, StaticShape};
 use crate::tensor::Tensor;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -127,6 +127,108 @@ where
     }
 }
 
+/// Non-trainable buffer with interior mutability (for running statistics).
+pub struct Buffer<S, E = f32, B = Cpu>
+where
+    S: ShapeSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    tensor: std::sync::Mutex<Tensor<S, E, B>>,
+}
+
+impl<S, E, B> Buffer<S, E, B>
+where
+    S: ShapeSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    pub fn new(tensor: Tensor<S, E, B>) -> Self {
+        tensor.set_requires_grad(false);
+        Self {
+            tensor: std::sync::Mutex::new(tensor),
+        }
+    }
+
+    pub fn tensor(&self) -> std::sync::MutexGuard<'_, Tensor<S, E, B>> {
+        self.tensor.lock().expect("buffer mutex poisoned")
+    }
+
+    pub(crate) fn as_ref(&self) -> BufferRef<'_, E, B>
+    where
+        S: StaticShape,
+    {
+        BufferRef { inner: self }
+    }
+}
+
+trait BufferAccess<E, B>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn dtype(&self) -> DTypeId;
+    fn dims(&self) -> Vec<usize>;
+    fn data(&self) -> Result<Vec<E>>;
+    fn set_data(&self, data: Vec<E>) -> Result<()>;
+}
+
+impl<S, E, B> BufferAccess<E, B> for Buffer<S, E, B>
+where
+    S: StaticShape,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    fn dtype(&self) -> DTypeId {
+        E::ID
+    }
+
+    fn dims(&self) -> Vec<usize> {
+        self.tensor().shape().dims().to_vec()
+    }
+
+    fn data(&self) -> Result<Vec<E>> {
+        self.tensor().to_vec()
+    }
+
+    fn set_data(&self, data: Vec<E>) -> Result<()> {
+        let mut guard = self.tensor.lock().expect("buffer mutex poisoned");
+        guard.replace_data(data)?;
+        guard.set_requires_grad(false);
+        Ok(())
+    }
+}
+
+pub struct BufferRef<'a, E, B>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    inner: &'a dyn BufferAccess<E, B>,
+}
+
+impl<E, B> BufferRef<'_, E, B>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    pub fn dtype(&self) -> DTypeId {
+        self.inner.dtype()
+    }
+
+    pub fn dims(&self) -> Vec<usize> {
+        self.inner.dims()
+    }
+
+    pub fn data(&self) -> Result<Vec<E>> {
+        self.inner.data()
+    }
+
+    pub fn set_data(&self, data: Vec<E>) -> Result<()> {
+        self.inner.set_data(data)
+    }
+}
+
 pub trait Layer<Input: ?Sized> {
     type Output;
 }
@@ -159,6 +261,15 @@ where
     fn parameters_mut<'a>(&'a mut self, out: &mut Vec<ParameterRefMut<'a, E, B>>) {
         self.visit_parameters_mut("", &mut |_, param| out.push(param));
     }
+
+    fn visit_buffers<'a>(&'a self, prefix: &str, visit: &mut dyn FnMut(&str, BufferRef<'a, E, B>)) {
+        let _ = prefix;
+        let _ = &mut *visit;
+    }
+
+    fn buffers<'a>(&'a self, out: &mut Vec<BufferRef<'a, E, B>>) {
+        self.visit_buffers("", &mut |_, buf| out.push(buf));
+    }
 }
 
 pub(crate) fn parameter_path(prefix: &str, segment: &str) -> String {
@@ -170,6 +281,7 @@ pub(crate) fn parameter_path(prefix: &str, segment: &str) -> String {
 }
 
 macro_rules! has_parameters {
+    // ── NEW arm: includes buffers section ────────────────────────────────────
     (
         impl[$($generics:tt)*] $ty:ty
         where { $($where_clause:tt)* }
@@ -177,6 +289,7 @@ macro_rules! has_parameters {
             params { $($params:tt)* }
             children { $($children:tt)* }
             transparent_children { $($transparent:tt)* }
+            buffers { $($buffers:tt)* }
         }
     ) => {
         impl<$($generics)*> $crate::nn::HasParameters<E, B> for $ty
@@ -207,6 +320,40 @@ macro_rules! has_parameters {
                 $crate::nn::has_parameters!(@visit_params_mut self prefix visit; $($params)*);
                 $crate::nn::has_parameters!(@visit_children_mut self prefix visit; $($children)*);
                 $crate::nn::has_parameters!(@visit_transparent_children_mut self prefix visit; $($transparent)*);
+            }
+
+            fn visit_buffers<'a>(
+                &'a self,
+                prefix: &str,
+                visit: &mut dyn FnMut(&str, $crate::nn::BufferRef<'a, E, B>),
+            ) {
+                let _ = prefix;
+                let _ = &mut *visit;
+                $crate::nn::has_parameters!(@visit_buffers self prefix visit; $($buffers)*);
+                $crate::nn::has_parameters!(@visit_children_buffers self prefix visit; $($children)*);
+                $crate::nn::has_parameters!(@visit_transparent_children_buffers self prefix visit; $($transparent)*);
+            }
+        }
+    };
+
+    // ── OLD arm: backward-compat — delegates to new arm with empty buffers ──
+    (
+        impl[$($generics:tt)*] $ty:ty
+        where { $($where_clause:tt)* }
+        {
+            params { $($params:tt)* }
+            children { $($children:tt)* }
+            transparent_children { $($transparent:tt)* }
+        }
+    ) => {
+        $crate::nn::has_parameters! {
+            impl[$($generics)*] $ty
+            where { $($where_clause)* }
+            {
+                params { $($params)* }
+                children { $($children)* }
+                transparent_children { $($transparent)* }
+                buffers { }
             }
         }
     };
@@ -359,6 +506,65 @@ macro_rules! has_parameters {
 
     (@visit_transparent_child_mut $self:ident $prefix:ident $visit:ident $field:ident) => {
         $self.$field.visit_parameters_mut($prefix, $visit);
+    };
+
+    // ── Buffer helper rules ──────────────────────────────────────────────────
+    (@visit_buffers $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_buffers $self:ident $prefix:ident $visit:ident; $field:ident, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_buffer $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_buffers $self $prefix $visit; $($rest)*);
+    };
+    (@visit_buffers $self:ident $prefix:ident $visit:ident; $field:ident) => {
+        $crate::nn::has_parameters!(@visit_buffer $self $prefix $visit $field);
+    };
+
+    (@visit_buffer $self:ident $prefix:ident $visit:ident $field:ident) => {
+        $visit(
+            &$crate::nn::parameter_path($prefix, stringify!($field)),
+            $self.$field.as_ref(),
+        );
+    };
+
+    (@visit_children_buffers $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_children_buffers $self:ident $prefix:ident $visit:ident; $field:ident [], $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_child_buffers $self $prefix $visit $field []);
+        $crate::nn::has_parameters!(@visit_children_buffers $self $prefix $visit; $($rest)*);
+    };
+    (@visit_children_buffers $self:ident $prefix:ident $visit:ident; $field:ident []) => {
+        $crate::nn::has_parameters!(@visit_child_buffers $self $prefix $visit $field []);
+    };
+    (@visit_children_buffers $self:ident $prefix:ident $visit:ident; $field:tt, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_child_buffers $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_children_buffers $self $prefix $visit; $($rest)*);
+    };
+    (@visit_children_buffers $self:ident $prefix:ident $visit:ident; $field:tt) => {
+        $crate::nn::has_parameters!(@visit_child_buffers $self $prefix $visit $field);
+    };
+
+    (@visit_child_buffers $self:ident $prefix:ident $visit:ident $field:ident []) => {
+        for (idx, child) in $self.$field.iter().enumerate() {
+            let segment = format!("{}.{idx}", stringify!($field));
+            let path = $crate::nn::parameter_path($prefix, &segment);
+            child.visit_buffers(&path, $visit);
+        }
+    };
+
+    (@visit_child_buffers $self:ident $prefix:ident $visit:ident $field:tt) => {
+        $self.$field
+            .visit_buffers(&$crate::nn::parameter_path($prefix, stringify!($field)), $visit);
+    };
+
+    (@visit_transparent_children_buffers $self:ident $prefix:ident $visit:ident;) => {};
+    (@visit_transparent_children_buffers $self:ident $prefix:ident $visit:ident; $field:ident, $($rest:tt)*) => {
+        $crate::nn::has_parameters!(@visit_transparent_child_buffers $self $prefix $visit $field);
+        $crate::nn::has_parameters!(@visit_transparent_children_buffers $self $prefix $visit; $($rest)*);
+    };
+    (@visit_transparent_children_buffers $self:ident $prefix:ident $visit:ident; $field:ident) => {
+        $crate::nn::has_parameters!(@visit_transparent_child_buffers $self $prefix $visit $field);
+    };
+
+    (@visit_transparent_child_buffers $self:ident $prefix:ident $visit:ident $field:ident) => {
+        $self.$field.visit_buffers($prefix, $visit);
     };
 }
 

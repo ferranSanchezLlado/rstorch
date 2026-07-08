@@ -1,6 +1,8 @@
 use rstorch::prelude::*;
+use rstorch::shape::AnyDim;
 use rstorch::{
-    AdamW, Error, HasParameters, Optimizer, PersistenceError, StateDict, Tensor, TensorRecord,
+    AdamW, BatchNorm2d, Error, HasParameters, Optimizer, PersistenceError, StateDict, Tensor,
+    TensorRecord,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -328,6 +330,72 @@ fn malformed_state_files_return_structured_errors() {
         err,
         Error::Persistence(PersistenceError::UnexpectedTrailingBytes)
     ));
+}
+
+#[test]
+fn buffer_state_dict_round_trips_and_optimizer_skips_buffers() {
+    let mut bn = BatchNorm2d::<2>::new().unwrap();
+
+    // Train pass updates running_mean / running_var away from their initial values
+    let input = Tensor::<D4<Sym<Batch>, C<2>, AnyDim, AnyDim>>::from_vec_with_shape(
+        vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        [2, 2, 1, 2],
+    )
+    .unwrap();
+    let mut train_ctx = TrainContext::training(0);
+    bn.forward(&input, &mut train_ctx).unwrap();
+
+    // Collect buffer names from the state dict
+    let state = StateDict::from_module(&bn).unwrap();
+    let record_names: Vec<_> = state.records().iter().map(TensorRecord::name).collect();
+    assert!(
+        record_names.contains(&"running_mean"),
+        "running_mean must appear in state dict; got {record_names:?}"
+    );
+    assert!(
+        record_names.contains(&"running_var"),
+        "running_var must appear in state dict; got {record_names:?}"
+    );
+
+    // Load into a fresh module and verify eval output matches
+    let mut restored = BatchNorm2d::<2>::new().unwrap();
+    state.load_module(&mut restored).unwrap();
+
+    let mut eval_ctx = TrainContext::eval();
+    let out_orig = bn.forward(&input, &mut eval_ctx).unwrap().to_vec().unwrap();
+    let out_restored = restored
+        .forward(&input, &mut eval_ctx)
+        .unwrap()
+        .to_vec()
+        .unwrap();
+    assert_eq!(
+        out_orig, out_restored,
+        "eval output must match after buffer round-trip"
+    );
+
+    // Optimizer must not see buffers — only weight and bias (2 parameters)
+    let mut params = Vec::new();
+    bn.parameters_mut(&mut params);
+    assert_eq!(
+        params.len(),
+        2,
+        "only weight and bias should be exposed to optimizer; buffers must be excluded"
+    );
+
+    // Name-mismatch: StateDict missing a buffer record → MissingTensor error
+    let mut records = state.into_records();
+    records.retain(|r| r.name() != "running_mean");
+    let err = StateDict::new(records)
+        .unwrap()
+        .load_module(&mut restored)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Persistence(PersistenceError::MissingTensor { .. })
+        ),
+        "missing buffer record must yield MissingTensor error"
+    );
 }
 
 fn round_trip_linear_state<E>()

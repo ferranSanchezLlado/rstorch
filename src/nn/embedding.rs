@@ -39,6 +39,16 @@ where
         Ok(Self::from_weight(Tensor::from_vec(values)?))
     }
 
+    pub fn normal(rng: &mut SmallRng, std: E) -> Result<Self> {
+        const { const_check::mul_fits(VOCAB, DIM, "embedding_normal", "VOCAB", "DIM") };
+
+        let std_f64 = std.to_f64();
+        let values = (0..VOCAB * DIM)
+            .map(|_| E::from_f64(rng.normal::<f64>() * std_f64))
+            .collect();
+        Ok(Self::from_weight(Tensor::from_vec(values)?))
+    }
+
     pub fn weight(&self) -> &Parameter<D2<C<VOCAB>, C<DIM>>, E, B> {
         &self.weight
     }
@@ -132,6 +142,18 @@ where
         const { const_check::mul_fits(SEQ, DIM, "positional_embedding_uniform", "SEQ", "DIM") };
 
         let values = (0..SEQ * DIM).map(|_| rng.uniform(low, high)).collect();
+        Ok(Self {
+            weight: Parameter::new(Tensor::from_vec(values)?),
+        })
+    }
+
+    pub fn normal(rng: &mut SmallRng, std: E) -> Result<Self> {
+        const { const_check::mul_fits(SEQ, DIM, "positional_embedding_normal", "SEQ", "DIM") };
+
+        let std_f64 = std.to_f64();
+        let values = (0..SEQ * DIM)
+            .map(|_| E::from_f64(rng.normal::<f64>() * std_f64))
+            .collect();
         Ok(Self {
             weight: Parameter::new(Tensor::from_vec(values)?),
         })

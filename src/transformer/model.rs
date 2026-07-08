@@ -11,7 +11,7 @@ use crate::nn::{
 use crate::no_grad;
 use crate::random::SmallRng;
 use crate::shape::{AnyDim, C, D2, D3, Sym};
-use crate::tensor::{Scalar, Tensor};
+use crate::tensor::{Mask, Scalar, Tensor};
 use crate::transformer::Tokenizer;
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +97,19 @@ where
     ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>> {
         let attn_input = layer_norm_3d(&self.norm1, input)?;
         let attn = self.attention.forward_causal(&attn_input)?;
+        let hidden = input.add(&attn)?;
+        let ff_input = layer_norm_3d(&self.norm2, &hidden)?;
+        let ff = feed_forward_3d(&self.fc1, &self.fc2, &ff_input)?;
+        hidden.add(&ff)
+    }
+
+    pub fn forward_padded(
+        &self,
+        input: &Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>,
+        padding_mask: Option<&Mask<D2<AnyDim, C<SEQ>>, B>>,
+    ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>> {
+        let attn_input = layer_norm_3d(&self.norm1, input)?;
+        let attn = self.attention.forward_padded(&attn_input, padding_mask)?;
         let hidden = input.add(&attn)?;
         let ff_input = layer_norm_3d(&self.norm2, &hidden)?;
         let ff = feed_forward_3d(&self.fc1, &self.fc2, &ff_input)?;
@@ -211,7 +224,6 @@ where
 
     pub fn with_config(rng: &mut SmallRng, config: TransformerConfig<E>) -> Result<Self> {
         ensure_head_shape::<EMBED, HEADS, HEAD_DIM>()?;
-        let emb_limit = config.init_std;
         let mut blocks = Vec::with_capacity(LAYERS);
         for _ in 0..LAYERS {
             blocks.push(TransformerBlock::with_config(rng, config)?);
@@ -222,8 +234,8 @@ where
             Err(_) => unreachable!("constructed exactly LAYERS transformer blocks"),
         };
         Ok(Self {
-            token_embedding: Embedding::uniform(rng, -emb_limit, emb_limit)?,
-            position_embedding: PositionalEmbedding::uniform(rng, -emb_limit, emb_limit)?,
+            token_embedding: Embedding::normal(rng, config.init_std)?,
+            position_embedding: PositionalEmbedding::normal(rng, config.init_std)?,
             blocks,
             final_norm: LayerNorm::with_eps(config.norm_eps)?,
             lm_head: Linear::xavier_uniform(rng)?,
@@ -291,6 +303,43 @@ where
             .reshape_with_shape::<D2<AnyDim, C<VOCAB>>>([input_ids.len() * SEQ, VOCAB])?
             .cross_entropy_with(
                 &targets,
+                CrossEntropyOpts {
+                    reduction: Reduction::Mean,
+                    ignore_index: Some(ignore_index),
+                    label_smoothing: 0.0,
+                },
+            )
+    }
+
+    pub fn forward_padded(
+        &self,
+        input_ids: &[[usize; SEQ]],
+        padding_mask: Option<&Mask<D2<AnyDim, C<SEQ>>, B>>,
+    ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<VOCAB>>, E, B>> {
+        let batch = input_ids.len();
+        let token = self.token_embedding.forward(input_ids)?;
+        let pos = self.position_embedding.forward(batch)?;
+        let mut hidden = token.add(&pos)?;
+        for block in &self.blocks {
+            hidden = block.forward_padded(&hidden, padding_mask)?;
+        }
+        let hidden = layer_norm_3d(&self.final_norm, &hidden)?;
+        project_logits_3d(&self.lm_head, &hidden)
+    }
+
+    pub fn loss_padded(
+        &self,
+        input_ids: &[[usize; SEQ]],
+        targets: &[[usize; SEQ]],
+        padding_mask: Option<&Mask<D2<AnyDim, C<SEQ>>, B>>,
+        ignore_index: usize,
+    ) -> Result<Scalar<E, B>> {
+        let logits = self.forward_padded(input_ids, padding_mask)?;
+        let targets_flat: Vec<_> = targets.iter().flat_map(|row| row.iter().copied()).collect();
+        logits
+            .reshape_with_shape::<D2<AnyDim, C<VOCAB>>>([input_ids.len() * SEQ, VOCAB])?
+            .cross_entropy_with(
+                &targets_flat,
                 CrossEntropyOpts {
                     reduction: Reduction::Mean,
                     ignore_index: Some(ignore_index),

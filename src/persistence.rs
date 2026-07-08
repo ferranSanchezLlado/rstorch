@@ -209,6 +209,34 @@ impl StateDict {
         if let Some(err) = err {
             return Err(err);
         }
+        module.visit_buffers("", &mut |name, buf| {
+            if err.is_some() {
+                return;
+            }
+            if !seen.insert(name.to_owned()) {
+                err = Some(
+                    PersistenceError::DuplicateTensor {
+                        name: name.to_owned(),
+                    }
+                    .into(),
+                );
+                return;
+            }
+            let data = match buf.data() {
+                Ok(data) => data,
+                Err(source) => {
+                    err = Some(source);
+                    return;
+                }
+            };
+            match TensorRecord::from_values(name, buf.dims(), &data) {
+                Ok(record) => records.push(record),
+                Err(source) => err = Some(source),
+            }
+        });
+        if let Some(err) = err {
+            return Err(err);
+        }
         Ok(Self { records })
     }
 
@@ -232,19 +260,26 @@ impl StateDict {
     {
         validate_unique_tensor_names(&self.records)?;
 
-        let mut params = Vec::new();
-        module.visit_parameters_mut("", &mut |name, param| {
-            params.push(NamedParameterMut {
-                name: name.to_owned(),
-                dtype: param.dtype(),
-                dims: param.dims(),
-                param,
-            });
+        // Collect metadata only (no stored refs) so param and buffer passes don't
+        // produce overlapping mutable/immutable borrows of `module`.
+        let mut param_metas: Vec<(String, DTypeId, Vec<usize>)> = Vec::new();
+        module.visit_parameters("", &mut |name, param| {
+            param_metas.push((name.to_owned(), param.dtype(), param.dims()));
         });
-        validate_unique_parameter_names(params.iter().map(|param| param.name.as_str()))?;
+        validate_unique_parameter_names(param_metas.iter().map(|(n, _, _)| n.as_str()))?;
+
+        let mut buf_metas: Vec<(String, DTypeId, Vec<usize>)> = Vec::new();
+        module.visit_buffers("", &mut |name, buf| {
+            buf_metas.push((name.to_owned(), buf.dtype(), buf.dims()));
+        });
+        validate_unique_parameter_names(buf_metas.iter().map(|(n, _, _)| n.as_str()))?;
 
         let records = self.record_map()?;
-        let expected: HashSet<_> = params.iter().map(|param| param.name.as_str()).collect();
+        let expected: HashSet<_> = param_metas
+            .iter()
+            .map(|(n, _, _)| n.as_str())
+            .chain(buf_metas.iter().map(|(n, _, _)| n.as_str()))
+            .collect();
         for record in &self.records {
             if !expected.contains(record.name.as_str()) {
                 return Err(PersistenceError::UnexpectedTensor {
@@ -254,22 +289,60 @@ impl StateDict {
             }
         }
 
-        for param in &params {
-            let Some(record) = records.get(param.name.as_str()) else {
-                return Err(PersistenceError::MissingTensor {
-                    name: param.name.clone(),
-                }
-                .into());
+        for (name, dtype, dims) in &param_metas {
+            let Some(record) = records.get(name.as_str()) else {
+                return Err(PersistenceError::MissingTensor { name: name.clone() }.into());
             };
-            validate_record_matches(param.name.as_str(), param.dtype, &param.dims, record)?;
+            validate_record_matches(name.as_str(), *dtype, dims, record)?;
         }
 
-        for mut param in params {
-            let record = records
-                .get(param.name.as_str())
-                .expect("validated module state record disappeared");
-            param.param.set_data(record.to_values::<E>()?)?;
+        for (name, dtype, dims) in &buf_metas {
+            let Some(record) = records.get(name.as_str()) else {
+                return Err(PersistenceError::MissingTensor { name: name.clone() }.into());
+            };
+            validate_record_matches(name.as_str(), *dtype, dims, record)?;
         }
+
+        // Mutable pass to load params; enclosed in a block so the borrows are
+        // released before the immutable buffer pass below.
+        {
+            let mut params = Vec::new();
+            module.visit_parameters_mut("", &mut |name, param| {
+                params.push(NamedParameterMut {
+                    name: name.to_owned(),
+                    param,
+                });
+            });
+            for mut param in params {
+                let record = records
+                    .get(param.name.as_str())
+                    .expect("validated module state record disappeared");
+                param.param.set_data(record.to_values::<E>()?)?;
+            }
+        }
+
+        // Buffer set_data uses Mutex interior mutability, so only &self is needed.
+        let mut err: Option<crate::error::Error> = None;
+        module.visit_buffers("", &mut |name, buf| {
+            if err.is_some() {
+                return;
+            }
+            let record = records
+                .get(name)
+                .expect("validated module state record disappeared");
+            match record.to_values::<E>() {
+                Ok(values) => {
+                    if let Err(e) = buf.set_data(values) {
+                        err = Some(e);
+                    }
+                }
+                Err(e) => err = Some(e),
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+
         Ok(())
     }
 
@@ -900,8 +973,6 @@ where
     B: Backend<E>,
 {
     name: String,
-    dtype: DTypeId,
-    dims: Vec<usize>,
     param: ParameterRefMut<'a, E, B>,
 }
 

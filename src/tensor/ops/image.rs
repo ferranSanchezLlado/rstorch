@@ -749,6 +749,244 @@ where
 
 use crate::shape::D1;
 
+impl<Batch, Channels, Height, Width, E, B> Tensor<D4<Batch, Channels, Height, Width>, E, B>
+where
+    Batch: DimSpec,
+    Channels: DimSpec,
+    Height: DimSpec,
+    Width: DimSpec,
+    E: FloatDType,
+    B: Backend<E>,
+{
+    /// Batch normalization forward pass (training mode).
+    ///
+    /// Returns `(output, batch_mean, batch_var)`. The caller is responsible for
+    /// updating running statistics with the returned per-channel statistics.
+    pub fn batch_norm2d(
+        &self,
+        weight: &Tensor<D1<Channels>, E, B>,
+        bias: &Tensor<D1<Channels>, E, B>,
+        eps: f64,
+        _momentum: f64,
+    ) -> Result<(Self, Vec<E>, Vec<E>)> {
+        ensure_same_device::<E, B>(self.device(), weight.device(), "batch_norm2d")?;
+        ensure_same_device::<E, B>(self.device(), bias.device(), "batch_norm2d")?;
+        let dims = self.shape().dims();
+        let n = dims[0];
+        let ch = dims[1];
+        let h = dims[2];
+        let w = dims[3];
+        let items = n * h * w;
+
+        let input_values = self.to_vec()?;
+        let weight_values = weight.to_vec()?;
+        let bias_values = bias.to_vec()?;
+
+        let mut mean_f64 = vec![0f64; ch];
+        let mut var_f64 = vec![0f64; ch];
+        for c in 0..ch {
+            let mut sum = 0f64;
+            for ni in 0..n {
+                for hi in 0..h {
+                    for wi in 0..w {
+                        sum += input_values[nchw_index(ni, c, hi, wi, ch, h, w)].to_f64();
+                    }
+                }
+            }
+            mean_f64[c] = sum / items as f64;
+            let mut sq_sum = 0f64;
+            for ni in 0..n {
+                for hi in 0..h {
+                    for wi in 0..w {
+                        let diff = input_values[nchw_index(ni, c, hi, wi, ch, h, w)].to_f64()
+                            - mean_f64[c];
+                        sq_sum += diff * diff;
+                    }
+                }
+            }
+            var_f64[c] = sq_sum / items as f64;
+        }
+
+        let std_vals: Vec<f64> = var_f64.iter().map(|&v| (v + eps).sqrt()).collect();
+        let total = n * ch * h * w;
+        let mut x_hat = vec![0f64; total];
+        let mut out_values = Vec::with_capacity(total);
+        for ni in 0..n {
+            for c in 0..ch {
+                for hi in 0..h {
+                    for wi in 0..w {
+                        let idx = nchw_index(ni, c, hi, wi, ch, h, w);
+                        let xh = (input_values[idx].to_f64() - mean_f64[c]) / std_vals[c];
+                        x_hat[idx] = xh;
+                        out_values.push(E::from_f64(
+                            xh * weight_values[c].to_f64() + bias_values[c].to_f64(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let batch_mean: Vec<E> = mean_f64.iter().map(|&m| E::from_f64(m)).collect();
+        let batch_var: Vec<E> = var_f64.iter().map(|&v| E::from_f64(v)).collect();
+
+        let raw = RawTensor::from_vec_on(self.device().clone(), out_values, self.shape().clone())?;
+        let input_raw = self.raw().clone();
+        let weight_raw = weight.raw().clone();
+        let bias_raw = bias.raw().clone();
+        let weight_values_cap = weight_values;
+        let x_hat_cap = x_hat;
+        let std_vals_cap = std_vals;
+
+        let result = Self::autograd_output(
+            raw,
+            vec![
+                AnyTensor::from_shape(self),
+                AnyTensor::from_shape(weight),
+                AnyTensor::from_shape(bias),
+            ],
+            move |grad| {
+                let dout = grad.to_vec()?;
+                let mut dx = vec![E::ZERO; n * ch * h * w];
+                let mut dweight = vec![<E::Acc as DType>::ZERO; ch];
+                let mut dbias = vec![<E::Acc as DType>::ZERO; ch];
+                for c in 0..ch {
+                    let mut sum_dxhat = 0f64;
+                    let mut sum_dxhat_xhat = 0f64;
+                    for ni in 0..n {
+                        for hi in 0..h {
+                            for wi in 0..w {
+                                let idx = nchw_index(ni, c, hi, wi, ch, h, w);
+                                let dxh = dout[idx].to_f64() * weight_values_cap[c].to_f64();
+                                sum_dxhat += dxh;
+                                sum_dxhat_xhat += dxh * x_hat_cap[idx];
+                                dweight[c] += E::Acc::from_f64(dout[idx].to_f64() * x_hat_cap[idx]);
+                                dbias[c] += E::Acc::from_f64(dout[idx].to_f64());
+                            }
+                        }
+                    }
+                    let m = items as f64;
+                    let inv_std = 1.0 / std_vals_cap[c];
+                    for ni in 0..n {
+                        for hi in 0..h {
+                            for wi in 0..w {
+                                let idx = nchw_index(ni, c, hi, wi, ch, h, w);
+                                let dxh = dout[idx].to_f64() * weight_values_cap[c].to_f64();
+                                let val = inv_std
+                                    * (dxh - sum_dxhat / m - x_hat_cap[idx] * sum_dxhat_xhat / m);
+                                dx[idx] = E::from_f64(val);
+                            }
+                        }
+                    }
+                }
+                let dweight_f: Vec<E> = dweight
+                    .into_iter()
+                    .map(|v| E::from_f64(v.to_f64()))
+                    .collect();
+                let dbias_f: Vec<E> = dbias.into_iter().map(|v| E::from_f64(v.to_f64())).collect();
+                Ok(vec![
+                    Some(raw_from_vec_like(&input_raw, dx)?),
+                    Some(raw_from_vec_like(&weight_raw, dweight_f)?),
+                    Some(raw_from_vec_like(&bias_raw, dbias_f)?),
+                ])
+            },
+        )?;
+
+        Ok((result, batch_mean, batch_var))
+    }
+
+    /// Batch normalization inference pass using stored running statistics.
+    pub fn batch_norm2d_eval(
+        &self,
+        weight: &Tensor<D1<Channels>, E, B>,
+        bias: &Tensor<D1<Channels>, E, B>,
+        running_mean: &[E],
+        running_var: &[E],
+        eps: f64,
+    ) -> Result<Self> {
+        ensure_same_device::<E, B>(self.device(), weight.device(), "batch_norm2d_eval")?;
+        ensure_same_device::<E, B>(self.device(), bias.device(), "batch_norm2d_eval")?;
+        let dims = self.shape().dims();
+        let n = dims[0];
+        let ch = dims[1];
+        let h = dims[2];
+        let w = dims[3];
+
+        let input_values = self.to_vec()?;
+        let weight_values = weight.to_vec()?;
+        let bias_values = bias.to_vec()?;
+
+        let mut out_values = Vec::with_capacity(n * ch * h * w);
+        for ni in 0..n {
+            for c in 0..ch {
+                let std = (running_var[c].to_f64() + eps).sqrt();
+                for hi in 0..h {
+                    for wi in 0..w {
+                        let idx = nchw_index(ni, c, hi, wi, ch, h, w);
+                        let xh = (input_values[idx].to_f64() - running_mean[c].to_f64()) / std;
+                        out_values.push(E::from_f64(
+                            xh * weight_values[c].to_f64() + bias_values[c].to_f64(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let raw = RawTensor::from_vec_on(
+            self.device().clone(),
+            out_values,
+            Shape::known([n, ch, h, w]),
+        )?;
+        let input_raw = self.raw().clone();
+        let weight_raw = weight.raw().clone();
+        let bias_raw = bias.raw().clone();
+        let running_mean_cap: Vec<E> = running_mean.to_vec();
+        let running_var_cap: Vec<E> = running_var.to_vec();
+
+        Self::autograd_output(
+            raw,
+            vec![
+                AnyTensor::from_shape(self),
+                AnyTensor::from_shape(weight),
+                AnyTensor::from_shape(bias),
+            ],
+            move |grad| {
+                let dout = grad.to_vec()?;
+                let mut dx = vec![E::ZERO; n * ch * h * w];
+                let mut dweight = vec![<E::Acc as DType>::ZERO; ch];
+                let mut dbias = vec![<E::Acc as DType>::ZERO; ch];
+                for ni in 0..n {
+                    for c in 0..ch {
+                        let std = (running_var_cap[c].to_f64() + eps).sqrt();
+                        let inv_std = 1.0 / std;
+                        let xh_mean = running_mean_cap[c].to_f64();
+                        for hi in 0..h {
+                            for wi in 0..w {
+                                let idx = nchw_index(ni, c, hi, wi, ch, h, w);
+                                let xh = (input_values[idx].to_f64() - xh_mean) / std;
+                                dweight[c] += E::Acc::from_f64(dout[idx].to_f64() * xh);
+                                dbias[c] += E::Acc::from_f64(dout[idx].to_f64());
+                                dx[idx] = E::from_f64(
+                                    dout[idx].to_f64() * weight_values[c].to_f64() * inv_std,
+                                );
+                            }
+                        }
+                    }
+                }
+                let dweight_f: Vec<E> = dweight
+                    .into_iter()
+                    .map(|v| E::from_f64(v.to_f64()))
+                    .collect();
+                let dbias_f: Vec<E> = dbias.into_iter().map(|v| E::from_f64(v.to_f64())).collect();
+                Ok(vec![
+                    Some(raw_from_vec_like(&input_raw, dx)?),
+                    Some(raw_from_vec_like(&weight_raw, dweight_f)?),
+                    Some(raw_from_vec_like(&bias_raw, dbias_f)?),
+                ])
+            },
+        )
+    }
+}
+
 fn padded_dim(op: &'static str, input: usize, padding: usize) -> Result<usize> {
     let doubled = padding
         .checked_mul(2)

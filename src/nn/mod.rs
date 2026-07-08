@@ -25,12 +25,13 @@ pub use embedding::{Embedding, PositionalEmbedding};
 pub use flatten::Flatten;
 pub use linear::Linear;
 pub use loss::{CrossEntropyOpts, Reduction, bce_with_logits_loss, huber_loss, l1_loss, mse_loss};
-pub use normalization::LayerNorm;
+pub use normalization::{BatchNorm2d, LayerNorm, RMSNorm};
 pub(crate) use parameter::has_parameters;
 #[allow(unused_imports)]
 pub(crate) use parameter::parameter_path;
 pub use parameter::{
-    HasParameters, Layer, Module, Parameter, ParameterId, ParameterRef, ParameterRefMut,
+    Buffer, BufferRef, HasParameters, Layer, Module, Parameter, ParameterId, ParameterRef,
+    ParameterRefMut,
 };
 pub use pooling::{AvgPool2d, MaxPool2d};
 pub use sequential::Sequential;

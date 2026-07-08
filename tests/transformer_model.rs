@@ -1,5 +1,5 @@
 use rstorch::prelude::*;
-use rstorch::{AdamW, HasParameters, Optimizer};
+use rstorch::{AdamW, HasParameters, Mask, Optimizer};
 
 #[test]
 fn tiny_decoder_only_transformer_trains_on_cpu() {
@@ -78,6 +78,35 @@ fn transformer_block_composes_through_module_trait() {
     let out = Module::forward(&block, &input, &mut ctx).unwrap();
 
     assert_eq!(out.shape().dims(), &[2, 3, 4]);
+}
+
+#[test]
+fn forward_padded_accepts_padding_mask_and_produces_correct_shape() {
+    let mut rng = SmallRng::seed_from_u64(8);
+    let model = DecoderOnlyTransformer::<6, 3, 4, 2, 2, 8>::new(&mut rng).unwrap();
+    let input = [[2usize, 4, 5], [4, 5, 0]];
+
+    // padding_mask: true = padded position; batch 1 has no padding, batch 2 last token is pad
+    let padding_mask = Mask::<D2<AnyDim, C<3>>>::from_vec_with_shape(
+        vec![false, false, false, false, false, true],
+        [2, 3],
+    )
+    .unwrap();
+
+    let logits = model.forward_padded(&input, Some(&padding_mask)).unwrap();
+    assert_eq!(logits.shape().dims(), &[2, 3, 6]);
+
+    // None mask must also work (falls back to causal-only)
+    let logits_no_mask = model.forward_padded(&input, None).unwrap();
+    assert_eq!(logits_no_mask.shape().dims(), &[2, 3, 6]);
+
+    // loss_padded with pad token=0 as ignore_index
+    let targets = [[4usize, 5, 3], [5, 3, 0]];
+    let loss = model
+        .loss_padded(&input, &targets, Some(&padding_mask), 0)
+        .unwrap();
+    let loss_val = loss.to_vec().unwrap()[0];
+    assert!(loss_val.is_finite() && loss_val > 0.0);
 }
 
 #[cfg(feature = "hub")]

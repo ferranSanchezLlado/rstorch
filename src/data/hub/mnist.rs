@@ -16,21 +16,29 @@ pub const TRAIN_IMAGES: DatasetResource = DatasetResource {
     name: "train images",
     url: "https://storage.googleapis.com/cvdf-datasets/mnist/train-images-idx3-ubyte.gz",
     file_name: "train-images-idx3-ubyte.gz",
+    sha256: Some("440fcabf73cc546fa21475e81ea370265605f56be210a4024d2ca8f203523609"),
+    max_bytes: Some(12_000_000),
 };
 pub const TRAIN_LABELS: DatasetResource = DatasetResource {
     name: "train labels",
     url: "https://storage.googleapis.com/cvdf-datasets/mnist/train-labels-idx1-ubyte.gz",
     file_name: "train-labels-idx1-ubyte.gz",
+    sha256: Some("3552534a0a558bbed6aed32b30c495cca23d567ec52cac8be1a0730e8010255c"),
+    max_bytes: Some(50_000),
 };
 pub const TEST_IMAGES: DatasetResource = DatasetResource {
     name: "test images",
     url: "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-images-idx3-ubyte.gz",
     file_name: "t10k-images-idx3-ubyte.gz",
+    sha256: Some("8d422c7b0a1c1c79245a5bcf07fe86e33eeafee792b84584aec276f5a2dbc4e6"),
+    max_bytes: Some(2_000_000),
 };
 pub const TEST_LABELS: DatasetResource = DatasetResource {
     name: "test labels",
     url: "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-labels-idx1-ubyte.gz",
     file_name: "t10k-labels-idx1-ubyte.gz",
+    sha256: Some("f7ae60f92e00ec6debd23a6088c31dbd2371eca3ffa0defaefb259924204aec6"),
+    max_bytes: Some(10_000),
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

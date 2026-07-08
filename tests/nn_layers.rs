@@ -378,6 +378,109 @@ fn cnn_loss_tensor(
         .unwrap()
 }
 
+#[test]
+fn rmsnorm_gradient_matches_finite_difference() {
+    let input_data = vec![1.0f64, 2.0, 4.0, -1.0, 0.5, 3.0];
+    let probe = Tensor2D::<2, 3, f64>::from_vec(vec![0.5, -0.2, 0.7, -0.4, 0.3, 0.1]).unwrap();
+    let norm = RMSNorm::<3, f64>::new().unwrap();
+    let input = Tensor2D::<2, 3, f64>::from_vec(input_data.clone())
+        .unwrap()
+        .with_requires_grad(true);
+    let mut ctx = ();
+
+    norm.forward(&input, &mut ctx)
+        .unwrap()
+        .mul(&probe)
+        .unwrap()
+        .sum()
+        .unwrap()
+        .backward()
+        .unwrap();
+
+    let grad = input.grad().unwrap().to_vec().unwrap();
+    for (idx, &analytic) in grad.iter().enumerate() {
+        let numerical = finite_difference(&input_data, idx, 1e-6, |values| {
+            RMSNorm::<3, f64>::new()
+                .unwrap()
+                .forward(
+                    &Tensor2D::<2, 3, f64>::from_vec(values.to_vec()).unwrap(),
+                    &mut (),
+                )
+                .unwrap()
+                .mul(&probe)
+                .unwrap()
+                .sum()
+                .unwrap()
+                .to_vec()
+                .unwrap()[0]
+        });
+        assert_close_f64(analytic, numerical, 1e-5);
+    }
+}
+
+#[test]
+fn batch_norm2d_gradient_matches_finite_difference() {
+    use rstorch::Tensor;
+
+    // N=2, CH=2, H=1, W=2; NCHW layout
+    let input_data: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let weight_data: Vec<f64> = vec![1.0, 1.5];
+    let bias_data: Vec<f64> = vec![0.1, -0.1];
+
+    let probe: Tensor4D<2, 2, 1, 2, f64> =
+        Tensor::from_vec(vec![0.5, -0.2, 0.3, 0.1, -0.4, 0.6, 0.2, -0.3]).unwrap();
+
+    let input = Tensor4D::<2, 2, 1, 2, f64>::from_vec(input_data.clone())
+        .unwrap()
+        .with_requires_grad(true);
+    let weight = Tensor1D::<2, f64>::from_vec(weight_data.clone())
+        .unwrap()
+        .with_requires_grad(true);
+    let bias = Tensor1D::<2, f64>::from_vec(bias_data.clone())
+        .unwrap()
+        .with_requires_grad(true);
+
+    let (out, _, _) = input.batch_norm2d(&weight, &bias, 1e-5, 0.1).unwrap();
+    out.mul(&probe).unwrap().sum().unwrap().backward().unwrap();
+
+    let input_grad = input.grad().unwrap().to_vec().unwrap();
+    let weight_grad = weight.grad().unwrap().to_vec().unwrap();
+    let bias_grad = bias.grad().unwrap().to_vec().unwrap();
+
+    for (idx, &analytic) in weight_grad.iter().enumerate() {
+        let numerical = finite_difference(&weight_data, idx, 1e-5, |w| {
+            let wt = Tensor1D::<2, f64>::from_vec(w.to_vec()).unwrap();
+            let inp = Tensor4D::<2, 2, 1, 2, f64>::from_vec(input_data.clone()).unwrap();
+            let bt = Tensor1D::<2, f64>::from_vec(bias_data.clone()).unwrap();
+            let (o, _, _) = inp.batch_norm2d(&wt, &bt, 1e-5, 0.1).unwrap();
+            o.mul(&probe).unwrap().sum().unwrap().to_vec().unwrap()[0]
+        });
+        assert_close_f64(analytic, numerical, 1e-4);
+    }
+
+    for (idx, &analytic) in bias_grad.iter().enumerate() {
+        let numerical = finite_difference(&bias_data, idx, 1e-5, |b| {
+            let bt = Tensor1D::<2, f64>::from_vec(b.to_vec()).unwrap();
+            let inp = Tensor4D::<2, 2, 1, 2, f64>::from_vec(input_data.clone()).unwrap();
+            let wt = Tensor1D::<2, f64>::from_vec(weight_data.clone()).unwrap();
+            let (o, _, _) = inp.batch_norm2d(&wt, &bt, 1e-5, 0.1).unwrap();
+            o.mul(&probe).unwrap().sum().unwrap().to_vec().unwrap()[0]
+        });
+        assert_close_f64(analytic, numerical, 1e-4);
+    }
+
+    for (idx, &analytic) in input_grad.iter().enumerate() {
+        let numerical = finite_difference(&input_data, idx, 1e-5, |inp| {
+            let it = Tensor4D::<2, 2, 1, 2, f64>::from_vec(inp.to_vec()).unwrap();
+            let wt = Tensor1D::<2, f64>::from_vec(weight_data.clone()).unwrap();
+            let bt = Tensor1D::<2, f64>::from_vec(bias_data.clone()).unwrap();
+            let (o, _, _) = it.batch_norm2d(&wt, &bt, 1e-5, 0.1).unwrap();
+            o.mul(&probe).unwrap().sum().unwrap().to_vec().unwrap()[0]
+        });
+        assert_close_f64(analytic, numerical, 1e-4);
+    }
+}
+
 fn finite_difference(values: &[f64], idx: usize, eps: f64, f: impl Fn(&[f64]) -> f64) -> f64 {
     let mut plus = values.to_vec();
     plus[idx] += eps;

@@ -74,6 +74,7 @@ pub struct MultiHeadAttention<
     k_proj: Linear<EMBED, EMBED, E, B>,
     v_proj: Linear<EMBED, EMBED, E, B>,
     out_proj: Linear<EMBED, EMBED, E, B>,
+    cached_causal_mask: std::sync::Mutex<Option<(usize, Mask<D3<AnyDim, C<SEQ>, C<SEQ>>, B>)>>,
 }
 
 impl<const SEQ: usize, const EMBED: usize, const HEADS: usize, const HEAD_DIM: usize, E, B>
@@ -90,7 +91,26 @@ where
             k_proj: Linear::xavier_uniform(rng)?,
             v_proj: Linear::xavier_uniform(rng)?,
             out_proj: Linear::xavier_uniform(rng)?,
+            cached_causal_mask: std::sync::Mutex::new(None),
         })
+    }
+
+    fn get_or_build_causal_mask(
+        &self,
+        batch_heads: usize,
+    ) -> Result<Mask<D3<AnyDim, C<SEQ>, C<SEQ>>, B>> {
+        let mut guard = self
+            .cached_causal_mask
+            .lock()
+            .expect("causal mask mutex poisoned");
+        if let Some((cached_size, ref mask)) = *guard
+            && cached_size == batch_heads
+        {
+            return Ok(mask.clone());
+        }
+        let mask = causal_attention_mask_for_backend::<SEQ, B>(batch_heads)?;
+        *guard = Some((batch_heads, mask.clone()));
+        Ok(mask)
     }
 
     pub fn forward(
@@ -105,8 +125,43 @@ where
         input: &Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>,
     ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>> {
         let batch = input.shape().dims()[0];
-        let mask = causal_attention_mask_for_backend::<SEQ, B>(batch * HEADS)?;
+        let mask = self.get_or_build_causal_mask(batch * HEADS)?;
         self.forward_with_mask(input, Some(&mask))
+    }
+
+    /// Forward with causal masking and an optional per-sample padding mask.
+    ///
+    /// `padding_mask` has shape `[batch, SEQ]` where `true` means the key
+    /// position is padding and should be masked out.
+    pub fn forward_padded(
+        &self,
+        input: &Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>,
+        padding_mask: Option<&Mask<D2<AnyDim, C<SEQ>>, B>>,
+    ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<EMBED>>, E, B>> {
+        let Some(pad) = padding_mask else {
+            return self.forward_causal(input);
+        };
+        let batch = input.shape().dims()[0];
+        let batch_heads = batch * HEADS;
+        let causal = self.get_or_build_causal_mask(batch_heads)?;
+        let causal_vals = causal.to_vec()?;
+        let pad_vals = pad.to_vec()?;
+
+        let mut combined = causal_vals.clone();
+        for b in 0..batch {
+            for h in 0..HEADS {
+                let bh = b * HEADS + h;
+                for q in 0..SEQ {
+                    for k in 0..SEQ {
+                        let causal_idx = bh * SEQ * SEQ + q * SEQ + k;
+                        let pad_idx = b * SEQ + k;
+                        combined[causal_idx] = causal_vals[causal_idx] || pad_vals[pad_idx];
+                    }
+                }
+            }
+        }
+        let combined_mask = Mask::from_vec_with_shape(combined, [batch_heads, SEQ, SEQ])?;
+        self.forward_with_mask(input, Some(&combined_mask))
     }
 
     pub fn forward_with_mask(

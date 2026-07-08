@@ -36,6 +36,13 @@ pub enum DataError {
     Parse {
         source: Box<dyn error::Error + Send + Sync + 'static>,
     },
+    ChecksumMismatch {
+        expected: String,
+        found: String,
+    },
+    DownloadSizeCap {
+        max_bytes: u64,
+    },
 }
 
 impl fmt::Display for DataError {
@@ -66,6 +73,12 @@ impl fmt::Display for DataError {
             }
             Self::Io { source } => write!(f, "io error: {source}"),
             Self::Parse { source } => write!(f, "parse error: {source}"),
+            Self::ChecksumMismatch { expected, found } => {
+                write!(f, "checksum mismatch: expected {expected}, found {found}")
+            }
+            Self::DownloadSizeCap { max_bytes } => {
+                write!(f, "download exceeds size cap of {max_bytes} bytes")
+            }
         }
     }
 }
