@@ -5,7 +5,7 @@ mod ops;
 mod raw;
 
 use crate::backend::{Backend, Cpu};
-use crate::dtype::{DType, DTypeId, FloatDType};
+use crate::dtype::{DType, DTypeId, FloatDType, bf16, f16};
 use crate::error::Result;
 use crate::random::SmallRng;
 use crate::shape::{C, D0, D1, D2, D3, D4, Shape, ShapeSpec, StaticShape};
@@ -254,6 +254,20 @@ where
     }
 }
 
+impl<const N: usize, B> Tensor<D1<C<N>>, i64, B>
+where
+    B: Backend<i64>,
+{
+    /// Builds an i64 data tensor containing `0..N`.
+    ///
+    /// i64 tensors are intended for ids, labels, and indices. Integer
+    /// autograd, typed-layer arithmetic, matmul, and GPU i64 backends are
+    /// intentionally not part of the pre-1.0 surface.
+    pub fn arange() -> Result<Self> {
+        Self::from_vec((0..N).map(|value| value as i64).collect())
+    }
+}
+
 impl<S, E, B> Tensor<S, E, B>
 where
     S: ShapeSpec,
@@ -306,22 +320,27 @@ where
         self.raw().to_vec()
     }
 
-    /// Casts this tensor to another floating dtype and returns a detached leaf.
+    /// Casts this tensor to another dtype and returns a detached leaf.
+    ///
+    /// Integer tensors are data containers, not differentiable numeric tensors:
+    /// i64 casts do not enable integer autograd, arithmetic, or matmul. Casting
+    /// i64 to a float uses the nearest representable float value and may lose
+    /// precision above 2^53. Casting a float to i64 truncates toward zero and
+    /// returns an error for non-finite or out-of-range values.
     ///
     /// Conversion methods intentionally detach from autograd graphs. Graphs are
     /// single-dtype and single-backend; compose `cast`, `to_backend`, and
     /// `to_backend_on` before enabling gradients for converted tensors.
     pub fn cast<F>(&self) -> Result<Tensor<S, F, B>>
     where
-        E: FloatDType,
-        F: FloatDType,
+        F: DType,
         B: Backend<F, Device = <B as Backend<E>>::Device>,
     {
         let data = self
             .to_vec()?
             .into_iter()
-            .map(|value| F::from_f64(value.to_f64()))
-            .collect();
+            .map(cast_value::<E, F>)
+            .collect::<Result<Vec<_>>>()?;
         let raw =
             RawTensor::<F, B>::from_vec_on(self.device().clone(), data, self.shape().clone())?;
         Tensor::<S, F, B>::from_raw(raw)
@@ -405,6 +424,106 @@ where
     fn raw(&self) -> &RawTensor<E, B> {
         &self.inner.raw
     }
+}
+
+fn cast_value<E, F>(value: E) -> Result<F>
+where
+    E: DType,
+    F: DType,
+{
+    cast_scalar_to_dtype::<F>(cast_scalar_from_dtype(value), E::ID)
+}
+
+enum CastScalar {
+    Float(f64),
+    Int(i64),
+}
+
+fn cast_scalar_from_dtype<E: DType>(value: E) -> CastScalar {
+    let mut bytes = Vec::with_capacity(E::BYTE_SIZE);
+    value.write_le_bytes(&mut bytes);
+    match E::ID {
+        DTypeId::F16 => CastScalar::Float(
+            <f16 as DType>::read_le_bytes(&bytes)
+                .expect("dtype id and byte width match")
+                .to_f64(),
+        ),
+        DTypeId::BF16 => CastScalar::Float(
+            <bf16 as DType>::read_le_bytes(&bytes)
+                .expect("dtype id and byte width match")
+                .to_f64(),
+        ),
+        DTypeId::F32 => CastScalar::Float(
+            <f32 as DType>::read_le_bytes(&bytes).expect("dtype id and byte width match") as f64,
+        ),
+        DTypeId::F64 => CastScalar::Float(
+            <f64 as DType>::read_le_bytes(&bytes).expect("dtype id and byte width match"),
+        ),
+        DTypeId::I64 => CastScalar::Int(
+            <i64 as DType>::read_le_bytes(&bytes).expect("dtype id and byte width match"),
+        ),
+    }
+}
+
+fn cast_scalar_to_dtype<F: DType>(value: CastScalar, from: DTypeId) -> Result<F> {
+    match F::ID {
+        DTypeId::F16 => Ok(retype_cast_value::<F, f16>(match value {
+            CastScalar::Float(value) => <f16 as FloatDType>::from_f64(value),
+            CastScalar::Int(value) => <f16 as FloatDType>::from_f64(value as f64),
+        })),
+        DTypeId::BF16 => Ok(retype_cast_value::<F, bf16>(match value {
+            CastScalar::Float(value) => <bf16 as FloatDType>::from_f64(value),
+            CastScalar::Int(value) => <bf16 as FloatDType>::from_f64(value as f64),
+        })),
+        DTypeId::F32 => Ok(retype_cast_value::<F, f32>(match value {
+            CastScalar::Float(value) => value as f32,
+            CastScalar::Int(value) => value as f32,
+        })),
+        DTypeId::F64 => Ok(retype_cast_value::<F, f64>(match value {
+            CastScalar::Float(value) => value,
+            CastScalar::Int(value) => value as f64,
+        })),
+        DTypeId::I64 => match value {
+            CastScalar::Int(value) => Ok(retype_cast_value::<F, i64>(value)),
+            CastScalar::Float(value) => {
+                let value = cast_float_to_i64(value, from)?;
+                Ok(retype_cast_value::<F, i64>(value))
+            }
+        },
+    }
+}
+
+fn cast_float_to_i64(value: f64, from: DTypeId) -> Result<i64> {
+    if !value.is_finite() {
+        return Err(crate::error::DTypeError::InvalidCast {
+            op: "cast",
+            from,
+            to: DTypeId::I64,
+            reason: "float to i64 cast requires a finite value",
+        }
+        .into());
+    }
+    let truncated = value.trunc();
+    if !(truncated >= i64::MIN as f64 && truncated < 9_223_372_036_854_775_808.0) {
+        return Err(crate::error::DTypeError::InvalidCast {
+            op: "cast",
+            from,
+            to: DTypeId::I64,
+            reason: "float to i64 cast is out of range after truncation",
+        }
+        .into());
+    }
+    Ok(truncated as i64)
+}
+
+fn retype_cast_value<F, T>(value: T) -> F
+where
+    F: DType,
+    T: DType,
+{
+    let mut bytes = Vec::with_capacity(T::BYTE_SIZE);
+    value.write_le_bytes(&mut bytes);
+    F::read_le_bytes(&bytes).expect("matched dtype id preserves byte width")
 }
 
 impl<E, B> Tensor<D0, E, B>

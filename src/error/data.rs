@@ -8,6 +8,9 @@ pub enum DataError {
         index: usize,
         len: usize,
     },
+    NegativeIndex {
+        index: i64,
+    },
     EmptyBatch,
     InvalidBatchSize {
         batch_size: usize,
@@ -41,6 +44,7 @@ impl fmt::Display for DataError {
             Self::IndexOutOfBounds { index, len } => {
                 write!(f, "index {index} out of bounds for dataset of length {len}")
             }
+            Self::NegativeIndex { index } => write!(f, "negative index {index} is invalid"),
             Self::EmptyBatch => write!(f, "cannot collate an empty batch"),
             Self::InvalidBatchSize { batch_size } => {
                 write!(f, "invalid batch size {batch_size}")

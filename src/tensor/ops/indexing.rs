@@ -1,6 +1,6 @@
 use super::super::autograd::{AnyTensor, raw_from_vec_like};
 use super::super::{RawTensor, Scalar, Tensor};
-use super::ensure_nonzero_dim;
+use super::{ensure_nonzero_dim, ensure_same_device};
 use crate::backend::Backend;
 use crate::dtype::{DType, FloatDType};
 use crate::error::{DataError, Error, Result, ShapeError, const_check};
@@ -68,6 +68,35 @@ where
 {
     pub fn cross_entropy(&self, targets: &[usize]) -> Result<Scalar<E, B>> {
         self.cross_entropy_with(targets, CrossEntropyOpts::default())
+    }
+
+    /// Tensor-label sibling of [`cross_entropy`](Self::cross_entropy).
+    ///
+    /// This path is gated on `B: Backend<i64>` and is intended for CPU id and
+    /// label plumbing. The slice-based `usize` path remains the universal
+    /// every-backend API. Negative ids are rejected; they do not wrap Python-style.
+    pub fn cross_entropy_ids(&self, targets: &Tensor<D1<A>, i64, B>) -> Result<Scalar<E, B>>
+    where
+        B: Backend<i64, Device = <B as Backend<E>>::Device>,
+    {
+        self.cross_entropy_ids_with(targets, CrossEntropyOpts::default())
+    }
+
+    /// Option-bearing tensor-label sibling of [`cross_entropy_with`](Self::cross_entropy_with).
+    ///
+    /// `ignore_index` is still a `usize`, so negative ids are invalid rather
+    /// than ignored. i64 tensors do not participate in autograd.
+    pub fn cross_entropy_ids_with(
+        &self,
+        targets: &Tensor<D1<A>, i64, B>,
+        opts: CrossEntropyOpts,
+    ) -> Result<Scalar<E, B>>
+    where
+        B: Backend<i64, Device = <B as Backend<E>>::Device>,
+    {
+        ensure_same_device::<E, B>(self.device(), targets.device(), "cross_entropy_ids")?;
+        let targets = i64_indices_to_usize(&targets.to_vec()?)?;
+        self.cross_entropy_with(&targets, opts)
     }
 
     pub fn cross_entropy_with(
@@ -233,6 +262,44 @@ where
             },
         )
     }
+
+    /// Tensor-index sibling of [`index_select_rows`](Self::index_select_rows).
+    ///
+    /// This is available only when the backend can store i64 tensors. The
+    /// `&[usize]` method remains the universal every-backend path. Negative
+    /// indices are rejected; RsTorch does not apply Python-style wrapping.
+    pub fn index_select_rows_ids<T, I>(
+        &self,
+        indices: &Tensor<D1<I>, i64, B>,
+    ) -> Result<Tensor<D2<T, N>, E, B>>
+    where
+        T: DimSpec,
+        I: DimSpec,
+        B: Backend<i64, Device = <B as Backend<E>>::Device>,
+    {
+        ensure_same_device::<E, B>(self.device(), indices.device(), "index_select_rows_ids")?;
+        let indices = i64_indices_to_usize(&indices.to_vec()?)?;
+        self.index_select_rows(&indices)
+    }
+}
+
+fn i64_indices_to_usize(values: &[i64]) -> Result<Vec<usize>> {
+    values
+        .iter()
+        .copied()
+        .map(|index| {
+            if index < 0 {
+                return Err(DataError::NegativeIndex { index }.into());
+            }
+            usize::try_from(index).map_err(|_| {
+                DataError::IndexOutOfBounds {
+                    index: usize::MAX,
+                    len: usize::MAX,
+                }
+                .into()
+            })
+        })
+        .collect()
 }
 
 fn row_max<E: FloatDType>(values: &[E]) -> E {

@@ -18,6 +18,24 @@ fn tensor_files_round_trip_all_float_dtypes_bit_exactly() {
     round_trip_bf16();
     round_trip_f32();
     round_trip_f64();
+    round_trip_i64();
+}
+
+#[test]
+fn tensor_file_rejects_unknown_dtype_code() {
+    let tensor = Tensor1D::<1, i64>::from_vec(vec![7]).unwrap();
+    let path = test_path("unknown-dtype");
+    save_tensor(&path, &tensor).unwrap();
+
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[26] = 99;
+    fs::write(&path, bytes).unwrap();
+
+    let err = load_tensor::<D1<C<1>>, i64>(&path).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Persistence(PersistenceError::InvalidDType { code: 99 })
+    ));
 }
 
 #[test]
@@ -425,6 +443,15 @@ fn round_trip_f64() {
             .map(|value| value.to_bits())
             .collect::<Vec<_>>()
     );
+}
+
+fn round_trip_i64() {
+    let values = [i64::MIN, 0, 9_007_199_254_740_993];
+    let tensor = Tensor1D::<3, i64>::from_vec(values.to_vec()).unwrap();
+    let path = test_path("i64-tensor");
+    tensor.save(&path).unwrap();
+    let loaded = Tensor1D::<3, i64>::load(&path).unwrap();
+    assert_eq!(loaded.to_vec().unwrap(), values);
 }
 
 fn train_step(layer: &mut Linear<1, 1>, opt: &mut AdamW<f32>) {

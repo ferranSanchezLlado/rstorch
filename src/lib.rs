@@ -19,6 +19,11 @@
 //! return new leaf tensors because autograd graphs are single-dtype and
 //! single-backend.
 //!
+//! `i64` is supported as a data dtype for ids, labels, and indices on CPU. It
+//! intentionally does not support autograd, typed tensor arithmetic, matmul, or
+//! GPU storage before 1.0; the existing `usize` id APIs remain the universal
+//! every-backend paths.
+//!
 //! Static-shape tensor operators (`+`, `-`, `*`, `/`, unary `-`) are ergonomic
 //! wrappers around the fallible method forms. They return [`Result`] instead of
 //! panicking because backend kernels can still fail even when the type system has

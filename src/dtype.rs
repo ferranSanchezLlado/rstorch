@@ -9,6 +9,7 @@ pub enum DTypeId {
     BF16,
     F32,
     F64,
+    I64,
 }
 
 mod sealed {
@@ -279,6 +280,24 @@ impl DType for f64 {
     const BYTE_SIZE: usize = 8;
     const ZERO: Self = 0.0;
     const ONE: Self = 1.0;
+
+    fn write_le_bytes(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_le_bytes());
+    }
+
+    fn read_le_bytes(bytes: &[u8]) -> Option<Self> {
+        let bytes: [u8; 8] = bytes.try_into().ok()?;
+        Some(Self::from_le_bytes(bytes))
+    }
+}
+
+impl sealed::SealedDType for i64 {}
+
+impl DType for i64 {
+    const ID: DTypeId = DTypeId::I64;
+    const BYTE_SIZE: usize = 8;
+    const ZERO: Self = 0;
+    const ONE: Self = 1;
 
     fn write_le_bytes(self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.to_le_bytes());

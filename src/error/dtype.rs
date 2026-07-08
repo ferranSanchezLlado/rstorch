@@ -10,6 +10,12 @@ pub enum DTypeError {
         expected: DTypeId,
         found: DTypeId,
     },
+    InvalidCast {
+        op: &'static str,
+        from: DTypeId,
+        to: DTypeId,
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for DTypeError {
@@ -25,6 +31,12 @@ impl fmt::Display for DTypeError {
                     "{op} dtype mismatch: expected {expected:?}, found {found:?}"
                 )
             }
+            Self::InvalidCast {
+                op,
+                from,
+                to,
+                reason,
+            } => write!(f, "{op} cannot cast {from:?} to {to:?}: {reason}"),
         }
     }
 }

@@ -4,7 +4,7 @@ use super::parameter::Parameter;
 use crate::backend::{Backend, Cpu};
 use crate::data::Batch;
 use crate::dtype::FloatDType;
-use crate::error::{Result, const_check};
+use crate::error::{DataError, DeviceError, Result, const_check};
 use crate::random::SmallRng;
 use crate::shape::{AnyDim, C, D2, D3, Sym};
 use crate::tensor::Tensor;
@@ -49,6 +49,51 @@ where
     ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<DIM>>, E, B>> {
         let batch = ids.len();
         let flat: Vec<_> = ids.iter().flat_map(|row| row.iter().copied()).collect();
+        self.weight
+            .tensor()
+            .index_select_rows::<AnyDim>(&flat)?
+            .reshape_with_shape([batch, SEQ, DIM])
+    }
+
+    /// Tensor-id sibling of [`forward`](Self::forward).
+    ///
+    /// This is available only when the backend can store i64 tensors. The
+    /// `&[[usize; SEQ]]` method remains the universal every-backend path.
+    /// Negative ids are rejected rather than wrapped. i64 tensors are data
+    /// containers only: no integer autograd, arithmetic, matmul, or pre-1.0 GPU
+    /// i64 backend is provided.
+    pub fn forward_ids<const SEQ: usize>(
+        &self,
+        ids: &Tensor<D2<Sym<Batch>, C<SEQ>>, i64, B>,
+    ) -> Result<Tensor<D3<Sym<Batch>, C<SEQ>, C<DIM>>, E, B>>
+    where
+        B: Backend<i64, Device = <B as Backend<E>>::Device>,
+    {
+        if self.weight.tensor().device() != ids.device() {
+            return Err(DeviceError::Mismatch {
+                op: "embedding_forward_ids",
+                lhs: format!("{:?}", self.weight.tensor().device()),
+                rhs: format!("{:?}", ids.device()),
+            }
+            .into());
+        }
+        let batch = ids.shape().dims()[0];
+        let flat = ids
+            .to_vec()?
+            .into_iter()
+            .map(|id| {
+                if id < 0 {
+                    return Err(DataError::NegativeIndex { index: id }.into());
+                }
+                usize::try_from(id).map_err(|_| {
+                    DataError::IndexOutOfBounds {
+                        index: usize::MAX,
+                        len: VOCAB,
+                    }
+                    .into()
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         self.weight
             .tensor()
             .index_select_rows::<AnyDim>(&flat)?

@@ -37,6 +37,28 @@ where
         }
         Ok(out)
     }
+
+    /// Returns [`argmax_last`](Self::argmax_last) as an i64 data tensor.
+    ///
+    /// This CPU-oriented id path is available only when the backend also
+    /// implements `Backend<i64>`. The universal `Vec<usize>` method remains the
+    /// every-backend path. i64 tensors do not support autograd, arithmetic, or
+    /// matmul, and GPU i64 storage is intentionally out of scope before 1.0.
+    pub fn argmax_last_tensor(&self) -> Result<Tensor<S::Reduced, i64, B>>
+    where
+        B: Backend<i64, Device = <B as Backend<E>>::Device>,
+    {
+        let dims = self.shape().dims();
+        let last_axis = S::RANK - 1;
+        let shape = Shape::known(dims[..last_axis].to_vec());
+        let values = self
+            .argmax_last()?
+            .into_iter()
+            .map(|value| value as i64)
+            .collect();
+        let raw = RawTensor::<i64, B>::from_vec_on(self.device().clone(), values, shape)?;
+        Tensor::<S::Reduced, i64, B>::from_raw(raw)
+    }
 }
 
 impl<S, E, B> Tensor<S, E, B>

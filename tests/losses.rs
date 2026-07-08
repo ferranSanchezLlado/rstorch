@@ -1,4 +1,5 @@
 use rstorch::prelude::*;
+use rstorch::{DataError, Error};
 
 #[test]
 fn cross_entropy_options_ignore_index_matches_value_and_gradient_rules() {
@@ -82,6 +83,24 @@ fn new_losses_and_label_smoothing_match_expected_values() {
                 + row_loss(&[1.0, 2.0, 3.0], 2))
             / 3.0;
     assert_close(smoothed, expected, 1e-6);
+}
+
+#[test]
+fn cross_entropy_ids_uses_i64_label_tensors() {
+    let logits = Tensor2D::<2, 3>::from_vec(vec![1.0, 2.0, 3.0, 3.0, 2.0, 1.0]).unwrap();
+    let targets = Tensor1D::<2, i64>::from_vec(vec![2, 0]).unwrap();
+
+    assert_eq!(
+        logits.cross_entropy_ids(&targets).unwrap().item().unwrap(),
+        logits.cross_entropy(&[2, 0]).unwrap().item().unwrap()
+    );
+
+    let bad = Tensor1D::<2, i64>::from_vec(vec![2, -1]).unwrap();
+    let err = logits.cross_entropy_ids(&bad).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Data(DataError::NegativeIndex { index: -1 })
+    ));
 }
 
 fn assert_close(actual: f32, expected: f32, tol: f32) {

@@ -1,15 +1,15 @@
 error[E0080]: evaluation panicked: log_softmax_last: last axis=0 must be greater than 0
-   --> src/tensor/axis_ops.rs:372:13
+   --> src/tensor/axis_ops.rs:394:13
     |
-372 |             const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "log_softmax_last", "last axis")
+394 |             const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "log_softmax_last", "last axis")
     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `rstorch::tensor::axis_ops::<impl rstorch::Tensor<rstorch::D2<rstorch::C<2>, rstorch::C<0>>>>::log_softmax_last::{constant#0}` failed here
 
 note: erroneous constant encountered
-   --> src/tensor/axis_ops.rs:371:9
+   --> src/tensor/axis_ops.rs:393:9
     |
-371 | /         const {
-372 | |             const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "log_softmax_last", "last axis")
-373 | |         };
+393 | /         const {
+394 | |             const_check::known_nonzero(<S::Last as DimSpec>::KNOWN, "log_softmax_last", "last axis")
+395 | |         };
     | |_________^
 
 note: the above error was encountered while instantiating `<instantiation>`

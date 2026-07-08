@@ -19,20 +19,12 @@ help: the trait `dtype::sealed::SealedDType` is not implemented for `RogueDType`
   |
   | struct RogueDType(f32);
   | ^^^^^^^^^^^^^^^^^
-help: the following other types implement trait `dtype::sealed::SealedDType`
- --> src/dtype.rs
-  |
-  | impl sealed::SealedDType for f32 {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `f32`
-...
-  | impl sealed::SealedDType for f16 {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `rstorch::f16`
-...
-  | impl sealed::SealedDType for bf16 {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `bf16`
-...
-  | impl sealed::SealedDType for f64 {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `f64`
+  = help: the following other types implement trait `dtype::sealed::SealedDType`:
+            bf16
+            f32
+            f64
+            i64
+            rstorch::f16
 note: required by a bound in `rstorch::DType`
  --> src/dtype.rs
   |
@@ -46,6 +38,7 @@ note: required by a bound in `rstorch::DType`
             rstorch::f16
             rstorch::bf16
             f64
+            i64
 
 error[E0046]: not all trait items implemented, missing: `Acc`
  --> tests/ui/default/api/sealed_traits/downstream_impl.rs
@@ -66,20 +59,12 @@ help: the trait `dtype::sealed::SealedDType` is not implemented for `RogueDType`
   |
   | struct RogueDType(f32);
   | ^^^^^^^^^^^^^^^^^
-help: the following other types implement trait `dtype::sealed::SealedDType`
- --> src/dtype.rs
-  |
-  | impl sealed::SealedDType for f32 {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `f32`
-...
-  | impl sealed::SealedDType for f16 {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `rstorch::f16`
-...
-  | impl sealed::SealedDType for bf16 {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `bf16`
-...
-  | impl sealed::SealedDType for f64 {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `f64`
+  = help: the following other types implement trait `dtype::sealed::SealedDType`:
+            bf16
+            f32
+            f64
+            i64
+            rstorch::f16
   = note: required for `RogueDType` to implement `rstorch::DType`
 note: required by a bound in `FloatDType`
  --> src/dtype.rs

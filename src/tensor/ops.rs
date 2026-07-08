@@ -292,26 +292,6 @@ where
         )
     }
 
-    pub fn gt_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
-        self.compare_scalar(rhs, |a, b| a > b)
-    }
-
-    pub fn ge_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
-        self.compare_scalar(rhs, |a, b| a >= b)
-    }
-
-    pub fn lt_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
-        self.compare_scalar(rhs, |a, b| a < b)
-    }
-
-    pub fn le_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
-        self.compare_scalar(rhs, |a, b| a <= b)
-    }
-
-    pub fn eq_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
-        self.compare_scalar(rhs, |a, b| a == b)
-    }
-
     pub fn masked_fill(&self, mask: &Mask<S, B>, value: E) -> Result<Self> {
         if self.shape() != mask.shape() {
             return Err(ShapeError::LengthMismatch {
@@ -499,16 +479,6 @@ where
         })
     }
 
-    fn compare_scalar(&self, rhs: E, compare: impl Fn(E, E) -> bool) -> Result<Mask<S, B>> {
-        Mask::from_vec_with_shape(
-            self.to_vec()?
-                .into_iter()
-                .map(|value| compare(value, rhs))
-                .collect(),
-            self.shape().clone(),
-        )
-    }
-
     fn full_extreme(
         &self,
         op: &'static str,
@@ -540,6 +510,43 @@ where
                 .collect();
             Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
         })
+    }
+}
+
+impl<S, E, B> Tensor<S, E, B>
+where
+    S: ShapeSpec,
+    E: DType,
+    B: Backend<E>,
+{
+    pub fn gt_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
+        self.compare_scalar(rhs, |a, b| a > b)
+    }
+
+    pub fn ge_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
+        self.compare_scalar(rhs, |a, b| a >= b)
+    }
+
+    pub fn lt_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
+        self.compare_scalar(rhs, |a, b| a < b)
+    }
+
+    pub fn le_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
+        self.compare_scalar(rhs, |a, b| a <= b)
+    }
+
+    pub fn eq_scalar(&self, rhs: E) -> Result<Mask<S, B>> {
+        self.compare_scalar(rhs, |a, b| a == b)
+    }
+
+    fn compare_scalar(&self, rhs: E, compare: impl Fn(E, E) -> bool) -> Result<Mask<S, B>> {
+        Mask::from_vec_with_shape(
+            self.to_vec()?
+                .into_iter()
+                .map(|value| compare(value, rhs))
+                .collect(),
+            self.shape().clone(),
+        )
     }
 }
 

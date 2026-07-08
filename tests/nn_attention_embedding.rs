@@ -18,6 +18,20 @@ fn embedding_lookup_accumulates_repeated_token_gradients() {
 }
 
 #[test]
+fn embedding_forward_ids_accepts_i64_tensor_ids() {
+    let embedding = Embedding::<4, 2>::from_weight(
+        Tensor2D::<4, 2>::from_vec(vec![0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap(),
+    );
+    let ids =
+        Tensor::<D2<Sym<Batch>, C<3>>, i64>::from_vec_with_shape(vec![1, 1, 2], [1, 3]).unwrap();
+
+    let out = embedding.forward_ids(&ids).unwrap();
+
+    assert_eq!(out.shape().dims(), &[1, 3, 2]);
+    assert_eq!(out.to_vec().unwrap(), vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
 fn scaled_attention_causal_mask_blocks_future_positions() {
     let q = Tensor::<D3<AnyDim, C<3>, C<1>>>::from_vec_with_shape(vec![0.0, 0.0, 0.0], [1, 3, 1])
         .unwrap();

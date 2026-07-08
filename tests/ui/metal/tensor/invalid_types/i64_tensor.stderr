@@ -1,0 +1,35 @@
+error[E0277]: the trait bound `i64: backend::metal::MetalDType` is not satisfied
+ --> tests/ui/metal/tensor/invalid_types/i64_tensor.rs
+  |
+  |     let _ = Tensor::<D1<C<1>>, i64, Metal>::zeros();
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `backend::metal::MetalDType` is not implemented for `i64`
+  |
+help: the trait `backend::metal::MetalDType` is implemented for `f32`
+ --> src/backend/metal.rs
+  |
+  | impl MetalDType for f32 {
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+  = note: required for `Metal` to implement `rstorch::Backend<i64>`
+note: required by a bound in `Tensor`
+ --> src/tensor/mod.rs
+  |
+  | pub struct Tensor<S, E = f32, B = Cpu>
+  |            ------ required by a bound in this struct
+...
+  |     B: Backend<E>,
+  |        ^^^^^^^^^^ required by this bound in `Tensor`
+
+error[E0599]: the associated function or constant `zeros` exists for struct `Tensor<D1<C<1>>, i64, Metal>`, but its trait bounds were not satisfied
+ --> tests/ui/metal/tensor/invalid_types/i64_tensor.rs
+  |
+  |     let _ = Tensor::<D1<C<1>>, i64, Metal>::zeros();
+  |                                             ^^^^^ associated function or constant cannot be called on `Tensor<D1<C<1>>, i64, Metal>` due to unsatisfied trait bounds
+  |
+ ::: src/backend/metal.rs
+  |
+  | pub struct Metal;
+  | ---------------- doesn't satisfy `Metal: rstorch::Backend<i64>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `i64: backend::metal::MetalDType`
+          which is required by `Metal: rstorch::Backend<i64>`

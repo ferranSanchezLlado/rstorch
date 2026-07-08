@@ -991,7 +991,7 @@ fn dtype_size(dtype: DTypeId) -> usize {
     match dtype {
         DTypeId::F16 | DTypeId::BF16 => 2,
         DTypeId::F32 => 4,
-        DTypeId::F64 => 8,
+        DTypeId::F64 | DTypeId::I64 => 8,
     }
 }
 
@@ -1001,6 +1001,7 @@ fn dtype_code(dtype: DTypeId) -> u8 {
         DTypeId::BF16 => 2,
         DTypeId::F32 => 3,
         DTypeId::F64 => 4,
+        DTypeId::I64 => 5,
     }
 }
 
@@ -1010,6 +1011,7 @@ fn dtype_from_code(code: u8) -> Result<DTypeId> {
         2 => Ok(DTypeId::BF16),
         3 => Ok(DTypeId::F32),
         4 => Ok(DTypeId::F64),
+        5 => Ok(DTypeId::I64),
         _ => Err(PersistenceError::InvalidDType { code }.into()),
     }
 }

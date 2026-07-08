@@ -1,7 +1,7 @@
 //! Forward and autograd behavior of the typed tensor op surface.
 
 use rstorch::prelude::*;
-use rstorch::{Error, ShapeError, Tensor};
+use rstorch::{DTypeError, DTypeId, Error, ShapeError, Tensor};
 
 #[test]
 fn numeric_ops_are_differentiable() {
@@ -127,6 +127,60 @@ fn f16_full_mean_uses_wide_accumulator() {
 }
 
 #[test]
+fn i64_tensors_cover_data_surface_and_loud_casts() {
+    let ids = Tensor1D::<5, i64>::arange().unwrap();
+    assert_eq!(ids.dtype(), DTypeId::I64);
+    assert_eq!(ids.to_vec().unwrap(), vec![0, 1, 2, 3, 4]);
+
+    let matrix = ids.reshape_with_shape::<D2<C<1>, C<5>>>([1, 5]).unwrap();
+    assert_eq!(matrix.transpose().unwrap().shape().dims(), &[5, 1]);
+    assert!(matrix.contiguous().unwrap().is_contiguous());
+    assert_eq!(
+        ids.gt_scalar(2).unwrap().to_vec().unwrap(),
+        vec![false, false, false, true, true]
+    );
+
+    let more = Tensor1D::<2, i64>::from_vec(vec![5, 6]).unwrap();
+    assert_eq!(
+        ids.cat::<C<2>, 7>(&more).unwrap().to_vec().unwrap(),
+        vec![0, 1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(
+        more.stack(&more).unwrap().to_vec().unwrap(),
+        vec![5, 6, 5, 6]
+    );
+
+    let floats: Tensor1D<4> = Tensor1D::<4, f32>::from_vec(vec![1.9, -2.2, 3.0, 0.0]).unwrap();
+    let ints: Tensor1D<4, i64> = floats.cast().unwrap();
+    assert_eq!(ints.to_vec().unwrap(), vec![1, -2, 3, 0]);
+    let round_trip: Tensor1D<4, f32> = ints.cast().unwrap();
+    assert_eq!(round_trip.to_vec().unwrap(), vec![1.0, -2.0, 3.0, 0.0]);
+
+    let same: Tensor1D<1, i64> = Tensor1D::<1, i64>::from_vec(vec![9_007_199_254_740_993])
+        .unwrap()
+        .cast()
+        .unwrap();
+    assert_eq!(same.to_vec().unwrap(), vec![9_007_199_254_740_993]);
+
+    let err = Tensor1D::<1>::from_vec(vec![f32::NAN])
+        .unwrap()
+        .cast::<i64>()
+        .unwrap_err();
+    assert!(matches!(err, Error::DType(DTypeError::InvalidCast { .. })));
+    let err = Tensor1D::<1, f64>::from_vec(vec![9_223_372_036_854_775_808.0])
+        .unwrap()
+        .cast::<i64>()
+        .unwrap_err();
+    assert!(matches!(err, Error::DType(DTypeError::InvalidCast { .. })));
+
+    let logits = Tensor2D::<2, 3>::from_vec(vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0]).unwrap();
+    assert_eq!(
+        logits.argmax_last_tensor().unwrap().to_vec().unwrap(),
+        vec![1, 2]
+    );
+}
+
+#[test]
 fn static_shape_operators_and_display_are_ergonomic() {
     let lhs = Tensor1D::<3>::from_vec(vec![1.0, 2.0, 3.0]).unwrap();
     let rhs = Tensor1D::<3>::from_vec(vec![4.0, 5.0, 6.0]).unwrap();
@@ -218,6 +272,15 @@ fn broadcasts_masks_and_indexing_have_gradients() {
     assert_eq!(
         x.grad().unwrap().to_vec().unwrap(),
         vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
+    );
+
+    let id_indices = Tensor1D::<3, i64>::from_vec(vec![1, 0, 1]).unwrap();
+    assert_eq!(
+        x.index_select_rows_ids::<C<3>, C<3>>(&id_indices)
+            .unwrap()
+            .to_vec()
+            .unwrap(),
+        vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     );
 }
 
