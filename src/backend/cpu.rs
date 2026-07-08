@@ -1,5 +1,6 @@
-use super::{Backend, sealed};
+use super::{Backend, parallel, sealed};
 use crate::dtype::DType;
+use std::borrow::Cow;
 use std::error;
 use std::fmt;
 
@@ -83,6 +84,13 @@ impl<E: DType> Backend<E> for Cpu {
         Ok(storage.clone())
     }
 
+    fn host_access<'a>(
+        _device: &Self::Device,
+        storage: &'a Self::Storage,
+    ) -> std::result::Result<Cow<'a, [E]>, Self::Error> {
+        Ok(Cow::Borrowed(storage.as_slice()))
+    }
+
     fn storage_len(storage: &Self::Storage) -> usize {
         storage.len()
     }
@@ -110,8 +118,7 @@ impl<E: DType> Backend<E> for Cpu {
         // element still accumulates its `k` terms in ascending-`inner` order,
         // so results are bitwise identical to the naive row/col/inner loop.
         let mut out = vec![E::ZERO; m.saturating_mul(n)];
-        for row in 0..m {
-            let out_row = &mut out[row * n..(row + 1) * n];
+        parallel::for_each_chunk_mut(&mut out, n, |row, out_row| {
             for inner in 0..k {
                 let scale = lhs[row * k + inner];
                 let rhs_row = &rhs[inner * n..(inner + 1) * n];
@@ -119,7 +126,7 @@ impl<E: DType> Backend<E> for Cpu {
                     *acc += scale * value;
                 }
             }
-        }
+        });
         Ok(out)
     }
 
@@ -214,7 +221,7 @@ impl<E: DType> Backend<E> for Cpu {
 fn binary<E, F>(lhs: &[E], rhs: &[E], len: usize, f: F) -> std::result::Result<Vec<E>, CpuError>
 where
     E: DType,
-    F: Fn(E, E) -> E,
+    F: Fn(E, E) -> E + Send + Sync,
 {
     if lhs.len() != len || rhs.len() != len {
         return Err(CpuError::LengthMismatch {
@@ -223,7 +230,9 @@ where
         });
     }
 
-    Ok(lhs.iter().zip(rhs.iter()).map(|(&a, &b)| f(a, b)).collect())
+    let mut out = vec![E::ZERO; len];
+    parallel::for_each_mut(&mut out, |idx, value| *value = f(lhs[idx], rhs[idx]));
+    Ok(out)
 }
 
 fn unary_scalar<E, F>(
@@ -234,7 +243,7 @@ fn unary_scalar<E, F>(
 ) -> std::result::Result<Vec<E>, CpuError>
 where
     E: DType,
-    F: Fn(E, E) -> E,
+    F: Fn(E, E) -> E + Send + Sync,
 {
     if input.len() != len {
         return Err(CpuError::LengthMismatch {
@@ -243,5 +252,7 @@ where
         });
     }
 
-    Ok(input.iter().map(|&value| f(value, rhs)).collect())
+    let mut out = vec![E::ZERO; len];
+    parallel::for_each_mut(&mut out, |idx, value| *value = f(input[idx], rhs));
+    Ok(out)
 }

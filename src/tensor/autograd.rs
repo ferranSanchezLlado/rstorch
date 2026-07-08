@@ -347,15 +347,24 @@ where
     E: DType,
     B: Backend<E>,
 {
-    let lhs_data = lhs.to_vec()?;
-    let rhs_data = rhs.to_vec()?;
-    let storage = B::add(
-        lhs.device(),
-        &B::from_vec(lhs.device(), lhs_data).map_err(crate::error::Error::backend)?,
-        &B::from_vec(rhs.device(), rhs_data).map_err(crate::error::Error::backend)?,
-        lhs.numel(),
-    )
-    .map_err(crate::error::Error::backend)?;
+    let lhs_storage;
+    let rhs_storage;
+    let lhs_input = if lhs.is_contiguous() && B::storage_len(lhs.storage()) == lhs.numel() {
+        lhs.storage()
+    } else {
+        lhs_storage =
+            B::from_vec(lhs.device(), lhs.to_vec()?).map_err(crate::error::Error::backend)?;
+        &lhs_storage
+    };
+    let rhs_input = if rhs.is_contiguous() && B::storage_len(rhs.storage()) == rhs.numel() {
+        rhs.storage()
+    } else {
+        rhs_storage =
+            B::from_vec(rhs.device(), rhs.to_vec()?).map_err(crate::error::Error::backend)?;
+        &rhs_storage
+    };
+    let storage = B::add(lhs.device(), lhs_input, rhs_input, lhs.numel())
+        .map_err(crate::error::Error::backend)?;
     RawTensor::from_storage_on(lhs.device().clone(), storage, lhs.shape().clone())
 }
 
@@ -383,7 +392,7 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    raw_from_vec_like(input, input.to_vec()?.into_iter().map(|x| -x).collect())
+    raw_from_vec_like(input, input.host_values()?.iter().map(|&x| -x).collect())
 }
 
 pub(crate) fn raw_mul<E, B>(lhs: &RawTensor<E, B>, rhs: &RawTensor<E, B>) -> Result<RawTensor<E, B>>
@@ -393,10 +402,10 @@ where
 {
     raw_from_vec_like(
         lhs,
-        lhs.to_vec()?
-            .into_iter()
-            .zip(rhs.to_vec()?)
-            .map(|(a, b)| a * b)
+        lhs.host_values()?
+            .iter()
+            .zip(rhs.host_values()?.iter())
+            .map(|(&a, &b)| a * b)
             .collect(),
     )
 }
@@ -408,10 +417,10 @@ where
 {
     raw_from_vec_like(
         lhs,
-        lhs.to_vec()?
-            .into_iter()
-            .zip(rhs.to_vec()?)
-            .map(|(a, b)| a / b)
+        lhs.host_values()?
+            .iter()
+            .zip(rhs.host_values()?.iter())
+            .map(|(&a, &b)| a / b)
             .collect(),
     )
 }
@@ -423,7 +432,7 @@ where
 {
     raw_from_vec_like(
         input,
-        input.to_vec()?.into_iter().map(|x| x * rhs).collect(),
+        input.host_values()?.iter().map(|&x| x * rhs).collect(),
     )
 }
 
@@ -434,7 +443,7 @@ where
 {
     raw_from_vec_like(
         input,
-        input.to_vec()?.into_iter().map(|x| x / rhs).collect(),
+        input.host_values()?.iter().map(|&x| x / rhs).collect(),
     )
 }
 

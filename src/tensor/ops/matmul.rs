@@ -172,8 +172,8 @@ where
             }
             .into());
         }
-        let lhs_values = self.to_vec()?;
-        let rhs_values = rhs.to_vec()?;
+        let lhs_values = self.host_values()?.into_owned();
+        let rhs_values = rhs.host_values()?.into_owned();
         let values = bmm_values(&lhs_values, &rhs_values, batch, m, k, n);
         let raw =
             RawTensor::from_vec_on(self.device().clone(), values, Shape::known([batch, m, n]))?;
@@ -183,7 +183,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let grad = grad.to_vec()?;
+                let grad = grad.host_values()?;
                 let mut lhs_grad = vec![E::ZERO; batch * m * k];
                 let mut rhs_grad = vec![E::ZERO; batch * k * n];
                 for b in 0..batch {
@@ -241,7 +241,7 @@ where
         }
         RawTensor::from_vec_on(
             input.device().clone(),
-            input.to_vec()?,
+            input.host_values()?.into_owned(),
             input.shape().clone(),
         )
     };

@@ -1,5 +1,6 @@
 use super::{Backend, sealed};
 use crate::dtype::{DType, f16};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::error;
 use std::ffi::c_void;
@@ -184,6 +185,13 @@ where
             let ptr = storage.buffer.contents().cast::<E>();
             Ok(std::slice::from_raw_parts(ptr, storage.len).to_vec())
         }
+    }
+
+    fn host_access<'a>(
+        device: &Self::Device,
+        storage: &'a Self::Storage,
+    ) -> std::result::Result<Cow<'a, [E]>, Self::Error> {
+        Self::to_vec(device, storage).map(Cow::Owned)
     }
 
     fn storage_len(storage: &Self::Storage) -> usize {

@@ -2,6 +2,7 @@ use crate::backend::{Backend, Cpu};
 use crate::dtype::{DType, DTypeId};
 use crate::error::{Error, Result, ShapeError};
 use crate::shape::{Layout, Shape};
+use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -165,11 +166,14 @@ where
     }
 
     pub(crate) fn to_vec(&self) -> Result<Vec<E>> {
-        let mut physical = B::to_vec(&self.device, &self.storage).map_err(Error::backend)?;
+        Ok(self.host_values()?.into_owned())
+    }
+
+    pub(crate) fn host_values(&self) -> Result<Cow<'_, [E]>> {
+        let physical = B::host_access(&self.device, &self.storage).map_err(Error::backend)?;
 
         // Contiguous layouts read storage positions `0..numel` in order, so
-        // the physical buffer already is the logical value order and the
-        // per-position gather below would only re-copy it.
+        // the physical buffer already is the logical value order.
         if self.layout.is_contiguous() {
             let numel = self.layout.numel();
             if physical.len() < numel {
@@ -179,8 +183,13 @@ where
                 }
                 .into());
             }
-            physical.truncate(numel);
-            return Ok(physical);
+            return Ok(match physical {
+                Cow::Borrowed(values) => Cow::Borrowed(&values[..numel]),
+                Cow::Owned(mut values) => {
+                    values.truncate(numel);
+                    Cow::Owned(values)
+                }
+            });
         }
 
         self.layout
@@ -195,7 +204,8 @@ where
                     .into()
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()
+            .map(Cow::Owned)
     }
 }
 

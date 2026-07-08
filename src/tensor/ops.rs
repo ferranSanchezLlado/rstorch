@@ -93,7 +93,7 @@ where
         )?;
         let input_raw = self.raw().clone();
         Scalar::<E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
-            let seed = grad.to_vec()?[0];
+            let seed = grad.host_values()?[0];
             Ok(vec![Some(raw_full_like(&input_raw, seed)?)])
         })
     }
@@ -106,7 +106,7 @@ where
             }
             .into());
         }
-        let input_values = self.to_vec()?;
+        let input_values = self.host_values()?;
         let sum = input_values
             .iter()
             .fold(<E::Acc as DType>::ZERO, |acc, &value| {
@@ -122,7 +122,7 @@ where
         let input_raw = self.raw().clone();
         let numel = self.numel();
         Scalar::<E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
-            let seed = grad.to_vec()?[0] / E::from_usize(numel);
+            let seed = grad.host_values()?[0] / E::from_usize(numel);
             Ok(vec![Some(raw_full_like(&input_raw, seed)?)])
         })
     }
@@ -131,7 +131,7 @@ where
         if self.numel() == 0 {
             return Err(ShapeError::ZeroDimension { op: "var", axis: 0 }.into());
         }
-        let values = self.to_vec()?;
+        let values = self.host_values()?.into_owned();
         let numel = self.numel();
         let denom = E::Acc::from_usize(numel);
         let mean_acc = values.iter().fold(<E::Acc as DType>::ZERO, |acc, &value| {
@@ -150,7 +150,7 @@ where
         let input_raw = self.raw().clone();
         let mean = E::from_f64(mean_acc.to_f64());
         Scalar::<E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
-            let seed = grad.to_vec()?[0];
+            let seed = grad.host_values()?[0];
             let scale = E::from_f64(2.0) / E::from_usize(numel);
             let grad_values = values
                 .iter()
@@ -190,20 +190,22 @@ where
     pub fn relu(&self) -> Result<Self> {
         let input = self.contiguous()?;
         let values = input
-            .to_vec()?
-            .into_iter()
+            .host_values()?
+            .iter()
+            .copied()
             .map(|value| if value > E::ZERO { value } else { E::ZERO })
             .collect();
         let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
-            let mask = input_raw
-                .to_vec()?
-                .into_iter()
-                .map(|value| if value > E::ZERO { E::ONE } else { E::ZERO });
+            let input_values = input_raw.host_values()?;
+            let mask = input_values
+                .iter()
+                .map(|&value| if value > E::ZERO { E::ONE } else { E::ZERO });
             let grad_values = grad
-                .to_vec()?
-                .into_iter()
+                .host_values()?
+                .iter()
+                .copied()
                 .zip(mask)
                 .map(|(g, m)| g * m)
                 .collect();
@@ -303,8 +305,9 @@ where
         }
         let mask_values = mask.to_vec()?;
         let values = self
-            .to_vec()?
-            .into_iter()
+            .host_values()?
+            .iter()
+            .copied()
             .zip(&mask_values)
             .map(|(x, &m)| if m { value } else { x })
             .collect();
@@ -312,10 +315,10 @@ where
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad_values = grad
-                .to_vec()?
-                .into_iter()
+                .host_values()?
+                .iter()
                 .zip(&mask_values)
-                .map(|(g, &m)| if m { E::ZERO } else { g })
+                .map(|(&g, &m)| if m { E::ZERO } else { g })
                 .collect();
             Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
         })
@@ -332,13 +335,13 @@ where
             .into());
         }
         let mask_values = mask.to_vec()?;
-        let lhs_values = self.to_vec()?;
-        let rhs_values = other.to_vec()?;
+        let lhs_values = self.host_values()?;
+        let rhs_values = other.host_values()?;
         let values = lhs_values
-            .into_iter()
-            .zip(rhs_values)
+            .iter()
+            .zip(rhs_values.iter())
             .zip(&mask_values)
-            .map(|((a, b), &m)| if m { a } else { b })
+            .map(|((&a, &b), &m)| if m { a } else { b })
             .collect();
         let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
         let lhs_raw = self.raw().clone();
@@ -347,16 +350,16 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(other)],
             move |grad| {
-                let grad_values = grad.to_vec()?;
+                let grad_values = grad.host_values()?;
                 let lhs_grad = grad_values
                     .iter()
                     .zip(&mask_values)
                     .map(|(&g, &m)| if m { g } else { E::ZERO })
                     .collect();
                 let rhs_grad = grad_values
-                    .into_iter()
+                    .iter()
                     .zip(&mask_values)
-                    .map(|(g, &m)| if m { E::ZERO } else { g })
+                    .map(|(&g, &m)| if m { E::ZERO } else { g })
                     .collect();
                 Ok(vec![
                     Some(raw_from_vec_like(&lhs_raw, lhs_grad)?),
@@ -451,7 +454,7 @@ where
         forward: impl Fn(E) -> E + Copy + Send + Sync + 'static,
         backward: impl Fn(E, E) -> E + Copy + Send + Sync + 'static,
     ) -> Result<Self> {
-        let input_values = self.to_vec()?;
+        let input_values = self.host_values()?.into_owned();
         let output_values = input_values
             .iter()
             .copied()
@@ -465,15 +468,15 @@ where
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad_values = grad
-                .to_vec()?
-                .into_iter()
+                .host_values()?
+                .iter()
                 .zip(
                     input_values
                         .iter()
                         .copied()
                         .zip(output_values.iter().copied()),
                 )
-                .map(|(g, (x, y))| g * backward(x, y))
+                .map(|(&g, (x, y))| g * backward(x, y))
                 .collect();
             Ok(vec![Some(raw_from_vec_like(&input_raw, grad_values)?)])
         })
@@ -487,7 +490,7 @@ where
         if self.numel() == 0 {
             return Err(ShapeError::ZeroDimension { op, axis: 0 }.into());
         }
-        let values = self.to_vec()?;
+        let values = self.host_values()?.into_owned();
         let mut best = values[0];
         for &value in &values[1..] {
             if better(value, best) {
@@ -501,7 +504,7 @@ where
         )?;
         let input_raw = self.raw().clone();
         Scalar::<E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
-            let seed = grad.to_vec()?[0];
+            let seed = grad.host_values()?[0];
             let count = values.iter().filter(|&&value| value == best).count();
             let each = seed / E::from_usize(count);
             let grad_values = values
@@ -541,8 +544,9 @@ where
 
     fn compare_scalar(&self, rhs: E, compare: impl Fn(E, E) -> bool) -> Result<Mask<S, B>> {
         Mask::from_vec_with_shape(
-            self.to_vec()?
-                .into_iter()
+            self.host_values()?
+                .iter()
+                .copied()
                 .map(|value| compare(value, rhs))
                 .collect(),
             self.shape().clone(),

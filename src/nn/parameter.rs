@@ -7,6 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_PARAMETER_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Host closure applied to a parameter's `(data, grad)` slices, returning the
+/// updated data buffer. Used by the optimizer path to mutate parameter data
+/// without a `data()`/`set_data()` host round trip.
+type UpdateData<'a, E> = &'a mut dyn FnMut(&[E], &[E]) -> Vec<E>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ParameterId(u64);
 
@@ -77,6 +82,7 @@ where
     B: Backend<E>,
 {
     fn grad(&self) -> Result<Option<Vec<E>>>;
+    fn update_data(&mut self, update: UpdateData<'_, E>) -> Result<bool>;
     fn set_grad(&mut self, data: Vec<E>) -> Result<()>;
     fn set_data(&mut self, data: Vec<E>) -> Result<()>;
 }
@@ -116,6 +122,17 @@ where
 {
     fn grad(&self) -> Result<Option<Vec<E>>> {
         self.grad().map(|grad| grad.to_vec()).transpose()
+    }
+
+    fn update_data(&mut self, update: UpdateData<'_, E>) -> Result<bool> {
+        let Some(grad) = self.grad() else {
+            return Ok(false);
+        };
+        let data = self.tensor.host_values()?;
+        let grad = grad.host_values()?;
+        let next = update(&data, &grad);
+        self.tensor.replace_data(next)?;
+        Ok(true)
     }
 
     fn set_grad(&mut self, grad: Vec<E>) -> Result<()> {
@@ -644,6 +661,10 @@ where
     /// See [`Self::data`] for the optimizer data-access stability note.
     pub fn grad(&self) -> Result<Option<Vec<E>>> {
         self.inner.grad()
+    }
+
+    pub(crate) fn update_data(&mut self, update: UpdateData<'_, E>) -> Result<bool> {
+        self.inner.update_data(update)
     }
 
     /// Sets gradient data through the current host round-trip path.

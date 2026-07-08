@@ -1,6 +1,6 @@
 use super::autograd::{AnyTensor, raw_from_vec_like};
 use super::{RawTensor, Tensor};
-use crate::backend::Backend;
+use crate::backend::{Backend, parallel};
 use crate::dtype::{DType, FloatDType};
 use crate::error::{DeviceError, Result, ShapeError, const_check};
 use crate::shape::{DimSpec, LastAxis, LeadingAxis, Shape, ShapeSpec, bind_and_check};
@@ -20,7 +20,7 @@ where
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
         ensure_nonzero_dim("argmax_last", last_axis, cols)?;
-        let values = self.to_vec()?;
+        let values = self.host_values()?;
         let mut out = Vec::with_capacity(rows);
         for row in 0..rows {
             let start = row * cols;
@@ -113,7 +113,7 @@ where
         let last_axis = S::RANK - 1;
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
-        let values = self.to_vec()?;
+        let values = self.host_values()?;
         let mut out = vec![E::ZERO; rows];
         for row in 0..rows {
             for col in 0..cols {
@@ -130,9 +130,9 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let seed = grad.to_vec()?;
+                let seed = grad.host_values()?;
                 let mut values = Vec::with_capacity(rows * cols);
-                for &g in &seed {
+                for &g in seed.iter() {
                     values.extend(std::iter::repeat_n(g, cols));
                 }
                 Ok(vec![Some(raw_from_vec_like(&input_raw, values)?)])
@@ -155,7 +155,7 @@ where
         ensure_nonzero_dim("var_last", axis, cols)?;
         let dims = self.shape().dims();
         let rows = product(&dims[..axis]);
-        let values = self.to_vec()?;
+        let values = self.host_values()?.into_owned();
         let mut means = vec![E::ZERO; rows];
         let mut out = vec![E::ZERO; rows];
         for row in 0..rows {
@@ -186,7 +186,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let seed = grad.to_vec()?;
+                let seed = grad.host_values()?;
                 let mut grad_values = vec![E::ZERO; rows * cols];
                 let scale = E::from_f64(2.0) / E::from_usize(cols);
                 for row in 0..rows {
@@ -215,7 +215,7 @@ where
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
         ensure_nonzero_dim("max_last", last_axis, cols)?;
-        let values = self.to_vec()?;
+        let values = self.host_values()?.into_owned();
         let mut out = Vec::with_capacity(rows);
         for row in 0..rows {
             let start = row * cols;
@@ -237,7 +237,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let seed = grad.to_vec()?;
+                let seed = grad.host_values()?;
                 let mut grad_values = vec![E::ZERO; rows * cols];
                 for row in 0..rows {
                     let start = row * cols;
@@ -265,7 +265,7 @@ where
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
         ensure_nonzero_dim("min_last", last_axis, cols)?;
-        let values = self.to_vec()?;
+        let values = self.host_values()?.into_owned();
         let mut out = Vec::with_capacity(rows);
         for row in 0..rows {
             let start = row * cols;
@@ -287,7 +287,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let seed = grad.to_vec()?;
+                let seed = grad.host_values()?;
                 let mut grad_values = vec![E::ZERO; rows * cols];
                 for row in 0..rows {
                     let start = row * cols;
@@ -315,7 +315,7 @@ where
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
         ensure_nonzero_dim("logsumexp_last", last_axis, cols)?;
-        let values = self.to_vec()?;
+        let values = self.host_values()?.into_owned();
         let mut softmax = vec![E::ZERO; rows * cols];
         let mut out = Vec::with_capacity(rows);
         for row in 0..rows {
@@ -345,7 +345,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let seed = grad.to_vec()?;
+                let seed = grad.host_values()?;
                 let mut grad_values = vec![E::ZERO; rows * cols];
                 for row in 0..rows {
                     for col in 0..cols {
@@ -365,12 +365,12 @@ where
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
         ensure_nonzero_dim("softmax_last", last_axis, cols)?;
-        let values = stable_row_softmax(&self.to_vec()?, rows, cols);
+        let values = stable_row_softmax(&self.host_values()?, rows, cols);
         let raw =
             RawTensor::from_vec_on(self.device().clone(), values.clone(), self.shape().clone())?;
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
-            let grad = grad.to_vec()?;
+            let grad = grad.host_values()?;
             let mut out = vec![E::ZERO; rows * cols];
             for row in 0..rows {
                 let start = row * cols;
@@ -399,13 +399,13 @@ where
         let rows = product(&dims[..last_axis]);
         let cols = dims[last_axis];
         ensure_nonzero_dim("log_softmax_last", last_axis, cols)?;
-        let input = self.to_vec()?;
+        let input = self.host_values()?;
         let softmax = stable_row_softmax(&input, rows, cols);
         let values = stable_row_log_softmax(&input, rows, cols);
         let raw = RawTensor::from_vec_on(self.device().clone(), values, self.shape().clone())?;
         let input_raw = self.raw().clone();
         Self::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
-            let grad = grad.to_vec()?;
+            let grad = grad.host_values()?;
             let mut out = vec![E::ZERO; rows * cols];
             for row in 0..rows {
                 let start = row * cols;
@@ -460,8 +460,8 @@ where
             }
             .into());
         }
-        let lhs_values = self.to_vec()?;
-        let rhs_values = rhs.to_vec()?;
+        let lhs_values = self.host_values()?.into_owned();
+        let rhs_values = rhs.host_values()?.into_owned();
         let values = lhs_values
             .iter()
             .copied()
@@ -475,7 +475,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let grad_values = grad.to_vec()?;
+                let grad_values = grad.host_values()?;
                 let mut lhs_grad = Vec::with_capacity(rows * cols);
                 let mut rhs_grad = vec![E::ZERO; cols];
                 for idx in 0..rows * cols {
@@ -544,7 +544,7 @@ where
         let dims = self.shape().dims();
         let leading = dims[0];
         let inner = product(&dims[1..]);
-        let values = self.to_vec()?;
+        let values = self.host_values()?;
         let mut out = vec![E::ZERO; inner];
         for row in 0..leading {
             for col in 0..inner {
@@ -558,7 +558,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let seed = grad.to_vec()?;
+                let seed = grad.host_values()?;
                 let mut values = Vec::with_capacity(leading * inner);
                 for _ in 0..leading {
                     values.extend(seed.iter().copied());
@@ -616,8 +616,8 @@ where
             }
             .into());
         }
-        let lhs_values = self.to_vec()?;
-        let rhs_values = rhs.to_vec()?;
+        let lhs_values = self.host_values()?.into_owned();
+        let rhs_values = rhs.host_values()?.into_owned();
         let values = lhs_values
             .iter()
             .copied()
@@ -631,7 +631,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let grad_values = grad.to_vec()?;
+                let grad_values = grad.host_values()?;
                 let mut lhs_grad = Vec::with_capacity(leading * inner);
                 let mut rhs_grad = vec![E::ZERO; leading];
                 for idx in 0..leading * inner {
@@ -688,36 +688,35 @@ fn row_max<E: FloatDType>(values: &[E]) -> E {
 
 fn stable_row_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize) -> Vec<E> {
     let mut out = vec![E::ZERO; rows * cols];
-    for row in 0..rows {
+    parallel::for_each_chunk_mut(&mut out, cols, |row, out_row| {
         let start = row * cols;
         let max = row_max(&values[start..start + cols]);
         let mut sum = <E::Acc as DType>::ZERO;
         for col in 0..cols {
             let exp = E::Acc::from_f64((values[start + col] - max).to_f64()).exp();
             sum += exp;
-            out[start + col] = E::from_f64(exp.to_f64());
+            out_row[col] = E::from_f64(exp.to_f64());
         }
-        for col in 0..cols {
-            out[start + col] =
-                E::from_f64((E::Acc::from_f64(out[start + col].to_f64()) / sum).to_f64());
+        for slot in out_row.iter_mut() {
+            *slot = E::from_f64((E::Acc::from_f64(slot.to_f64()) / sum).to_f64());
         }
-    }
+    });
     out
 }
 
 fn stable_row_log_softmax<E: FloatDType>(values: &[E], rows: usize, cols: usize) -> Vec<E> {
     let mut out = vec![E::ZERO; rows * cols];
-    for row in 0..rows {
+    parallel::for_each_chunk_mut(&mut out, cols, |row, out_row| {
         let start = row * cols;
         let max = row_max(&values[start..start + cols]);
         let sum = (0..cols)
             .map(|col| E::Acc::from_f64((values[start + col] - max).to_f64()).exp())
             .fold(<E::Acc as DType>::ZERO, |acc, value| acc + value);
         let logsumexp = E::Acc::from_f64(max.to_f64()) + sum.ln();
-        for col in 0..cols {
-            out[start + col] =
+        for (col, slot) in out_row.iter_mut().enumerate() {
+            *slot =
                 E::from_f64((E::Acc::from_f64(values[start + col].to_f64()) - logsumexp).to_f64());
         }
-    }
+    });
     out
 }

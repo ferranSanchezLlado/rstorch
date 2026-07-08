@@ -46,7 +46,7 @@ where
         Tensor::<T, E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad = RawTensor::from_vec_on(
                 grad.device().clone(),
-                grad.to_vec()?,
+                grad.host_values()?.into_owned(),
                 grad.shape().clone(),
             )?;
             let layout = grad
@@ -88,7 +88,7 @@ where
         Tensor::<T, E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
             let grad = RawTensor::from_vec_on(
                 grad.device().clone(),
-                grad.to_vec()?,
+                grad.host_values()?.into_owned(),
                 grad.shape().clone(),
             )?;
             let layout = grad
@@ -165,8 +165,8 @@ where
             .into());
         }
 
-        let mut data = self.to_vec()?;
-        data.extend(rhs.to_vec()?);
+        let mut data = self.host_values()?.into_owned();
+        data.extend(rhs.host_values()?.iter().copied());
         let raw = RawTensor::from_vec_on(self.device().clone(), data, Shape::known([N]))?;
         let left_len = self.numel();
         let lhs_shape = self.shape().clone();
@@ -175,7 +175,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let data = grad.to_vec()?;
+                let data = grad.host_values()?;
                 let lhs = RawTensor::from_vec_on(
                     grad.device().clone(),
                     data[..left_len].to_vec(),
@@ -216,8 +216,8 @@ where
             }
             .into());
         }
-        let mut values = self.to_vec()?;
-        values.extend(rhs.to_vec()?);
+        let mut values = self.host_values()?.into_owned();
+        values.extend(rhs.host_values()?.iter().copied());
         let raw = RawTensor::from_vec_on(self.device().clone(), values, Shape::known([2, len]))?;
         let lhs_raw = self.raw().clone();
         let rhs_raw = rhs.raw().clone();
@@ -225,7 +225,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let values = grad.to_vec()?;
+                let values = grad.host_values()?;
                 Ok(vec![
                     Some(raw_from_vec_like(&lhs_raw, values[..len].to_vec())?),
                     Some(raw_from_vec_like(&rhs_raw, values[len..].to_vec())?),
@@ -312,8 +312,8 @@ where
             }
             .into());
         }
-        let mut values = self.to_vec()?;
-        values.extend(rhs.to_vec()?);
+        let mut values = self.host_values()?.into_owned();
+        values.extend(rhs.host_values()?.iter().copied());
         let raw = RawTensor::from_vec_on(self.device().clone(), values, Shape::known([OUT, cols]))?;
         let lhs_len = self.numel();
         let lhs_raw = self.raw().clone();
@@ -322,7 +322,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let values = grad.to_vec()?;
+                let values = grad.host_values()?;
                 Ok(vec![
                     Some(raw_from_vec_like(&lhs_raw, values[..lhs_len].to_vec())?),
                     Some(raw_from_vec_like(&rhs_raw, values[lhs_len..].to_vec())?),
@@ -382,8 +382,8 @@ where
             }
             .into());
         }
-        let lhs_values = self.to_vec()?;
-        let rhs_values = rhs.to_vec()?;
+        let lhs_values = self.host_values()?;
+        let rhs_values = rhs.host_values()?;
         let mut values = Vec::with_capacity(rows * OUT);
         for row in 0..rows {
             values.extend_from_slice(&lhs_values[row * lhs_dims[1]..(row + 1) * lhs_dims[1]]);
@@ -398,7 +398,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let grad = grad.to_vec()?;
+                let grad = grad.host_values()?;
                 let mut lhs_grad = Vec::with_capacity(rows * lhs_cols);
                 let mut rhs_grad = Vec::with_capacity(rows * rhs_cols);
                 for row in 0..rows {
@@ -439,8 +439,8 @@ where
             }
             .into());
         }
-        let mut values = self.to_vec()?;
-        values.extend(rhs.to_vec()?);
+        let mut values = self.host_values()?.into_owned();
+        values.extend(rhs.host_values()?.iter().copied());
         let raw = RawTensor::from_vec_on(
             self.device().clone(),
             values,
@@ -453,7 +453,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let values = grad.to_vec()?;
+                let values = grad.host_values()?;
                 Ok(vec![
                     Some(raw_from_vec_like(&lhs_raw, values[..lhs_len].to_vec())?),
                     Some(raw_from_vec_like(&rhs_raw, values[lhs_len..].to_vec())?),

@@ -79,35 +79,38 @@ where
     fn step(&mut self, params: &mut [ParameterRefMut<'_, E, B>]) -> Result<()> {
         let _guard = no_grad();
         for param in params {
-            let Some(grad) = param.grad()? else {
-                continue;
-            };
-            let mut data = param.data()?;
-            if self.weight_decay != E::ZERO {
-                for value in &mut data {
-                    *value -= self.lr * self.weight_decay * *value;
+            let id = param.id();
+            let lr = self.lr;
+            let momentum = self.momentum;
+            let weight_decay = self.weight_decay;
+            let velocity = &mut self.velocity;
+            param.update_data(&mut |data, grad| {
+                let mut next = data.to_vec();
+                if weight_decay != E::ZERO {
+                    for value in &mut next {
+                        *value -= lr * weight_decay * *value;
+                    }
                 }
-            }
-            if let Some(momentum) = self.momentum {
-                let velocity = self
-                    .velocity
-                    .entry(param.id())
-                    .or_insert_with(|| vec![E::ZERO; grad.len()]);
-                if velocity.len() != grad.len() {
-                    *velocity = vec![E::ZERO; grad.len()];
+                if let Some(momentum) = momentum {
+                    let velocity = velocity
+                        .entry(id)
+                        .or_insert_with(|| vec![E::ZERO; grad.len()]);
+                    if velocity.len() != grad.len() {
+                        *velocity = vec![E::ZERO; grad.len()];
+                    }
+                    for (v, &g) in velocity.iter_mut().zip(grad) {
+                        *v = *v * momentum + g;
+                    }
+                    for (value, &v) in next.iter_mut().zip(velocity.iter()) {
+                        *value -= lr * v;
+                    }
+                } else {
+                    for (value, &g) in next.iter_mut().zip(grad) {
+                        *value -= lr * g;
+                    }
                 }
-                for (v, &g) in velocity.iter_mut().zip(&grad) {
-                    *v = *v * momentum + g;
-                }
-                for (value, &v) in data.iter_mut().zip(velocity.iter()) {
-                    *value -= self.lr * v;
-                }
-            } else {
-                for (value, &g) in data.iter_mut().zip(&grad) {
-                    *value -= self.lr * g;
-                }
-            }
-            param.set_data(data)?;
+                next
+            })?;
         }
         Ok(())
     }

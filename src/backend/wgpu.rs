@@ -1,8 +1,10 @@
 use super::{Backend, sealed};
 use crate::dtype::{DType, f16};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::error;
 use std::fmt;
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use wgpu as wgpu_rs;
 use wgpu::util::DeviceExt;
@@ -20,6 +22,12 @@ pub struct WgpuDevice {
     queue: Arc<wgpu_rs::Queue>,
     name: Arc<str>,
     features: wgpu_rs::Features,
+    pipelines: Arc<WgpuPipelineCache>,
+}
+
+struct WgpuPipelineCache {
+    layout: wgpu_rs::BindGroupLayout,
+    pipelines: Mutex<HashMap<&'static str, Arc<wgpu_rs::ComputePipeline>>>,
 }
 
 #[derive(Clone)]
@@ -238,6 +246,13 @@ where
         Ok(values)
     }
 
+    fn host_access<'a>(
+        device: &Self::Device,
+        storage: &'a Self::Storage,
+    ) -> std::result::Result<Cow<'a, [E]>, Self::Error> {
+        Self::to_vec(device, storage).map(Cow::Owned)
+    }
+
     fn storage_len(storage: &Self::Storage) -> usize {
         storage.len
     }
@@ -391,11 +406,24 @@ fn create_default_device(
             })
             .await
             .map_err(|err| WgpuError::RequestDevice(err.to_string()))?;
+        let layout = device.create_bind_group_layout(&wgpu_rs::BindGroupLayoutDescriptor {
+            label: Some("rstorch-wgpu-bind-group-layout"),
+            entries: &[
+                storage_layout_entry(0, true),
+                storage_layout_entry(1, true),
+                storage_layout_entry(2, false),
+                storage_layout_entry(3, true),
+            ],
+        });
         Ok(WgpuDevice {
             raw: Arc::new(device),
             queue: Arc::new(queue),
             name: Arc::from(info.name),
             features,
+            pipelines: Arc::new(WgpuPipelineCache {
+                layout,
+                pipelines: Mutex::new(HashMap::new()),
+            }),
         })
     })
 }
@@ -463,43 +491,10 @@ fn run_kernel<E: WgpuDType>(
             contents: &params,
             usage: wgpu_rs::BufferUsages::STORAGE,
         });
-    let shader = device
-        .raw
-        .create_shader_module(wgpu_rs::ShaderModuleDescriptor {
-            label: Some("rstorch-wgpu-shader"),
-            source: wgpu_rs::ShaderSource::Wgsl(E::SHADERS.into()),
-        });
-    let layout = device
-        .raw
-        .create_bind_group_layout(&wgpu_rs::BindGroupLayoutDescriptor {
-            label: Some("rstorch-wgpu-bind-group-layout"),
-            entries: &[
-                storage_layout_entry(0, true),
-                storage_layout_entry(1, true),
-                storage_layout_entry(2, false),
-                storage_layout_entry(3, true),
-            ],
-        });
-    let pipeline_layout = device
-        .raw
-        .create_pipeline_layout(&wgpu_rs::PipelineLayoutDescriptor {
-            label: Some("rstorch-wgpu-pipeline-layout"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
-        });
-    let pipeline = device
-        .raw
-        .create_compute_pipeline(&wgpu_rs::ComputePipelineDescriptor {
-            label: Some(entry_point),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some(entry_point),
-            compilation_options: wgpu_rs::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+    let pipeline = pipeline::<E>(device, entry_point);
     let bind_group = device.raw.create_bind_group(&wgpu_rs::BindGroupDescriptor {
         label: Some("rstorch-wgpu-bind-group"),
-        layout: &layout,
+        layout: &device.pipelines.layout,
         entries: &[
             wgpu_rs::BindGroupEntry {
                 binding: 0,
@@ -537,6 +532,46 @@ fn run_kernel<E: WgpuDType>(
     device.queue.submit(Some(encoder.finish()));
     device.raw.poll(wgpu_rs::PollType::Wait).ok();
     Ok(output)
+}
+
+fn pipeline<E: WgpuDType>(
+    device: &WgpuDevice,
+    entry_point: &'static str,
+) -> Arc<wgpu_rs::ComputePipeline> {
+    let mut cache = device
+        .pipelines
+        .pipelines
+        .lock()
+        .expect("pipeline cache poisoned");
+    if let Some(pipeline) = cache.get(entry_point) {
+        return Arc::clone(pipeline);
+    }
+
+    let shader = device
+        .raw
+        .create_shader_module(wgpu_rs::ShaderModuleDescriptor {
+            label: Some("rstorch-wgpu-shader"),
+            source: wgpu_rs::ShaderSource::Wgsl(E::SHADERS.into()),
+        });
+    let pipeline_layout = device
+        .raw
+        .create_pipeline_layout(&wgpu_rs::PipelineLayoutDescriptor {
+            label: Some("rstorch-wgpu-pipeline-layout"),
+            bind_group_layouts: &[&device.pipelines.layout],
+            push_constant_ranges: &[],
+        });
+    let pipeline = Arc::new(device.raw.create_compute_pipeline(
+        &wgpu_rs::ComputePipelineDescriptor {
+            label: Some(entry_point),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some(entry_point),
+            compilation_options: wgpu_rs::PipelineCompilationOptions::default(),
+            cache: None,
+        },
+    ));
+    cache.insert(entry_point, Arc::clone(&pipeline));
+    pipeline
 }
 
 fn empty_storage<E>(

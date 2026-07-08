@@ -56,32 +56,32 @@ where
     let _guard = no_grad();
     let one = E::ONE;
     for param in params {
-        let Some(grad) = param.grad()? else {
-            continue;
-        };
-        let mut data = param.data()?;
-        let moments = state.entry(param.id()).or_insert_with(|| AdamState {
-            m: vec![E::ZERO; grad.len()],
-            v: vec![E::ZERO; grad.len()],
-        });
-        if moments.m.len() != grad.len() || moments.v.len() != grad.len() {
-            moments.m = vec![E::ZERO; grad.len()];
-            moments.v = vec![E::ZERO; grad.len()];
-        }
+        let id = param.id();
+        param.update_data(&mut |data, grad| {
+            let moments = state.entry(id).or_insert_with(|| AdamState {
+                m: vec![E::ZERO; grad.len()],
+                v: vec![E::ZERO; grad.len()],
+            });
+            if moments.m.len() != grad.len() || moments.v.len() != grad.len() {
+                moments.m = vec![E::ZERO; grad.len()];
+                moments.v = vec![E::ZERO; grad.len()];
+            }
 
-        for ((value, &g), (m, v)) in data
-            .iter_mut()
-            .zip(&grad)
-            .zip(moments.m.iter_mut().zip(moments.v.iter_mut()))
-        {
-            *m = config.beta1 * *m + (one - config.beta1) * g;
-            *v = config.beta2 * *v + (one - config.beta2) * g * g;
-            let m_hat = *m / (one - beta1_pow);
-            let v_hat = *v / (one - beta2_pow);
-            let decayed = *value - config.lr * config.weight_decay * *value;
-            *value = decayed - config.lr * m_hat / (v_hat.sqrt() + config.eps);
-        }
-        param.set_data(data)?;
+            let mut next = data.to_vec();
+            for ((value, &g), (m, v)) in next
+                .iter_mut()
+                .zip(grad)
+                .zip(moments.m.iter_mut().zip(moments.v.iter_mut()))
+            {
+                *m = config.beta1 * *m + (one - config.beta1) * g;
+                *v = config.beta2 * *v + (one - config.beta2) * g * g;
+                let m_hat = *m / (one - beta1_pow);
+                let v_hat = *v / (one - beta2_pow);
+                let decayed = *value - config.lr * config.weight_decay * *value;
+                *value = decayed - config.lr * m_hat / (v_hat.sqrt() + config.eps);
+            }
+            next
+        })?;
     }
     Ok(())
 }

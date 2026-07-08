@@ -194,7 +194,7 @@ where
             .into());
         }
 
-        let input = self.to_vec()?;
+        let input = self.host_values()?;
         let mut values = vec![E::ZERO; batch * channels * OUT_H * OUT_W];
         for n in 0..batch {
             for c in 0..channels {
@@ -225,7 +225,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let grad = grad.to_vec()?;
+                let grad = grad.host_values()?;
                 let mut input_grad = vec![E::ZERO; batch * channels * height * width];
                 for n in 0..batch {
                     for c in 0..channels {
@@ -314,8 +314,8 @@ where
             .into());
         }
 
-        let lhs_values = self.to_vec()?;
-        let rhs_values = rhs.to_vec()?;
+        let lhs_values = self.host_values()?.into_owned();
+        let rhs_values = rhs.host_values()?.into_owned();
         let mut values = Vec::with_capacity(lhs_values.len());
         for n in 0..batch {
             for (c, &channel_value) in rhs_values.iter().enumerate().take(channels) {
@@ -334,7 +334,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(rhs)],
             move |grad| {
-                let grad_values = grad.to_vec()?;
+                let grad_values = grad.host_values()?.into_owned();
                 let mut rhs_grad = vec![E::ZERO; channels];
                 for n in 0..batch {
                     for (c, channel_grad) in rhs_grad.iter_mut().enumerate().take(channels) {
@@ -415,8 +415,8 @@ where
             options.dilation_w,
         )?;
 
-        let input_values = self.to_vec()?;
-        let weight_values = weight.to_vec()?;
+        let input_values = self.host_values()?.into_owned();
+        let weight_values = weight.host_values()?.into_owned();
         let values = conv2d_values(
             &input_values,
             &weight_values,
@@ -443,7 +443,7 @@ where
             vec![AnyTensor::from_shape(self), AnyTensor::from_shape(weight)],
             move |grad| {
                 let (input_grad, weight_grad) = conv2d_backward_values(
-                    &grad.to_vec()?,
+                    &grad.host_values()?,
                     &input_values,
                     &weight_values,
                     batch,
@@ -477,7 +477,7 @@ where
         let width = dims[3];
         validate_pool_output("max_pool2d", height, width, OUT_H, OUT_W, options)?;
 
-        let input_values = self.to_vec()?;
+        let input_values = self.host_values()?.into_owned();
         let mut values = vec![E::ZERO; batch * channels * OUT_H * OUT_W];
         for n in 0..batch {
             for c in 0..channels {
@@ -539,7 +539,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let grad = grad.to_vec()?;
+                let grad = grad.host_values()?;
                 let mut input_grad = vec![E::ZERO; batch * channels * height * width];
                 for n in 0..batch {
                     for c in 0..channels {
@@ -633,7 +633,7 @@ where
         let width = dims[3];
         validate_pool_output("avg_pool2d", height, width, OUT_H, OUT_W, options)?;
 
-        let input_values = self.to_vec()?;
+        let input_values = self.host_values()?.into_owned();
         let mut counts = vec![0usize; batch * channels * OUT_H * OUT_W];
         let mut values = vec![<E::Acc as DType>::ZERO; batch * channels * OUT_H * OUT_W];
         for n in 0..batch {
@@ -700,7 +700,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let grad = grad.to_vec()?;
+                let grad = grad.host_values()?;
                 let mut input_grad = vec![E::ZERO; batch * channels * height * width];
                 for n in 0..batch {
                     for c in 0..channels {
@@ -778,9 +778,9 @@ where
         let w = dims[3];
         let items = n * h * w;
 
-        let input_values = self.to_vec()?;
-        let weight_values = weight.to_vec()?;
-        let bias_values = bias.to_vec()?;
+        let input_values = self.host_values()?.into_owned();
+        let weight_values = weight.host_values()?.into_owned();
+        let bias_values = bias.host_values()?.into_owned();
 
         let mut mean_f64 = vec![0f64; ch];
         let mut var_f64 = vec![0f64; ch];
@@ -845,7 +845,7 @@ where
                 AnyTensor::from_shape(bias),
             ],
             move |grad| {
-                let dout = grad.to_vec()?;
+                let dout = grad.host_values()?;
                 let mut dx = vec![E::ZERO; n * ch * h * w];
                 let mut dweight = vec![<E::Acc as DType>::ZERO; ch];
                 let mut dbias = vec![<E::Acc as DType>::ZERO; ch];
@@ -911,9 +911,9 @@ where
         let h = dims[2];
         let w = dims[3];
 
-        let input_values = self.to_vec()?;
-        let weight_values = weight.to_vec()?;
-        let bias_values = bias.to_vec()?;
+        let input_values = self.host_values()?.into_owned();
+        let weight_values = weight.host_values()?.into_owned();
+        let bias_values = bias.host_values()?.into_owned();
 
         let mut out_values = Vec::with_capacity(n * ch * h * w);
         for ni in 0..n {
@@ -950,7 +950,7 @@ where
                 AnyTensor::from_shape(bias),
             ],
             move |grad| {
-                let dout = grad.to_vec()?;
+                let dout = grad.host_values()?;
                 let mut dx = vec![E::ZERO; n * ch * h * w];
                 let mut dweight = vec![<E::Acc as DType>::ZERO; ch];
                 let mut dbias = vec![<E::Acc as DType>::ZERO; ch];

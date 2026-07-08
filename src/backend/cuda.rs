@@ -5,6 +5,7 @@ use cudarc::driver::{
     PushKernelArg, ValidAsZeroBits,
 };
 use cudarc::nvrtc::Ptx;
+use std::borrow::Cow;
 use std::error;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -159,6 +160,13 @@ macro_rules! cuda_backend_impl {
             storage: &Self::Storage,
         ) -> std::result::Result<Vec<$element>, Self::Error> {
             device.stream.clone_dtoh(&storage.data).map_err(cuda_err)
+        }
+
+        fn host_access<'a>(
+            device: &Self::Device,
+            storage: &'a Self::Storage,
+        ) -> std::result::Result<Cow<'a, [$element]>, Self::Error> {
+            Self::to_vec(device, storage).map(Cow::Owned)
         }
 
         fn storage_len(storage: &Self::Storage) -> usize {

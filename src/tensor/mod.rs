@@ -12,6 +12,7 @@ use crate::shape::{C, D0, D1, D2, D3, D4, Shape, ShapeSpec, StaticShape};
 pub use autograd::{NoGradGuard, is_grad_enabled, no_grad};
 pub use ops::{Conv2dOptions, Padding2d, Pool2dOptions};
 use raw::RawTensor;
+use std::borrow::Cow;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -320,6 +321,10 @@ where
         self.raw().to_vec()
     }
 
+    pub(crate) fn host_values(&self) -> Result<Cow<'_, [E]>> {
+        self.raw().host_values()
+    }
+
     /// Casts this tensor to another dtype and returns a detached leaf.
     ///
     /// Integer tensors are data containers, not differentiable numeric tensors:
@@ -569,6 +574,7 @@ pub(super) mod test_support {
     use super::*;
     use crate::backend::sealed;
     use crate::dtype::DType;
+    use std::borrow::Cow;
     use std::error;
     use std::fmt;
 
@@ -635,6 +641,13 @@ pub(super) mod test_support {
             storage: &Self::Storage,
         ) -> std::result::Result<Vec<E>, Self::Error> {
             Ok(storage.clone())
+        }
+
+        fn host_access<'a>(
+            _device: &Self::Device,
+            storage: &'a Self::Storage,
+        ) -> std::result::Result<Cow<'a, [E]>, Self::Error> {
+            Ok(Cow::Borrowed(storage.as_slice()))
         }
 
         fn storage_len(storage: &Self::Storage) -> usize {
@@ -808,6 +821,13 @@ pub(super) mod test_support {
             _device: &Self::Device,
             _storage: &Self::Storage,
         ) -> std::result::Result<Vec<E>, Self::Error> {
+            Err(FailingBackendError)
+        }
+
+        fn host_access<'a>(
+            _device: &Self::Device,
+            _storage: &'a Self::Storage,
+        ) -> std::result::Result<Cow<'a, [E]>, Self::Error> {
             Err(FailingBackendError)
         }
 

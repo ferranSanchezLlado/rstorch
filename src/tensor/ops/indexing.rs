@@ -95,7 +95,7 @@ where
         B: Backend<i64, Device = <B as Backend<E>>::Device>,
     {
         ensure_same_device::<E, B>(self.device(), targets.device(), "cross_entropy_ids")?;
-        let targets = i64_indices_to_usize(&targets.to_vec()?)?;
+        let targets = i64_indices_to_usize(&targets.host_values()?)?;
         self.cross_entropy_with(&targets, opts)
     }
 
@@ -130,7 +130,7 @@ where
                 .into());
             }
         }
-        let input = self.to_vec()?;
+        let input = self.host_values()?;
         let softmax = stable_row_softmax(&input, rows, cols);
         let log_probs = stable_row_log_softmax(&input, rows, cols);
         let smoothing = E::from_f64(opts.label_smoothing);
@@ -172,7 +172,7 @@ where
         let input_raw = self.raw().clone();
         let targets = targets.to_vec();
         Tensor::<D0, E, B>::autograd_output(raw, vec![AnyTensor::from_shape(self)], move |grad| {
-            let seed = grad.to_vec()?[0];
+            let seed = grad.host_values()?[0];
             let mut values = vec![E::ZERO; rows * cols];
             if valid_count == 0 {
                 return Ok(vec![Some(raw_from_vec_like(&input_raw, values)?)]);
@@ -205,7 +205,8 @@ where
             }
             .into());
         }
-        let values = self.to_vec()?[row * cols..(row + 1) * cols].to_vec();
+        let input = self.host_values()?;
+        let values = input[row * cols..(row + 1) * cols].to_vec();
         let raw = RawTensor::from_vec_on(self.device().clone(), values, Shape::known([cols]))?;
         let input_raw = self.raw().clone();
         Tensor::<D1<N>, E, B>::autograd_output(
@@ -213,7 +214,7 @@ where
             vec![AnyTensor::from_shape(self)],
             move |grad| {
                 let mut values = vec![E::ZERO; rows * cols];
-                values[row * cols..(row + 1) * cols].copy_from_slice(&grad.to_vec()?);
+                values[row * cols..(row + 1) * cols].copy_from_slice(&grad.host_values()?);
                 Ok(vec![Some(raw_from_vec_like(&input_raw, values)?)])
             },
         )
@@ -235,7 +236,7 @@ where
                 return Err(DataError::IndexOutOfBounds { index, len: rows }.into());
             }
         }
-        let input = self.to_vec()?;
+        let input = self.host_values()?;
         let mut values = Vec::with_capacity(indices.len() * cols);
         for &index in indices {
             values.extend_from_slice(&input[index * cols..(index + 1) * cols]);
@@ -251,7 +252,7 @@ where
             raw,
             vec![AnyTensor::from_shape(self)],
             move |grad| {
-                let grad = grad.to_vec()?;
+                let grad = grad.host_values()?;
                 let mut values = vec![E::ZERO; rows * cols];
                 for (out_row, &source_row) in indices.iter().enumerate() {
                     for col in 0..cols {
@@ -278,7 +279,7 @@ where
         B: Backend<i64, Device = <B as Backend<E>>::Device>,
     {
         ensure_same_device::<E, B>(self.device(), indices.device(), "index_select_rows_ids")?;
-        let indices = i64_indices_to_usize(&indices.to_vec()?)?;
+        let indices = i64_indices_to_usize(&indices.host_values()?)?;
         self.index_select_rows(&indices)
     }
 }

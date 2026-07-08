@@ -3,10 +3,12 @@ mod cpu;
 mod cuda;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod metal;
+pub(crate) mod parallel;
 #[cfg(feature = "wgpu")]
 mod wgpu;
 
 use crate::dtype::DType;
+use std::borrow::Cow;
 
 pub use cpu::{Cpu, CpuDevice, CpuError};
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
@@ -45,6 +47,12 @@ pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'stat
         device: &Self::Device,
         storage: &Self::Storage,
     ) -> std::result::Result<Vec<E>, Self::Error>;
+    fn host_access<'a>(
+        device: &Self::Device,
+        storage: &'a Self::Storage,
+    ) -> std::result::Result<Cow<'a, [E]>, Self::Error> {
+        Self::to_vec(device, storage).map(Cow::Owned)
+    }
     fn storage_len(storage: &Self::Storage) -> usize;
 
     fn matmul(

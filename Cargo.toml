@@ -19,6 +19,7 @@ cudarc = { version = "0.19", default-features = false, features = ["std", "drive
 flate2 = { version = "1", optional = true }
 half = "2"
 pollster = { version = "0.4", optional = true }
+rayon = { version = "1", optional = true }
 ureq = { version = "2", optional = true }
 wgpu = { version = "25", optional = true }
 
@@ -49,6 +50,7 @@ metal = ["dep:metal"]
 wgpu = ["dep:pollster", "dep:wgpu"]
 cuda = ["dep:cudarc"]
 hub = ["dep:flate2", "dep:ureq"]
+rayon = ["dep:rayon"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = { version = "0.33.0", optional = true }
