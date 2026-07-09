@@ -9,9 +9,11 @@
 //! Metal additionally has native forward hooks for the Epoch 16.6 training
 //! set, including unaries, row softmax/log-softmax, `sum_last`, `bmm`,
 //! broadcasts, masks, row gather, cross-entropy forward, and fused
-//! LayerNorm/RMSNorm. Remaining tensor ops and most backward formulas still
-//! execute as reference code through documented host round trips, so none of
-//! the GPU backends is a supported training path. Metal and WGPU are
+//! LayerNorm/RMSNorm. Metal also has fused device-resident SGD/Adam update
+//! kernels used by the built-in optimizers. Remaining tensor ops and some
+//! backward formulas still execute as reference code through documented host
+//! round trips, so none of the GPU backends is a supported training path.
+//! Metal and WGPU are
 //! parity-tested against CPU on real hardware; CUDA compiles and has typed
 //! device errors but has never been verified on a real device — treat it as
 //! untested. The audited support matrix, the 1.0 backend claims
@@ -44,10 +46,9 @@
 //! [`SmallRng::gen_range`] with a zero upper bound, internal invariant failures,
 //! and poisoned synchronization primitives.
 //!
-//! Optimizer parameter data access through [`nn::ParameterRefMut`] currently
-//! uses host `Vec<E>` round trips. That surface is intentionally unstable for
-//! external optimizer implementors until the device-resident optimizer path is
-//! settled.
+//! Built-in optimizers use crate-internal backend update hooks. Direct optimizer
+//! parameter data access through [`nn::ParameterRefMut`] remains a host `Vec<E>`
+//! fallback for checkpointing and external optimizer implementations.
 
 pub mod backend;
 pub mod data;

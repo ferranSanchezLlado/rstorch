@@ -122,6 +122,8 @@ trait MetalDType: DType {
     const CROSS_ENTROPY_KERNEL: &'static str;
     const LAYER_NORM_KERNEL: &'static str;
     const RMS_NORM_KERNEL: &'static str;
+    const SGD_STEP_KERNEL: &'static str;
+    const ADAM_STEP_KERNEL: &'static str;
 }
 
 impl MetalDType for f32 {
@@ -141,6 +143,8 @@ impl MetalDType for f32 {
     const CROSS_ENTROPY_KERNEL: &'static str = "cross_entropy_f32_kernel";
     const LAYER_NORM_KERNEL: &'static str = "layer_norm_f32_kernel";
     const RMS_NORM_KERNEL: &'static str = "rms_norm_f32_kernel";
+    const SGD_STEP_KERNEL: &'static str = "sgd_step_f32_kernel";
+    const ADAM_STEP_KERNEL: &'static str = "adam_step_f32_kernel";
 }
 
 impl MetalDType for f16 {
@@ -160,6 +164,8 @@ impl MetalDType for f16 {
     const CROSS_ENTROPY_KERNEL: &'static str = "cross_entropy_f16_kernel";
     const LAYER_NORM_KERNEL: &'static str = "layer_norm_f16_kernel";
     const RMS_NORM_KERNEL: &'static str = "rms_norm_f16_kernel";
+    const SGD_STEP_KERNEL: &'static str = "sgd_step_f16_kernel";
+    const ADAM_STEP_KERNEL: &'static str = "adam_step_f16_kernel";
 }
 
 impl<E> Backend<E> for Metal
@@ -786,6 +792,106 @@ where
         })?;
         Ok(Some(output))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sgd_step(
+        device: &Self::Device,
+        param: &Self::Storage,
+        grad: &Self::Storage,
+        velocity: Option<&Self::Storage>,
+        len: usize,
+        lr: E,
+        momentum: Option<E>,
+        weight_decay: E,
+    ) -> std::result::Result<(Self::Storage, Option<Self::Storage>), Self::Error>
+    where
+        E: crate::dtype::FloatDType,
+    {
+        ensure_len(param.len, len)?;
+        ensure_len(grad.len, len)?;
+        if let Some(velocity) = velocity {
+            ensure_len(velocity.len, len)?;
+        }
+        let output = empty_storage::<E>(device, len);
+        let velocity_output = momentum.map(|_| empty_storage::<E>(device, len));
+        if len == 0 {
+            return Ok((output, velocity_output));
+        }
+
+        let pipeline = pipeline::<E>(device, E::SGD_STEP_KERNEL)?;
+        let len_u32 = checked_u32(len, "sgd step length")?;
+        let use_momentum = u32::from(momentum.is_some());
+        encode_and_wait(device, &pipeline, len, |encoder| {
+            encoder.set_buffer(0, Some(&param.buffer), 0);
+            encoder.set_buffer(1, Some(&grad.buffer), 0);
+            encoder.set_buffer(2, velocity.map(buffer_ref), 0);
+            encoder.set_buffer(3, Some(&output.buffer), 0);
+            encoder.set_buffer(4, velocity_output.as_ref().map(buffer_ref), 0);
+            set_value(encoder, 5, lr);
+            set_value(encoder, 6, momentum.unwrap_or(E::ZERO));
+            set_value(encoder, 7, weight_decay);
+            set_u32(encoder, 8, use_momentum);
+            set_u32(encoder, 9, len_u32);
+        })?;
+        Ok((output, velocity_output))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn adam_step(
+        device: &Self::Device,
+        param: &Self::Storage,
+        grad: &Self::Storage,
+        m: Option<&Self::Storage>,
+        v: Option<&Self::Storage>,
+        len: usize,
+        lr: E,
+        beta1: E,
+        beta2: E,
+        eps: E,
+        weight_decay: E,
+        beta1_pow: E,
+        beta2_pow: E,
+    ) -> std::result::Result<(Self::Storage, Self::Storage, Self::Storage), Self::Error>
+    where
+        E: crate::dtype::FloatDType,
+    {
+        ensure_len(param.len, len)?;
+        ensure_len(grad.len, len)?;
+        if let Some(m) = m {
+            ensure_len(m.len, len)?;
+        }
+        if let Some(v) = v {
+            ensure_len(v.len, len)?;
+        }
+        let output = empty_storage::<E>(device, len);
+        let m_output = empty_storage::<E>(device, len);
+        let v_output = empty_storage::<E>(device, len);
+        if len == 0 {
+            return Ok((output, m_output, v_output));
+        }
+
+        let pipeline = pipeline::<E>(device, E::ADAM_STEP_KERNEL)?;
+        let len_u32 = checked_u32(len, "adam step length")?;
+        encode_and_wait(device, &pipeline, len, |encoder| {
+            encoder.set_buffer(0, Some(&param.buffer), 0);
+            encoder.set_buffer(1, Some(&grad.buffer), 0);
+            encoder.set_buffer(2, m.map(buffer_ref), 0);
+            encoder.set_buffer(3, v.map(buffer_ref), 0);
+            encoder.set_buffer(4, Some(&output.buffer), 0);
+            encoder.set_buffer(5, Some(&m_output.buffer), 0);
+            encoder.set_buffer(6, Some(&v_output.buffer), 0);
+            set_value(encoder, 7, lr);
+            set_value(encoder, 8, beta1);
+            set_value(encoder, 9, beta2);
+            set_value(encoder, 10, eps);
+            set_value(encoder, 11, weight_decay);
+            set_value(encoder, 12, beta1_pow);
+            set_value(encoder, 13, beta2_pow);
+            set_u32(encoder, 14, u32::from(m.is_some() && v.is_some()));
+            set_u32(encoder, 15, len_u32);
+        })?;
+        Ok((output, m_output, v_output))
+    }
 }
 
 fn native_unary_op(op: NativeUnaryOp) -> u32 {
@@ -1062,6 +1168,10 @@ fn raw_bytes_storage<T>(device: &MetalDevice, values: Vec<T>) -> MetalStorage {
     }
 }
 
+fn buffer_ref(storage: &MetalStorage) -> &metal_rs::BufferRef {
+    &storage.buffer
+}
+
 fn checked_u32_vec(
     values: &[usize],
     name: &'static str,
@@ -1075,7 +1185,8 @@ fn checked_u32_vec(
 
 #[cfg(test)]
 mod tests {
-    use super::{SHADERS_F16, SHADERS_F32};
+    use super::{Backend, Metal, SHADERS_F16, SHADERS_F32};
+    use crate::dtype::{FloatDType, f16};
 
     #[test]
     fn bundled_kernel_source_contains_required_entrypoints() {
@@ -1095,6 +1206,8 @@ mod tests {
         assert!(SHADERS_F32.contains("kernel void cross_entropy_f32_kernel"));
         assert!(SHADERS_F32.contains("kernel void layer_norm_f32_kernel"));
         assert!(SHADERS_F32.contains("kernel void rms_norm_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void sgd_step_f32_kernel"));
+        assert!(SHADERS_F32.contains("kernel void adam_step_f32_kernel"));
         assert!(SHADERS_F16.contains("half apply_op_f16"));
         assert!(SHADERS_F16.contains("kernel void binary_f16_kernel"));
         assert!(SHADERS_F16.contains("kernel void scalar_f16_kernel"));
@@ -1111,5 +1224,79 @@ mod tests {
         assert!(SHADERS_F16.contains("kernel void cross_entropy_f16_kernel"));
         assert!(SHADERS_F16.contains("kernel void layer_norm_f16_kernel"));
         assert!(SHADERS_F16.contains("kernel void rms_norm_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void sgd_step_f16_kernel"));
+        assert!(SHADERS_F16.contains("kernel void adam_step_f16_kernel"));
+    }
+
+    fn assert_optimizer_kernels<E>()
+    where
+        E: FloatDType,
+        Metal: Backend<E>,
+    {
+        let Ok(device) = <Metal as Backend<E>>::default_device() else {
+            return;
+        };
+        let param =
+            <Metal as Backend<E>>::from_vec(&device, vec![E::from_f64(1.0), E::from_f64(2.0)])
+                .unwrap();
+        let grad =
+            <Metal as Backend<E>>::from_vec(&device, vec![E::from_f64(0.5), E::from_f64(-0.25)])
+                .unwrap();
+
+        let (next, velocity) = <Metal as Backend<E>>::sgd_step(
+            &device,
+            &param,
+            &grad,
+            None,
+            2,
+            E::from_f64(0.1),
+            Some(E::from_f64(0.9)),
+            E::ZERO,
+        )
+        .unwrap();
+        let next = <Metal as Backend<E>>::to_vec(&device, &next).unwrap();
+        let velocity = <Metal as Backend<E>>::to_vec(&device, &velocity.unwrap()).unwrap();
+        assert_close::<E>(&next, &[0.95, 2.025]);
+        assert_close::<E>(&velocity, &[0.5, -0.25]);
+
+        let (next, m, v) = <Metal as Backend<E>>::adam_step(
+            &device,
+            &param,
+            &grad,
+            None,
+            None,
+            2,
+            E::from_f64(0.1),
+            E::from_f64(0.9),
+            E::from_f64(0.999),
+            E::from_f64(1e-8),
+            E::ZERO,
+            E::from_f64(0.9),
+            E::from_f64(0.999),
+        )
+        .unwrap();
+        let next = <Metal as Backend<E>>::to_vec(&device, &next).unwrap();
+        let m = <Metal as Backend<E>>::to_vec(&device, &m).unwrap();
+        let v = <Metal as Backend<E>>::to_vec(&device, &v).unwrap();
+        assert_close::<E>(&next, &[0.9, 2.1]);
+        assert_close::<E>(&m, &[0.05, -0.025]);
+        assert_close::<E>(&v, &[0.00025, 0.0000625]);
+    }
+
+    fn assert_close<E: FloatDType>(actual: &[E], expected: &[f64]) {
+        let tol = if E::BYTE_SIZE == 2 { 5e-3 } else { 1e-5 };
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            assert!((actual.to_f64() - expected).abs() <= tol);
+        }
+    }
+
+    #[test]
+    fn metal_f32_optimizer_kernels_update_storage() {
+        assert_optimizer_kernels::<f32>();
+    }
+
+    #[test]
+    fn metal_f16_optimizer_kernels_update_storage() {
+        assert_optimizer_kernels::<f16>();
     }
 }

@@ -7,10 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_PARAMETER_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Host closure applied to a parameter's `(data, grad)` slices, returning the
-/// updated data buffer. Used by the optimizer path to mutate parameter data
-/// without a `data()`/`set_data()` host round trip.
-type UpdateData<'a, E> = &'a mut dyn FnMut(&[E], &[E]) -> Vec<E>;
+type UpdateStorage<'a, E, B> = &'a mut dyn FnMut(
+    &<B as Backend<E>>::Device,
+    &<B as Backend<E>>::Storage,
+    &<B as Backend<E>>::Storage,
+    usize,
+) -> Result<<B as Backend<E>>::Storage>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ParameterId(u64);
@@ -82,7 +84,7 @@ where
     B: Backend<E>,
 {
     fn grad(&self) -> Result<Option<Vec<E>>>;
-    fn update_data(&mut self, update: UpdateData<'_, E>) -> Result<bool>;
+    fn update_storage(&mut self, update: UpdateStorage<'_, E, B>) -> Result<bool>;
     fn set_grad(&mut self, data: Vec<E>) -> Result<()>;
     fn set_data(&mut self, data: Vec<E>) -> Result<()>;
 }
@@ -124,15 +126,8 @@ where
         self.grad().map(|grad| grad.to_vec()).transpose()
     }
 
-    fn update_data(&mut self, update: UpdateData<'_, E>) -> Result<bool> {
-        let Some(grad) = self.grad() else {
-            return Ok(false);
-        };
-        let data = self.tensor.host_values()?;
-        let grad = grad.host_values()?;
-        let next = update(&data, &grad);
-        self.tensor.replace_data(next)?;
-        Ok(true)
+    fn update_storage(&mut self, update: UpdateStorage<'_, E, B>) -> Result<bool> {
+        self.tensor.update_data_with_storage(update)
     }
 
     fn set_grad(&mut self, grad: Vec<E>) -> Result<()> {
@@ -648,35 +643,34 @@ where
 
     /// Returns parameter data through the current host round-trip path.
     ///
-    /// This data-access surface is intentionally unstable for external
-    /// optimizer implementors until backend parity settles the device-resident
-    /// optimizer kernel set. Built-in CPU optimizers may continue using this
-    /// path in the interim.
+    /// Built-in optimizers use crate-internal backend update hooks instead.
+    /// This host fallback remains available for checkpointing and external
+    /// optimizer implementations.
     pub fn data(&self) -> Result<Vec<E>> {
         self.inner.data()
     }
 
     /// Returns gradient data through the current host round-trip path.
     ///
-    /// See [`Self::data`] for the optimizer data-access stability note.
+    /// See [`Self::data`] for the built-in optimizer device-update note.
     pub fn grad(&self) -> Result<Option<Vec<E>>> {
         self.inner.grad()
     }
 
-    pub(crate) fn update_data(&mut self, update: UpdateData<'_, E>) -> Result<bool> {
-        self.inner.update_data(update)
+    pub(crate) fn update_storage(&mut self, update: UpdateStorage<'_, E, B>) -> Result<bool> {
+        self.inner.update_storage(update)
     }
 
     /// Sets gradient data through the current host round-trip path.
     ///
-    /// See [`Self::data`] for the optimizer data-access stability note.
+    /// See [`Self::data`] for the built-in optimizer device-update note.
     pub fn set_grad(&mut self, grad: Vec<E>) -> Result<()> {
         self.inner.set_grad(grad)
     }
 
     /// Sets parameter data through the current host round-trip path.
     ///
-    /// See [`Self::data`] for the optimizer data-access stability note.
+    /// See [`Self::data`] for the built-in optimizer device-update note.
     pub fn set_data(&mut self, data: Vec<E>) -> Result<()> {
         self.inner.set_data(data)
     }

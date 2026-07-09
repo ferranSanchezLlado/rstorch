@@ -7,7 +7,7 @@ pub(crate) mod parallel;
 #[cfg(feature = "wgpu")]
 mod wgpu;
 
-use crate::dtype::DType;
+use crate::dtype::{DType, FloatDType};
 use std::borrow::Cow;
 
 pub use cpu::{Cpu, CpuDevice, CpuError};
@@ -350,5 +350,106 @@ pub trait Backend<E: DType>: sealed::SealedBackend + Clone + Send + Sync + 'stat
         _eps: f64,
     ) -> std::result::Result<Option<Self::Storage>, Self::Error> {
         Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn sgd_step(
+        device: &Self::Device,
+        param: &Self::Storage,
+        grad: &Self::Storage,
+        velocity: Option<&Self::Storage>,
+        len: usize,
+        lr: E,
+        momentum: Option<E>,
+        weight_decay: E,
+    ) -> std::result::Result<(Self::Storage, Option<Self::Storage>), Self::Error>
+    where
+        E: FloatDType,
+    {
+        record_reference_fall("sgd_step");
+        let param = Self::host_access(device, param)?;
+        let grad = Self::host_access(device, grad)?;
+        let mut next = param[..len].to_vec();
+        if weight_decay != E::ZERO {
+            for value in &mut next {
+                *value -= lr * weight_decay * *value;
+            }
+        }
+
+        let next_velocity = if let Some(momentum) = momentum {
+            let mut velocity_values = match velocity {
+                Some(velocity) if Self::storage_len(velocity) == len => {
+                    Self::host_access(device, velocity)?[..len].to_vec()
+                }
+                _ => vec![E::ZERO; len],
+            };
+            for (v, &g) in velocity_values.iter_mut().zip(&grad[..len]) {
+                *v = *v * momentum + g;
+            }
+            for (value, &v) in next.iter_mut().zip(&velocity_values) {
+                *value -= lr * v;
+            }
+            Some(Self::from_vec(device, velocity_values)?)
+        } else {
+            for (value, &g) in next.iter_mut().zip(&grad[..len]) {
+                *value -= lr * g;
+            }
+            None
+        };
+
+        Ok((Self::from_vec(device, next)?, next_velocity))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn adam_step(
+        device: &Self::Device,
+        param: &Self::Storage,
+        grad: &Self::Storage,
+        m: Option<&Self::Storage>,
+        v: Option<&Self::Storage>,
+        len: usize,
+        lr: E,
+        beta1: E,
+        beta2: E,
+        eps: E,
+        weight_decay: E,
+        beta1_pow: E,
+        beta2_pow: E,
+    ) -> std::result::Result<(Self::Storage, Self::Storage, Self::Storage), Self::Error>
+    where
+        E: FloatDType,
+    {
+        record_reference_fall("adam_step");
+        let one = E::ONE;
+        let param = Self::host_access(device, param)?;
+        let grad = Self::host_access(device, grad)?;
+        let mut next = param[..len].to_vec();
+        let mut m_values = match m {
+            Some(m) if Self::storage_len(m) == len => Self::host_access(device, m)?[..len].to_vec(),
+            _ => vec![E::ZERO; len],
+        };
+        let mut v_values = match v {
+            Some(v) if Self::storage_len(v) == len => Self::host_access(device, v)?[..len].to_vec(),
+            _ => vec![E::ZERO; len],
+        };
+
+        for ((value, &g), (m, v)) in next
+            .iter_mut()
+            .zip(&grad[..len])
+            .zip(m_values.iter_mut().zip(v_values.iter_mut()))
+        {
+            *m = beta1 * *m + (one - beta1) * g;
+            *v = beta2 * *v + (one - beta2) * g * g;
+            let m_hat = *m / (one - beta1_pow);
+            let v_hat = *v / (one - beta2_pow);
+            let decayed = *value - lr * weight_decay * *value;
+            *value = decayed - lr * m_hat / (v_hat.sqrt() + eps);
+        }
+
+        Ok((
+            Self::from_vec(device, next)?,
+            Self::from_vec(device, m_values)?,
+            Self::from_vec(device, v_values)?,
+        ))
     }
 }

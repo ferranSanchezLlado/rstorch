@@ -1,7 +1,7 @@
 use super::Optimizer;
-use crate::backend::Backend;
+use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatDType;
-use crate::error::{PersistenceError, Result};
+use crate::error::{Error, PersistenceError, Result};
 use crate::nn::{HasParameters, ParameterId, ParameterRefMut};
 use crate::no_grad;
 use crate::persistence::{
@@ -10,17 +10,34 @@ use crate::persistence::{
     validate_optimizer_parameters,
 };
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
-pub struct Sgd<E> {
+pub struct Sgd<E, B = Cpu>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
     lr: E,
     momentum: Option<E>,
     weight_decay: E,
-    velocity: HashMap<ParameterId, Vec<E>>,
+    velocity: HashMap<ParameterId, OptimizerStorage<E, B>>,
+    _backend: PhantomData<B>,
 }
 
-impl<E> Sgd<E>
+struct OptimizerStorage<E, B>
 where
     E: FloatDType,
+    B: Backend<E>,
+{
+    device: B::Device,
+    storage: B::Storage,
+    _dtype: PhantomData<E>,
+}
+
+impl<E, B> Sgd<E, B>
+where
+    E: FloatDType,
+    B: Backend<E>,
 {
     pub fn new(lr: E) -> Self {
         Self {
@@ -28,6 +45,7 @@ where
             momentum: None,
             weight_decay: E::ZERO,
             velocity: HashMap::new(),
+            _backend: PhantomData,
         }
     }
 
@@ -37,6 +55,7 @@ where
             momentum: None,
             weight_decay,
             velocity: HashMap::new(),
+            _backend: PhantomData,
         }
     }
 
@@ -46,6 +65,7 @@ where
             momentum: Some(momentum),
             weight_decay: E::ZERO,
             velocity: HashMap::new(),
+            _backend: PhantomData,
         }
     }
 
@@ -55,6 +75,7 @@ where
             momentum: Some(momentum),
             weight_decay,
             velocity: HashMap::new(),
+            _backend: PhantomData,
         }
     }
 
@@ -71,7 +92,7 @@ where
     }
 }
 
-impl<E, B> Optimizer<E, B> for Sgd<E>
+impl<E, B> Optimizer<E, B> for Sgd<E, B>
 where
     E: FloatDType,
     B: Backend<E>,
@@ -83,40 +104,43 @@ where
             let lr = self.lr;
             let momentum = self.momentum;
             let weight_decay = self.weight_decay;
-            let velocity = &mut self.velocity;
-            param.update_data(&mut |data, grad| {
-                let mut next = data.to_vec();
-                if weight_decay != E::ZERO {
-                    for value in &mut next {
-                        *value -= lr * weight_decay * *value;
-                    }
-                }
-                if let Some(momentum) = momentum {
-                    let velocity = velocity
-                        .entry(id)
-                        .or_insert_with(|| vec![E::ZERO; grad.len()]);
-                    if velocity.len() != grad.len() {
-                        *velocity = vec![E::ZERO; grad.len()];
-                    }
-                    for (v, &g) in velocity.iter_mut().zip(grad) {
-                        *v = *v * momentum + g;
-                    }
-                    for (value, &v) in next.iter_mut().zip(velocity.iter()) {
-                        *value -= lr * v;
-                    }
-                } else {
-                    for (value, &g) in next.iter_mut().zip(grad) {
-                        *value -= lr * g;
-                    }
-                }
-                next
+            let previous_velocity = self
+                .velocity
+                .get(&id)
+                .map(|velocity| velocity.storage.clone());
+            let mut next_velocity = None;
+            let updated = param.update_storage(&mut |device, data, grad, len| {
+                let (next, velocity) = B::sgd_step(
+                    device,
+                    data,
+                    grad,
+                    previous_velocity.as_ref(),
+                    len,
+                    lr,
+                    momentum,
+                    weight_decay,
+                )
+                .map_err(Error::backend)?;
+                next_velocity = velocity.map(|storage| OptimizerStorage {
+                    device: device.clone(),
+                    storage,
+                    _dtype: PhantomData,
+                });
+                Ok(next)
             })?;
+            if updated {
+                if let Some(velocity) = next_velocity {
+                    self.velocity.insert(id, velocity);
+                } else {
+                    self.velocity.remove(&id);
+                }
+            }
         }
         Ok(())
     }
 }
 
-impl<E, B> OptimizerState<E, B> for Sgd<E>
+impl<E, B> OptimizerState<E, B> for Sgd<E, B>
 where
     E: FloatDType,
     B: Backend<E>,
@@ -130,10 +154,12 @@ where
             .map(|meta| {
                 let tensors = match self.velocity.get(&meta.id) {
                     Some(velocity) => {
+                        let values = B::to_vec(&velocity.device, &velocity.storage)
+                            .map_err(Error::backend)?;
                         vec![TensorRecord::from_values(
                             "velocity",
                             meta.dims.clone(),
-                            velocity,
+                            &values,
                         )?]
                     }
                     None => Vec::new(),
@@ -168,7 +194,16 @@ where
             let mut velocity = None;
             for tensor in saved.tensors() {
                 match tensor.name() {
-                    "velocity" => velocity = Some(tensor.to_values::<E>()?),
+                    "velocity" => {
+                        let values = tensor.to_values::<E>()?;
+                        let device = B::default_device().map_err(Error::backend)?;
+                        let storage = B::from_vec(&device, values).map_err(Error::backend)?;
+                        velocity = Some(OptimizerStorage {
+                            device,
+                            storage,
+                            _dtype: PhantomData,
+                        });
+                    }
                     name => {
                         return Err(PersistenceError::UnexpectedTensor {
                             name: format!("{}.{}", snapshot.name, name),

@@ -1,5 +1,5 @@
 use super::{RawTensor, Scalar, Tensor, TensorInner};
-use crate::backend::Backend;
+use crate::backend::{Backend, NativeUnaryOp};
 use crate::dtype::{DType, FloatDType};
 use crate::error::{Result, ShapeError};
 use crate::shape::ShapeSpec;
@@ -65,7 +65,7 @@ where
     id: u64,
     requires_grad: AtomicBool,
     is_leaf: bool,
-    grad: Mutex<Option<RawTensor<E, B>>>,
+    pub(crate) grad: Mutex<Option<RawTensor<E, B>>>,
     grad_fn: Mutex<Option<Arc<GradFn<E, B>>>>,
 }
 
@@ -347,22 +347,10 @@ where
     E: DType,
     B: Backend<E>,
 {
-    let lhs_storage;
-    let rhs_storage;
-    let lhs_input = if lhs.is_contiguous() && B::storage_len(lhs.storage()) == lhs.numel() {
-        lhs.storage()
-    } else {
-        lhs_storage =
-            B::from_vec(lhs.device(), lhs.to_vec()?).map_err(crate::error::Error::backend)?;
-        &lhs_storage
-    };
-    let rhs_input = if rhs.is_contiguous() && B::storage_len(rhs.storage()) == rhs.numel() {
-        rhs.storage()
-    } else {
-        rhs_storage =
-            B::from_vec(rhs.device(), rhs.to_vec()?).map_err(crate::error::Error::backend)?;
-        &rhs_storage
-    };
+    let mut lhs_storage = None;
+    let mut rhs_storage = None;
+    let lhs_input = contiguous_storage(lhs, &mut lhs_storage)?;
+    let rhs_input = contiguous_storage(rhs, &mut rhs_storage)?;
     let storage = B::add(lhs.device(), lhs_input, rhs_input, lhs.numel())
         .map_err(crate::error::Error::backend)?;
     RawTensor::from_storage_on(lhs.device().clone(), storage, lhs.shape().clone())
@@ -384,7 +372,16 @@ where
     E: DType,
     B: Backend<E>,
 {
-    raw_from_vec_like(like, vec![value; like.numel()])
+    let storage = if value == E::ZERO {
+        B::zeros(like.device(), like.numel()).map_err(crate::error::Error::backend)?
+    } else if value == E::ONE {
+        B::ones(like.device(), like.numel()).map_err(crate::error::Error::backend)?
+    } else {
+        let ones = B::ones(like.device(), like.numel()).map_err(crate::error::Error::backend)?;
+        B::mul_scalar(like.device(), &ones, value, like.numel())
+            .map_err(crate::error::Error::backend)?
+    };
+    RawTensor::from_storage_on(like.device().clone(), storage, like.shape().clone())
 }
 
 pub(crate) fn raw_neg<E, B>(input: &RawTensor<E, B>) -> Result<RawTensor<E, B>>
@@ -392,7 +389,23 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    raw_from_vec_like(input, input.host_values()?.iter().map(|&x| -x).collect())
+    let mut input_storage = None;
+    let input_storage = contiguous_storage(input, &mut input_storage)?;
+    let storage = if let Some(storage) = B::try_unary(
+        input.device(),
+        input_storage,
+        input.numel(),
+        NativeUnaryOp::Neg,
+    )
+    .map_err(crate::error::Error::backend)?
+    {
+        storage
+    } else {
+        crate::backend::record_reference_fall("unary");
+        B::mul_scalar(input.device(), input_storage, -E::ONE, input.numel())
+            .map_err(crate::error::Error::backend)?
+    };
+    RawTensor::from_storage_on(input.device().clone(), storage, input.shape().clone())
 }
 
 pub(crate) fn raw_mul<E, B>(lhs: &RawTensor<E, B>, rhs: &RawTensor<E, B>) -> Result<RawTensor<E, B>>
@@ -400,14 +413,13 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    raw_from_vec_like(
-        lhs,
-        lhs.host_values()?
-            .iter()
-            .zip(rhs.host_values()?.iter())
-            .map(|(&a, &b)| a * b)
-            .collect(),
-    )
+    let mut lhs_storage = None;
+    let mut rhs_storage = None;
+    let lhs_input = contiguous_storage(lhs, &mut lhs_storage)?;
+    let rhs_input = contiguous_storage(rhs, &mut rhs_storage)?;
+    let storage = B::mul(lhs.device(), lhs_input, rhs_input, lhs.numel())
+        .map_err(crate::error::Error::backend)?;
+    RawTensor::from_storage_on(lhs.device().clone(), storage, lhs.shape().clone())
 }
 
 pub(crate) fn raw_div<E, B>(lhs: &RawTensor<E, B>, rhs: &RawTensor<E, B>) -> Result<RawTensor<E, B>>
@@ -415,14 +427,13 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    raw_from_vec_like(
-        lhs,
-        lhs.host_values()?
-            .iter()
-            .zip(rhs.host_values()?.iter())
-            .map(|(&a, &b)| a / b)
-            .collect(),
-    )
+    let mut lhs_storage = None;
+    let mut rhs_storage = None;
+    let lhs_input = contiguous_storage(lhs, &mut lhs_storage)?;
+    let rhs_input = contiguous_storage(rhs, &mut rhs_storage)?;
+    let storage = B::div(lhs.device(), lhs_input, rhs_input, lhs.numel())
+        .map_err(crate::error::Error::backend)?;
+    RawTensor::from_storage_on(lhs.device().clone(), storage, lhs.shape().clone())
 }
 
 pub(crate) fn raw_mul_scalar<E, B>(input: &RawTensor<E, B>, rhs: E) -> Result<RawTensor<E, B>>
@@ -430,10 +441,11 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    raw_from_vec_like(
-        input,
-        input.host_values()?.iter().map(|&x| x * rhs).collect(),
-    )
+    let mut input_storage = None;
+    let input_storage = contiguous_storage(input, &mut input_storage)?;
+    let storage = B::mul_scalar(input.device(), input_storage, rhs, input.numel())
+        .map_err(crate::error::Error::backend)?;
+    RawTensor::from_storage_on(input.device().clone(), storage, input.shape().clone())
 }
 
 pub(crate) fn raw_div_scalar<E, B>(input: &RawTensor<E, B>, rhs: E) -> Result<RawTensor<E, B>>
@@ -441,10 +453,29 @@ where
     E: FloatDType,
     B: Backend<E>,
 {
-    raw_from_vec_like(
-        input,
-        input.host_values()?.iter().map(|&x| x / rhs).collect(),
-    )
+    let mut input_storage = None;
+    let input_storage = contiguous_storage(input, &mut input_storage)?;
+    let storage = B::div_scalar(input.device(), input_storage, rhs, input.numel())
+        .map_err(crate::error::Error::backend)?;
+    RawTensor::from_storage_on(input.device().clone(), storage, input.shape().clone())
+}
+
+fn contiguous_storage<'a, E, B>(
+    input: &'a RawTensor<E, B>,
+    scratch: &'a mut Option<B::Storage>,
+) -> Result<&'a B::Storage>
+where
+    E: DType,
+    B: Backend<E>,
+{
+    if input.is_contiguous() && B::storage_len(input.storage()) == input.numel() {
+        return Ok(input.storage());
+    }
+    *scratch =
+        Some(B::from_vec(input.device(), input.to_vec()?).map_err(crate::error::Error::backend)?);
+    Ok(scratch
+        .as_ref()
+        .expect("scratch storage was just initialized"))
 }
 
 #[cfg(test)]

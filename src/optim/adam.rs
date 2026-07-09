@@ -1,7 +1,7 @@
 use super::Optimizer;
-use crate::backend::Backend;
+use crate::backend::{Backend, Cpu};
 use crate::dtype::FloatDType;
-use crate::error::{PersistenceError, Result};
+use crate::error::{Error, PersistenceError, Result};
 use crate::nn::{HasParameters, ParameterId, ParameterRefMut};
 use crate::no_grad;
 use crate::persistence::{
@@ -10,8 +10,13 @@ use crate::persistence::{
     validate_optimizer_parameters,
 };
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
-pub struct Adam<E> {
+pub struct Adam<E, B = Cpu>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
     lr: E,
     beta1: E,
     beta2: E,
@@ -20,12 +25,18 @@ pub struct Adam<E> {
     step: usize,
     beta1_pow: E,
     beta2_pow: E,
-    state: HashMap<ParameterId, AdamState<E>>,
+    state: HashMap<ParameterId, AdamState<E, B>>,
 }
 
-struct AdamState<E> {
-    m: Vec<E>,
-    v: Vec<E>,
+struct AdamState<E, B>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
+    device: B::Device,
+    m: B::Storage,
+    v: B::Storage,
+    _dtype: PhantomData<E>,
 }
 
 /// Hyperparameters shared by the Adam and AdamW update.
@@ -46,7 +57,7 @@ fn adam_step<E, B>(
     config: &AdamConfig<E>,
     beta1_pow: E,
     beta2_pow: E,
-    state: &mut HashMap<ParameterId, AdamState<E>>,
+    state: &mut HashMap<ParameterId, AdamState<E, B>>,
     params: &mut [ParameterRefMut<'_, E, B>],
 ) -> Result<()>
 where
@@ -54,41 +65,49 @@ where
     B: Backend<E>,
 {
     let _guard = no_grad();
-    let one = E::ONE;
     for param in params {
         let id = param.id();
-        param.update_data(&mut |data, grad| {
-            let moments = state.entry(id).or_insert_with(|| AdamState {
-                m: vec![E::ZERO; grad.len()],
-                v: vec![E::ZERO; grad.len()],
+        let previous_m = state.get(&id).map(|state| state.m.clone());
+        let previous_v = state.get(&id).map(|state| state.v.clone());
+        // `next_state` is populated only when the closure runs, i.e. when the
+        // parameter has a gradient; a gradient-less parameter keeps prior state.
+        let mut next_state = None;
+        param.update_storage(&mut |device, data, grad, len| {
+            let (next, m, v) = B::adam_step(
+                device,
+                data,
+                grad,
+                previous_m.as_ref(),
+                previous_v.as_ref(),
+                len,
+                config.lr,
+                config.beta1,
+                config.beta2,
+                config.eps,
+                config.weight_decay,
+                beta1_pow,
+                beta2_pow,
+            )
+            .map_err(Error::backend)?;
+            next_state = Some(AdamState {
+                device: device.clone(),
+                m,
+                v,
+                _dtype: PhantomData,
             });
-            if moments.m.len() != grad.len() || moments.v.len() != grad.len() {
-                moments.m = vec![E::ZERO; grad.len()];
-                moments.v = vec![E::ZERO; grad.len()];
-            }
-
-            let mut next = data.to_vec();
-            for ((value, &g), (m, v)) in next
-                .iter_mut()
-                .zip(grad)
-                .zip(moments.m.iter_mut().zip(moments.v.iter_mut()))
-            {
-                *m = config.beta1 * *m + (one - config.beta1) * g;
-                *v = config.beta2 * *v + (one - config.beta2) * g * g;
-                let m_hat = *m / (one - beta1_pow);
-                let v_hat = *v / (one - beta2_pow);
-                let decayed = *value - config.lr * config.weight_decay * *value;
-                *value = decayed - config.lr * m_hat / (v_hat.sqrt() + config.eps);
-            }
-            next
+            Ok(next)
         })?;
+        if let Some(next_state) = next_state {
+            state.insert(id, next_state);
+        }
     }
     Ok(())
 }
 
-impl<E> Adam<E>
+impl<E, B> Adam<E, B>
 where
     E: FloatDType,
+    B: Backend<E>,
 {
     pub fn new(lr: E) -> Self {
         Self {
@@ -124,7 +143,7 @@ where
     }
 }
 
-impl<E, B> Optimizer<E, B> for Adam<E>
+impl<E, B> Optimizer<E, B> for Adam<E, B>
 where
     E: FloatDType,
     B: Backend<E>,
@@ -150,7 +169,7 @@ where
     }
 }
 
-impl<E, B> OptimizerState<E, B> for Adam<E>
+impl<E, B> OptimizerState<E, B> for Adam<E, B>
 where
     E: FloatDType,
     B: Backend<E>,
@@ -206,7 +225,11 @@ fn pow<E: FloatDType>(value: E, n: usize) -> E {
     (0..n).fold(E::ONE, |acc, _| acc * value)
 }
 
-pub struct AdamW<E> {
+pub struct AdamW<E, B = Cpu>
+where
+    E: FloatDType,
+    B: Backend<E>,
+{
     lr: E,
     beta1: E,
     beta2: E,
@@ -215,12 +238,13 @@ pub struct AdamW<E> {
     step: usize,
     beta1_pow: E,
     beta2_pow: E,
-    state: HashMap<ParameterId, AdamState<E>>,
+    state: HashMap<ParameterId, AdamState<E, B>>,
 }
 
-impl<E> AdamW<E>
+impl<E, B> AdamW<E, B>
 where
     E: FloatDType,
+    B: Backend<E>,
 {
     pub fn new(lr: E, weight_decay: E) -> Self {
         Self {
@@ -249,7 +273,7 @@ where
     }
 }
 
-impl<E, B> Optimizer<E, B> for AdamW<E>
+impl<E, B> Optimizer<E, B> for AdamW<E, B>
 where
     E: FloatDType,
     B: Backend<E>,
@@ -275,7 +299,7 @@ where
     }
 }
 
-impl<E, B> OptimizerState<E, B> for AdamW<E>
+impl<E, B> OptimizerState<E, B> for AdamW<E, B>
 where
     E: FloatDType,
     B: Backend<E>,
@@ -326,7 +350,7 @@ where
 }
 
 fn adam_parameter_states<E, B, M>(
-    state: &HashMap<ParameterId, AdamState<E>>,
+    state: &HashMap<ParameterId, AdamState<E, B>>,
     module: &M,
 ) -> Result<Vec<crate::persistence::OptimizerParameterState>>
 where
@@ -338,10 +362,14 @@ where
         .into_iter()
         .map(|meta| {
             let tensors = match state.get(&meta.id) {
-                Some(moments) => vec![
-                    TensorRecord::from_values("m", meta.dims.clone(), &moments.m)?,
-                    TensorRecord::from_values("v", meta.dims.clone(), &moments.v)?,
-                ],
+                Some(moments) => {
+                    let m = B::to_vec(&moments.device, &moments.m).map_err(Error::backend)?;
+                    let v = B::to_vec(&moments.device, &moments.v).map_err(Error::backend)?;
+                    vec![
+                        TensorRecord::from_values("m", meta.dims.clone(), &m)?,
+                        TensorRecord::from_values("v", meta.dims.clone(), &v)?,
+                    ]
+                }
                 None => Vec::new(),
             };
             optimizer_parameter_state::<E>(&meta, tensors)
@@ -352,7 +380,7 @@ where
 fn load_adam_parameter_states<E, B, M>(
     module: &M,
     state: &OptimizerStateDict,
-) -> Result<HashMap<ParameterId, AdamState<E>>>
+) -> Result<HashMap<ParameterId, AdamState<E, B>>>
 where
     E: FloatDType,
     B: Backend<E>,
@@ -377,7 +405,18 @@ where
         }
         match (m, v) {
             (Some(m), Some(v)) => {
-                out.insert(snapshot.id, AdamState { m, v });
+                let device = B::default_device().map_err(Error::backend)?;
+                let m = B::from_vec(&device, m).map_err(Error::backend)?;
+                let v = B::from_vec(&device, v).map_err(Error::backend)?;
+                out.insert(
+                    snapshot.id,
+                    AdamState {
+                        device,
+                        m,
+                        v,
+                        _dtype: PhantomData,
+                    },
+                );
             }
             (None, None) => {}
             (Some(_), None) => {

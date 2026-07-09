@@ -568,6 +568,47 @@ where
         *self = Self::from_raw(raw)?.with_requires_grad(true);
         Ok(())
     }
+
+    pub(crate) fn update_data_with_storage(
+        &mut self,
+        mut update: impl FnMut(&B::Device, &B::Storage, &B::Storage, usize) -> Result<B::Storage>,
+    ) -> Result<bool> {
+        let Some(grad_raw) = self
+            .inner
+            .autograd
+            .grad
+            .lock()
+            .expect("grad slot poisoned")
+            .clone()
+        else {
+            return Ok(false);
+        };
+
+        let data_storage;
+        let data =
+            if self.raw().is_contiguous() && B::storage_len(self.raw().storage()) == self.numel() {
+                self.raw().storage()
+            } else {
+                data_storage = B::from_vec(self.device(), self.raw().to_vec()?)
+                    .map_err(crate::error::Error::backend)?;
+                &data_storage
+            };
+
+        let grad_storage;
+        let grad =
+            if grad_raw.is_contiguous() && B::storage_len(grad_raw.storage()) == grad_raw.numel() {
+                grad_raw.storage()
+            } else {
+                grad_storage = B::from_vec(self.device(), grad_raw.to_vec()?)
+                    .map_err(crate::error::Error::backend)?;
+                &grad_storage
+            };
+
+        let storage = update(self.device(), data, grad, self.numel())?;
+        let raw = RawTensor::from_storage_on(self.device().clone(), storage, self.shape().clone())?;
+        *self = Self::from_raw(raw)?.with_requires_grad(true);
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

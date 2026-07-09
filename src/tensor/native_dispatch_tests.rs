@@ -119,6 +119,71 @@ where
     lhs.matmul(&rhs).unwrap().sum().unwrap().backward().unwrap();
 }
 
+/// Trains a tiny `4 -> 8 -> 2` MLP for `steps` full forward/backward/optimizer
+/// iterations against a fixed regression target and returns the first and last
+/// MSE loss. The optimizer is built by `make_opt` so both SGD and Adam paths
+/// can be exercised. This is the on-device training smoke test body: the same
+/// code runs on CPU (reference) and Metal (native).
+fn train_mlp<E, B, O>(make_opt: impl FnOnce() -> O, steps: usize) -> (f64, f64)
+where
+    E: FloatDType,
+    B: Backend<E>,
+    O: crate::optim::Optimizer<E, B>,
+{
+    use crate::nn::{HasParameters, Linear, Module, mse_loss};
+    use crate::random::SmallRng;
+
+    let mut rng = SmallRng::seed_from_u64(7);
+    let mut l1 = Linear::<4, 8, E, B>::xavier_uniform(&mut rng).unwrap();
+    let mut l2 = Linear::<8, 2, E, B>::xavier_uniform(&mut rng).unwrap();
+    let input = Tensor2D::<3, 4, E, B>::from_vec(values(&[
+        0.5, -0.2, 0.1, 0.4, -0.3, 0.8, -0.1, 0.2, 0.6, 0.0, -0.4, 0.3,
+    ]))
+    .unwrap();
+    let target =
+        Tensor2D::<3, 2, E, B>::from_vec(values(&[0.2, -0.4, -0.1, 0.5, 0.3, 0.1])).unwrap();
+    let mut opt = make_opt();
+
+    let mut losses = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        let mut ctx = crate::nn::TrainContext::eval();
+        let hidden = l1.forward(&input, &mut ctx).unwrap().relu().unwrap();
+        let output = l2.forward(&hidden, &mut ctx).unwrap();
+        let loss = mse_loss(&output, &target).unwrap();
+        losses.push(loss.item().unwrap().to_f64());
+        loss.backward().unwrap();
+
+        let mut params = Vec::new();
+        l1.parameters_mut(&mut params);
+        l2.parameters_mut(&mut params);
+        opt.step(&mut params).unwrap();
+    }
+    (losses[0], *losses.last().unwrap())
+}
+
+#[test]
+fn cpu_training_step_uses_reference_optimizer_path() {
+    use crate::backend::Cpu;
+    use crate::optim::{Adam, Sgd};
+
+    fall_counter::reset();
+    let _ = train_mlp::<f32, Cpu, _>(|| Sgd::<f32, Cpu>::with_momentum(0.05, 0.9), 1);
+    assert!(
+        fall_counter::count("sgd_step") >= 1,
+        "expected CPU SGD to take the reference optimizer path"
+    );
+
+    fall_counter::reset();
+    let _ = train_mlp::<f32, Cpu, _>(|| Adam::<f32, Cpu>::new(0.05), 1);
+    assert!(
+        fall_counter::count("adam_step") >= 1,
+        "expected CPU Adam to take the reference optimizer path"
+    );
+
+    let (first, last) = train_mlp::<f32, Cpu, _>(|| Sgd::<f32, Cpu>::with_momentum(0.1, 0.9), 40);
+    assert!(last < first, "expected CPU training loss {last} < {first}");
+}
+
 #[test]
 fn cpu_forward_set_uses_reference_path() {
     use crate::backend::Cpu;
@@ -181,5 +246,65 @@ mod metal_native {
     #[test]
     fn metal_f16_dispatches_native() {
         assert_dispatches_native::<f16>();
+    }
+
+    /// On-device training smoke test: one full step runs the optimizer update
+    /// and the matmul backward native (zero reference falls), and a longer run
+    /// decreases the loss. The forward set's native dispatch is covered by
+    /// `assert_dispatches_native`; here the addition is the backward + fused
+    /// optimizer kernels driving a real MLP training loop on hardware.
+    fn assert_training_native<E>()
+    where
+        E: FloatDType,
+        Metal: Backend<E>,
+    {
+        use crate::optim::{Adam, Sgd};
+
+        if <Metal as Backend<E>>::default_device().is_err() {
+            return;
+        }
+
+        fall_counter::reset();
+        let _ = train_mlp::<E, Metal, _>(
+            || Sgd::<E, Metal>::with_momentum(E::from_f64(0.05), E::from_f64(0.9)),
+            1,
+        );
+        assert_eq!(
+            fall_counter::count("sgd_step"),
+            0,
+            "Metal SGD step fell back to the reference optimizer path"
+        );
+        assert_eq!(
+            fall_counter::count("strided_matmul"),
+            0,
+            "Metal matmul backward fell back to the reference path during training"
+        );
+
+        fall_counter::reset();
+        let _ = train_mlp::<E, Metal, _>(|| Adam::<E, Metal>::new(E::from_f64(0.05)), 1);
+        assert_eq!(
+            fall_counter::count("adam_step"),
+            0,
+            "Metal Adam step fell back to the reference optimizer path"
+        );
+
+        let (first, last) = train_mlp::<E, Metal, _>(
+            || Sgd::<E, Metal>::with_momentum(E::from_f64(0.1), E::from_f64(0.9)),
+            40,
+        );
+        assert!(
+            last < first,
+            "expected Metal training loss {last} < {first}"
+        );
+    }
+
+    #[test]
+    fn metal_f32_training_step_runs_native() {
+        assert_training_native::<f32>();
+    }
+
+    #[test]
+    fn metal_f16_training_step_runs_native() {
+        assert_training_native::<f16>();
     }
 }

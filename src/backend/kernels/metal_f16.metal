@@ -385,3 +385,69 @@ kernel void rms_norm_f16_kernel(
         out[start + col] = half(float(input[start + col]) * inv_rms * float(weight[col]));
     }
 }
+
+kernel void sgd_step_f16_kernel(
+    device const half* param [[buffer(0)]],
+    device const half* grad [[buffer(1)]],
+    device const half* velocity_in [[buffer(2)]],
+    device half* out [[buffer(3)]],
+    device half* velocity_out [[buffer(4)]],
+    constant half& lr [[buffer(5)]],
+    constant half& momentum [[buffer(6)]],
+    constant half& weight_decay [[buffer(7)]],
+    constant uint& use_momentum [[buffer(8)]],
+    constant uint& len [[buffer(9)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= len) {
+        return;
+    }
+    half value = param[gid];
+    half next = value;
+    if (weight_decay != half(0.0)) {
+        next -= lr * weight_decay * value;
+    }
+    if (use_momentum != 0) {
+        half velocity = velocity_in == nullptr ? grad[gid] : velocity_in[gid] * momentum + grad[gid];
+        velocity_out[gid] = velocity;
+        next -= lr * velocity;
+    } else {
+        next -= lr * grad[gid];
+    }
+    out[gid] = next;
+}
+
+kernel void adam_step_f16_kernel(
+    device const half* param [[buffer(0)]],
+    device const half* grad [[buffer(1)]],
+    device const half* m_in [[buffer(2)]],
+    device const half* v_in [[buffer(3)]],
+    device half* out [[buffer(4)]],
+    device half* m_out [[buffer(5)]],
+    device half* v_out [[buffer(6)]],
+    constant half& lr [[buffer(7)]],
+    constant half& beta1 [[buffer(8)]],
+    constant half& beta2 [[buffer(9)]],
+    constant half& eps [[buffer(10)]],
+    constant half& weight_decay [[buffer(11)]],
+    constant half& beta1_pow [[buffer(12)]],
+    constant half& beta2_pow [[buffer(13)]],
+    constant uint& has_state [[buffer(14)]],
+    constant uint& len [[buffer(15)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= len) {
+        return;
+    }
+    half g = grad[gid];
+    half m_prev = has_state != 0 ? m_in[gid] : half(0.0);
+    half v_prev = has_state != 0 ? v_in[gid] : half(0.0);
+    half m = beta1 * m_prev + (half(1.0) - beta1) * g;
+    half v = beta2 * v_prev + (half(1.0) - beta2) * g * g;
+    half m_hat = m / (half(1.0) - beta1_pow);
+    half v_hat = v / (half(1.0) - beta2_pow);
+    half decayed = param[gid] - lr * weight_decay * param[gid];
+    out[gid] = decayed - lr * m_hat / (sqrt(v_hat) + eps);
+    m_out[gid] = m;
+    v_out[gid] = v;
+}

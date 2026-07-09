@@ -384,3 +384,69 @@ kernel void rms_norm_f32_kernel(
         out[start + col] = input[start + col] * inv_rms * weight[col];
     }
 }
+
+kernel void sgd_step_f32_kernel(
+    device const float* param [[buffer(0)]],
+    device const float* grad [[buffer(1)]],
+    device const float* velocity_in [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    device float* velocity_out [[buffer(4)]],
+    constant float& lr [[buffer(5)]],
+    constant float& momentum [[buffer(6)]],
+    constant float& weight_decay [[buffer(7)]],
+    constant uint& use_momentum [[buffer(8)]],
+    constant uint& len [[buffer(9)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= len) {
+        return;
+    }
+    float value = param[gid];
+    float next = value;
+    if (weight_decay != 0.0) {
+        next -= lr * weight_decay * value;
+    }
+    if (use_momentum != 0) {
+        float velocity = velocity_in == nullptr ? grad[gid] : velocity_in[gid] * momentum + grad[gid];
+        velocity_out[gid] = velocity;
+        next -= lr * velocity;
+    } else {
+        next -= lr * grad[gid];
+    }
+    out[gid] = next;
+}
+
+kernel void adam_step_f32_kernel(
+    device const float* param [[buffer(0)]],
+    device const float* grad [[buffer(1)]],
+    device const float* m_in [[buffer(2)]],
+    device const float* v_in [[buffer(3)]],
+    device float* out [[buffer(4)]],
+    device float* m_out [[buffer(5)]],
+    device float* v_out [[buffer(6)]],
+    constant float& lr [[buffer(7)]],
+    constant float& beta1 [[buffer(8)]],
+    constant float& beta2 [[buffer(9)]],
+    constant float& eps [[buffer(10)]],
+    constant float& weight_decay [[buffer(11)]],
+    constant float& beta1_pow [[buffer(12)]],
+    constant float& beta2_pow [[buffer(13)]],
+    constant uint& has_state [[buffer(14)]],
+    constant uint& len [[buffer(15)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= len) {
+        return;
+    }
+    float g = grad[gid];
+    float m_prev = has_state != 0 ? m_in[gid] : 0.0;
+    float v_prev = has_state != 0 ? v_in[gid] : 0.0;
+    float m = beta1 * m_prev + (1.0 - beta1) * g;
+    float v = beta2 * v_prev + (1.0 - beta2) * g * g;
+    float m_hat = m / (1.0 - beta1_pow);
+    float v_hat = v / (1.0 - beta2_pow);
+    float decayed = param[gid] - lr * weight_decay * param[gid];
+    out[gid] = decayed - lr * m_hat / (sqrt(v_hat) + eps);
+    m_out[gid] = m;
+    v_out[gid] = v;
+}

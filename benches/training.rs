@@ -214,11 +214,11 @@ fn bench_conv_pool(c: &mut Criterion) {
 
 /// One SGD training step (batch 64, 784 -> 128 -> 10) plus a bare 256x256
 /// matmul, for one backend. Outside constructors, same-shape/scalar
-/// arithmetic, `matmul`, and `sum`, every tensor op is a typed-layer reference
-/// implementation, so on a GPU backend the step crosses host round trips at
-/// every activation, reduction, and optimizer update. The cpu-vs-GPU ratio
-/// here quantifies what "supported via host round trip" means in practice for
-/// the backend claims decision in
+/// arithmetic, `matmul`, and `sum`, many tensor ops are typed-layer reference
+/// implementations. Metal has expanded native forward and optimizer coverage,
+/// while other GPU backends still cross host round trips through most of the
+/// step. The cpu-vs-GPU ratio here quantifies what the backend claims decision
+/// means in practice for
 /// [Backend And DType Support](../docs/backend-dtype-support.md).
 fn bench_step_for_backend<B: Backend<f32>>(group: &mut BenchmarkGroup<'_, WallTime>, name: &str) {
     let mut rng = SmallRng::seed_from_u64(3);
