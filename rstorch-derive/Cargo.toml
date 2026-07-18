@@ -1,0 +1,14 @@
+# Crate owned by T13 (docs/restart-v3/implementation-plan.md §3): T13 adds
+# its own dependencies (syn/quote) and the derive implementation.
+[package]
+name = "rstorch-derive"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derive macros for rstorch (#[derive(Module)])"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true

@@ -1,4 +1,5 @@
-target
+/target
 Cargo.lock
-.test_cache
-data
+/.test_cache
+/data
+.DS_Store

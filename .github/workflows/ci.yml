@@ -1,0 +1,63 @@
+# restart-v3 CI (implementation-plan §1.2): stable + MSRV, fmt, clippy
+# -D warnings, doc build, and a cargo-public-api diff against the committed
+# baseline. Branch filters keep pushed task branches from triggering this;
+# only restart-v3 itself and PRs targeting it run.
+name: CI
+
+on:
+  push:
+    branches: [restart-v3]
+  pull_request:
+    branches: [restart-v3]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.88 is the MSRV; lints/fmt run on stable only so lint drift
+        # between toolchains cannot wedge CI.
+        toolchain: [stable, "1.88"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy,rustfmt
+          rustup default ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        if: matrix.toolchain == 'stable'
+        run: cargo fmt --all --check
+      - name: Clippy
+        if: matrix.toolchain == 'stable'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Docs
+        if: matrix.toolchain == 'stable'
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  public-api:
+    name: Public API diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup toolchain install nightly --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-public-api
+        run: cargo install cargo-public-api --locked
+      - name: Diff against committed baseline
+        run: |
+          cargo public-api --simplified > /tmp/current-public-api.txt
+          diff -u docs/restart-v3/public-api-baseline.txt /tmp/current-public-api.txt

@@ -1,0 +1,18 @@
+# The downstream fixture crate (exploration §3.1 "first-hour usability as
+# the approval record"): depends only on the rstorch public API. Fixture
+# files live in tests/ as integration tests, one per activating task
+# (tensor_ops.rs → T19, saliency.rs → T30, mnist_mlp.rs → T50,
+# mnist_cnn.rs → T51, char_lm.rs → T52).
+[package]
+name = "fixtures"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compile-tested acceptance fixtures for rstorch (not published)"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+rstorch = { path = ".." }
