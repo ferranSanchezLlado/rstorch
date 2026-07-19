@@ -8,3 +8,5 @@
 pub use crate::{DType, Device, Error, Grads, Result, Rng, Shape, Tensor};
 
 pub use crate::nn::{Forward, Mode, Module, Param};
+
+pub use crate::text::{BpeTokenizer, CharTokenizer, Tokenizer};
