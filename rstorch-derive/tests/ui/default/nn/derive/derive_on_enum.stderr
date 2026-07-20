@@ -1,0 +1,8 @@
+error: #[derive(Module)] supports structs only, not enums (a module's field set must be statically known so every parameter is visited)
+  --> tests/ui/default/nn/derive/derive_on_enum.rs:8:1
+   |
+8  | / enum Net {
+9  | |     A(Param),
+10 | |     B,
+11 | | }
+   | |_^

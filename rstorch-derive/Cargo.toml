@@ -12,3 +12,15 @@ rust-version.workspace = true
 
 [lib]
 proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+# Dev-dependency cycle (rstorch depends on rstorch-derive) is sanctioned by
+# the T13 brief: the derive's own tests need the frozen `nn` contracts, and
+# `trybuild` drives the pinned-toolchain UI suite (see `tests/`).
+[dev-dependencies]
+rstorch = { path = ".." }
+trybuild = "1"

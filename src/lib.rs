@@ -14,6 +14,12 @@
 //! use rstorch::prelude::*;
 //! ```
 
+// `#[derive(Module)]` (the `rstorch-derive` crate, T13) generates paths
+// rooted at `::rstorch`; this alias lets that expansion resolve when the
+// derive is used *inside* this crate (the layer zoo from wave 4 on) exactly
+// as it does downstream. Sanctioned by the T13 brief.
+extern crate self as rstorch;
+
 // ---- public namespaces (types also re-exported flat below) --------------
 pub mod device;
 pub mod dtype;
@@ -47,3 +53,8 @@ pub use error::{Error, Result};
 pub use rng::Rng;
 pub use shape::Shape;
 pub use tensor::Tensor;
+
+/// Derive an implementation of [`nn::Module`] — see the [`rstorch_derive`]
+/// crate docs for the loud-by-default field-classification rule and
+/// `#[module(skip)]`.
+pub use rstorch_derive::Module;
