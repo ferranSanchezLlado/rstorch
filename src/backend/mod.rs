@@ -36,6 +36,10 @@
 #![allow(dead_code)]
 
 pub(crate) mod cpu;
+// T10b: the rayon parallelism switch, compiled only under the `rayon`
+// feature (kernels fall back to sequential loops otherwise).
+#[cfg(feature = "rayon")]
+pub(crate) mod parallel;
 
 use crate::device::Device;
 use crate::dtype::DType;
