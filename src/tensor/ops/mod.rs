@@ -4,5 +4,6 @@
 pub(crate) mod conv;
 pub(crate) mod elementwise;
 pub(crate) mod index;
+pub(crate) mod reduce;
 pub(crate) mod shape;
 pub(crate) mod sugar;
