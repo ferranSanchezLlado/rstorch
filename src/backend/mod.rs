@@ -35,6 +35,9 @@
 // the integrator removes this allow at v3-m1 once the op layer calls into it.
 #![allow(dead_code)]
 
+// T19: the table-driven op × dtype harness that validates any backend
+// against the CPU reference (`conformance::run`).
+pub(crate) mod conformance;
 pub(crate) mod cpu;
 // T10b: the rayon parallelism switch, compiled only under the `rayon`
 // feature (kernels fall back to sequential loops otherwise).
