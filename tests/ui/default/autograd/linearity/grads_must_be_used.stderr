@@ -1,0 +1,15 @@
+error: unused `Grads` that must be used
+  --> tests/ui/default/autograd/linearity/grads_must_be_used.rs:14:5
+   |
+14 |     xt.mul(&xt)?.sum_all()?.backward()?;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> tests/ui/default/autograd/linearity/grads_must_be_used.rs:6:9
+   |
+6  | #![deny(unused_must_use)]
+   |         ^^^^^^^^^^^^^^^
+help: use `let _ = ...` to ignore the resulting value
+   |
+14 |     let _ = xt.mul(&xt)?.sum_all()?.backward()?;
+   |     +++++++
