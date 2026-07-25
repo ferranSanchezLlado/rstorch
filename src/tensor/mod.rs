@@ -16,6 +16,7 @@
 // constructors/accessors are unaffected (they are never dead).
 #![allow(dead_code)]
 
+mod fmt;
 pub(crate) mod ops;
 
 use crate::autograd::{self, Grads};
