@@ -133,9 +133,11 @@ fn emit(kind: &FieldKind, accessor: &TokenStream, segment: &str, is_mut: bool) -
             }
         },
         FieldKind::VecModule => {
-            // Indexed dotted paths: `blocks.0`, `blocks.1`, … The parent
-            // segment (`blocks`) is joined by the visitor when descending;
-            // each element gets its index as the child segment.
+            // Indexed dotted paths: `blocks.0`, `blocks.1`, … The child
+            // segment carries BOTH the field name and the index, because
+            // nothing descends into the field itself — emitting the bare
+            // index would drop `blocks` from every path and make two `Vec`
+            // fields in one module collide.
             let iter = if is_mut {
                 quote!(self.#accessor.iter_mut())
             } else {
@@ -143,7 +145,7 @@ fn emit(kind: &FieldKind, accessor: &TokenStream, segment: &str, is_mut: bool) -
             };
             quote! {
                 for (__i, __m) in #iter.enumerate() {
-                    visitor.module(&__i.to_string(), __m);
+                    visitor.module(&::std::format!("{}.{}", #segment, __i), __m);
                 }
             }
         }
@@ -336,10 +338,11 @@ mod tests {
     #[test]
     fn vec_module_is_indexed() {
         let out = expand_str("struct M { blocks: Vec<Block> }");
-        // Indexed child segment = the element index as a string.
+        // Indexed child segment = the FIELD NAME plus the element index, so
+        // paths read `blocks.3.attn.qkv.weight` per the frozen path format.
         assert!(out.contains("self . blocks . iter () . enumerate ()"));
         assert!(out.contains("self . blocks . iter_mut () . enumerate ()"));
-        assert!(out.contains("visitor . module (& __i . to_string () , __m)"));
+        assert!(out.contains(r#"format ! ("{}.{}" , "blocks" , __i)"#));
     }
 
     #[test]

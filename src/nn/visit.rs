@@ -293,14 +293,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T13 defect: #[derive(Module)] drops a Vec field's own segment"]
     fn derived_vec_fields_keep_their_field_segment() {
         // The frozen path format (this module's docs, exploration §4.4) is
         // `blocks.3.attn.qkv.weight`: the field segment, then the index. The
-        // derive currently emits only the index (`0.qkv.weight`), so two `Vec`
-        // fields in one module collide on identical paths. Fixing it belongs
-        // to T13, which owns `rstorch-derive`; this case is the acceptance
-        // test for that fix.
+        // derive originally emitted only the index (`0.qkv.weight`), so two
+        // `Vec` fields in one module collided on identical paths. T40 found
+        // it and wrote this case; the integrator fixed `rstorch-derive`
+        // (T13's file) so it now passes.
         let paths: Vec<_> = walk(&net(false, 2)).into_iter().map(|(p, _)| p).collect();
         assert!(
             paths.contains(&"blocks.1.qkv.weight".to_string()),
