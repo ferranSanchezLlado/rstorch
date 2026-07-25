@@ -75,7 +75,23 @@ mod sealed {
     /// [`Element`](super::Element). This closes the dtype set (adding a dtype
     /// is a crate-internal, compiler-guided change with no semver event)
     /// **without** putting any crate-private type on the public interface.
-    pub trait Sealed {}
+    ///
+    /// The seal requires [`HostConv`](super::HostConv), the crate-private
+    /// host ↔ storage plumbing. Hanging it here rather than directly off
+    /// [`Element`](super::Element) is what lets the frozen `T: Element`
+    /// signatures (`from_vec`/`to_vec`/`to_scalar`) reach the conversion
+    /// while `Element`'s own bound list — and therefore the public API —
+    /// stays exactly as T01 froze it: `Sealed` is unnameable downstream, so
+    /// nothing crate-private becomes reachable, and neither `HostConv` nor
+    /// `CpuStorage` appears in the public interface.
+    // `private_bounds` fires because `Sealed` is *reachable* at `pub`
+    // visibility (it is named in [`Element`](super::Element)'s bound list)
+    // while `HostConv` is `pub(crate)`. That is precisely the arrangement we
+    // want and it is not a leak: `Sealed` lives in a private module, so no
+    // downstream crate can name it, invoke it, or observe `HostConv` through
+    // it — the public API text is byte-identical either way.
+    #[allow(private_bounds)]
+    pub trait Sealed: super::HostConv {}
 }
 
 /// A Rust scalar type that can be a tensor element. Sealed: exactly six
@@ -107,12 +123,13 @@ pub trait Element: sealed::Sealed + Copy + Send + Sync + std::fmt::Debug + 'stat
 
 /// Crate-private host ↔ [`CpuStorage`] plumbing, kept **off** the public
 /// [`Element`] trait so the crate-internal `CpuStorage` never leaks into the
-/// public interface. Implemented for exactly the six [`Element`] types;
-/// generic CPU kernel/constructor code bounds `E: HostConv`.
-// Consumed by T10a/T20 (from_vec/to_vec, host transfer); the integrator
-// removes this allow once those land.
-#[allow(dead_code)]
-pub(crate) trait HostConv: Element {
+/// public interface. It is reached instead through the unnameable seal
+/// (`sealed::Sealed: HostConv`), which is what makes the frozen
+/// `T: Element` host-transfer signatures implementable without widening
+/// `Element`'s public bound list. Implemented for exactly the six
+/// [`Element`] types; generic CPU kernel/constructor code may also bound
+/// `E: HostConv` directly.
+pub(crate) trait HostConv: Sized {
     /// Wrap a host vector in the matching [`CpuStorage`] variant.
     fn into_cpu_storage(v: Vec<Self>) -> CpuStorage;
 
