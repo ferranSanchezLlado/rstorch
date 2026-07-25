@@ -425,8 +425,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Backward: finite-difference cases against the single `check_grad`
-    // harness. `record()` is a no-op and `check_grad` is a stub until T30,
-    // so these are `#[ignore]`d; **T31** removes the attribute.
+    // harness, activated by **T31** now that T30's engine is live.
     //
     // `check_grad` wants a scalar-valued `f`, and the reductions that would
     // supply one live in T23 (a sibling task, not this layer). Every case
@@ -454,7 +453,6 @@ mod tests {
     const TOL: f64 = 1e-4;
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_matmul_2d() {
         let a = iota([2, 3]);
         let b = iota([3, 2]);
@@ -470,7 +468,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_matmul_batched() {
         let a = iota([2, 2, 3]);
         let b = iota([2, 3, 2]);
@@ -478,7 +475,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_matmul_broadcast_batch_is_summed_back() {
         // The lhs is a bare matrix reused across the batch: its gradient is
         // the sum over the batch axis (the `sum_to` path).
@@ -499,7 +495,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_matmul_through_a_transposed_operand() {
         // The `Linear` spelling `x @ wᵀ`: the transpose's backward and the
         // matmul's must compose.
@@ -515,7 +510,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_matmul_with_a_repeated_operand() {
         // `a @ a` accumulates two contributions into the same leaf.
         let a = iota([2, 2]);

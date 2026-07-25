@@ -1137,46 +1137,88 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Backward — finite differences (activated by T31 once T30's engine and
-    // `check_grad` are live; `record` is a no-op until then).
+    // Backward — finite differences against the single `check_grad` harness.
     //
-    // `check_grad` requires `f` to produce a **scalar**, and no reduction op
-    // exists in this task's layer (T23 owns `sum`), so the cases below use
-    // single-element tensors. Rank-padding broadcast (`[]` against `[1]`) is
-    // still covered, exercising `sum_to`; T31 widens these to multi-element
-    // shapes once `sum` is available.
+    // `check_grad` requires `f` to produce a **scalar**. T22 was written
+    // before T23's reductions existed, so every case below used to be a
+    // single-element tensor; **T31** widened them to multi-element shapes and
+    // scalarizes with the weighted sum `wsum`.
+    //
+    // The weighting is load-bearing. A one-element input cannot distinguish a
+    // correct backward from one that mixes elements up, and an *unweighted*
+    // `sum_all` hands every element the same cotangent — which cannot tell a
+    // gradient placed in the right slot from one transposed, reversed, or
+    // broadcast-summed into the wrong slot. `wsum`'s weights are pairwise
+    // distinct, so any misplacement shows up as a wrong number.
     // ------------------------------------------------------------------
-
-    fn scalar(x: f32) -> Tensor {
-        t(&[x], ())
-    }
 
     const EPS: f64 = 1e-3;
     const TOL: f64 = 1e-3;
 
+    /// `Σ w ⊙ x` with pairwise-distinct constant weights: a scalar objective
+    /// whose gradient w.r.t. `x` is `w` rather than a constant.
+    fn wsum(x: &Tensor) -> Result<Tensor> {
+        let w: Vec<f32> = (0..x.num_elements())
+            .map(|i| 0.25 + 0.5 * (i as f32))
+            .collect();
+        x.mul(&Tensor::from_vec(w, x.dims().to_vec(), &CPU)?)?
+            .sum_all()
+    }
+
+    /// The left operand of the binary cases: no element equals its `rhs`
+    /// partner, so `maximum`/`minimum` are locally smooth (a tie is a kink
+    /// finite differences cannot see through).
+    fn lhs() -> Tensor {
+        t(&[1.5, -0.75, 2.25, 0.5, -1.25, 3.0], [2, 3])
+    }
+
+    fn rhs() -> Tensor {
+        t(&[-0.5, 2.0, 1.25, -2.5, 0.75, -1.5], [2, 3])
+    }
+
     #[test]
-    #[ignore = "needs T30's autograd engine (T31 activates)"]
     fn grad_binary_arithmetic() {
-        for f in [
-            |i: &[Tensor]| i[0].add(&i[1]),
-            |i: &[Tensor]| i[0].sub(&i[1]),
-            |i: &[Tensor]| i[0].mul(&i[1]),
-            |i: &[Tensor]| i[0].div(&i[1]),
-            |i: &[Tensor]| i[0].maximum(&i[1]),
-            |i: &[Tensor]| i[0].minimum(&i[1]),
-        ] {
-            check_grad(f, &[scalar(1.5), scalar(-0.75)], EPS, TOL).unwrap();
+        type BinaryCase = fn(&[Tensor]) -> Result<Tensor>;
+        let cases: [BinaryCase; 6] = [
+            |i| wsum(&i[0].add(&i[1])?),
+            |i| wsum(&i[0].sub(&i[1])?),
+            |i| wsum(&i[0].mul(&i[1])?),
+            |i| wsum(&i[0].div(&i[1])?),
+            |i| wsum(&i[0].maximum(&i[1])?),
+            |i| wsum(&i[0].minimum(&i[1])?),
+        ];
+        for f in cases {
+            check_grad(f, &[lhs(), rhs()], EPS, TOL).unwrap();
         }
     }
 
     #[test]
-    #[ignore = "needs T30's autograd engine (T31 activates)"]
     fn grad_binary_broadcast_reduces_through_sum_to() {
         // A rank-0 operand against a rank-1 one: the lhs cotangent has to be
         // summed back down over the padded leading axis.
         check_grad(
             |i: &[Tensor]| i[0].mul(&i[1]),
-            &[scalar(2.0), t(&[-3.0], [1])],
+            &[t(&[2.0], ()), t(&[-3.0], [1])],
+            EPS,
+            TOL,
+        )
+        .unwrap();
+
+        // A [3] operand against a [2, 3] one: the rhs cotangent is summed
+        // over the *padded* axis only, keeping its per-column placement.
+        check_grad(
+            |i: &[Tensor]| wsum(&i[0].mul(&i[1])?),
+            &[lhs(), t(&[-0.5, 2.0, 1.25], [3])],
+            EPS,
+            TOL,
+        )
+        .unwrap();
+
+        // …and a [2, 1] operand, summed over the *existing* size-1 axis, so
+        // the two reduction paths in `sum_to` are both exercised.
+        check_grad(
+            |i: &[Tensor]| wsum(&i[0].div(&i[1])?),
+            &[lhs(), t(&[-2.5, 0.75], [2, 1])],
             EPS,
             TOL,
         )
@@ -1184,64 +1226,65 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs T30's autograd engine (T31 activates)"]
     fn grad_scalar_variants() {
-        for f in [
-            |i: &[Tensor]| i[0].add_scalar(2.0),
-            |i: &[Tensor]| i[0].sub_scalar(2.0),
-            |i: &[Tensor]| i[0].mul_scalar(-3.0),
-            |i: &[Tensor]| i[0].div_scalar(4.0),
-        ] {
-            check_grad(f, &[scalar(0.6)], EPS, TOL).unwrap();
+        type ScalarCase = fn(&[Tensor]) -> Result<Tensor>;
+        let cases: [ScalarCase; 4] = [
+            |i| wsum(&i[0].add_scalar(2.0)?),
+            |i| wsum(&i[0].sub_scalar(2.0)?),
+            |i| wsum(&i[0].mul_scalar(-3.0)?),
+            |i| wsum(&i[0].div_scalar(4.0)?),
+        ];
+        for f in cases {
+            check_grad(f, &[lhs()], EPS, TOL).unwrap();
         }
     }
 
     #[test]
-    #[ignore = "needs T30's autograd engine (T31 activates)"]
     fn grad_unary_family() {
-        type UnaryCase = (fn(&[Tensor]) -> Result<Tensor>, f32);
+        // Several points per op, both signs where the domain allows, all far
+        // enough from a kink (`relu`/`abs` at 0) that `±EPS` stays on one side.
+        type UnaryCase = (fn(&[Tensor]) -> Result<Tensor>, &'static [f32]);
         let cases: [UnaryCase; 9] = [
-            (|i| i[0].relu(), 0.7),
-            (|i| i[0].gelu(), 0.7),
-            (|i| i[0].exp(), 0.3),
-            (|i| i[0].ln(), 1.7),
-            (|i| i[0].sqrt(), 2.3),
-            (|i| i[0].tanh(), 0.4),
-            (|i| i[0].sigmoid(), 0.4),
-            (|i| i[0].neg(), 0.9),
-            (|i| i[0].abs(), -1.2),
+            (|i| wsum(&i[0].relu()?), &[0.7, -1.3, 2.5]),
+            (|i| wsum(&i[0].gelu()?), &[0.7, -1.3, 2.5, -0.2]),
+            (|i| wsum(&i[0].exp()?), &[0.3, -1.1, 1.4]),
+            (|i| wsum(&i[0].ln()?), &[1.7, 0.4, 3.2]),
+            (|i| wsum(&i[0].sqrt()?), &[2.3, 0.6, 4.1]),
+            (|i| wsum(&i[0].tanh()?), &[0.4, -1.5, 2.2]),
+            (|i| wsum(&i[0].sigmoid()?), &[0.4, -1.5, 2.2]),
+            (|i| wsum(&i[0].neg()?), &[0.9, -2.0, 0.1]),
+            (|i| wsum(&i[0].abs()?), &[-1.2, 0.8, 2.6]),
         ];
         for (f, at) in cases {
-            check_grad(f, &[scalar(at)], EPS, TOL).unwrap();
+            check_grad(f, &[t(at, [at.len()])], EPS, TOL).unwrap();
         }
         // GELU's backward has a special case at exactly zero (Φ(0) = 1/2).
-        check_grad(|i| i[0].gelu(), &[scalar(0.0)], EPS, TOL).unwrap();
+        check_grad(|i| i[0].gelu(), &[t(&[0.0], ())], EPS, TOL).unwrap();
     }
 
     #[test]
-    #[ignore = "needs T30's autograd engine (T31 activates)"]
     fn grad_masking_ops() {
-        let keep = Tensor::from_vec(vec![false], (), &CPU).unwrap();
-        let drop = Tensor::from_vec(vec![true], (), &CPU).unwrap();
-        for mask in [keep.clone(), drop.clone()] {
-            let m = mask.clone();
-            check_grad(
-                move |i: &[Tensor]| i[0].masked_fill(&m, 0.0),
-                &[scalar(1.25)],
-                EPS,
-                TOL,
-            )
-            .unwrap();
-        }
-        for cond in [keep, drop] {
-            let c = cond.clone();
-            check_grad(
-                move |i: &[Tensor]| c.where_cond(&i[0], &i[1]),
-                &[scalar(1.25), scalar(-0.5)],
-                EPS,
-                TOL,
-            )
-            .unwrap();
-        }
+        // A mixed mask, so one call covers both the kept and the dropped
+        // branch and the gradient has to land on the right elements.
+        let mask =
+            Tensor::from_vec(vec![false, true, true, false, true, false], [2, 3], &CPU).unwrap();
+
+        let m = mask.clone();
+        check_grad(
+            move |i: &[Tensor]| wsum(&i[0].masked_fill(&m, 0.0)?),
+            &[lhs()],
+            EPS,
+            TOL,
+        )
+        .unwrap();
+
+        let c = mask;
+        check_grad(
+            move |i: &[Tensor]| wsum(&c.where_cond(&i[0], &i[1])?),
+            &[lhs(), rhs()],
+            EPS,
+            TOL,
+        )
+        .unwrap();
     }
 }

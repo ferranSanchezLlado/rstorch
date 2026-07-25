@@ -41,6 +41,10 @@ metal = { version = "0.33.0", optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
+# Reads the committed PyTorch reference vectors in `tests/numerics.rs` (T31).
+# Already in the lock file via `trybuild`; sanctioned by the integrator in
+# place of a bespoke parser inside the test file.
+serde_json = "1"
 trybuild = "1"
 
 # Bench targets are owned by the bench tasks

@@ -599,10 +599,9 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Backward helpers. `record()` is a no-op until T30, so the closures
-    // built above never run in this wave; these tests exercise the value-level
-    // functions they are made of. The finite-difference cases that check the
-    // closures themselves are the `#[ignore]`d ones further down.
+    // Backward helpers: these tests exercise the value-level functions the
+    // backward closures are made of. The finite-difference cases that check
+    // the closures end to end are further down.
     // ------------------------------------------------------------------
 
     /// Rebuild what `cross_entropy_impl` captures, for a batch with no
@@ -673,16 +672,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Backward: finite differences against the single `check_grad` harness.
-    // `record()` is a no-op and `check_grad` is a stub until T30, so these
-    // are `#[ignore]`d; **T31** removes the attribute.
+    // Backward: finite differences against the single `check_grad` harness,
+    // activated by **T31** now that T30's engine is live.
     // ------------------------------------------------------------------
 
     const EPS: f64 = 1e-3;
     const TOL: f64 = 1e-4;
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
     fn grad_cross_entropy() {
         let logits = t(&[0.5, -1.0, 2.0, 0.25, 1.5, -0.75], [2, 3]);
         let y = labels(&[2, 0]);
@@ -696,7 +693,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
     fn grad_cross_entropy_ignore_index_is_zero_on_ignored_rows() {
         let logits = t(&[0.5, -1.0, 2.0, 0.25, 1.5, -0.75], [2, 3]);
         let y = labels(&[1, -100]);
@@ -710,7 +706,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
     fn grad_mse_loss_flows_to_both_operands() {
         let pred = t(&[1.0, -2.0, 0.5, 3.0], [2, 2]);
         let target = t(&[0.25, 1.0, -1.5, 2.0], [2, 2]);

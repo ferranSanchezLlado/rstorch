@@ -3,8 +3,8 @@
 //! [`check_grad`] is the **single** finite-difference gradient harness
 //! (implementation-plan §4): every W3 op family writes its backward tests as
 //! cases against this one signature, so no task invents its own FD checker.
-//! T01 froze the signature; **T30** filled it (and T31 removes the
-//! `#[ignore]`s that kept those cases dormant while `record` was a no-op).
+//! T01 froze the signature, **T30** filled it, and **T31** activated the
+//! op-family cases that had been dormant while `record` was a no-op.
 
 use crate::backend::dispatch;
 use crate::dtype::DType;

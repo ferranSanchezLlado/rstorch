@@ -466,29 +466,35 @@ mod tests {
         ));
     }
 
-    // ----- backward (activated by T31/m4) --------------------------------
+    // ----- backward: finite differences ----------------------------------
     //
-    // `record` is a no-op until T30, so these are written against the single
-    // `testing::check_grad` harness and `#[ignore]`d. The implementation-plan
-    // §4 grid activates T26's finite-difference cases at milestone m4 (the
-    // CNN end-to-end gate), not with the rest of T31.
+    // Written against the single `testing::check_grad` harness. The
+    // implementation-plan §4 grid deferred T26's cases to milestone m4 on the
+    // assumption that T26 would not be merged by m2; it was, and these pass,
+    // so **T31** activates them as regression protection rather than leaving
+    // a merged op family unguarded.
     //
     // `check_grad` needs a scalar-valued function, and reductions belong to
-    // T23, so each case ends in a convolution with an all-ones kernel that
-    // collapses the feature map to a single element — that *is* the sum.
+    // T23, so each case ends in a convolution with a one-element output —
+    // that final convolution *is* the weighted readout.
 
-    /// The all-ones `[1, 1, h, w]` kernel that turns an `[1, 1, h, w]` feature
-    /// map into a one-element tensor.
-    fn summing_kernel(h: usize, w: usize) -> Tensor {
-        Tensor::ones([1, 1, h, w], DType::F32, &CPU).unwrap()
+    /// A `[1, 1, h, w]` kernel with pairwise-distinct weights, collapsing a
+    /// `[1, 1, h, w]` feature map to one element.
+    ///
+    /// The weights are deliberately not all ones: a uniform readout gives
+    /// every spatial position the same cotangent, so a backward that scattered
+    /// the gradient to the wrong position within a window could still agree
+    /// with finite differences. Distinct weights make placement observable.
+    fn readout_kernel(h: usize, w: usize) -> Tensor {
+        let data: Vec<f32> = (0..h * w).map(|i| 0.25 + 0.5 * (i as f32)).collect();
+        Tensor::from_vec(data, [1, 1, h, w], &CPU).unwrap()
     }
 
     #[test]
-    #[ignore = "T31/m4: activates once the autograd engine (T30) lands"]
     fn conv2d_backward_matches_finite_differences() {
         let x = image([1, 1, 4, 4]);
         let w = image([1, 1, 3, 3]);
-        let sum = summing_kernel(2, 2);
+        let sum = readout_kernel(2, 2);
         crate::testing::check_grad(
             move |xs| {
                 let y = xs[0].conv2d(&xs[1], (1, 1), (0, 0), (1, 1))?;
@@ -502,13 +508,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31/m4: activates once the autograd engine (T30) lands"]
     fn conv2d_backward_with_stride_padding_and_dilation() {
         // stride 2, padding 1, dilation 2 over 5x5 with a 2x2 kernel:
         // effective kernel 3, padded 7, so the feature map is 3x3.
         let x = image([1, 2, 5, 5]);
         let w = image([1, 2, 2, 2]);
-        let sum = summing_kernel(3, 3);
+        let sum = readout_kernel(3, 3);
         crate::testing::check_grad(
             move |xs| {
                 let y = xs[0].conv2d(&xs[1], (2, 2), (1, 1), (2, 2))?;
@@ -522,12 +527,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31/m4: activates once the autograd engine (T30) lands"]
     fn max_pool2d_backward_matches_finite_differences() {
         // Strictly increasing values: no ties, so the maximum is a locally
         // smooth function of the input.
         let x = image([1, 1, 4, 4]);
-        let sum = summing_kernel(2, 2);
+        let sum = readout_kernel(2, 2);
         crate::testing::check_grad(
             move |xs| {
                 let y = xs[0].max_pool2d((2, 2), (2, 2), (0, 0))?;
@@ -541,11 +545,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31/m4: activates once the autograd engine (T30) lands"]
     fn avg_pool2d_backward_matches_finite_differences() {
         // Padded pooling: 4x4 with a 2x2 window, stride 2, padding 1 -> 3x3.
         let x = image([1, 1, 4, 4]);
-        let sum = summing_kernel(3, 3);
+        let sum = readout_kernel(3, 3);
         crate::testing::check_grad(
             move |xs| {
                 let y = xs[0].avg_pool2d((2, 2), (2, 2), (1, 1))?;

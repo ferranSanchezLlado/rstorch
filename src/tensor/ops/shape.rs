@@ -1154,10 +1154,9 @@ mod tests {
     // ------------------------------------------------------------------
     // pad_with_zeros — the value-level half of the `narrow` backward.
     //
-    // The backward *closures* cannot run until T30 makes `record` build a
-    // graph, so this helper is covered directly here: everything the
-    // `#[ignore]`d FD case will assert about the gradient's placement is a
-    // property of this function.
+    // The FD case below covers the closure end to end; this test covers the
+    // same placement property directly on the helper, where a failure names
+    // the padding maths rather than the whole gradient chain.
     // ------------------------------------------------------------------
 
     #[test]
@@ -1255,8 +1254,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Backward: finite-difference cases against the single `check_grad`
-    // harness. `record()` is a no-op and `check_grad` is a stub until T30,
-    // so these are `#[ignore]`d; **T31** removes the attribute.
+    // harness, activated by **T31** now that T30's engine is live.
     //
     // `check_grad` needs a scalar-valued `f`, and the reduction ops that
     // would supply one live in T23 (not in this task's layer). Every case
@@ -1285,7 +1283,6 @@ mod tests {
     const TOL: f64 = 1e-4;
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_reshape() {
         let x = iota([2, 3]);
         for flat in 0..6 {
@@ -1309,7 +1306,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_transpose_and_permute() {
         let x = iota([2, 3]);
         check_grad(|xs| pick(&xs[0].transpose(0, 1)?, 3), &[x], EPS, TOL).unwrap();
@@ -1319,7 +1315,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_squeeze_and_unsqueeze() {
         let x = iota([2, 1, 3]);
         check_grad(|xs| pick(&xs[0].squeeze(1)?, 4), &[x], EPS, TOL).unwrap();
@@ -1329,7 +1324,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_narrow_pads_with_zeros() {
         let x = iota([3, 4]);
         // Interior slice: the gradient must be zero outside [1, 3).
@@ -1354,7 +1348,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_broadcast_to_sums_the_expanded_axes() {
         let x = iota([1, 3]);
         for flat in 0..6 {
@@ -1378,7 +1371,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_cat_splits_the_cotangent_per_input() {
         let a = iota([2, 2]);
         let b = iota([1, 2]);
@@ -1404,7 +1396,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_stack_splits_the_cotangent_per_input() {
         let a = iota([2, 3]);
         let b = iota([2, 3]);
@@ -1425,7 +1416,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31 activates the FD suite once T30 lands the engine"]
     fn grad_flows_through_a_chain_of_view_ops() {
         // The attention-style reshape/transpose chain, differentiated end to
         // end: a regression net for composing the inverses in the right order.

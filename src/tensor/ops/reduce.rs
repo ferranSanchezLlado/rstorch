@@ -46,13 +46,14 @@
 //! |---|---|
 //! | `sum(axis)` | broadcast the cotangent back along `axis` |
 //! | `mean(axis)` | the same, scaled by `1/n` |
-//! | `max`/`min(axis)` | route to the winners, splitting ties evenly |
+//! | `max`/`min(axis)` | route to the winners, splitting ties evenly; a line whose extremum is `NaN` has no winner and gets an all-`NaN` cotangent |
 //! | `var`/`std`, `softmax`, `log_softmax` | none of their own — they are *composed* from recorded ops (`mean`/`sub`/`mul`/`sum`/`exp`/`div`), so the engine differentiates the composition |
 //! | `argmax`/`argmin` | not differentiable ([`I64`](crate::DType::I64) output); they never reach the record seam |
 //!
 //! The `max`/`min` backward is the only one that captures tensors: the
 //! **detached** input and the **detached** output (the detached-output capture
-//! rule, exploration §4.3), built before the traced output is assembled.
+//! rule, exploration §4.3), built before the traced output is assembled. Its
+//! `NaN` rule is stated in full on `route_to_extrema`.
 
 use crate::autograd::{BackwardFn, record};
 use crate::backend::{ArgReduceOp, ReduceOp, dispatch};
@@ -198,6 +199,38 @@ fn spread(
 ///
 /// `x` and `out` are the **detached** input and output; both are re-viewed
 /// with the reduced axis present so they broadcast against each other.
+///
+/// # NaN lines (T31 decision, resolving T23's open question)
+///
+/// The forward **propagates** NaN: a line containing a NaN reduces to NaN
+/// (`backend::cpu::reduce`). That makes the tie count degenerate here —
+/// nothing compares equal to NaN, so a NaN line has *zero* winners and the
+/// even split is `g / 0`.
+///
+/// The decision is that **NaN propagates through the backward too**: every
+/// element of a line whose extremum is NaN receives a NaN cotangent,
+/// whatever `g` was. Rationale:
+///
+/// - It is the only answer consistent with the forward. The loss that
+///   consumed this output is already NaN; handing back a finite (or zero)
+///   gradient would let a poisoned step look healthy, which is the failure
+///   mode that is hardest to debug.
+/// - It is what the even-split formula already *tried* to produce: with no
+///   winners the share is `g / 0` and `hit · share` is `0 · ∞` = NaN. The
+///   decision here is to keep that answer and make it deliberate, not to
+///   overturn it. (PyTorch's `amax`/`amin` backward is the same
+///   `mask · (g / mask.sum())` shape and so reaches `0 / 0` the same way,
+///   but that was **not** re-measured for this decision — do not cite it as
+///   verified parity.)
+/// - The alternatives were rejected: routing the cotangent to the NaN's
+///   position (`torch.max(dim)`'s index-based backward) contradicts the
+///   even-split rule this op chose, and raising an error would make a
+///   data-dependent NaN a hard failure deep inside `backward()`, unlike every
+///   other op in the crate, which propagates NaN quietly.
+///
+/// The NaN is written **explicitly** rather than left to fall out of `0 · ∞`:
+/// that accident holds under IEEE-754 but not under a backend free to fold
+/// `0 · x` to `0`, and a numerics contract should not rest on that.
 fn route_to_extrema(
     g: &Tensor,
     x: &Tensor,
@@ -211,10 +244,18 @@ fn route_to_extrema(
     let zero = Tensor::zeros((), x.dtype(), &x.device())?;
     // 1 at every element that ties the extremum, 0 elsewhere.
     let hit = x.eq(&out_kd)?.where_cond(&one, &zero)?;
-    // At least one element wins per line (the axis is non-empty), so the
-    // division is safe.
-    let share = g_kd.div(&hit.sum_keepdim(axis as isize)?)?;
-    hit.mul(&share)
+    let winners = hit.sum_keepdim(axis as isize)?;
+    if !x.dtype().is_float() {
+        // An integer line always has a winner: the axis is non-empty and
+        // every value compares equal to itself.
+        return hit.mul(&g_kd.div(&winners)?);
+    }
+    // Zero winners means the extremum was NaN. Divide by 1 there so the share
+    // stays finite, then overwrite the whole line with NaN.
+    let starved = winners.eq(&zero)?;
+    let share = g_kd.div(&starved.where_cond(&one, &winners)?)?;
+    let nan = Tensor::full((), f64::NAN, x.dtype(), &x.device())?;
+    starved.where_cond(&nan, &hit.mul(&share)?)
 }
 
 /// One axis reduction, forward plus its recorded backward. `axis` is already
@@ -1160,10 +1201,9 @@ mod tests {
     // Backward: the value-level pieces that do not need the engine
     // ------------------------------------------------------------------
     //
-    // `record()` is a no-op until T30, so the closures below never run in this
-    // wave. These tests exercise the *helpers* they are built from, which are
-    // ordinary value-level functions; the finite-difference cases that check
-    // the closures themselves are the `#[ignore]`d ones further down.
+    // These tests exercise the *helpers* the backward closures are built
+    // from, which are ordinary value-level functions; the finite-difference
+    // cases that check the closures end to end are further down.
 
     #[test]
     fn spread_broadcasts_the_cotangent_back_over_the_axis() {
@@ -1223,10 +1263,57 @@ mod tests {
         assert_eq!(v(&routed), vec![0.0, 10.0, 0.0, 3.0, 3.0, 0.0]);
     }
 
+    /// Pins the T31 NaN decision documented on `route_to_extrema`: the
+    /// forward propagates NaN, so the backward does too — the *whole* line
+    /// goes NaN, and the lines beside it are untouched.
+    #[test]
+    fn a_nan_line_propagates_nan_through_the_max_backward() {
+        // Row 0 is clean, row 1 holds a NaN, row 2 is all NaN (the 0/0 case
+        // T23 flagged: nothing compares equal to the NaN extremum).
+        let x = t(
+            &[
+                1.0,
+                5.0,
+                3.0,
+                4.0,
+                f32::NAN,
+                2.0,
+                f32::NAN,
+                f32::NAN,
+                f32::NAN,
+            ],
+            [3, 3],
+        );
+        for reduced in [x.max(1).unwrap(), x.min(1).unwrap()] {
+            // The forward is NaN on both poisoned rows to begin with.
+            let forward = v(&reduced);
+            assert!(forward[0].is_finite(), "{forward:?}");
+            assert!(forward[1].is_nan() && forward[2].is_nan(), "{forward:?}");
+
+            let g = t(&[10.0, 6.0, 7.0], [3]);
+            let routed = v(&route_to_extrema(&g, &x, &reduced, 1, false).unwrap());
+            // Row 0 is unaffected by its neighbours' NaNs.
+            assert!(routed[..3].iter().all(|e| e.is_finite()), "{routed:?}");
+            assert!((routed[..3].iter().sum::<f32>() - 10.0).abs() < 1e-6);
+            // Rows 1 and 2 are NaN everywhere, not just at the NaN element,
+            // and not zero.
+            assert!(routed[3..].iter().all(|e| e.is_nan()), "{routed:?}");
+        }
+    }
+
+    /// The same decision seen from the public surface: a NaN input poisons
+    /// the gradient the engine hands back, rather than vanishing into a zero.
+    #[test]
+    fn a_nan_max_poisons_the_gradient_end_to_end() {
+        let x = t(&[1.0, f32::NAN, 3.0], [3]).traced().unwrap();
+        let grads = x.max_all().unwrap().backward().unwrap();
+        let g = grads.wrt_input(&x).unwrap().to_vec::<f32>().unwrap();
+        assert!(g.iter().all(|e| e.is_nan()), "{g:?}");
+    }
+
     // ------------------------------------------------------------------
-    // Backward: finite differences against the single `check_grad` harness.
-    // `record()` is a no-op and `check_grad` is a stub until T30, so these
-    // are `#[ignore]`d; **T31** removes the attribute.
+    // Backward: finite differences against the single `check_grad` harness,
+    // activated by **T31** now that T30's engine is live.
     // ------------------------------------------------------------------
 
     const EPS: f64 = 1e-3;
@@ -1248,7 +1335,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
     fn grad_sum_and_mean() {
         let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
         let w = weights(&[2]);
@@ -1263,7 +1349,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
     fn grad_max_and_min_route_to_the_winners() {
         // Distinct values: the cotangent goes to exactly one element per line
         // (finite differences agree only away from ties).
@@ -1279,7 +1364,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
     fn grad_var_and_std() {
         let x = t(&[1.0, 2.0, 4.0, 8.0, 3.0, 5.0], [2, 3]);
         let w = weights(&[2]);
@@ -1290,7 +1374,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
     fn grad_softmax_and_log_softmax() {
         let x = t(&[0.3, -1.2, 2.0, 0.7, 1.1, -0.4], [2, 3]);
         let w = weights(&[2, 3]);
@@ -1301,7 +1384,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
     fn grad_flows_through_a_reduction_chain() {
         // The shape a normalization layer has: subtract the mean, divide by
         // the standard deviation, reduce to a scalar.

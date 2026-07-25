@@ -618,46 +618,97 @@ mod tests {
     // ------------------------------------------------------------------
     // Backward — finite differences.
     //
-    // `check_grad` needs a single-element output and this task's layer only
-    // owns the indexed reads, so each case selects exactly one element. T31
-    // un-ignores these (and may compose them with T23's reductions, which
-    // are not on this branch, for multi-element coverage).
+    // T25 landed before T23's reductions were on its branch, so `check_grad`'s
+    // required scalar was obtained by selecting a single output element.
+    // **T31** composes these with a *weighted* `sum_all` instead. A one-hot
+    // selection does catch a scatter that overwrites (the dropped contribution
+    // is missing from the total), but it reaches one gathered element out of
+    // however many the index names, and an *unweighted* sum hands every
+    // gathered element the same cotangent — neither can distinguish a
+    // scatter-add landing in the right slot from one landing in the wrong one.
+    // Distinct weights can, and the accumulation case below then pins the sum
+    // of two *different* contributions rather than the presence of one.
     // ------------------------------------------------------------------
 
-    #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
-    fn index_select_backward_matches_finite_differences() {
-        let x = t_f32(&[1.0, -2.0, 3.0, 0.5], [4]);
-        let idx = ids(&[2], [1]);
-        crate::testing::check_grad(|inputs| inputs[0].index_select(0, &idx), &[x], 1e-3, 1e-4)
-            .unwrap();
+    const EPS: f64 = 1e-3;
+    const TOL: f64 = 1e-4;
+
+    /// `Σ w ⊙ x` with pairwise-distinct constant weights: a scalar objective
+    /// whose cotangent on `x` is `w` rather than a constant.
+    fn wsum(x: &Tensor) -> Result<Tensor> {
+        let w: Vec<f32> = (0..x.num_elements())
+            .map(|i| 0.25 + 0.5 * (i as f32))
+            .collect();
+        x.mul(&Tensor::from_vec(w, x.dims().to_vec(), &CPU)?)?
+            .sum_all()
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
-    fn index_select_backward_accumulates_repeated_indices() {
-        // The same row twice: the cotangent must sum, not overwrite.
-        let x = t_f32(&[1.0, -2.0, 3.0], [3]);
-        let idx = ids(&[1, 1], [2]);
+    fn index_select_backward_matches_finite_differences() {
+        // Out of order, and row 1 is never selected — its gradient is checked
+        // against zero, not skipped.
+        let x = t_f32(&[1.0, -2.0, 3.0, 0.5, -1.5, 2.5], [3, 2]);
+        let idx = ids(&[2, 0], [2]);
         crate::testing::check_grad(
-            |inputs| {
-                let picked = inputs[0].index_select(0, &idx)?;
-                // A [2] output is not scalar; narrow back to one element so
-                // the harness has the scalar it documents.
-                picked.index_select(0, &ids(&[0], [1]))
-            },
+            |inputs| wsum(&inputs[0].index_select(0, &idx)?),
             &[x],
-            1e-3,
-            1e-4,
+            EPS,
+            TOL,
+        )
+        .unwrap();
+
+        // Selecting along a trailing axis, where the gathered stride is 1.
+        let x = t_f32(&[1.0, -2.0, 3.0, 0.5, -1.5, 2.5], [2, 3]);
+        let idx = ids(&[2, 0, 2], [3]);
+        crate::testing::check_grad(
+            |inputs| wsum(&inputs[0].index_select(1, &idx)?),
+            &[x],
+            EPS,
+            TOL,
         )
         .unwrap();
     }
 
     #[test]
-    #[ignore = "T31: activates once the autograd engine (T30) fills record/check_grad"]
+    fn index_select_backward_accumulates_repeated_indices() {
+        // Row 1 twice, under *different* weights (0.25 and 0.75): its
+        // gradient is their sum, 1.0. A backward that overwrote instead of
+        // accumulating would report 0.25 or 0.75 — both wrong, and both
+        // invisible to an unweighted objective.
+        let x = t_f32(&[1.0, -2.0, 3.0], [3]);
+        let idx = ids(&[1, 1, 2], [3]);
+        crate::testing::check_grad(
+            |inputs| wsum(&inputs[0].index_select(0, &idx)?),
+            std::slice::from_ref(&x),
+            EPS,
+            TOL,
+        )
+        .unwrap();
+
+        // The analytic gradient itself, so the accumulation is pinned as a
+        // value and not only as an agreement with finite differences.
+        let traced = x.traced().unwrap();
+        let grads = wsum(&traced.index_select(0, &idx).unwrap())
+            .unwrap()
+            .backward()
+            .unwrap();
+        let g = grads.wrt_input(&traced).unwrap().to_vec::<f32>().unwrap();
+        assert_eq!(g, vec![0.0, 1.0, 1.25]);
+    }
+
+    #[test]
     fn gather_backward_matches_finite_differences() {
-        let x = t_f32(&[1.0, -2.0, 3.0], [1, 3]);
-        let idx = ids(&[2], [1, 1]);
-        crate::testing::check_grad(|inputs| inputs[0].gather(1, &idx), &[x], 1e-3, 1e-4).unwrap();
+        // Repeated column indices inside a row: the scatter-add has to sum
+        // two cotangents into the same source element.
+        let x = t_f32(&[1.0, -2.0, 3.0, 0.5, -1.5, 2.5], [2, 3]);
+        let idx = ids(&[2, 0, 2, 1, 1, 1], [2, 3]);
+        crate::testing::check_grad(|inputs| wsum(&inputs[0].gather(1, &idx)?), &[x], EPS, TOL)
+            .unwrap();
+
+        // …and along the leading axis, with a narrower index than the source.
+        let x = t_f32(&[1.0, -2.0, 3.0, 0.5, -1.5, 2.5], [3, 2]);
+        let idx = ids(&[2, 0, 2, 2], [2, 2]);
+        crate::testing::check_grad(|inputs| wsum(&inputs[0].gather(0, &idx)?), &[x], EPS, TOL)
+            .unwrap();
     }
 }
