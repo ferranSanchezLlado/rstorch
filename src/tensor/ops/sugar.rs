@@ -134,7 +134,7 @@ mod tests {
         std::panic::set_hook(Box::new(|_| {}));
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         std::panic::set_hook(hook);
-        let payload = caught.err().expect("the operator should have panicked");
+        let payload = caught.expect_err("the operator should have panicked");
         payload
             .downcast_ref::<String>()
             .expect("panic payload should be a String")
