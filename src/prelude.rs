@@ -11,6 +11,10 @@ pub use crate::nn::{Forward, Mode, Module, Param, Sequential};
 
 pub use crate::text::{BpeTokenizer, CharTokenizer, Tokenizer};
 
+// The data pipeline (T45): the loader, the trait its batches come from, and
+// the two provided datasets that cover the in-memory cases.
+pub use crate::data::{DataLoader, Dataset, TensorDataset, VecDataset};
+
 // The `Module` *derive macro* lives in the macro namespace, so it coexists
 // with the `Module` trait above under the one name: a single
 // `use rstorch::prelude::*;` brings both, and `#[derive(Module)]` resolves.
