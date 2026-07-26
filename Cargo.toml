@@ -54,6 +54,14 @@ trybuild = "1"
 name = "tensor_ops"
 harness = false
 
+[[bench]]
+name = "training"
+harness = false
+
+[[bench]]
+name = "data_pipeline"
+harness = false
+
 [features]
 default = []
 hub = ["dep:flate2", "dep:ureq"]
