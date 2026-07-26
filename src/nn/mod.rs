@@ -56,7 +56,9 @@
 //! prevent. Every rejection names the offending path.
 
 mod activation;
+mod attention;
 mod dropout;
+mod embedding;
 mod linear;
 mod mode;
 mod param;
@@ -65,7 +67,9 @@ mod util;
 pub(crate) mod visit;
 
 pub use activation::{Gelu, Relu};
+pub use attention::{MultiHeadAttention, scaled_dot_product_attention};
 pub use dropout::Dropout;
+pub use embedding::Embedding;
 pub use linear::Linear;
 pub use mode::Mode;
 pub use param::Param;

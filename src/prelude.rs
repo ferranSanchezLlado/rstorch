@@ -18,6 +18,9 @@ pub use crate::text::{BpeTokenizer, CharTokenizer, Tokenizer};
 // the two provided datasets that cover the in-memory cases.
 pub use crate::data::{DataLoader, Dataset, TensorDataset, VecDataset};
 
+// The layer zoo (T43): the two layers a transformer cannot be written without.
+pub use crate::nn::{Embedding, MultiHeadAttention};
+
 // The `Module` *derive macro* lives in the macro namespace, so it coexists
 // with the `Module` trait above under the one name: a single
 // `use rstorch::prelude::*;` brings both, and `#[derive(Module)]` resolves.
