@@ -636,3 +636,369 @@ fn randomised_masked_fill_matches_reference_bool_payload() {
         assert_eq!(out_slice::<bool>(&got), expected);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Contiguous fast path == general Cursor path, bit for bit
+//
+// The dense drivers (`map1_dense`/`map2_dense`/`map3_dense`) are a *second*
+// implementation of every kernel, reached only when all inputs are contiguous.
+// The tests below feed the same logical values through both paths and compare
+// **bit patterns**, so a divergence in NaN payload, signed zero, or rounding
+// cannot hide behind `==` (which calls NaN unequal and ±0 equal).
+// ---------------------------------------------------------------------------
+
+/// Exact comparison key for one output element: its bit pattern.
+trait ExactBits: Copy {
+    /// The element's bits, widened to `u64` so one helper covers every dtype.
+    fn exact_bits(self) -> u64;
+}
+impl ExactBits for f32 {
+    fn exact_bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+}
+impl ExactBits for f64 {
+    fn exact_bits(self) -> u64 {
+        self.to_bits()
+    }
+}
+impl ExactBits for half::f16 {
+    fn exact_bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+}
+impl ExactBits for half::bf16 {
+    fn exact_bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+}
+impl ExactBits for i64 {
+    fn exact_bits(self) -> u64 {
+        self as u64
+    }
+}
+impl ExactBits for bool {
+    fn exact_bits(self) -> u64 {
+        u64::from(self)
+    }
+}
+
+/// Read a kernel result as a list of exact bit patterns.
+fn exact<E: TypedSlice + ExactBits>(storage: &Storage) -> Vec<u64> {
+    out_slice::<E>(storage)
+        .into_iter()
+        .map(ExactBits::exact_bits)
+        .collect()
+}
+
+/// The same logical `[rows, cols]` matrix presented twice: once contiguous
+/// (the dense fast path) and once as a column-major buffer read through
+/// transposed strides (the general `Cursor` path). Both views gather to
+/// `values` in row-major order.
+fn dense_and_strided<E: TypedSlice>(
+    values: &[E],
+    rows: usize,
+    cols: usize,
+) -> (Owned<E>, Owned<E>) {
+    assert_eq!(values.len(), rows * cols);
+    let dense = Owned::<E>::new(
+        values.to_vec(),
+        Layout::contiguous(vec![rows, cols]).unwrap(),
+    );
+    let mut col_major = values.to_vec();
+    for i in 0..rows {
+        for j in 0..cols {
+            col_major[j * rows + i] = values[i * cols + j];
+        }
+    }
+    let strided = Owned::<E>::new(
+        col_major,
+        Layout::contiguous(vec![cols, rows])
+            .unwrap()
+            .transpose(0, 1)
+            .unwrap(),
+    );
+    assert!(
+        dense.layout.is_contiguous(),
+        "dense case must be contiguous"
+    );
+    assert!(
+        !strided.layout.is_contiguous(),
+        "strided case must miss the fast path"
+    );
+    (dense, strided)
+}
+
+/// f32 values chosen to expose every way the two paths could disagree: signed
+/// zeros (the `maximum`/`minimum` tie), NaN (payload propagation), infinities,
+/// and magnitudes that round.
+fn adversarial_f32() -> Vec<f32> {
+    vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        3.5,
+        -2.25,
+        1.0e-30,
+        1.0e30,
+        0.1,
+    ]
+}
+
+#[test]
+fn binary_dense_path_is_bitwise_identical_to_cursor_path_f32() {
+    let lhs_vals = adversarial_f32();
+    let rhs_vals: Vec<f32> = adversarial_f32().into_iter().rev().collect();
+    let (dl, sl) = dense_and_strided(&lhs_vals, 3, 4);
+    let (dr, sr) = dense_and_strided(&rhs_vals, 3, 4);
+
+    for op in [
+        BinaryOp::Add,
+        BinaryOp::Sub,
+        BinaryOp::Mul,
+        BinaryOp::Div,
+        BinaryOp::Maximum,
+        BinaryOp::Minimum,
+    ] {
+        let fast = binary(op, dl.view(), dr.view()).unwrap();
+        let general = binary(op, sl.view(), sr.view()).unwrap();
+        assert_eq!(
+            exact::<f32>(&fast),
+            exact::<f32>(&general),
+            "binary {op:?}: dense path differs from cursor path"
+        );
+        // Mixed contiguous/strided must agree too (this pair takes the general
+        // path because only one side is dense).
+        let mixed = binary(op, dl.view(), sr.view()).unwrap();
+        assert_eq!(exact::<f32>(&fast), exact::<f32>(&mixed), "binary {op:?}");
+    }
+}
+
+#[test]
+fn binary_dense_path_is_bitwise_identical_to_cursor_path_f64_f16_i64() {
+    let f64_vals: Vec<f64> = adversarial_f32().into_iter().map(f64::from).collect();
+    let (df, sf) = dense_and_strided(&f64_vals, 3, 4);
+    let h_vals: Vec<half::f16> = adversarial_f32()
+        .into_iter()
+        .map(half::f16::from_f32)
+        .collect();
+    let (dh, sh) = dense_and_strided(&h_vals, 3, 4);
+    let i_vals: Vec<i64> = vec![0, -1, 1, i64::MIN, i64::MAX, 7, -7, 2, -2, 3, 0, 11];
+    let (di, si) = dense_and_strided(&i_vals, 3, 4);
+
+    for op in [
+        BinaryOp::Add,
+        BinaryOp::Sub,
+        BinaryOp::Mul,
+        BinaryOp::Div,
+        BinaryOp::Maximum,
+        BinaryOp::Minimum,
+    ] {
+        assert_eq!(
+            exact::<f64>(&binary(op, df.view(), df.view()).unwrap()),
+            exact::<f64>(&binary(op, sf.view(), sf.view()).unwrap()),
+            "binary f64 {op:?}"
+        );
+        assert_eq!(
+            exact::<half::f16>(&binary(op, dh.view(), dh.view()).unwrap()),
+            exact::<half::f16>(&binary(op, sh.view(), sh.view()).unwrap()),
+            "binary f16 {op:?}"
+        );
+        // i64 `Div` by the zero elements exercises the guarded divide.
+        assert_eq!(
+            exact::<i64>(&binary(op, di.view(), di.view()).unwrap()),
+            exact::<i64>(&binary(op, si.view(), si.view()).unwrap()),
+            "binary i64 {op:?}"
+        );
+    }
+}
+
+#[test]
+fn binary_scalar_dense_path_is_bitwise_identical_to_cursor_path() {
+    let vals = adversarial_f32();
+    let (dense, strided) = dense_and_strided(&vals, 3, 4);
+    for op in [
+        BinaryOp::Add,
+        BinaryOp::Sub,
+        BinaryOp::Mul,
+        BinaryOp::Div,
+        BinaryOp::Maximum,
+        BinaryOp::Minimum,
+    ] {
+        for scalar in [0.0, -0.0, 2.5, -1.0] {
+            assert_eq!(
+                exact::<f32>(&binary_scalar(op, dense.view(), scalar).unwrap()),
+                exact::<f32>(&binary_scalar(op, strided.view(), scalar).unwrap()),
+                "binary_scalar {op:?} {scalar}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unary_dense_path_is_bitwise_identical_to_cursor_path() {
+    // Includes negatives, so `ln`/`sqrt` produce NaN on the same slots in both
+    // paths — exactly the case a bit-pattern comparison must police.
+    let vals = adversarial_f32();
+    let (dense, strided) = dense_and_strided(&vals, 3, 4);
+    let i_vals: Vec<i64> = vec![0, -1, 1, i64::MIN, i64::MAX, 7, -7, 2, -2, 3, 0, 11];
+    let (di, si) = dense_and_strided(&i_vals, 3, 4);
+
+    for op in [
+        UnaryOp::Relu,
+        UnaryOp::Gelu,
+        UnaryOp::Exp,
+        UnaryOp::Ln,
+        UnaryOp::Sqrt,
+        UnaryOp::Tanh,
+        UnaryOp::Sigmoid,
+        UnaryOp::Neg,
+        UnaryOp::Abs,
+    ] {
+        assert_eq!(
+            exact::<f32>(&unary(op, dense.view()).unwrap()),
+            exact::<f32>(&unary(op, strided.view()).unwrap()),
+            "unary f32 {op:?}: dense path differs from cursor path"
+        );
+        if matches!(op, UnaryOp::Neg | UnaryOp::Abs) {
+            assert_eq!(
+                exact::<i64>(&unary(op, di.view()).unwrap()),
+                exact::<i64>(&unary(op, si.view()).unwrap()),
+                "unary i64 {op:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn compare_where_masked_fill_dense_paths_match_cursor_paths() {
+    let lhs_vals = adversarial_f32();
+    let rhs_vals: Vec<f32> = adversarial_f32().into_iter().rev().collect();
+    let (dl, sl) = dense_and_strided(&lhs_vals, 3, 4);
+    let (dr, sr) = dense_and_strided(&rhs_vals, 3, 4);
+    let cond_vals: Vec<bool> = (0..12).map(|i| i % 3 == 0).collect();
+    let (dc, sc) = dense_and_strided(&cond_vals, 3, 4);
+
+    for op in [
+        CmpOp::Eq,
+        CmpOp::Ne,
+        CmpOp::Lt,
+        CmpOp::Le,
+        CmpOp::Gt,
+        CmpOp::Ge,
+    ] {
+        // NaN operands make every comparison false; both paths must agree.
+        assert_eq!(
+            exact::<bool>(&compare(op, dl.view(), dr.view()).unwrap()),
+            exact::<bool>(&compare(op, sl.view(), sr.view()).unwrap()),
+            "compare {op:?}"
+        );
+    }
+
+    assert_eq!(
+        exact::<f32>(&where_cond(dc.view(), dl.view(), dr.view()).unwrap()),
+        exact::<f32>(&where_cond(sc.view(), sl.view(), sr.view()).unwrap()),
+        "where_cond"
+    );
+    // One strided operand out of three must still route to the general path
+    // and agree.
+    assert_eq!(
+        exact::<f32>(&where_cond(dc.view(), dl.view(), dr.view()).unwrap()),
+        exact::<f32>(&where_cond(dc.view(), dl.view(), sr.view()).unwrap()),
+        "where_cond mixed"
+    );
+
+    for value in [0.0f64, -0.0, 5.5] {
+        assert_eq!(
+            exact::<f32>(&masked_fill(dl.view(), dc.view(), value).unwrap()),
+            exact::<f32>(&masked_fill(sl.view(), sc.view(), value).unwrap()),
+            "masked_fill {value}"
+        );
+    }
+}
+
+#[test]
+fn dense_path_covers_a_contiguous_prefix_of_a_larger_storage() {
+    // Narrowing the leading axis leaves offset 0 and row-major strides, so the
+    // layout is contiguous while the storage is twice as long: `dense` must
+    // hand the kernel the `n`-element prefix, not the whole buffer.
+    let base = contig_f32(&[4, 3]);
+    let prefix = base.layout.narrow(0, 0, 2).unwrap();
+    assert!(prefix.is_contiguous());
+    assert_eq!(prefix.num_elements(), 6);
+    let x = Owned::<f32>::new(base.data(), prefix);
+
+    let got = binary(BinaryOp::Mul, x.view(), x.view()).unwrap();
+    let expected: Vec<f32> = gather(&x.data(), &x.layout).iter().map(|a| a * a).collect();
+    assert_eq!(out_slice::<f32>(&got), expected);
+
+    let got = unary(UnaryOp::Neg, x.view()).unwrap();
+    let expected: Vec<f32> = gather(&x.data(), &x.layout).iter().map(|a| -a).collect();
+    assert_eq!(out_slice::<f32>(&got), expected);
+}
+
+#[test]
+fn dense_drivers_handle_a_ragged_multi_chunk_output() {
+    // Larger than `DENSE_CHUNK` and not a multiple of it, so under the `rayon`
+    // feature the output is split into two full windows plus a short tail and
+    // the base-offset arithmetic in `fill_dense_chunks` is exercised. Without
+    // the feature this is one window and simply checks the large-input path.
+    const CHUNK: usize = 16 * 1024;
+    let rows = 3usize;
+    let cols = CHUNK * 2 / 3 + 5;
+    let n = rows * cols;
+    assert!(n > CHUNK * 2 && !n.is_multiple_of(CHUNK));
+    let vals: Vec<f32> = (0..n).map(|i| (i % 97) as f32 * 0.25 - 6.0).collect();
+    let (dense, strided) = dense_and_strided(&vals, rows, cols);
+
+    let fast = binary(BinaryOp::Add, dense.view(), dense.view()).unwrap();
+    let general = binary(BinaryOp::Add, strided.view(), strided.view()).unwrap();
+    assert_eq!(exact::<f32>(&fast), exact::<f32>(&general));
+    let reference: Vec<f32> = vals.iter().map(|a| a + a).collect();
+    assert_eq!(out_slice::<f32>(&fast), reference);
+
+    let fast = unary(UnaryOp::Relu, dense.view()).unwrap();
+    let general = unary(UnaryOp::Relu, strided.view()).unwrap();
+    assert_eq!(exact::<f32>(&fast), exact::<f32>(&general));
+
+    let cond: Vec<bool> = (0..n).map(|i| i % 5 == 0).collect();
+    let (dc, sc) = dense_and_strided(&cond, rows, cols);
+    let fast = where_cond(dc.view(), dense.view(), dense.view()).unwrap();
+    let general = where_cond(sc.view(), strided.view(), strided.view()).unwrap();
+    assert_eq!(exact::<f32>(&fast), exact::<f32>(&general));
+
+    let fast = masked_fill(dense.view(), dc.view(), 1.5).unwrap();
+    let general = masked_fill(strided.view(), sc.view(), 1.5).unwrap();
+    assert_eq!(exact::<f32>(&fast), exact::<f32>(&general));
+
+    let fast = compare(CmpOp::Lt, dense.view(), dense.view()).unwrap();
+    let general = compare(CmpOp::Lt, strided.view(), strided.view()).unwrap();
+    assert_eq!(exact::<bool>(&fast), exact::<bool>(&general));
+}
+
+#[test]
+fn dense_classifies_layouts_and_clamps_to_the_view_length() {
+    let data: Vec<f32> = (0..12).map(|i| i as f32).collect();
+    let contig = Layout::contiguous([3, 4]).unwrap();
+    assert_eq!(dense(&contig, &data, 12).map(<[f32]>::len), Some(12));
+
+    // A contiguous prefix of a longer storage yields just the prefix.
+    let prefix = Layout::contiguous([4, 3]).unwrap().narrow(0, 0, 2).unwrap();
+    assert_eq!(dense(&prefix, &data, 6), Some(&data[..6]));
+
+    // Permuted, offset, and broadcast layouts are not the identity map.
+    assert!(dense(&contig.transpose(0, 1).unwrap(), &data, 12).is_none());
+    assert!(dense(&contig.narrow(1, 1, 3).unwrap(), &data, 9).is_none());
+    let bcast = Layout::contiguous([1, 4])
+        .unwrap()
+        .broadcast_to(&Shape::from([3, 4]))
+        .unwrap();
+    assert!(dense(&bcast, &data, 12).is_none());
+
+    // Too short a buffer falls back rather than panicking.
+    assert!(dense(&contig, &data[..8], 12).is_none());
+}

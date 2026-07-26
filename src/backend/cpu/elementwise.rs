@@ -10,13 +10,25 @@
 //!   narrowed, or broadcast (stride-0 axes repeat elements). The op layer
 //!   pre-broadcasts multi-input kernels to shape-identical views, so the
 //!   output is dense/contiguous and one logical index addresses every input.
-//! - **A contiguous fast path.** When a view is
+//! - **A contiguous fast path.** When *every* input view is
 //!   [`is_contiguous`](crate::layout::Layout::is_contiguous), the cursor is
-//!   the identity map and reads reduce to a flat slice walk (adapted from the
-//!   v2 `backend/cpu.rs` contiguous loops).
-//! - **One dtype-dispatch macro.** `dispatch_typed!` routes a runtime
-//!   [`DType`](crate::dtype::DType) to a monomorphized body over the concrete
-//!   element type, so each multi-dtype op is written once.
+//!   the identity map, so the kernel drops it entirely and zips flat slices
+//!   instead (adapted from the v2 `backend/cpu.rs` contiguous loops). The
+//!   layout decision is made **once per call**, outside the loop: `dense`
+//!   turns a view into a `&[E]`, and the `map1_dense`/`map2_dense`/
+//!   `map3_dense` drivers walk it with equal-length iterators, so the
+//!   per-element work is the arithmetic alone — no layout match and no bounds
+//!   check, which lets the loop vectorize. Mixed contiguous/strided inputs (in
+//!   particular a broadcast operand) keep the general [`Cursor`] path, which
+//!   is allowed to stay slower.
+//! - **Two families of dispatch macro, both hoisted out of the loop.**
+//!   `dispatch_typed!` routes a runtime [`DType`](crate::dtype::DType) to a
+//!   monomorphized body over the concrete element type, so each multi-dtype op
+//!   is written once. `dispatch_binary_op!`/`dispatch_unary_op!`/
+//!   `dispatch_cmp_op!` do the same for the *op discriminant*: they rebind it
+//!   as a `const`, so the kernel closure captures nothing and the arithmetic
+//!   `match` inside `binary_f32` and friends folds at compile time instead of
+//!   re-running for every element.
 //! - **The parallelism switch.** Output buffers are filled through `fill`,
 //!   which becomes a rayon parallel loop under the `rayon` feature
 //!   (`backend::parallel`) and a sequential loop otherwise.
@@ -94,6 +106,10 @@ impl Cursor {
 
 /// Fill `out` by writing `f(i)` at every position, in parallel under the
 /// `rayon` feature and sequentially otherwise.
+///
+/// This is the **general** driver: it pays one [`Cursor`] map per input per
+/// element. Kernels whose inputs are all contiguous use the `map*_dense`
+/// drivers below instead.
 #[inline]
 fn fill<T, F>(out: &mut [T], f: F)
 where
@@ -109,6 +125,163 @@ where
         for (idx, slot) in out.iter_mut().enumerate() {
             *slot = f(idx);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contiguous fast path
+// ---------------------------------------------------------------------------
+
+/// Elements per rayon task in the contiguous drivers. Large enough that the
+/// per-task overhead is amortized and the inner loop stays vectorized, small
+/// enough to keep every core fed on the shapes these kernels see.
+#[cfg(feature = "rayon")]
+const DENSE_CHUNK: usize = 16 * 1024;
+
+/// The dense `n`-element prefix of `data`, or `None` when `layout` is not the
+/// identity map into it.
+///
+/// `Layout::is_contiguous` means offset 0 and canonical row-major strides, so
+/// logical element `i` lives at `data[i]` and the first `n` elements of the
+/// storage *are* the view. Non-contiguous layouts (permuted, narrowed,
+/// broadcast) return `None` and their kernel takes the `Cursor` path.
+///
+/// Returning a slice of length exactly `n` is what makes the drivers below
+/// fast: every iterator in the zip then has the same length, so the bounds
+/// checks fold away. The `get` is also belt-and-braces against a short
+/// storage — `View` construction already validates the layout against it, and
+/// this keeps the helper panic-free regardless.
+#[inline]
+fn dense<'a, E>(layout: &Layout, data: &'a [E], n: usize) -> Option<&'a [E]> {
+    if layout.is_contiguous() {
+        data.get(..n)
+    } else {
+        None
+    }
+}
+
+/// Hand `out` to `body` as `(base_index, window)` pairs: the whole slice in one
+/// call without `rayon`, and [`DENSE_CHUNK`]-sized parallel windows with it.
+///
+/// The windows are a pure partition of `out` — every slot is written by exactly
+/// one call, from the same input positions — so the result does not depend on
+/// the feature flag or on the thread count.
+#[cfg(feature = "rayon")]
+#[inline]
+fn fill_dense_chunks<T, F>(out: &mut [T], body: F)
+where
+    T: Send,
+    F: Fn(usize, &mut [T]) + Send + Sync,
+{
+    if out.is_empty() {
+        return;
+    }
+    let chunk = DENSE_CHUNK.min(out.len());
+    crate::backend::parallel::for_each_chunk_mut(out, chunk, |idx, window| {
+        body(idx * chunk, window)
+    });
+}
+
+/// Build the dense output `[f(a[0]), f(a[1]), …]`.
+///
+/// Without `rayon` the buffer is `collect`ed straight from the input iterator:
+/// its length is exact (`TrustedLen`), so the allocation happens once and every
+/// output byte is written exactly once — where pre-sizing with `vec![ZERO; n]`
+/// and then overwriting costs a second pass over the whole output, which on a
+/// bandwidth-bound kernel is real traffic. With `rayon` the buffer is pre-sized
+/// and filled in windows, because the parallel façade partitions an existing
+/// slice. Both branches write the same value to every slot.
+#[inline]
+fn map1_dense<A, O, F>(a: &[A], f: F) -> Vec<O>
+where
+    A: Copy + Sync,
+    O: TypedSlice,
+    F: Fn(A) -> O + Send + Sync,
+{
+    #[cfg(not(feature = "rayon"))]
+    {
+        a.iter().map(|&x| f(x)).collect()
+    }
+    #[cfg(feature = "rayon")]
+    {
+        let mut out = vec![O::ZERO; a.len()];
+        fill_dense_chunks(&mut out, |base, window| {
+            // Re-slicing the input to the window length is what lets the loop
+            // drop its bounds checks: both iterators then have equal length.
+            let a = &a[base..base + window.len()];
+            for (slot, &x) in window.iter_mut().zip(a) {
+                *slot = f(x);
+            }
+        });
+        out
+    }
+}
+
+/// Build the dense output `[f(a[0], b[0]), …]`. `a` and `b` must have equal
+/// length. See [`map1_dense`] for why the sequential branch collects.
+#[inline]
+fn map2_dense<A, B, O, F>(a: &[A], b: &[B], f: F) -> Vec<O>
+where
+    A: Copy + Sync,
+    B: Copy + Sync,
+    O: TypedSlice,
+    F: Fn(A, B) -> O + Send + Sync,
+{
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(not(feature = "rayon"))]
+    {
+        a.iter().zip(b).map(|(&x, &y)| f(x, y)).collect()
+    }
+    #[cfg(feature = "rayon")]
+    {
+        let mut out = vec![O::ZERO; a.len()];
+        fill_dense_chunks(&mut out, |base, window| {
+            let end = base + window.len();
+            let a = &a[base..end];
+            let b = &b[base..end];
+            for ((slot, &x), &y) in window.iter_mut().zip(a).zip(b) {
+                *slot = f(x, y);
+            }
+        });
+        out
+    }
+}
+
+/// Build the dense output `[f(a[0], b[0], c[0]), …]`. All three inputs must
+/// have equal length. See [`map1_dense`] for why the sequential branch
+/// collects.
+#[inline]
+fn map3_dense<A, B, C, O, F>(a: &[A], b: &[B], c: &[C], f: F) -> Vec<O>
+where
+    A: Copy + Sync,
+    B: Copy + Sync,
+    C: Copy + Sync,
+    O: TypedSlice,
+    F: Fn(A, B, C) -> O + Send + Sync,
+{
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(a.len(), c.len());
+    #[cfg(not(feature = "rayon"))]
+    {
+        a.iter()
+            .zip(b)
+            .zip(c)
+            .map(|((&x, &y), &z)| f(x, y, z))
+            .collect()
+    }
+    #[cfg(feature = "rayon")]
+    {
+        let mut out = vec![O::ZERO; a.len()];
+        fill_dense_chunks(&mut out, |base, window| {
+            let end = base + window.len();
+            let a = &a[base..end];
+            let b = &b[base..end];
+            let c = &c[base..end];
+            for (((slot, &x), &y), &z) in window.iter_mut().zip(a).zip(b).zip(c) {
+                *slot = f(x, y, z);
+            }
+        });
+        out
     }
 }
 
@@ -202,12 +375,62 @@ macro_rules! dispatch_typed {
     }};
 }
 
+/// Re-dispatch a runtime op enum into one `const` per variant, binding it as
+/// `$konst` inside a copy of `$body` for each arm.
+///
+/// This is the loop-hoisting half of the fast path. A kernel closure written
+/// against the `const` captures *nothing*, and the arithmetic `match` inside
+/// `binary_f32` and friends folds to the single reachable arm at compile time —
+/// where a closure over a runtime `op` re-ran that match for every element.
+///
+/// The cost is one monomorphization of the kernel per (op, dtype) pair, which
+/// is the price of the specialization.
+macro_rules! dispatch_op_const {
+    ($ty:ty, $op:expr, $konst:ident => $body:block, [$($variant:ident),+ $(,)?]) => {
+        match $op {
+            $(
+                <$ty>::$variant => {
+                    const $konst: $ty = <$ty>::$variant;
+                    $body
+                }
+            )+
+        }
+    };
+}
+
+/// `dispatch_op_const` over every `BinaryOp` variant.
+macro_rules! dispatch_binary_op {
+    ($op:expr, $konst:ident => $body:block) => {
+        dispatch_op_const!(BinaryOp, $op, $konst => $body,
+            [Add, Sub, Mul, Div, Maximum, Minimum])
+    };
+}
+
+/// `dispatch_op_const` over every `UnaryOp` variant.
+macro_rules! dispatch_unary_op {
+    ($op:expr, $konst:ident => $body:block) => {
+        dispatch_op_const!(UnaryOp, $op, $konst => $body,
+            [Relu, Gelu, Exp, Ln, Sqrt, Tanh, Sigmoid, Neg, Abs])
+    };
+}
+
+/// `dispatch_op_const` over every `CmpOp` variant.
+macro_rules! dispatch_cmp_op {
+    ($op:expr, $konst:ident => $body:block) => {
+        dispatch_op_const!(CmpOp, $op, $konst => $body, [Eq, Ne, Lt, Le, Gt, Ge])
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Binary
 // ---------------------------------------------------------------------------
 
 /// Apply `f` element-wise over two pre-broadcast, shape-identical views,
 /// producing a fresh contiguous `Vec<E>` output.
+///
+/// Both views contiguous is the fast path: a flat slice zip with no cursor.
+/// Otherwise the general `Cursor` path runs. Either way `f` sees the same
+/// operand pair for the same output slot, so the two paths agree bit for bit.
 fn zip_map<E, F>(op: &'static str, lhs: View<'_>, rhs: View<'_>, f: F) -> Result<Storage>
 where
     E: TypedSlice,
@@ -216,12 +439,21 @@ where
     let n = lhs.layout().num_elements();
     let lhs_data = cpu_slice::<E>(lhs.storage(), op)?;
     let rhs_data = cpu_slice::<E>(rhs.storage(), op)?;
-    let lc = Cursor::new(lhs.layout());
-    let rc = Cursor::new(rhs.layout());
-    let mut out = vec![E::ZERO; n];
-    fill(&mut out, |i| {
-        f(lhs_data[lc.index(i)], rhs_data[rc.index(i)])
-    });
+    let out = match (
+        dense(lhs.layout(), lhs_data, n),
+        dense(rhs.layout(), rhs_data, n),
+    ) {
+        (Some(a), Some(b)) => map2_dense(a, b, f),
+        _ => {
+            let lc = Cursor::new(lhs.layout());
+            let rc = Cursor::new(rhs.layout());
+            let mut out = vec![E::ZERO; n];
+            fill(&mut out, |i| {
+                f(lhs_data[lc.index(i)], rhs_data[rc.index(i)])
+            });
+            out
+        }
+    };
     Ok(E::into_storage(out))
 }
 
@@ -231,56 +463,60 @@ pub(crate) fn binary(op: BinaryOp, lhs: View<'_>, rhs: View<'_>) -> Result<Stora
     let device = lhs.device();
     // Floats support every op; i64 supports arithmetic (wrapping / guarded);
     // bool has no arithmetic (comparisons live in `compare`).
-    match lhs.dtype() {
-        DType::F32 => zip_map::<f32, _>(name, lhs, rhs, move |a, b| binary_f32(op, a, b)),
-        DType::F64 => zip_map::<f64, _>(name, lhs, rhs, move |a, b| binary_f64(op, a, b)),
-        DType::F16 => zip_map::<half::f16, _>(name, lhs, rhs, move |a, b| {
-            half::f16::from_f32(binary_f32(op, a.to_f32(), b.to_f32()))
-        }),
-        DType::BF16 => zip_map::<half::bf16, _>(name, lhs, rhs, move |a, b| {
-            half::bf16::from_f32(binary_f32(op, a.to_f32(), b.to_f32()))
-        }),
-        DType::I64 => zip_map::<i64, _>(name, lhs, rhs, move |a, b| binary_i64(op, a, b)),
-        other => Err(Error::Unsupported {
-            op: name,
-            device,
-            dtype: other,
-        }),
-    }
+    dispatch_binary_op!(op, OP => {
+        match lhs.dtype() {
+            DType::F32 => zip_map::<f32, _>(name, lhs, rhs, |a, b| binary_f32(OP, a, b)),
+            DType::F64 => zip_map::<f64, _>(name, lhs, rhs, |a, b| binary_f64(OP, a, b)),
+            DType::F16 => zip_map::<half::f16, _>(name, lhs, rhs, |a, b| {
+                half::f16::from_f32(binary_f32(OP, a.to_f32(), b.to_f32()))
+            }),
+            DType::BF16 => zip_map::<half::bf16, _>(name, lhs, rhs, |a, b| {
+                half::bf16::from_f32(binary_f32(OP, a.to_f32(), b.to_f32()))
+            }),
+            DType::I64 => zip_map::<i64, _>(name, lhs, rhs, |a, b| binary_i64(OP, a, b)),
+            other => Err(Error::Unsupported {
+                op: name,
+                device,
+                dtype: other,
+            }),
+        }
+    })
 }
 
 /// See [`BackendOps::binary_scalar`](crate::backend::BackendOps::binary_scalar).
 pub(crate) fn binary_scalar(op: BinaryOp, x: View<'_>, scalar: f64) -> Result<Storage> {
     let name = binary_op_name(op);
     let device = x.device();
-    match x.dtype() {
-        DType::F32 => {
-            let s = scalar as f32;
-            unary_map::<f32, _>(name, x, move |a| binary_f32(op, a, s))
+    dispatch_binary_op!(op, OP => {
+        match x.dtype() {
+            DType::F32 => {
+                let s = scalar as f32;
+                unary_map::<f32, _>(name, x, move |a| binary_f32(OP, a, s))
+            }
+            DType::F64 => unary_map::<f64, _>(name, x, move |a| binary_f64(OP, a, scalar)),
+            DType::F16 => {
+                let s = scalar as f32;
+                unary_map::<half::f16, _>(name, x, move |a| {
+                    half::f16::from_f32(binary_f32(OP, a.to_f32(), s))
+                })
+            }
+            DType::BF16 => {
+                let s = scalar as f32;
+                unary_map::<half::bf16, _>(name, x, move |a| {
+                    half::bf16::from_f32(binary_f32(OP, a.to_f32(), s))
+                })
+            }
+            DType::I64 => {
+                let s = scalar as i64;
+                unary_map::<i64, _>(name, x, move |a| binary_i64(OP, a, s))
+            }
+            other => Err(Error::Unsupported {
+                op: name,
+                device,
+                dtype: other,
+            }),
         }
-        DType::F64 => unary_map::<f64, _>(name, x, move |a| binary_f64(op, a, scalar)),
-        DType::F16 => {
-            let s = scalar as f32;
-            unary_map::<half::f16, _>(name, x, move |a| {
-                half::f16::from_f32(binary_f32(op, a.to_f32(), s))
-            })
-        }
-        DType::BF16 => {
-            let s = scalar as f32;
-            unary_map::<half::bf16, _>(name, x, move |a| {
-                half::bf16::from_f32(binary_f32(op, a.to_f32(), s))
-            })
-        }
-        DType::I64 => {
-            let s = scalar as i64;
-            unary_map::<i64, _>(name, x, move |a| binary_i64(op, a, s))
-        }
-        other => Err(Error::Unsupported {
-            op: name,
-            device,
-            dtype: other,
-        }),
-    }
+    })
 }
 
 fn binary_op_name(op: BinaryOp) -> &'static str {
@@ -294,6 +530,13 @@ fn binary_op_name(op: BinaryOp) -> &'static str {
     }
 }
 
+// The three scalar bodies below are the single source of truth for the binary
+// arithmetic, so every dtype and both layout paths agree by construction.
+// `inline(always)` is what makes that free rather than costly: callers pass
+// `op` as a `const` (see `dispatch_binary_op!`), so after inlining the match
+// folds to the one reachable arm and the enclosing loop vectorizes.
+
+#[inline(always)]
 fn binary_f32(op: BinaryOp, a: f32, b: f32) -> f32 {
     match op {
         BinaryOp::Add => a + b,
@@ -305,6 +548,7 @@ fn binary_f32(op: BinaryOp, a: f32, b: f32) -> f32 {
     }
 }
 
+#[inline(always)]
 fn binary_f64(op: BinaryOp, a: f64, b: f64) -> f64 {
     match op {
         BinaryOp::Add => a + b,
@@ -316,6 +560,7 @@ fn binary_f64(op: BinaryOp, a: f64, b: f64) -> f64 {
     }
 }
 
+#[inline(always)]
 fn binary_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
     // Wrapping arithmetic (PyTorch integer-overflow semantics) so kernels are
     // panic-free and identical in debug and release; division guards a zero
@@ -335,6 +580,10 @@ fn binary_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Apply `f` element-wise over one view, producing a fresh contiguous output.
+///
+/// A contiguous input takes the flat slice walk; anything else takes the
+/// general `Cursor` path. `f` sees the same element for the same output slot
+/// either way, so the two paths agree bit for bit.
 fn unary_map<E, F>(op: &'static str, x: View<'_>, f: F) -> Result<Storage>
 where
     E: TypedSlice,
@@ -342,9 +591,15 @@ where
 {
     let n = x.layout().num_elements();
     let data = cpu_slice::<E>(x.storage(), op)?;
-    let cursor = Cursor::new(x.layout());
-    let mut out = vec![E::ZERO; n];
-    fill(&mut out, |i| f(data[cursor.index(i)]));
+    let out = match dense(x.layout(), data, n) {
+        Some(src) => map1_dense(src, f),
+        None => {
+            let cursor = Cursor::new(x.layout());
+            let mut out = vec![E::ZERO; n];
+            fill(&mut out, |i| f(data[cursor.index(i)]));
+            out
+        }
+    };
     Ok(E::into_storage(out))
 }
 
@@ -353,32 +608,37 @@ where
 pub(crate) fn unary(op: UnaryOp, x: View<'_>) -> Result<Storage> {
     let name = unary_op_name(op);
     let device = x.device();
-    match x.dtype() {
-        DType::F32 => unary_map::<f32, _>(name, x, move |a| unary_f64(op, a as f64) as f32),
-        DType::F64 => unary_map::<f64, _>(name, x, move |a| unary_f64(op, a)),
-        DType::F16 => unary_map::<half::f16, _>(name, x, move |a| {
-            half::f16::from_f64(unary_f64(op, a.to_f64()))
-        }),
-        DType::BF16 => unary_map::<half::bf16, _>(name, x, move |a| {
-            half::bf16::from_f64(unary_f64(op, a.to_f64()))
-        }),
-        DType::I64 => match op {
-            // Only the sign-preserving integer unaries are defined; the rest
-            // are float-only per the `UnaryOp` contract.
-            UnaryOp::Neg => unary_map::<i64, _>(name, x, |a| a.wrapping_neg()),
-            UnaryOp::Abs => unary_map::<i64, _>(name, x, |a| a.wrapping_abs()),
-            _ => Err(Error::Unsupported {
+    dispatch_unary_op!(op, OP => {
+        match x.dtype() {
+            // The `f64` round trip is the contract, not an accident: every
+            // float dtype gets the same `unary_f64` definition, and the same
+            // rounding, so f16/bf16/f32/f64 agree. Unchanged here.
+            DType::F32 => unary_map::<f32, _>(name, x, |a| unary_f64(OP, a as f64) as f32),
+            DType::F64 => unary_map::<f64, _>(name, x, |a| unary_f64(OP, a)),
+            DType::F16 => unary_map::<half::f16, _>(name, x, |a| {
+                half::f16::from_f64(unary_f64(OP, a.to_f64()))
+            }),
+            DType::BF16 => unary_map::<half::bf16, _>(name, x, |a| {
+                half::bf16::from_f64(unary_f64(OP, a.to_f64()))
+            }),
+            DType::I64 => match OP {
+                // Only the sign-preserving integer unaries are defined; the
+                // rest are float-only per the `UnaryOp` contract.
+                UnaryOp::Neg => unary_map::<i64, _>(name, x, |a| a.wrapping_neg()),
+                UnaryOp::Abs => unary_map::<i64, _>(name, x, |a| a.wrapping_abs()),
+                _ => Err(Error::Unsupported {
+                    op: name,
+                    device,
+                    dtype: DType::I64,
+                }),
+            },
+            other => Err(Error::Unsupported {
                 op: name,
                 device,
-                dtype: DType::I64,
+                dtype: other,
             }),
-        },
-        other => Err(Error::Unsupported {
-            op: name,
-            device,
-            dtype: other,
-        }),
-    }
+        }
+    })
 }
 
 fn unary_op_name(op: UnaryOp) -> &'static str {
@@ -398,6 +658,10 @@ fn unary_op_name(op: UnaryOp) -> &'static str {
 /// The unary math in `f64`; callers cast to/from the element type. One
 /// implementation guarantees f16/bf16/f32/f64 agree on the definition (in
 /// particular the **exact** GELU with `erf`, not the tanh approximation).
+///
+/// `inline(always)` for the same reason as `binary_f32`: `op` arrives as a
+/// `const`, so only the selected arm survives in the caller's loop.
+#[inline(always)]
 fn unary_f64(op: UnaryOp, x: f64) -> f64 {
     match op {
         UnaryOp::Relu => x.max(0.0),
@@ -436,22 +700,40 @@ where
     let n = lhs.layout().num_elements();
     let lhs_data = cpu_slice::<E>(lhs.storage(), name)?;
     let rhs_data = cpu_slice::<E>(rhs.storage(), name)?;
-    let lc = Cursor::new(lhs.layout());
-    let rc = Cursor::new(rhs.layout());
-    let mut out = vec![false; n];
-    fill(&mut out, |i| {
-        let a = &lhs_data[lc.index(i)];
-        let b = &rhs_data[rc.index(i)];
-        match op {
-            CmpOp::Eq => a == b,
-            CmpOp::Ne => a != b,
-            CmpOp::Lt => a < b,
-            CmpOp::Le => a <= b,
-            CmpOp::Gt => a > b,
-            CmpOp::Ge => a >= b,
+    let out = dispatch_cmp_op!(op, OP => {
+        let f = |a: E, b: E| compare_scalar(OP, &a, &b);
+        match (
+            dense(lhs.layout(), lhs_data, n),
+            dense(rhs.layout(), rhs_data, n),
+        ) {
+            (Some(a), Some(b)) => map2_dense(a, b, f),
+            _ => {
+                let lc = Cursor::new(lhs.layout());
+                let rc = Cursor::new(rhs.layout());
+                let mut out = vec![false; n];
+                fill(&mut out, |i| f(lhs_data[lc.index(i)], rhs_data[rc.index(i)]));
+                out
+            }
         }
     });
     Ok(<bool as TypedSlice>::into_storage(out))
+}
+
+/// The comparison itself: one definition shared by every dtype and both layout
+/// paths.
+///
+/// `inline(always)` so that a `const` `op` (see `dispatch_cmp_op!`) folds the
+/// match away in the caller's loop.
+#[inline(always)]
+fn compare_scalar<E: PartialOrd>(op: CmpOp, a: &E, b: &E) -> bool {
+    match op {
+        CmpOp::Eq => a == b,
+        CmpOp::Ne => a != b,
+        CmpOp::Lt => a < b,
+        CmpOp::Le => a <= b,
+        CmpOp::Gt => a > b,
+        CmpOp::Ge => a >= b,
+    }
 }
 
 fn cmp_op_name(op: CmpOp) -> &'static str {
@@ -490,17 +772,30 @@ where
     let cond_data = cpu_slice::<bool>(cond.storage(), OP)?;
     let t_data = cpu_slice::<E>(on_true.storage(), OP)?;
     let f_data = cpu_slice::<E>(on_false.storage(), OP)?;
-    let cc = Cursor::new(cond.layout());
-    let tc = Cursor::new(on_true.layout());
-    let fc = Cursor::new(on_false.layout());
-    let mut out = vec![E::ZERO; n];
-    fill(&mut out, |i| {
-        if cond_data[cc.index(i)] {
-            t_data[tc.index(i)]
-        } else {
-            f_data[fc.index(i)]
+    let out = match (
+        dense(cond.layout(), cond_data, n),
+        dense(on_true.layout(), t_data, n),
+        dense(on_false.layout(), f_data, n),
+    ) {
+        // The dense path loads both operands and selects; the general path
+        // below only walks the selected operand's cursor. Same value either
+        // way — an unselected load is always in bounds, never observable.
+        (Some(c), Some(t), Some(f)) => map3_dense(c, t, f, |c, t, f| if c { t } else { f }),
+        _ => {
+            let cc = Cursor::new(cond.layout());
+            let tc = Cursor::new(on_true.layout());
+            let fc = Cursor::new(on_false.layout());
+            let mut out = vec![E::ZERO; n];
+            fill(&mut out, |i| {
+                if cond_data[cc.index(i)] {
+                    t_data[tc.index(i)]
+                } else {
+                    f_data[fc.index(i)]
+                }
+            });
+            out
         }
-    });
+    };
     Ok(E::into_storage(out))
 }
 
@@ -524,16 +819,25 @@ where
     let n = x.layout().num_elements();
     let x_data = cpu_slice::<E>(x.storage(), OP)?;
     let mask_data = cpu_slice::<bool>(mask.storage(), OP)?;
-    let xc = Cursor::new(x.layout());
-    let mc = Cursor::new(mask.layout());
-    let mut out = vec![E::ZERO; n];
-    fill(&mut out, |i| {
-        if mask_data[mc.index(i)] {
-            value
-        } else {
-            x_data[xc.index(i)]
+    let out = match (
+        dense(x.layout(), x_data, n),
+        dense(mask.layout(), mask_data, n),
+    ) {
+        (Some(src), Some(m)) => map2_dense(src, m, |a, m| if m { value } else { a }),
+        _ => {
+            let xc = Cursor::new(x.layout());
+            let mc = Cursor::new(mask.layout());
+            let mut out = vec![E::ZERO; n];
+            fill(&mut out, |i| {
+                if mask_data[mc.index(i)] {
+                    value
+                } else {
+                    x_data[xc.index(i)]
+                }
+            });
+            out
         }
-    });
+    };
     Ok(E::into_storage(out))
 }
 
