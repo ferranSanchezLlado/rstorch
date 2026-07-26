@@ -55,12 +55,18 @@
 //! that silently produces wrong results is the failure mode they exist to
 //! prevent. Every rejection names the offending path.
 
+mod activation;
+mod dropout;
+mod linear;
 mod mode;
 mod param;
 mod sequential;
 mod util;
 pub(crate) mod visit;
 
+pub use activation::{Gelu, Relu};
+pub use dropout::Dropout;
+pub use linear::Linear;
 pub use mode::Mode;
 pub use param::Param;
 pub use sequential::Sequential;

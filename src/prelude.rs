@@ -9,6 +9,9 @@ pub use crate::{DType, Device, Error, Grads, Result, Rng, Shape, Tensor};
 
 pub use crate::nn::{Forward, Mode, Module, Param, Sequential};
 
+// The core layer zoo (T41).
+pub use crate::nn::{Dropout, Gelu, Linear, Relu};
+
 pub use crate::text::{BpeTokenizer, CharTokenizer, Tokenizer};
 
 // The data pipeline (T45): the loader, the trait its batches come from, and
