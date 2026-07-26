@@ -12,6 +12,9 @@ pub use crate::nn::{Forward, Mode, Module, Param, Sequential};
 // The core layer zoo (T41).
 pub use crate::nn::{Dropout, Gelu, Linear, Relu};
 
+// The normalization layers (T42).
+pub use crate::nn::{BatchNorm2d, LayerNorm, RMSNorm};
+
 pub use crate::text::{BpeTokenizer, CharTokenizer, Tokenizer};
 
 // The data pipeline (T45): the loader, the trait its batches come from, and

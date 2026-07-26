@@ -61,6 +61,7 @@ mod dropout;
 mod embedding;
 mod linear;
 mod mode;
+mod norm;
 mod param;
 mod sequential;
 mod util;
@@ -72,6 +73,7 @@ pub use dropout::Dropout;
 pub use embedding::Embedding;
 pub use linear::Linear;
 pub use mode::Mode;
+pub use norm::{BatchNorm2d, LayerNorm, RMSNorm};
 pub use param::Param;
 pub use sequential::Sequential;
 // Model-level utilities exposed flat (exploration §4.4: `nn::to_device`).
