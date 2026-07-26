@@ -13,6 +13,34 @@
 //! v2 native paths, which accumulated in dtype. The walk is stride-aware, so
 //! transposed / narrowed / broadcast operand views are handled directly with
 //! no pre-materialization.
+//!
+//! # Loop order
+//!
+//! A naive `i` → `j` → `p` nest makes the innermost step
+//! `rhs[rhs_col + p * rhs_k_stride]`, striding `rhs` by `n` per multiply. That
+//! is v2's hotspot 1 (~1.2 G MAC/s at 1024²), so the order is instead picked
+//! from the `rhs` strides:
+//!
+//! - **`rhs_n_stride == 1`** (row-major `rhs`, the plain `a @ b` case) —
+//!   `i` → `p` → `j`, accumulating a whole output row at once against
+//!   consecutive `rhs` rows. The row accumulator and the `rhs` row are
+//!   unit-stride slices of equal length, so the inner loop is a
+//!   bounds-check-free `axpy` that auto-vectorizes. This is v2's fix verbatim.
+//! - **otherwise** — `i` → `j` → `p` dot products, `COL_BLOCK` output columns
+//!   at a time. The case that matters is a transposed `rhs` view
+//!   (`rhs_k_stride == 1`), which is what
+//!   [`Linear`](crate::nn::Linear)'s `x @ w.T` produces: `p` is already the
+//!   contiguous axis there, so the naive nest was cache-friendly but
+//!   latency-bound on one dependent add chain. Blocking over `j` gives
+//!   `COL_BLOCK` independent chains and reuses each `lhs` load across them.
+//!
+//! Both orders accumulate every output element's `k` terms in ascending `p`
+//! into one `Acc` slot and narrow once, so each is bitwise-identical to the
+//! other and to the naive nest, for every dtype. Nothing here reassociates a
+//! sum — blocking is only ever over independent output elements, never within
+//! one element's inner product. That is the property the file is written
+//! around, and `both_loop_orders_are_bitwise_identical_to_the_naive_nest`
+//! pins it.
 
 use crate::backend::View;
 use crate::dtype::{DType, Element};
@@ -168,44 +196,116 @@ fn output_shape(plan: &Plan) -> Shape {
     Shape::from(dims)
 }
 
+/// How many output columns the strided-`rhs` order accumulates at once, so the
+/// multiply-add chains are independent instead of one latency-bound chain. Each
+/// chain still walks its own output element's `k` terms in ascending order, so
+/// the width is a pure throughput knob and cannot change a result.
+///
+/// Measured on `matmul/square_transposed_rhs_f32/256` (9.75 ms unblocked):
+/// 4 → 4.74 ms, **8 → 3.43 ms**, 12 → 3.89 ms, 16 → 4.12 ms. Past 8 the extra
+/// accumulators cost more in register pressure and loads per step than the
+/// added overlap buys.
+const COL_BLOCK: usize = 8;
+
 /// Generic batched matmul accumulating each inner product in `E::Acc` and
-/// casting once at output. `lhs`/`rhs` are the whole backing buffers.
+/// casting once at output. `lhs`/`rhs` are the whole backing buffers. See the
+/// module docs for why the loop order is chosen from the `rhs` strides.
 fn matmul_generic<E>(lhs: &[E], rhs: &[E], plan: &Plan) -> Vec<E>
 where
     E: Element,
     E::Acc: MatAcc,
 {
-    let batch_count: usize = plan.batch.iter().product::<usize>().max(1);
     let (m, k, n) = (plan.m, plan.k, plan.n);
+    // A rank-2 operand pair has no batch axes, so the product is 1 and the
+    // single "batch" is the matrix itself.
+    let batch_count: usize = plan.batch.iter().product();
+    // An empty output has nothing to accumulate. Returning here keeps the
+    // row-slice below from having to reason about a zero-length `rhs` range
+    // whose base may sit past the end of a zero-sized buffer, and keeps
+    // `batch_bases` off a zero-extent batch axis (which it would divide by).
+    // `k == 0` deliberately does *not* return early: that still produces `ZERO`
+    // for every output element, as it always has.
+    if batch_count == 0 || m == 0 || n == 0 {
+        return Vec::new();
+    }
     let mut out = Vec::with_capacity(batch_count * m * n);
-    // Decode a linear batch index into per-axis coords (row-major over the
-    // batch dims) and the corresponding operand base offsets.
-    for b in 0..batch_count {
-        let mut lhs_base = plan.lhs_offset;
-        let mut rhs_base = plan.rhs_offset;
-        let mut rem = b;
-        for ax in (0..plan.batch.len()).rev() {
-            let size = plan.batch[ax];
-            let coord = rem % size;
-            rem /= size;
-            lhs_base += coord * plan.lhs_batch_strides[ax];
-            rhs_base += coord * plan.rhs_batch_strides[ax];
-        }
-        for i in 0..m {
-            let lhs_row = lhs_base + i * plan.lhs_m_stride;
-            for j in 0..n {
-                let rhs_col = rhs_base + j * plan.rhs_n_stride;
-                let mut acc = <E::Acc as MatAcc>::ZERO;
+    if plan.rhs_n_stride == 1 {
+        // One wide accumulator slot per output column, allocated once and
+        // refilled per output row so the hot loops never allocate.
+        let mut acc_row = vec![<E::Acc as MatAcc>::ZERO; n];
+        for b in 0..batch_count {
+            let (lhs_base, rhs_base) = batch_bases(plan, b);
+            for i in 0..m {
+                let lhs_row = lhs_base + i * plan.lhs_m_stride;
+                acc_row.fill(<E::Acc as MatAcc>::ZERO);
                 for p in 0..k {
                     let a = lhs[lhs_row + p * plan.lhs_k_stride].to_acc();
-                    let bx = rhs[rhs_col + p * plan.rhs_k_stride].to_acc();
-                    acc = acc.mul_add(a, bx);
+                    // In bounds for any valid view: with an `n` stride of 1 the
+                    // last element of this row is the view's own maximal index
+                    // `offset + p*k_stride + (n-1)*1`. Slicing once per `p`
+                    // hoists the bounds check out of the `j` loop, which is
+                    // what lets it vectorize.
+                    let rhs_row = &rhs[rhs_base + p * plan.rhs_k_stride..][..n];
+                    for (slot, value) in acc_row.iter_mut().zip(rhs_row) {
+                        *slot = slot.mul_add(a, value.to_acc());
+                    }
                 }
-                out.push(E::from_acc(acc));
+                out.extend(acc_row.iter().copied().map(E::from_acc));
+            }
+        }
+    } else {
+        for b in 0..batch_count {
+            let (lhs_base, rhs_base) = batch_bases(plan, b);
+            for i in 0..m {
+                let lhs_row = lhs_base + i * plan.lhs_m_stride;
+                let mut j = 0;
+                while j + COL_BLOCK <= n {
+                    let mut accs = [<E::Acc as MatAcc>::ZERO; COL_BLOCK];
+                    let col_base = rhs_base + j * plan.rhs_n_stride;
+                    for p in 0..k {
+                        let a = lhs[lhs_row + p * plan.lhs_k_stride].to_acc();
+                        let row = col_base + p * plan.rhs_k_stride;
+                        for (u, acc) in accs.iter_mut().enumerate() {
+                            *acc = acc.mul_add(a, rhs[row + u * plan.rhs_n_stride].to_acc());
+                        }
+                    }
+                    out.extend(accs.into_iter().map(E::from_acc));
+                    j += COL_BLOCK;
+                }
+                // Tail columns, and every column when `n < COL_BLOCK`.
+                while j < n {
+                    let rhs_col = rhs_base + j * plan.rhs_n_stride;
+                    let mut acc = <E::Acc as MatAcc>::ZERO;
+                    for p in 0..k {
+                        let a = lhs[lhs_row + p * plan.lhs_k_stride].to_acc();
+                        let bx = rhs[rhs_col + p * plan.rhs_k_stride].to_acc();
+                        acc = acc.mul_add(a, bx);
+                    }
+                    out.push(E::from_acc(acc));
+                    j += 1;
+                }
             }
         }
     }
     out
+}
+
+/// Decode a linear batch index into per-axis coords (row-major over the
+/// broadcast batch dims) and return the two operand base offsets it selects.
+/// Only called with `b` below the batch count, so every extent is non-zero and
+/// the modulo is well defined.
+fn batch_bases(plan: &Plan, b: usize) -> (usize, usize) {
+    let mut lhs_base = plan.lhs_offset;
+    let mut rhs_base = plan.rhs_offset;
+    let mut rem = b;
+    for ax in (0..plan.batch.len()).rev() {
+        let size = plan.batch[ax];
+        let coord = rem % size;
+        rem /= size;
+        lhs_base += coord * plan.lhs_batch_strides[ax];
+        rhs_base += coord * plan.rhs_batch_strides[ax];
+    }
+    (lhs_base, rhs_base)
 }
 
 /// See [`BackendOps::matmul`](crate::backend::BackendOps::matmul).
@@ -300,6 +400,215 @@ mod tests {
     /// Expose the resolved output shape for shape-contract tests.
     fn matmul_shape(lhs: &Layout, rhs: &Layout) -> Shape {
         output_shape(&plan(lhs, rhs).unwrap())
+    }
+
+    /// xorshift64: reproducible inputs without pulling in a dependency.
+    struct Prng(u64);
+
+    impl Prng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+
+        fn f(&mut self) -> f32 {
+            (self.next() % 400) as f32 / 100.0 - 2.0
+        }
+
+        /// A value with a deliberately wide exponent spread (roughly 2^-12 to
+        /// 2^11). Summing these is order-sensitive in the low mantissa bits, so
+        /// a reassociated accumulation shows up in a bitwise comparison — which
+        /// `f`, whose magnitudes all sit within 2^2, would mostly hide.
+        fn wide(&mut self) -> f32 {
+            let bits = self.next();
+            let mantissa = (bits % 2048) as f32 / 1024.0 + 1.0;
+            let exp = ((bits >> 11) % 24) as i32 - 12;
+            let sign = if bits >> 63 == 0 { 1.0 } else { -1.0 };
+            sign * mantissa * 2f32.powi(exp)
+        }
+    }
+
+    /// `b` (logically `[k, n]`, row-major) rebuilt as a `[k, n]` *view* whose
+    /// `n` stride is `k` rather than 1: the buffer holds `bᵀ`, and transposing
+    /// its layout gives back `b`. This is the operand shape `Linear` feeds
+    /// `matmul` (`x @ w.T`), and it is what selects the strided loop order.
+    fn transposed_view_of(b: &[f32], k: usize, n: usize) -> (Storage, Layout) {
+        let bt: Vec<f32> = (0..n * k).map(|idx| b[(idx % k) * n + idx / k]).collect();
+        let layout = Layout::contiguous([n, k]).unwrap().transpose(0, 1).unwrap();
+        (f32_storage(bt), layout)
+    }
+
+    /// The naive `i` → `j` → `p` nest both loop orders must match bit for bit,
+    /// with the same unfused `acc + a*b` step `MatAcc` performs.
+    fn naive(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(m * n);
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0.0f32;
+                for p in 0..k {
+                    acc += a[i * k + p] * b[p * n + j];
+                }
+                out.push(acc);
+            }
+        }
+        out
+    }
+
+    /// Bit-exact comparison. `assert_eq!` on `f32` would also accept a
+    /// `-0.0`/`0.0` swap; compare bit patterns so nothing is waved through.
+    fn assert_bitwise_eq(got: &[f32], expected: &[f32], what: &str) {
+        assert_eq!(got.len(), expected.len(), "{what}: length");
+        for (idx, (g, e)) in got.iter().zip(expected).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                e.to_bits(),
+                "{what}: element {idx} differs: {g:e} vs {e:e}"
+            );
+        }
+    }
+
+    // ----- loop order ---------------------------------------------------
+
+    #[test]
+    fn both_loop_orders_are_bitwise_identical_to_the_naive_nest() {
+        // k is large enough, and the exponent spread wide enough, that any
+        // reassociation of the k-term sum would perturb the mantissa.
+        let (m, k, n) = (7usize, 129usize, 12usize);
+        let mut rng = Prng(0x0BAD_F00D_DEAD_BEEF);
+        let a: Vec<f32> = (0..m * k).map(|_| rng.wide()).collect();
+        let b: Vec<f32> = (0..k * n).map(|_| rng.wide()).collect();
+        let expected = naive(&a, &b, m, k, n);
+
+        let sa = f32_storage(a.clone());
+        let la = Layout::contiguous([m, k]).unwrap();
+
+        // Row-major rhs -> the unit-stride `i`/`p`/`j` row-accumulator order.
+        let sb = f32_storage(b.clone());
+        let lb = Layout::contiguous([k, n]).unwrap();
+        assert_eq!(
+            plan(&la, &lb).unwrap().rhs_n_stride,
+            1,
+            "expected the row-accumulator order"
+        );
+        let row_major = as_f32(&matmul(View::new(&sa, &la), View::new(&sb, &lb)).unwrap());
+        assert_bitwise_eq(&row_major, &expected, "row-major rhs");
+
+        // Transposed rhs view -> the column-blocked `i`/`j`/`p` order.
+        let (sbt, lbt) = transposed_view_of(&b, k, n);
+        assert_ne!(
+            plan(&la, &lbt).unwrap().rhs_n_stride,
+            1,
+            "expected the strided order"
+        );
+        let strided = as_f32(&matmul(View::new(&sa, &la), View::new(&sbt, &lbt)).unwrap());
+        assert_bitwise_eq(&strided, &expected, "transposed rhs view");
+    }
+
+    #[test]
+    fn column_block_tail_is_exact_for_every_width() {
+        // The strided order accumulates COL_BLOCK columns at a time; n from 1
+        // to 2*COL_BLOCK+1 covers a pure tail, whole blocks, and both mixes.
+        let (m, k) = (3usize, 17usize);
+        let mut rng = Prng(0xFEED_FACE_CAFE_D00D);
+        for n in 1..=(2 * COL_BLOCK + 1) {
+            let a: Vec<f32> = (0..m * k).map(|_| rng.wide()).collect();
+            let b: Vec<f32> = (0..k * n).map(|_| rng.wide()).collect();
+            let expected = naive(&a, &b, m, k, n);
+            let sa = f32_storage(a);
+            let la = Layout::contiguous([m, k]).unwrap();
+            let (sbt, lbt) = transposed_view_of(&b, k, n);
+            let got = as_f32(&matmul(View::new(&sa, &la), View::new(&sbt, &lbt)).unwrap());
+            assert_bitwise_eq(&got, &expected, &format!("strided rhs, n={n}"));
+        }
+    }
+
+    #[test]
+    fn both_loop_orders_agree_on_a_batched_broadcast_operand() {
+        // Batch decoding is shared by the two orders; check a broadcast rhs
+        // still lands on the same bits through either.
+        let (batch, m, k, n) = (3usize, 2usize, 33usize, 5usize);
+        let mut rng = Prng(0x5EED_1234_5678_9ABC);
+        let a: Vec<f32> = (0..batch * m * k).map(|_| rng.wide()).collect();
+        let b: Vec<f32> = (0..k * n).map(|_| rng.wide()).collect();
+        let sa = f32_storage(a.clone());
+        let la = Layout::contiguous([batch, m, k]).unwrap();
+
+        let sb = f32_storage(b.clone());
+        let lb = Layout::contiguous([1, k, n]).unwrap();
+        let row_major = as_f32(&matmul(View::new(&sa, &la), View::new(&sb, &lb)).unwrap());
+
+        let (sbt, lbt) = transposed_view_of(&b, k, n);
+        let strided = as_f32(&matmul(View::new(&sa, &la), View::new(&sbt, &lbt)).unwrap());
+        assert_bitwise_eq(&strided, &row_major, "batched broadcast rhs");
+
+        // And each batch equals the 2-D product of that lhs slice.
+        for bi in 0..batch {
+            let expected = naive(&a[bi * m * k..], &b, m, k, n);
+            assert_bitwise_eq(
+                &row_major[bi * m * n..(bi + 1) * m * n],
+                &expected,
+                &format!("batch {bi}"),
+            );
+        }
+    }
+
+    #[test]
+    fn f16_wide_accumulator_holds_on_both_loop_orders() {
+        // The `Acc` contract has to survive both paths: 1024 f16 ones summed in
+        // f16 would stall at 2048's mantissa step long before reaching 1024.
+        let (m, k, n) = (2usize, 1024usize, 6usize);
+        let one = half::f16::from_f32(1.0);
+        let f16s = |v: Vec<half::f16>| Storage::Cpu(CpuStorage::F16(Arc::new(v)));
+        let as_f16 = |s: &Storage| match s {
+            Storage::Cpu(CpuStorage::F16(v)) => v.as_ref().clone(),
+            _ => panic!("expected f16 storage"),
+        };
+        let sa = f16s(vec![one; m * k]);
+        let la = Layout::contiguous([m, k]).unwrap();
+
+        let sb = f16s(vec![one; k * n]);
+        let lb = Layout::contiguous([k, n]).unwrap();
+        let row_major = as_f16(&matmul(View::new(&sa, &la), View::new(&sb, &lb)).unwrap());
+
+        let sbt = f16s(vec![one; n * k]);
+        let lbt = Layout::contiguous([n, k]).unwrap().transpose(0, 1).unwrap();
+        let strided = as_f16(&matmul(View::new(&sa, &la), View::new(&sbt, &lbt)).unwrap());
+
+        assert!(row_major.iter().all(|x| x.to_f32() == 1024.0));
+        assert_eq!(row_major, strided);
+    }
+
+    #[test]
+    fn zero_sized_output_is_empty_and_does_not_panic() {
+        // A zero-extent *batch* axis (the third case) used to panic with a
+        // divide-by-zero while decoding batch coords: the batch count was
+        // clamped up to 1, so the decode ran anyway and took `rem % 0`.
+        for (ad, bd) in [
+            (vec![0usize, 3], vec![3usize, 2]),
+            (vec![2, 3], vec![3, 0]),
+            (vec![0, 2, 3], vec![0, 3, 2]),
+        ] {
+            let la = Layout::contiguous(ad.clone()).unwrap();
+            let lb = Layout::contiguous(bd.clone()).unwrap();
+            // Size each buffer to its own view, so this exercises a genuine
+            // zero-sized walk rather than an undersized storage.
+            let a = f32_storage(vec![1.0; la.shape().num_elements()]);
+            let b = f32_storage(vec![1.0; lb.shape().num_elements()]);
+            let r = matmul(View::new(&a, &la), View::new(&b, &lb)).unwrap();
+            assert!(
+                as_f32(&r).is_empty(),
+                "expected an empty output for {ad:?} @ {bd:?}"
+            );
+            assert_eq!(matmul_shape(&la, &lb).num_elements(), 0);
+        }
     }
 
     // ----- golden 2-D ---------------------------------------------------
@@ -458,23 +767,6 @@ mod tests {
 
     #[test]
     fn matmul_matches_naive_reference_random() {
-        struct Prng(u64);
-        impl Prng {
-            fn next(&mut self) -> u64 {
-                let mut x = self.0;
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                self.0 = x;
-                x
-            }
-            fn below(&mut self, n: usize) -> usize {
-                (self.next() % n as u64) as usize
-            }
-            fn f(&mut self) -> f32 {
-                (self.next() % 400) as f32 / 100.0 - 2.0
-            }
-        }
         let mut rng = Prng(0x1234_5678_9ABC_DEF0);
         for _ in 0..200 {
             let batch = 1 + rng.below(2); // 1..2 batch
