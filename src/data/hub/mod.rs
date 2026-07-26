@@ -31,11 +31,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub mod mnist;
+pub mod mnist_dataset;
 mod sha256;
 pub mod tiny_shakespeare;
+pub mod tiny_shakespeare_dataset;
 
 pub use mnist::{Mnist, MnistSplit, RawImages};
 pub use tiny_shakespeare::{TINY_SHAKESPEARE, TinyShakespeare};
+
+// The `Dataset` wrappers over the raw layer above (T46).
+pub use mnist_dataset::{MnistDataset, MnistLayout};
+pub use tiny_shakespeare_dataset::TinyShakespeareDataset;
 
 /// A local cache directory for downloaded dataset files.
 ///
