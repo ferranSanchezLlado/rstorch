@@ -15,6 +15,12 @@ pub use crate::nn::{Dropout, Gelu, Linear, Relu};
 // The normalization layers (T42).
 pub use crate::nn::{BatchNorm2d, LayerNorm, RMSNorm};
 
+// The optimizers of the first-hour loop (exploration §4.7 spells
+// `Adam::new(1e-3)` under a bare `use rstorch::prelude::*`). The parameter-group
+// builder types and the `schedule` functions stay behind `rstorch::optim::` —
+// they belong to hour two.
+pub use crate::optim::{Adam, AdamW, Sgd};
+
 pub use crate::text::{BpeTokenizer, CharTokenizer, Tokenizer};
 
 // The data pipeline (T45): the loader, the trait its batches come from, and

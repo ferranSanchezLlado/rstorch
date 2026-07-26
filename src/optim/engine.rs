@@ -1,0 +1,521 @@
+//! The machinery both optimizers share: path-predicate parameter groups and
+//! the two-pass parameter walk that makes the `MissingGrad` check loud.
+//!
+//! `Sgd` and `Adam` differ only in their per-parameter update formula and their
+//! moment state; everything around it — resolving hyperparameters for a dotted
+//! path, validating the gradient set, and swapping values — lives here so both
+//! behave identically.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::autograd::{GradKey, Grads};
+use crate::dtype::DType;
+use crate::error::{Error, Result};
+use crate::nn::visit::{Leaf, LeafMut, visit_all, visit_all_mut};
+use crate::nn::{Module, Param};
+use crate::tensor::Tensor;
+
+/// A parameter-path predicate: given a dotted visitor path
+/// (`blocks.3.attn.qkv.weight`), does this group apply?
+pub(crate) type PathPredicate = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// A group's override: the group's hyperparameters as a function of the
+/// optimizer's base hyperparameters. Stored as a function (not a snapshot) so
+/// a group states only its *differences* and later changes to the base — a
+/// `set_lr`, a builder call made after the group — still reach it.
+type Override<H> = Box<dyn Fn(H) -> H + Send + Sync>;
+
+/// Base hyperparameters plus path-predicate overrides (exploration §4.4).
+///
+/// The first predicate that matches a path wins; a path no predicate matches
+/// gets the base hyperparameters unchanged.
+pub(crate) struct Groups<H> {
+    base: H,
+    overrides: Vec<(PathPredicate, Override<H>)>,
+}
+
+impl<H: Clone> Groups<H> {
+    /// Start from `base` with no groups.
+    pub(crate) fn new(base: H) -> Groups<H> {
+        Groups {
+            base,
+            overrides: Vec::new(),
+        }
+    }
+
+    /// The base hyperparameters (what an unmatched path gets).
+    pub(crate) fn base(&self) -> &H {
+        &self.base
+    }
+
+    /// Mutate the base hyperparameters (the optimizer's own builder methods).
+    pub(crate) fn base_mut(&mut self) -> &mut H {
+        &mut self.base
+    }
+
+    /// Append a group: paths matching `predicate` get `configure(base)`.
+    pub(crate) fn push(
+        &mut self,
+        predicate: impl Fn(&str) -> bool + Send + Sync + 'static,
+        configure: impl Fn(H) -> H + Send + Sync + 'static,
+    ) {
+        self.overrides
+            .push((Box::new(predicate), Box::new(configure)));
+    }
+
+    /// The hyperparameters in force for `path` — the first matching group's
+    /// override applied to the base, or the base itself.
+    pub(crate) fn resolve(&self, path: &str) -> H {
+        for (matches, configure) in &self.overrides {
+            if matches(path) {
+                return configure(self.base.clone());
+            }
+        }
+        self.base.clone()
+    }
+}
+
+/// The dtype an update accumulates in: `f16`/`bf16` parameters keep **wide
+/// (f32) moments** (exploration §4.4), every other float accumulates as
+/// itself. The result is narrowed back to the parameter's dtype exactly once.
+pub(crate) fn accum_dtype(dtype: DType) -> DType {
+    match dtype {
+        DType::F16 | DType::BF16 => DType::F32,
+        other => other,
+    }
+}
+
+/// Drive one optimizer step over `model`, consuming `grads`.
+///
+/// Three passes, because a half-applied step is exactly the silent-corruption
+/// class this library exists to remove:
+///
+/// 1. **Validate the read-only walk.** Every non-frozen parameter must be a
+///    float tensor with a gradient of matching shape, dtype and device, and no
+///    parameter may be visited twice. The first violation is returned and
+///    *nothing* has been modified — in particular a non-frozen parameter with
+///    no gradient is [`Error::MissingGrad`] naming its path, never a silent
+///    skip (exploration §4.4).
+/// 2. **Check the mutable walk reaches exactly the same parameters** — a dry
+///    pass that touches no value. A hand-written `Module` whose `visit_mut`
+///    forgets a leaf would otherwise leave that parameter silently untrained,
+///    which is the same bug class as a missing gradient and gets the same loud
+///    treatment (the sibling of the check in
+///    [`nn::load_state_dict`](crate::nn::load_state_dict)).
+/// 3. **Apply.** `update` is called with each parameter's path, the parameter,
+///    and its gradient (moved out of `grads`); passes 1–2 have already proved
+///    the lookups and shapes, so only a backend failure can stop it here.
+///
+/// Frozen parameters are skipped legitimately, because freezing is explicit.
+/// Gradient entries for anything the walk does not reach (a traced input, a
+/// parameter of another model) are dropped with `grads`.
+pub(crate) fn apply(
+    op: &'static str,
+    model: &mut dyn Module,
+    grads: Grads,
+    mut update: impl FnMut(&str, &mut Param, Tensor) -> Result<()>,
+) -> Result<()> {
+    let mut grads = grads;
+
+    let mut failure: Option<Error> = None;
+    let mut seen: HashMap<GradKey, String> = HashMap::new();
+    // The non-frozen parameters pass 1 validated, so pass 2 can prove the
+    // mutable walk reaches every one of them.
+    let mut expected: HashMap<GradKey, String> = HashMap::new();
+    visit_all(&*model, &mut |path, leaf| {
+        if failure.is_some() {
+            return;
+        }
+        let Leaf::Param(param) = leaf else {
+            return;
+        };
+        if let Some(first) = seen.insert(param.grad_key(), path.to_string()) {
+            failure = Some(Error::InvalidArg {
+                op,
+                msg: format!(
+                    "one parameter is visited twice (as `{first}` and as `{path}`): the \
+                     optimizer would step it twice in one update. Own a tied parameter \
+                     once and write both uses inline"
+                ),
+            });
+            return;
+        }
+        if param.is_frozen() {
+            return;
+        }
+        expected.insert(param.grad_key(), path.to_string());
+        let value = param.value();
+        if !value.dtype().is_float() {
+            failure = Some(Error::InvalidArg {
+                op,
+                msg: format!(
+                    "parameter `{path}` has dtype {}: only floating-point parameters \
+                     can be optimized (an integer buffer is structure, not precision)",
+                    value.dtype()
+                ),
+            });
+            return;
+        }
+        // The loudness gate: no gradient for a non-frozen parameter is an
+        // error naming the path, so an untraced weight access (wrong `Mode`,
+        // a forward that read `Param::value` instead of `Param::get`) is
+        // caught at the very next step instead of silently freezing it.
+        let Ok(grad) = grads.wrt(param) else {
+            failure = Some(Error::MissingGrad {
+                path: path.to_string(),
+            });
+            return;
+        };
+        if grad.dims() != value.dims() {
+            failure = Some(Error::ShapeMismatch {
+                op,
+                lhs: value.shape().clone(),
+                rhs: grad.shape().clone(),
+            });
+        } else if grad.dtype() != value.dtype() {
+            failure = Some(Error::DTypeMismatch {
+                op,
+                expected: value.dtype(),
+                got: grad.dtype(),
+            });
+        } else if grad.device() != value.device() {
+            failure = Some(Error::DeviceMismatch {
+                op,
+                expected: value.device(),
+                got: grad.device(),
+            });
+        }
+    });
+    if let Some(e) = failure {
+        return Err(e);
+    }
+
+    // ---- pass 2: the mutable walk must reach exactly the same parameters ----
+    let mut unreached: HashSet<GradKey> = expected.keys().copied().collect();
+    let mut failure: Option<Error> = None;
+    visit_all_mut(model, &mut |path, leaf| {
+        if failure.is_some() {
+            return;
+        }
+        let LeafMut::Param(param) = leaf else {
+            return;
+        };
+        if param.is_frozen() {
+            return;
+        }
+        if !unreached.remove(&param.grad_key()) {
+            failure = Some(Error::InvalidArg {
+                op,
+                msg: format!(
+                    "`{path}` is emitted by visit_mut but was not validated by visit: \
+                     the module's two walks disagree, so a parameter would be stepped \
+                     unchecked or twice"
+                ),
+            });
+        }
+    });
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    if let Some(key) = unreached.iter().next() {
+        let path = &expected[key];
+        return Err(Error::InvalidArg {
+            op,
+            msg: format!(
+                "`{path}` is emitted by visit but not by visit_mut: the module's two \
+                 walks disagree, so that parameter would silently never be updated"
+            ),
+        });
+    }
+
+    // ---- pass 3: apply ----
+    let mut failure: Option<Error> = None;
+    visit_all_mut(model, &mut |path, leaf| {
+        if failure.is_some() {
+            return;
+        }
+        let LeafMut::Param(param) = leaf else {
+            return;
+        };
+        if param.is_frozen() {
+            return;
+        }
+        // Passes 1–2 proved this lookup succeeds.
+        let Some(grad) = grads.take(param.grad_key()) else {
+            failure = Some(Error::MissingGrad {
+                path: path.to_string(),
+            });
+            return;
+        };
+        if let Err(e) = update(path, param, grad) {
+            failure = Some(e);
+        }
+    });
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// The dotted paths of every trainable parameter of `model`, paired with its
+/// gradient identity — the path ↔ state key mapping optimizer-state
+/// persistence needs (state lives under `GradKey`, files are keyed by path).
+pub(crate) fn param_paths(model: &dyn Module) -> Vec<(String, GradKey)> {
+    let mut out = Vec::new();
+    visit_all(model, &mut |path, leaf| {
+        if let Leaf::Param(param) = leaf {
+            out.push((path.to_string(), param.grad_key()));
+        }
+    });
+    out
+}
+
+/// The value tensor of the parameter at `path`, for validating a loaded
+/// moment buffer against the parameter it belongs to.
+pub(crate) fn param_values(model: &dyn Module) -> HashMap<String, Tensor> {
+    let mut out = HashMap::new();
+    visit_all(model, &mut |path, leaf| {
+        if let Leaf::Param(param) = leaf {
+            out.insert(path.to_string(), param.value().clone());
+        }
+    });
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nn::Mode;
+    use crate::nn::visit::{Visitor, VisitorMut};
+    use crate::optim::testkit::{CPU, t};
+
+    /// Drive `apply` with an update that only records what it was handed, so a
+    /// test can assert on the *walk* without an optimizer's arithmetic in the
+    /// way.
+    fn record_walk(model: &mut dyn Module, grads: Grads) -> Result<Vec<String>> {
+        let mut visited = Vec::new();
+        apply("step", model, grads, |path, _param, _grad| {
+            visited.push(path.to_string());
+            Ok(())
+        })?;
+        Ok(visited)
+    }
+
+    /// A `Grads` built by hand, so a test can hand the engine a deliberately
+    /// mismatched gradient the autograd engine would never produce.
+    fn forged(pairs: Vec<(&Param, Tensor)>) -> Grads {
+        Grads::from_pairs(
+            pairs
+                .into_iter()
+                .map(|(p, g)| (p.grad_key(), g))
+                .collect::<HashMap<_, _>>(),
+        )
+    }
+
+    #[test]
+    fn accumulation_widens_only_the_narrow_floats() {
+        assert_eq!(accum_dtype(DType::F16), DType::F32);
+        assert_eq!(accum_dtype(DType::BF16), DType::F32);
+        // Everything else accumulates as itself; in particular F32 -> F32 keeps
+        // the whole wide-moment path a free identity cast.
+        assert_eq!(accum_dtype(DType::F32), DType::F32);
+        assert_eq!(accum_dtype(DType::F64), DType::F64);
+        assert_eq!(accum_dtype(DType::I64), DType::I64);
+    }
+
+    #[test]
+    fn groups_resolve_by_first_match() {
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        struct Hyper {
+            decay: f64,
+        }
+        let mut groups = Groups::new(Hyper { decay: 0.1 });
+        groups.push(|p| p.ends_with("bias"), |_| Hyper { decay: 0.0 });
+        // A second, wider predicate that also matches every bias: it must never
+        // win, because the first match does.
+        groups.push(|_| true, |_| Hyper { decay: 9.0 });
+
+        assert_eq!(groups.resolve("fc.bias").decay, 0.0);
+        assert_eq!(groups.resolve("fc.weight").decay, 9.0);
+        // The base is what an unmatched path would get…
+        assert_eq!(groups.base().decay, 0.1);
+        // …and mutating it reaches the groups that do not override that field,
+        // because an override is a function of the base, not a snapshot.
+        groups.base_mut().decay = 0.5;
+        assert_eq!(groups.resolve("fc.bias").decay, 0.0);
+    }
+
+    /// A model whose *read* walk emits one parameter under two names — the
+    /// double-step hazard the design forbids (own a tied parameter once).
+    struct Doubled {
+        p: Param,
+    }
+    impl Module for Doubled {
+        fn visit(&self, v: &mut Visitor) {
+            v.param("a", &self.p);
+            v.param("b", &self.p);
+        }
+        fn visit_mut(&mut self, v: &mut VisitorMut) {
+            v.param("a", &mut self.p);
+        }
+    }
+
+    #[test]
+    fn a_parameter_reached_twice_is_rejected_before_any_update() {
+        let mut m = Doubled {
+            p: Param::new(t(&[1.0])),
+        };
+        let grads = m.p.get(Mode::TRAIN).sum_all().unwrap().backward().unwrap();
+        let err = record_walk(&mut m, grads).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("visited twice"), "{msg}");
+        assert!(msg.contains('`') && msg.contains("`b`"), "{msg}");
+    }
+
+    /// A hand-written `Module` whose mutable walk forgets `b`: under a naive
+    /// implementation `b` would silently never be updated.
+    struct Lopsided {
+        a: Param,
+        b: Param,
+    }
+    impl Module for Lopsided {
+        fn visit(&self, v: &mut Visitor) {
+            v.param("a", &self.a);
+            v.param("b", &self.b);
+        }
+        fn visit_mut(&mut self, v: &mut VisitorMut) {
+            v.param("a", &mut self.a);
+        }
+    }
+
+    #[test]
+    fn a_parameter_the_mutable_walk_forgets_is_loud() {
+        let mut m = Lopsided {
+            a: Param::new(t(&[1.0])),
+            b: Param::new(t(&[1.0])),
+        };
+        let grads =
+            m.a.get(Mode::TRAIN)
+                .add(&m.b.get(Mode::TRAIN))
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .backward()
+                .unwrap();
+        let msg = record_walk(&mut m, grads).unwrap_err().to_string();
+        assert!(
+            msg.contains("`b` is emitted by visit but not by visit_mut"),
+            "{msg}"
+        );
+    }
+
+    /// The mirror image: a mutable walk that reaches a parameter the read walk
+    /// never validated, so its gradient would be applied unchecked.
+    struct Extra {
+        a: Param,
+        b: Param,
+    }
+    impl Module for Extra {
+        fn visit(&self, v: &mut Visitor) {
+            v.param("a", &self.a);
+        }
+        fn visit_mut(&mut self, v: &mut VisitorMut) {
+            v.param("a", &mut self.a);
+            v.param("b", &mut self.b);
+        }
+    }
+
+    #[test]
+    fn a_parameter_only_the_mutable_walk_reaches_is_loud() {
+        let mut m = Extra {
+            a: Param::new(t(&[1.0])),
+            b: Param::new(t(&[1.0])),
+        };
+        let grads = m.a.get(Mode::TRAIN).sum_all().unwrap().backward().unwrap();
+        let msg = record_walk(&mut m, grads).unwrap_err().to_string();
+        assert!(
+            msg.contains("`b` is emitted by visit_mut but was not validated by visit"),
+            "{msg}"
+        );
+    }
+
+    #[derive(rstorch::Module)]
+    struct One {
+        w: Param,
+    }
+
+    #[test]
+    fn an_integer_parameter_cannot_be_optimized() {
+        let mut m = One {
+            w: Param::new(Tensor::from_vec(vec![1i64, 2], [2], &CPU).unwrap()),
+        };
+        // An i64 parameter has no gradient at all, but the dtype rejection
+        // comes first so the message names the real problem.
+        let msg = record_walk(&mut m, Grads::from_pairs(HashMap::new()))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("only floating-point parameters"), "{msg}");
+        assert!(msg.contains("`w`"), "{msg}");
+    }
+
+    #[test]
+    fn a_mismatched_gradient_is_rejected_by_kind() {
+        let mut m = One {
+            w: Param::new(t(&[1.0, 2.0])),
+        };
+
+        // Wrong shape.
+        let grads = forged(vec![(&m.w, t(&[1.0, 2.0, 3.0]))]);
+        assert!(matches!(
+            record_walk(&mut m, grads),
+            Err(Error::ShapeMismatch { op: "step", .. })
+        ));
+
+        // Wrong dtype.
+        let ints = Tensor::from_vec(vec![1i64, 1], [2], &CPU).unwrap();
+        let grads = forged(vec![(&m.w, ints)]);
+        assert!(matches!(
+            record_walk(&mut m, grads),
+            Err(Error::DTypeMismatch { op: "step", .. })
+        ));
+
+        // …and the rejections changed nothing.
+        assert_eq!(m.w.value().to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn frozen_parameters_are_skipped_and_need_no_gradient() {
+        #[derive(rstorch::Module)]
+        struct Two {
+            a: Param,
+            b: Param,
+        }
+        let mut m = Two {
+            a: Param::new(t(&[1.0])),
+            b: Param::new(t(&[1.0])),
+        };
+        m.b.freeze();
+        // Only `a` is traced, because a frozen `Param::get` hands out the value.
+        let grads =
+            m.a.get(Mode::TRAIN)
+                .add(&m.b.get(Mode::TRAIN))
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .backward()
+                .unwrap();
+        assert_eq!(record_walk(&mut m, grads).unwrap(), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn param_paths_and_values_agree_with_the_walk() {
+        let m = One {
+            w: Param::new(t(&[3.0])),
+        };
+        let paths = param_paths(&m);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].0, "w");
+        assert_eq!(paths[0].1, m.w.grad_key());
+        assert_eq!(param_values(&m)["w"].to_vec::<f32>().unwrap(), vec![3.0f32]);
+    }
+}
