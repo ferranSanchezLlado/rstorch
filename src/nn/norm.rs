@@ -126,15 +126,41 @@ struct LayerNormBackward {
 
 impl LayerNormBackward {
     fn grad(&self, g: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
-        let weighted = g.mul(&self.weight)?;
-        let sum = weighted.sum_to(&self.stat_dims)?;
-        let projected = weighted.mul(&self.xhat)?.sum_to(&self.stat_dims)?;
-        let dx = weighted
-            .mul_scalar(self.width)?
-            .sub(&sum)?
-            .sub(&self.xhat.mul(&projected)?)?
-            .mul(&self.inv_std)?
-            .div_scalar(self.width)?;
+        let dx = match dispatch::backend(g.device()).fused(
+            FusedOp::LayerNorm,
+            &[
+                g.view(),
+                self.xhat.view(),
+                self.inv_std.view(),
+                self.weight.view(),
+            ],
+            &[],
+        ) {
+            Ok(mut outputs) if outputs.len() == 1 => {
+                Tensor::from_parts(outputs.remove(0), Layout::contiguous(g.shape().clone())?)
+            }
+            Ok(outputs) => {
+                return Err(Error::Backend {
+                    op: "LayerNorm::backward",
+                    msg: format!(
+                        "fused LayerNorm backward returned {} outputs, expected exactly 1",
+                        outputs.len()
+                    ),
+                });
+            }
+            Err(Error::Unsupported { .. }) => {
+                let weighted = g.mul(&self.weight)?;
+                let sum = weighted.sum_to(&self.stat_dims)?;
+                let projected = weighted.mul(&self.xhat)?.sum_to(&self.stat_dims)?;
+                weighted
+                    .mul_scalar(self.width)?
+                    .sub(&sum)?
+                    .sub(&self.xhat.mul(&projected)?)?
+                    .mul(&self.inv_std)?
+                    .div_scalar(self.width)?
+            }
+            Err(err) => return Err(err),
+        };
         let dweight = g.mul(&self.xhat)?.sum_to(&self.affine_dims)?;
         let dbias = g.sum_to(&self.affine_dims)?;
         Ok((dx, dweight, dbias))
@@ -144,41 +170,34 @@ impl LayerNormBackward {
 /// Last-axis LayerNorm through the optional fused backend contract.
 fn fused_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Result<Tensor> {
     const OP: &str = "LayerNorm::forward";
-    let outputs = dispatch::backend(x.device()).fused(
+    let save_stats = [x, weight, bias].iter().any(|input| input.node().is_some());
+    let scalars = [eps, 1.0];
+    let mut outputs = dispatch::backend(x.device()).fused(
         FusedOp::LayerNorm,
         &[x.view(), weight.view(), bias.view()],
-        &[eps],
+        &scalars[..if save_stats { 2 } else { 1 }],
     )?;
-    if outputs.len() != 1 {
+    let expected = if save_stats { 3 } else { 1 };
+    if outputs.len() != expected {
         return Err(Error::InvalidArg {
             op: OP,
             msg: format!(
-                "fused LayerNorm backend returned {} outputs, expected exactly 1",
-                outputs.len()
+                "fused LayerNorm backend returned {} outputs, expected exactly {expected}",
+                outputs.len(),
             ),
         });
     }
-    let out = Tensor::from_parts(
-        outputs.into_iter().next().expect("length validated"),
-        Layout::contiguous(x.shape().clone())?,
-    );
+    let out = Tensor::from_parts(outputs.remove(0), Layout::contiguous(x.shape().clone())?);
 
-    if [x, weight, bias].iter().all(|input| input.node().is_none()) {
+    if !save_stats {
         return Ok(out);
     }
 
-    let detached = x.detach();
-    let mu = mean_last(&detached, 1)?;
-    let centered = detached.sub(&mu)?;
-    let var = mean_last(&centered.mul(&centered)?, 1)?;
-    let std = scale_from_var(&var, eps)?;
-    let xhat = centered.div(&std)?.detach();
-    let inv_std = Tensor::ones(std.dims(), std.dtype(), &std.device())?
-        .div(&std)?
-        .detach();
     let mut stat_dims = x.dims().to_vec();
     let width = stat_dims[stat_dims.len() - 1];
     *stat_dims.last_mut().expect("LayerNorm input has a suffix") = 1;
+    let xhat = Tensor::from_parts(outputs.remove(0), Layout::contiguous(x.shape().clone())?);
+    let inv_std = Tensor::from_parts(outputs.remove(0), Layout::contiguous(stat_dims.as_slice())?);
     let backward_state = LayerNormBackward {
         xhat,
         inv_std,

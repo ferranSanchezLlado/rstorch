@@ -1,5 +1,6 @@
 //! Fused CPU kernels for last-axis softmax, layer normalization, and optimizer
-//! updates.
+//! updates. Recorded LayerNorm additionally returns its normalized values and
+//! inverse standard deviations, and accepts them back for its input gradient.
 //!
 //! Optimizer variants use the multi-output encoding documented on
 //! [`BackendOps::fused`](crate::backend::BackendOps::fused).
@@ -65,7 +66,7 @@ impl_float_acc!(f64);
 pub(crate) fn fused(op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
     match op {
         FusedOp::Softmax => softmax(inputs, scalars).map(|output| vec![output]),
-        FusedOp::LayerNorm => layer_norm(inputs, scalars).map(|output| vec![output]),
+        FusedOp::LayerNorm => layer_norm(inputs, scalars),
         FusedOp::SgdStep => sgd_step(inputs, scalars),
         FusedOp::AdamStep => adam_step(inputs, scalars),
     }
@@ -495,9 +496,21 @@ where
     output
 }
 
-fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
+fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
     const OP: &str = "fused_layer_norm";
-    require_encoding(OP, inputs, 3, scalars, 1)?;
+    if inputs.len() == 4 {
+        return layer_norm_backward_input(inputs, scalars);
+    }
+    if inputs.len() != 3 || !(scalars.len() == 1 || scalars.len() == 2) {
+        return Err(Error::InvalidArg {
+            op: OP,
+            msg: format!(
+                "expected 3 input(s) and 1 or 2 scalar(s), got {} and {}",
+                inputs.len(),
+                scalars.len()
+            ),
+        });
+    }
     let [x, weight, bias] = inputs else {
         unreachable!("arity validated")
     };
@@ -526,71 +539,224 @@ fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
             msg: format!("eps must be finite and positive, got {eps}"),
         });
     }
+    let save_stats = match scalars.get(1) {
+        None => false,
+        Some(&1.0) => true,
+        Some(value) => {
+            return Err(Error::InvalidArg {
+                op: OP,
+                msg: format!("save_stats must be encoded as 1, got {value}"),
+            });
+        }
+    };
 
     let storages = [
         cpu_storage(OP, *x)?,
         cpu_storage(OP, *weight)?,
         cpu_storage(OP, *bias)?,
     ];
-    let output = match storages {
+    macro_rules! run {
+        ($variant:ident, $xv:expr, $wv:expr, $bv:expr, $eps:expr) => {{
+            let (output, stats) = layer_norm_generic(
+                $xv,
+                x.layout(),
+                $wv,
+                weight.layout(),
+                $bv,
+                bias.layout(),
+                $eps,
+                save_stats,
+            );
+            (
+                CpuStorage::$variant(Arc::new(output)),
+                stats.map(|(xhat, inv_std)| {
+                    (
+                        CpuStorage::$variant(Arc::new(xhat)),
+                        CpuStorage::$variant(Arc::new(inv_std)),
+                    )
+                }),
+            )
+        }};
+    }
+    let (output, stats) = match storages {
         [
             CpuStorage::F16(xv),
             CpuStorage::F16(wv),
             CpuStorage::F16(bv),
-        ] => CpuStorage::F16(Arc::new(layer_norm_generic(
-            xv,
-            x.layout(),
-            wv,
-            weight.layout(),
-            bv,
-            bias.layout(),
-            eps as f32,
-        ))),
+        ] => run!(F16, xv, wv, bv, eps as f32),
         [
             CpuStorage::BF16(xv),
             CpuStorage::BF16(wv),
             CpuStorage::BF16(bv),
-        ] => CpuStorage::BF16(Arc::new(layer_norm_generic(
-            xv,
-            x.layout(),
-            wv,
-            weight.layout(),
-            bv,
-            bias.layout(),
-            eps as f32,
-        ))),
+        ] => run!(BF16, xv, wv, bv, eps as f32),
         [
             CpuStorage::F32(xv),
             CpuStorage::F32(wv),
             CpuStorage::F32(bv),
-        ] => CpuStorage::F32(Arc::new(layer_norm_generic(
-            xv,
-            x.layout(),
-            wv,
-            weight.layout(),
-            bv,
-            bias.layout(),
-            eps as f32,
-        ))),
+        ] => run!(F32, xv, wv, bv, eps as f32),
         [
             CpuStorage::F64(xv),
             CpuStorage::F64(wv),
             CpuStorage::F64(bv),
-        ] => CpuStorage::F64(Arc::new(layer_norm_generic(
-            xv,
-            x.layout(),
-            wv,
-            weight.layout(),
-            bv,
-            bias.layout(),
-            eps,
-        ))),
+        ] => run!(F64, xv, wv, bv, eps),
         _ => unreachable!("dtypes validated equal and float"),
     };
-    Ok(Storage::Cpu(output))
+    let mut outputs = vec![Storage::Cpu(output)];
+    if let Some((xhat, inv_std)) = stats {
+        outputs.push(Storage::Cpu(xhat));
+        outputs.push(Storage::Cpu(inv_std));
+    }
+    Ok(outputs)
+}
+
+fn layer_norm_backward_input(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
+    const OP: &str = "fused_layer_norm_backward_input";
+    require_encoding(OP, inputs, 4, scalars, 0)?;
+    let [g, xhat, inv_std, weight] = inputs else {
+        unreachable!("arity validated")
+    };
+    require_last_axis(OP, g.layout())?;
+    require_float(OP, *g)?;
+    for input in [xhat, inv_std, weight] {
+        require_same_dtype(OP, *g, *input)?;
+        if input.device() != g.device() {
+            return Err(Error::DeviceMismatch {
+                op: OP,
+                expected: g.device(),
+                got: input.device(),
+            });
+        }
+    }
+    for input in [g, xhat, inv_std, weight] {
+        validate_view(OP, *input)?;
+    }
+    let rank = g.layout().rank();
+    let width = g.layout().dims()[rank - 1];
+    if xhat.layout().shape() != g.layout().shape()
+        || inv_std.layout().rank() != rank
+        || inv_std.layout().dims()[..rank - 1] != g.layout().dims()[..rank - 1]
+        || inv_std.layout().dims()[rank - 1] != 1
+        || weight.layout().rank() != 1
+        || weight.layout().dims()[0] != width
+    {
+        return Err(Error::ShapeMismatch {
+            op: OP,
+            lhs: g.layout().shape().clone(),
+            rhs: xhat.layout().shape().clone(),
+        });
+    }
+
+    let storages = [
+        cpu_storage(OP, *g)?,
+        cpu_storage(OP, *xhat)?,
+        cpu_storage(OP, *inv_std)?,
+        cpu_storage(OP, *weight)?,
+    ];
+    macro_rules! run {
+        ($variant:ident, $g:expr, $xhat:expr, $inv_std:expr, $weight:expr) => {
+            CpuStorage::$variant(Arc::new(layer_norm_backward_input_generic(
+                $g,
+                g.layout(),
+                $xhat,
+                xhat.layout(),
+                $inv_std,
+                inv_std.layout(),
+                $weight,
+                weight.layout(),
+            )))
+        };
+    }
+    let output = match storages {
+        [
+            CpuStorage::F16(g),
+            CpuStorage::F16(x),
+            CpuStorage::F16(s),
+            CpuStorage::F16(w),
+        ] => {
+            run!(F16, g, x, s, w)
+        }
+        [
+            CpuStorage::BF16(g),
+            CpuStorage::BF16(x),
+            CpuStorage::BF16(s),
+            CpuStorage::BF16(w),
+        ] => {
+            run!(BF16, g, x, s, w)
+        }
+        [
+            CpuStorage::F32(g),
+            CpuStorage::F32(x),
+            CpuStorage::F32(s),
+            CpuStorage::F32(w),
+        ] => {
+            run!(F32, g, x, s, w)
+        }
+        [
+            CpuStorage::F64(g),
+            CpuStorage::F64(x),
+            CpuStorage::F64(s),
+            CpuStorage::F64(w),
+        ] => {
+            run!(F64, g, x, s, w)
+        }
+        _ => unreachable!("dtypes validated equal and float"),
+    };
+    Ok(vec![Storage::Cpu(output)])
 }
 
 #[allow(clippy::too_many_arguments)]
+fn layer_norm_backward_input_generic<E: Element>(
+    gradients: &[E],
+    gradient_layout: &Layout,
+    xhat: &[E],
+    xhat_layout: &Layout,
+    inv_std: &[E],
+    inv_std_layout: &Layout,
+    weights: &[E],
+    weight_layout: &Layout,
+) -> Vec<E>
+where
+    E::Acc: FloatAcc,
+{
+    let width = gradient_layout.dims()[gradient_layout.rank() - 1];
+    let rows = gradient_layout.num_elements() / width;
+    let width_acc = E::Acc::from_usize(width);
+    let mut output = Vec::with_capacity(gradient_layout.num_elements());
+    let mut weighted = Vec::with_capacity(width);
+
+    for row in 0..rows {
+        let g_base = row_base(gradient_layout, row);
+        let x_base = row_base(xhat_layout, row);
+        let stat_base = row_base(inv_std_layout, row);
+        let mut sum = E::Acc::ZERO;
+        let mut projected = E::Acc::ZERO;
+        weighted.clear();
+        for col in 0..width {
+            let g = gradients[g_base + col * gradient_layout.strides()[gradient_layout.rank() - 1]];
+            let x = xhat[x_base + col * xhat_layout.strides()[xhat_layout.rank() - 1]];
+            let weight = weights[weight_layout.offset() + col * weight_layout.strides()[0]];
+            let value = E::from_acc(g.to_acc() * weight.to_acc());
+            sum = sum + value.to_acc();
+            projected = projected + E::from_acc(value.to_acc() * x.to_acc()).to_acc();
+            weighted.push(value);
+        }
+        let sum = E::from_acc(sum);
+        let projected = E::from_acc(projected);
+        let inverse = inv_std[stat_base].to_acc();
+        for col in 0..width {
+            let x = xhat[x_base + col * xhat_layout.strides()[xhat_layout.rank() - 1]];
+            let scaled = E::from_acc(weighted[col].to_acc() * width_acc);
+            let centered = E::from_acc(scaled.to_acc() - sum.to_acc());
+            let projection = E::from_acc(x.to_acc() * projected.to_acc());
+            let centered = E::from_acc(centered.to_acc() - projection.to_acc());
+            let normalized = E::from_acc(centered.to_acc() * inverse);
+            output.push(E::from_acc(normalized.to_acc() / width_acc));
+        }
+    }
+    output
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn layer_norm_generic<E>(
     values: &[E],
     layout: &Layout,
@@ -599,7 +765,8 @@ fn layer_norm_generic<E>(
     biases: &[E],
     bias_layout: &Layout,
     eps: E::Acc,
-) -> Vec<E>
+    save_stats: bool,
+) -> (Vec<E>, Option<(Vec<E>, Vec<E>)>)
 where
     E: Element,
     E::Acc: FloatAcc,
@@ -608,6 +775,8 @@ where
     let rows = layout.num_elements() / width;
     let stride = layout.strides()[layout.rank() - 1];
     let mut output = Vec::with_capacity(layout.num_elements());
+    let mut xhat = save_stats.then(|| Vec::with_capacity(layout.num_elements()));
+    let mut inv_std = save_stats.then(|| Vec::with_capacity(rows));
 
     for row in 0..rows {
         let base = row_base(layout, row);
@@ -617,6 +786,7 @@ where
         }
         let mean = sum / E::Acc::from_usize(width);
         let mut squared = E::Acc::ZERO;
+        let state_mean = E::from_acc(mean).to_acc();
         for col in 0..width {
             let centered = values[base + col * stride].to_acc() - mean;
             squared = squared + centered * centered;
@@ -629,8 +799,27 @@ where
             let bias = biases[bias_layout.offset() + col * bias_layout.strides()[0]].to_acc();
             output.push(E::from_acc(normalized * weight + bias));
         }
+        if let (Some(xhat), Some(inv_std)) = (&mut xhat, &mut inv_std) {
+            // Match the former composed backward-state path exactly: each
+            // generic tensor op narrowed to E before the next operation.
+            let mut state_squared = E::Acc::ZERO;
+            for col in 0..width {
+                let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
+                let centered_acc = centered.to_acc();
+                state_squared = state_squared + E::from_acc(centered_acc * centered_acc).to_acc();
+            }
+            let variance = E::from_acc(state_squared / E::Acc::from_usize(width));
+            let variance_eps = E::from_acc(variance.to_acc() + eps);
+            let std = E::from_acc(variance_eps.to_acc().sqrt());
+            let inverse = E::from_acc(E::Acc::from_usize(1) / std.to_acc());
+            inv_std.push(inverse);
+            for col in 0..width {
+                let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
+                xhat.push(E::from_acc(centered.to_acc() / std.to_acc()));
+            }
+        }
     }
-    output
+    (output, xhat.zip(inv_std))
 }
 
 fn row_base(layout: &Layout, row: usize) -> usize {
@@ -1039,6 +1228,91 @@ mod tests {
         .unwrap()));
         close(&got[..3], &[-1.449_471_2, -1.0, 5.398_942_5]);
         close(&got[3..], &[-1.449_485_3, -1.0, 5.398_970_6]);
+    }
+
+    #[test]
+    fn layer_norm_saved_stats_match_the_composed_backward_state() {
+        let x = storage(vec![0.5, -1.5, 2.0, 0.25, -0.75, 1.25]);
+        let affine = storage(vec![1.0, 1.0, 1.0]);
+        let bias = storage(vec![0.0, 0.0, 0.0]);
+        let layout = Layout::contiguous([2, 3]).unwrap();
+        let affine_layout = Layout::contiguous([3]).unwrap();
+        let input = crate::tensor::Tensor::from_parts(x.clone(), layout.clone());
+        let mean = input.mean_keepdim(-1).unwrap();
+        let centered = input.sub(&mean).unwrap();
+        let variance = centered.mul(&centered).unwrap().mean_keepdim(-1).unwrap();
+        let std = variance.add_scalar(1e-5).unwrap().sqrt().unwrap();
+        let expected_xhat = centered.div(&std).unwrap().to_vec::<f32>().unwrap();
+        let expected_inv_std = crate::tensor::Tensor::ones([2, 1], DType::F32, &crate::Device::Cpu)
+            .unwrap()
+            .div(&std)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        let outputs = fused(
+            FusedOp::LayerNorm,
+            &[
+                View::new(&x, &layout),
+                View::new(&affine, &affine_layout),
+                View::new(&bias, &affine_layout),
+            ],
+            &[1e-5, 1.0],
+        )
+        .unwrap();
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(values(outputs[1].clone()), expected_xhat);
+        assert_eq!(values(outputs[2].clone()), expected_inv_std);
+    }
+
+    #[test]
+    fn layer_norm_fused_input_gradient_is_bit_exact_to_the_composed_formula() {
+        let g = storage(vec![0.3, -0.7, 1.1, 0.25, 0.9, -1.3]);
+        let xhat = storage(vec![-0.2, 1.4, -0.6, 0.8, -1.1, 0.35]);
+        let inv_std = storage(vec![0.75, 1.25]);
+        let weight = storage(vec![1.5, -0.5, 2.0]);
+        let layout = Layout::contiguous([2, 3]).unwrap();
+        let stat_layout = Layout::contiguous([2, 1]).unwrap();
+        let weight_layout = Layout::contiguous([3]).unwrap();
+        let tensor = |storage: &Storage, layout: &Layout| {
+            crate::tensor::Tensor::from_parts(storage.clone(), layout.clone())
+        };
+        let (gt, xt, st, wt) = (
+            tensor(&g, &layout),
+            tensor(&xhat, &layout),
+            tensor(&inv_std, &stat_layout),
+            tensor(&weight, &weight_layout),
+        );
+        let weighted = gt.mul(&wt).unwrap();
+        let sum = weighted.sum_to(&[2, 1]).unwrap();
+        let projected = weighted.mul(&xt).unwrap().sum_to(&[2, 1]).unwrap();
+        let expected = weighted
+            .mul_scalar(3.0)
+            .unwrap()
+            .sub(&sum)
+            .unwrap()
+            .sub(&xt.mul(&projected).unwrap())
+            .unwrap()
+            .mul(&st)
+            .unwrap()
+            .div_scalar(3.0)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        let got = fused(
+            FusedOp::LayerNorm,
+            &[
+                View::new(&g, &layout),
+                View::new(&xhat, &layout),
+                View::new(&inv_std, &stat_layout),
+                View::new(&weight, &weight_layout),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(values(got[0].clone()), expected);
     }
 
     #[test]
