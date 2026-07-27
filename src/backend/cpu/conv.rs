@@ -35,17 +35,10 @@
 //!
 //! # Gradient kernels
 //!
-//! `conv2d_input_grad`, `conv2d_weight_grad`, `max_pool2d_backward` and
-//! `avg_pool2d_backward` live here next to their forward counterparts. The
-//! frozen [`BackendOps::conv`](crate::backend::BackendOps::conv) seam routes
-//! only the three *forward* [`ConvOp`](crate::backend::ConvOp) variants, so
-//! the op layer's backward closures call these directly. They validate the
-//! operand device themselves and report
-//! [`Error::Unsupported`](crate::error::Error::Unsupported) for anything that
-//! is not CPU storage — a loud CPU-only path, never a silent host round-trip
-//! (exploration §4.5). Promoting them to `ConvOp` variants is a
-//! crate-private, non-semver change and is the natural shape once a second
-//! backend needs them (recorded as the T26 contract-change request).
+//! The four backward forms are routed through [`BackendOps::conv`](crate::backend::BackendOps::conv)
+//! alongside their forward counterparts. Their saved forward operands make
+//! the requested output shape and geometry explicit without exposing this
+//! module's [`Conv2dGeometry`] through the backend contract.
 
 use crate::backend::{Conv2dParams, ConvOp, View};
 use crate::dtype::{DType, Element};
@@ -589,6 +582,36 @@ pub(crate) fn conv(op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Re
                 input.layout(),
                 &geo
             ))
+        }
+        ConvOp::Conv2dInputGrad => {
+            let [grad, weight, input] = operands("conv2d", inputs)?;
+            let geo = Conv2dGeometry::conv2d(
+                "conv2d",
+                input.layout().dims(),
+                weight.layout().dims(),
+                params,
+            )?;
+            conv2d_input_grad(grad, weight, &geo)
+        }
+        ConvOp::Conv2dWeightGrad => {
+            let [grad, input, weight] = operands("conv2d", inputs)?;
+            let geo = Conv2dGeometry::conv2d(
+                "conv2d",
+                input.layout().dims(),
+                weight.layout().dims(),
+                params,
+            )?;
+            conv2d_weight_grad(grad, input, &geo)
+        }
+        ConvOp::MaxPool2dBackward => {
+            let [grad, input] = operands("max_pool2d", inputs)?;
+            let geo = Conv2dGeometry::pool("max_pool2d", input.layout().dims(), params)?;
+            max_pool2d_backward(grad, input, &geo)
+        }
+        ConvOp::AvgPool2dBackward => {
+            let [grad, input] = operands("avg_pool2d", inputs)?;
+            let geo = Conv2dGeometry::pool("avg_pool2d", input.layout().dims(), params)?;
+            avg_pool2d_backward(grad, &geo)
         }
     }
 }

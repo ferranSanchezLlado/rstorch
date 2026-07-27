@@ -189,6 +189,18 @@ pub(crate) enum ConvOp {
     MaxPool2d,
     /// 2-D average pooling. Input: `[input]`. Accumulates in `Acc`.
     AvgPool2d,
+    /// Input gradient of 2-D cross-correlation. Inputs:
+    /// `[grad, weight, original_input]`; the original input supplies the
+    /// requested output shape and completes the forward geometry.
+    Conv2dInputGrad,
+    /// Weight gradient of 2-D cross-correlation. Inputs:
+    /// `[grad, original_input, original_weight]`; the original weight
+    /// supplies the requested output shape and completes the geometry.
+    Conv2dWeightGrad,
+    /// Input gradient of max pooling. Inputs: `[grad, original_input]`.
+    MaxPool2dBackward,
+    /// Input gradient of average pooling. Inputs: `[grad, original_input]`.
+    AvgPool2dBackward,
 }
 
 /// Geometry for [`ConvOp`] kernels. All pairs are `(height, width)`.

@@ -14,7 +14,7 @@
 //! call the gradient kernels that live next to the forward ones.
 
 use crate::autograd;
-use crate::backend::cpu::conv::{self as conv_kernel, Conv2dGeometry};
+use crate::backend::cpu::conv::Conv2dGeometry;
 use crate::backend::{Conv2dParams, ConvOp, dispatch};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
@@ -116,13 +116,22 @@ impl Tensor {
             out,
             &[self, weight],
             Box::new(move |g| {
+                let backend = dispatch::backend(g.device());
                 vec![
                     from_kernel(
-                        conv_kernel::conv2d_input_grad(g.view(), saved_weight.view(), &geo),
+                        backend.conv(
+                            ConvOp::Conv2dInputGrad,
+                            &[g.view(), saved_weight.view(), saved_input.view()],
+                            &params,
+                        ),
                         geo.input_dims(),
                     ),
                     from_kernel(
-                        conv_kernel::conv2d_weight_grad(g.view(), saved_input.view(), &geo),
+                        backend.conv(
+                            ConvOp::Conv2dWeightGrad,
+                            &[g.view(), saved_input.view(), saved_weight.view()],
+                            &params,
+                        ),
                         geo.weight_dims(),
                     ),
                 ]
@@ -166,13 +175,23 @@ impl Tensor {
     ) -> Result<Tensor> {
         let (geo, out) = self.pool("max_pool2d", ConvOp::MaxPool2d, kernel, stride, padding)?;
         let saved_input = self.detach();
+        let params = Conv2dParams {
+            kernel,
+            stride,
+            padding,
+            dilation: (1, 1),
+        };
         Ok(autograd::record(
             "max_pool2d",
             out,
             &[self],
             Box::new(move |g| {
                 vec![from_kernel(
-                    conv_kernel::max_pool2d_backward(g.view(), saved_input.view(), &geo),
+                    dispatch::backend(g.device()).conv(
+                        ConvOp::MaxPool2dBackward,
+                        &[g.view(), saved_input.view()],
+                        &params,
+                    ),
                     geo.input_dims(),
                 )]
             }),
@@ -208,13 +227,24 @@ impl Tensor {
         padding: (usize, usize),
     ) -> Result<Tensor> {
         let (geo, out) = self.pool("avg_pool2d", ConvOp::AvgPool2d, kernel, stride, padding)?;
+        let saved_input = self.detach();
+        let params = Conv2dParams {
+            kernel,
+            stride,
+            padding,
+            dilation: (1, 1),
+        };
         Ok(autograd::record(
             "avg_pool2d",
             out,
             &[self],
             Box::new(move |g| {
                 vec![from_kernel(
-                    conv_kernel::avg_pool2d_backward(g.view(), &geo),
+                    dispatch::backend(g.device()).conv(
+                        ConvOp::AvgPool2dBackward,
+                        &[g.view(), saved_input.view()],
+                        &params,
+                    ),
                     geo.input_dims(),
                 )]
             }),
