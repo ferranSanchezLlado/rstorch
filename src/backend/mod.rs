@@ -226,8 +226,12 @@ pub(crate) struct Conv2dParams {
 /// Encodings are crate-private but frozen across the kernel and its callers:
 /// `Softmax` takes `[x]`/`[]` and returns `[y]`. `LayerNorm` forward takes
 /// `[x, weight, bias]`/`[eps]` and returns `[y]`, or accepts
-/// `[eps, save_stats=1]` and returns `[y, xhat, inv_std]`; its input-gradient
-/// form takes `[grad, xhat, inv_std, weight]`/`[]` and returns `[grad_x]`.
+/// `[eps, save_stats=1]` and returns `[y, xhat, inv_std]`. `y` has the input
+/// dtype; saved `xhat`/`inv_std` use its accumulation dtype (F32 for
+/// F16/BF16). Its input-gradient form takes
+/// `[grad, xhat_acc, inv_std_acc, weight]`/`[]` and returns `[grad_x]`, with
+/// `grad`/`weight` in parameter dtype and saved statistics in accumulation
+/// dtype.
 /// `SgdStep` takes
 /// `[param, grad]` or `[param, grad, velocity]` plus
 /// `[lr, momentum, weight_decay]` and returns `[next_param]` or
@@ -287,10 +291,11 @@ pub(crate) trait BackendOps: Send + Sync {
     /// `f64` and narrowed by the kernel.
     fn full(&self, len: usize, dtype: DType, value: f64) -> Result<Storage>;
 
-    /// Cast `x` to dtype `to`. Implemented lanes at m1: `F32↔I64`,
-    /// `F32↔Bool`, `I64↔Bool` (T60 adds the `F16`/`BF16` lanes). An
-    /// unimplemented lane is [`Error::Unsupported`](crate::Error::Unsupported),
-    /// never a silent reinterpretation.
+    /// Cast `x` to dtype `to`. Implemented lanes are `F32↔I64`, `F32↔Bool`,
+    /// `I64↔Bool`, plus F16/BF16 with F32, each other, I64, and Bool. F64
+    /// conversion remains outside the current cast scope. An unimplemented
+    /// lane is [`Error::Unsupported`](crate::Error::Unsupported), never a
+    /// silent reinterpretation.
     fn cast(&self, x: View<'_>, to: DType) -> Result<Storage>;
 
     /// Element-wise binary op over two **pre-broadcast, shape-identical**

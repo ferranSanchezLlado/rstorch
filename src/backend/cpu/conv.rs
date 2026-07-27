@@ -1190,6 +1190,27 @@ mod tests {
     }
 
     #[test]
+    fn conv2d_accumulates_bf16_in_f32() {
+        let k = 4096usize;
+        let one = half::bf16::from_f32(1.0);
+        let input = Storage::Cpu(CpuStorage::BF16(Arc::new(vec![one; k])));
+        let weight = Storage::Cpu(CpuStorage::BF16(Arc::new(vec![one; k])));
+        let il = Layout::contiguous([1, k, 1, 1]).unwrap();
+        let wl = Layout::contiguous([1, k, 1, 1]).unwrap();
+        let p = params((1, 1), (1, 1), (0, 0), (1, 1));
+        let out = conv(
+            ConvOp::Conv2d,
+            &[View::new(&input, &il), View::new(&weight, &wl)],
+            &p,
+        )
+        .unwrap();
+        let Storage::Cpu(CpuStorage::BF16(got)) = out else {
+            panic!("expected bf16")
+        };
+        assert_eq!(got[0].to_f32(), 4096.0);
+    }
+
+    #[test]
     fn max_pool2d_hand_computed() {
         // 1x1x4x4 = 1..16, 2x2 window, stride 2.
         let input = f32_storage((1..=16).map(|v| v as f32).collect());

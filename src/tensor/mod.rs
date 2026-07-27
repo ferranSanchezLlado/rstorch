@@ -558,9 +558,9 @@ impl Tensor {
     /// Summation goes through the backend `reduce` entry point with
     /// `ReduceOp::Sum`, one axis per call, highest axis index first so the
     /// indices of the axes still to be reduced stay valid as each reduction
-    /// drops one. Accumulation therefore follows the wide-`Acc` kernel
-    /// contract: an `f16` broadcast backward accumulates in `f32` and narrows
-    /// once, which is the fix for the v2 sum-saturation bug.
+    /// drops one. F16/BF16 inputs are widened before the first reduction and
+    /// remain F32 across every reduced axis, then narrow once at the final
+    /// requested shape.
     ///
     /// # Errors
     ///
@@ -614,10 +614,14 @@ impl Tensor {
             return Ok(self.clone());
         }
 
-        let backend = dispatch::backend(self.device());
+        let dtype = self.dtype();
         // Highest axis first: dropping axis `k` leaves every axis below `k`
         // at its original index.
         let mut cur = self.detach_shallow();
+        if matches!(dtype, DType::F16 | DType::BF16) {
+            cur = cur.to_dtype(DType::F32)?;
+        }
+        let backend = dispatch::backend(self.device());
         for &axis in reduce_axes.iter().rev() {
             let storage = backend.reduce(ReduceOp::Sum, cur.view(), axis)?;
             let dims: Vec<usize> = cur
@@ -628,6 +632,9 @@ impl Tensor {
                 .map(|(_, &d)| d)
                 .collect();
             cur = Tensor::from_parts(storage, Layout::contiguous(dims)?);
+        }
+        if cur.dtype() != dtype {
+            cur = cur.to_dtype(dtype)?;
         }
 
         // What survives is `target_dims` with its summed-away size-1 axes
@@ -1044,11 +1051,18 @@ mod tests {
         let same = f.to_dtype(DType::F32).unwrap();
         assert_eq!(f32_buf_ptr(&f), f32_buf_ptr(&same));
 
-        // An unimplemented lane is loud, never a silent reinterpretation.
-        assert!(matches!(
-            f.to_dtype(DType::F16),
-            Err(Error::Unsupported { op: "to_dtype", .. })
-        ));
+        let half = f.to_dtype(DType::F16).unwrap();
+        assert_eq!(half.dtype(), DType::F16);
+        assert_eq!(
+            half.to_dtype(DType::BF16)
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap(),
+            vec![1.8984375, -1.8984375, 0.0]
+        );
+        // F64 cast scope remains deferred and loud.
         assert!(matches!(
             f.to_dtype(DType::F64),
             Err(Error::Unsupported { op: "to_dtype", .. })
@@ -1284,12 +1298,35 @@ mod tests {
 
     #[test]
     fn sum_to_accumulates_in_the_wide_acc_type() {
-        // 4096 f16 ones broadcast down to a scalar: native f16 addition
-        // saturates at 2048, the `Acc = f32` contract does not.
-        let t = Tensor::full([4096], 1.0, DType::F16, &CPU).unwrap();
-        let s = t.sum_to(&[]).unwrap();
-        assert_eq!(s.dtype(), DType::F16);
-        assert_eq!(s.item().unwrap(), 4096.0);
+        for dtype in [DType::F16, DType::BF16] {
+            // Native f16 addition stalls at 2048 and bf16 at 256; Acc = f32.
+            let t = Tensor::full([4096], 1.0, dtype, &CPU).unwrap();
+            let s = t.sum_to(&[]).unwrap();
+            assert_eq!(s.dtype(), dtype);
+            assert_eq!(s.item().unwrap(), 4096.0);
+        }
+    }
+
+    #[test]
+    fn sum_to_keeps_reduced_multi_axis_accumulation_wide_until_the_target_shape() {
+        let width = 65_520;
+        let mut f16_values = vec![half::f16::ONE; width];
+        f16_values.extend(vec![half::f16::NEG_ONE; width]);
+        let f16 = Tensor::from_vec(f16_values, [2, width], &CPU).unwrap();
+        assert_eq!(f16.sum_to(&[1, 1]).unwrap().item().unwrap(), 0.0);
+
+        let mut bf16_values = Vec::with_capacity(514);
+        for index in 0..257 {
+            bf16_values.push(half::bf16::ONE);
+            bf16_values.push(if index < 256 {
+                half::bf16::NEG_ONE
+            } else {
+                half::bf16::ZERO
+            });
+        }
+        let base = Tensor::from_vec(bf16_values, [257, 2], &CPU).unwrap();
+        let strided = re_view(&base, base.layout().transpose(0, 1).unwrap());
+        assert_eq!(strided.sum_to(&[1, 1]).unwrap().item().unwrap(), 1.0);
     }
 
     #[test]

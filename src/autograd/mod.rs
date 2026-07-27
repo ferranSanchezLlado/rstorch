@@ -34,7 +34,8 @@
 //! - **[`backward`] is a pure function over the graph.** It walks an
 //!   *iterative* reverse topological order (an explicit worklist; a 100k-node
 //!   chain must not touch the stack), keeps one cotangent per node in a map,
-//!   sums the contributions that arrive from several consumers, and drops each
+//!   sums the contributions that arrive from several consumers in F32 for
+//!   F16/BF16 nodes (narrowing once when the fan-in is complete), and drops each
 //!   cotangent as soon as its node has been processed. Nothing in the graph is
 //!   mutated, so the same graph can be differentiated twice and from several
 //!   threads.
@@ -57,6 +58,7 @@
 // the integrator removes this allow once that lands.
 #![allow(dead_code)]
 
+use crate::DType;
 use crate::error::{Error, Result};
 use crate::tensor::Tensor;
 use std::collections::{HashMap, HashSet};
@@ -257,10 +259,10 @@ pub(crate) fn backward(t: &Tensor) -> Result<Grads> {
         .ok_or(Error::NotTraced { op: "backward" })?;
     let seed = Tensor::ones(t.dims(), t.dtype(), &t.device())?;
 
-    let mut cotangents: HashMap<usize, Tensor> = HashMap::new();
-    cotangents.insert(node_id(&root), seed);
+    let mut cotangents: HashMap<usize, Accumulated> = HashMap::new();
+    accumulate_wide(&mut cotangents, node_id(&root), seed)?;
     let order = topological_order(root);
-    let mut grads: HashMap<GradKey, Tensor> = HashMap::new();
+    let mut grads: HashMap<GradKey, Accumulated> = HashMap::new();
 
     // `order` is a reverse topological order rooted at `t`: every consumer of
     // a node precedes it, so a node's cotangent is complete the moment it is
@@ -272,23 +274,24 @@ pub(crate) fn backward(t: &Tensor) -> Result<Grads> {
             continue;
         };
         if let Some(key) = node.key {
-            accumulate(&mut grads, key, cotangent)?;
+            merge_accumulated(&mut grads, key, cotangent)?;
             // Leaves have no parents and no backward closure.
             continue;
         }
         let Some(backward) = node.backward.as_ref() else {
             continue;
         };
+        let cotangent = cotangent.finish()?;
         for (parent, contribution) in node.inputs.iter().zip(backward(&cotangent)) {
             let (Some(parent), Some(contribution)) = (parent, contribution) else {
                 continue;
             };
             // Detach defensively: a cotangent must never carry a graph of its
             // own, whatever a backward closure built it from.
-            accumulate(&mut cotangents, node_id(parent), contribution.detach())?;
+            accumulate_wide(&mut cotangents, node_id(parent), contribution.detach())?;
         }
     }
-    Ok(Grads::from_pairs(grads))
+    Ok(Grads { grads })
 }
 
 /// The nodes reachable from `root`, in reverse topological order (`root`
@@ -319,15 +322,125 @@ fn topological_order(root: Arc<Node>) -> Vec<Arc<Node>> {
     post_order
 }
 
-/// Add `value` into `map` under `key`, summing with whatever is already there.
-fn accumulate<K: std::hash::Hash + Eq>(
-    map: &mut HashMap<K, Tensor>,
+/// One node's fan-in cotangent. Reduced values are held in F32 until every
+/// incoming edge has contributed. Interior-node values narrow once before the
+/// backward closure runs; leaf values remain wide inside [`Grads`] until they
+/// are observed or consumed. Keeping the original dtype beside the tensor
+/// avoids adding dtype metadata to the crate-private graph-node contract.
+struct Accumulated {
+    value: Tensor,
+    dtype: DType,
+}
+
+impl Accumulated {
+    fn from_tensor(value: Tensor) -> Accumulated {
+        Accumulated {
+            dtype: value.dtype(),
+            value,
+        }
+    }
+
+    fn new(value: Tensor) -> Result<Accumulated> {
+        let mut accumulated = Accumulated::from_tensor(value);
+        accumulated.ensure_wide()?;
+        Ok(accumulated)
+    }
+
+    fn ensure_wide(&mut self) -> Result<()> {
+        if matches!(self.dtype, DType::F16 | DType::BF16) && self.value.dtype() != DType::F32 {
+            self.value = self.value.to_dtype(DType::F32)?;
+        }
+        Ok(())
+    }
+
+    fn add(&mut self, value: Tensor) -> Result<()> {
+        if value.dtype() != self.dtype {
+            return Err(Error::DTypeMismatch {
+                op: "backward",
+                expected: self.dtype,
+                got: value.dtype(),
+            });
+        }
+        let value = if self.value.dtype() != value.dtype() {
+            value.to_dtype(self.value.dtype())?
+        } else {
+            value
+        };
+        self.value = self.value.add(&value)?;
+        Ok(())
+    }
+
+    fn merge(&mut self, mut other: Accumulated) -> Result<()> {
+        if other.dtype != self.dtype {
+            return Err(Error::DTypeMismatch {
+                op: "backward",
+                expected: self.dtype,
+                got: other.dtype,
+            });
+        }
+        self.ensure_wide()?;
+        other.ensure_wide()?;
+        self.value = self.value.add(&other.value)?;
+        Ok(())
+    }
+
+    fn scale(&mut self, factor: f64) -> Result<()> {
+        self.ensure_wide()?;
+        self.value = self.value.mul_scalar(factor)?;
+        Ok(())
+    }
+
+    fn observed(&self) -> Result<Tensor> {
+        Accumulated {
+            value: self.value.clone(),
+            dtype: self.dtype,
+        }
+        .finish()
+    }
+
+    fn wide(&self) -> Result<Tensor> {
+        if matches!(self.dtype, DType::F16 | DType::BF16) && self.value.dtype() != DType::F32 {
+            self.value.to_dtype(DType::F32)
+        } else {
+            Ok(self.value.clone())
+        }
+    }
+
+    fn finish(self) -> Result<Tensor> {
+        if self.value.dtype() == self.dtype {
+            Ok(self.value)
+        } else {
+            self.value.to_dtype(self.dtype)
+        }
+    }
+}
+
+fn accumulate_wide<K: std::hash::Hash + Eq>(
+    map: &mut HashMap<K, Accumulated>,
     key: K,
     value: Tensor,
 ) -> Result<()> {
     match map.remove(&key) {
-        Some(existing) => {
-            map.insert(key, existing.add(&value)?);
+        Some(mut existing) => {
+            existing.add(value)?;
+            map.insert(key, existing);
+        }
+        None => {
+            map.insert(key, Accumulated::new(value)?);
+        }
+    }
+    Ok(())
+}
+
+fn merge_accumulated<K: std::hash::Hash + Eq>(
+    map: &mut HashMap<K, Accumulated>,
+    key: K,
+    value: Accumulated,
+) -> Result<()> {
+    match map.remove(&key) {
+        Some(mut existing) => {
+            existing.merge(value)?;
+            map.insert(key, existing);
         }
         None => {
             map.insert(key, value);
@@ -346,18 +459,23 @@ fn accumulate<K: std::hash::Hash + Eq>(
 /// pipelines (`acc = acc.merge(step)?`, `grads.clip_norm(1.0)?`).
 #[must_use]
 pub struct Grads {
-    grads: HashMap<GradKey, Tensor>,
+    grads: HashMap<GradKey, Accumulated>,
 }
 
 impl Grads {
     /// Build from a key→gradient map (the engine's output).
     pub(crate) fn from_pairs(grads: HashMap<GradKey, Tensor>) -> Grads {
-        Grads { grads }
+        Grads {
+            grads: grads
+                .into_iter()
+                .map(|(key, value)| (key, Accumulated::from_tensor(value)))
+                .collect(),
+        }
     }
 
     /// Remove and return the gradient for `key` (optimizer drain path).
-    pub(crate) fn take(&mut self, key: GradKey) -> Option<Tensor> {
-        self.grads.remove(&key)
+    pub(crate) fn take(&mut self, key: GradKey) -> Result<Option<Tensor>> {
+        self.grads.remove(&key).map(Accumulated::finish).transpose()
     }
 
     /// Whether a gradient is present for `key`.
@@ -387,7 +505,7 @@ impl Grads {
     pub fn merge(self, other: Grads) -> Result<Grads> {
         let mut grads = self.grads;
         for (key, value) in other.grads {
-            accumulate(&mut grads, key, value)?;
+            merge_accumulated(&mut grads, key, value)?;
         }
         Ok(Grads { grads })
     }
@@ -408,7 +526,7 @@ impl Grads {
         }
         let mut grads = self.grads;
         for value in grads.values_mut() {
-            *value = value.mul_scalar(factor)?;
+            value.scale(factor)?;
         }
         Ok(Grads { grads })
     }
@@ -433,7 +551,8 @@ impl Grads {
         }
         let mut total = 0.0f64;
         for value in self.grads.values() {
-            total += value.mul(value)?.sum_all()?.item()?;
+            let wide = value.wide()?;
+            total += wide.mul(&wide)?.sum_all()?.item()?;
         }
         let norm = total.sqrt();
         if !norm.is_finite() {
@@ -460,7 +579,8 @@ impl Grads {
     pub fn wrt(&self, param: &crate::nn::Param) -> Result<Tensor> {
         self.grads
             .get(&param.grad_key())
-            .cloned()
+            .map(Accumulated::observed)
+            .transpose()?
             .ok_or(Error::NotTraced { op: "wrt" })
     }
 
@@ -488,7 +608,8 @@ impl Grads {
         })?;
         self.grads
             .get(&key)
-            .cloned()
+            .map(Accumulated::observed)
+            .transpose()?
             .ok_or_else(|| Error::InvalidArg {
                 op: "wrt_input",
                 msg: "no gradient for this traced input: the tensor traced() \
@@ -673,6 +794,20 @@ mod tests {
     }
 
     #[test]
+    fn reduced_graph_fan_in_accumulates_repeated_adds_in_f32() {
+        for dtype in [DType::F16, DType::BF16] {
+            let x = Tensor::ones((), dtype, &CPU).unwrap().traced().unwrap();
+            let mut y = x.mul_scalar(1.0).unwrap();
+            for _ in 1..4096 {
+                y = y.add(&x.mul_scalar(1.0).unwrap()).unwrap();
+            }
+            let grad = y.backward().unwrap().wrt_input(&x).unwrap();
+            assert_eq!(grad.dtype(), dtype);
+            assert_eq!(grad.item().unwrap(), 4096.0);
+        }
+    }
+
+    #[test]
     fn several_leaves_land_under_their_own_keys() {
         let a = t(&[1.0, 2.0], [2]).traced().unwrap();
         let b = t(&[3.0, 4.0], [2]).traced().unwrap();
@@ -702,6 +837,49 @@ mod tests {
         let g = g.wrt_input(&row).unwrap();
         assert_eq!(g.dims(), &[1, 3]);
         assert_eq!(v(&g), vec![2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn reduced_broadcast_gradients_keep_multi_axis_sum_to_wide() {
+        for dtype in [DType::F16, DType::BF16] {
+            let (width, values) = if dtype == DType::F16 {
+                let width = 65_520;
+                let mut values = vec![1.0f32; width];
+                values.extend(vec![-1.0; width]);
+                (width, values)
+            } else {
+                let width = 257;
+                let mut values = vec![1.0f32; width];
+                values.extend((0..width).map(|index| if index < 256 { -1.0 } else { 0.0 }));
+                (width, values)
+            };
+            let leaf = Tensor::ones([1, 1], dtype, &CPU).unwrap().traced().unwrap();
+            let weights = match dtype {
+                DType::F16 => Tensor::from_vec(
+                    values.into_iter().map(half::f16::from_f32).collect(),
+                    [2, width],
+                    &CPU,
+                ),
+                DType::BF16 => Tensor::from_vec(
+                    values.into_iter().map(half::bf16::from_f32).collect(),
+                    [2, width],
+                    &CPU,
+                ),
+                _ => unreachable!(),
+            }
+            .unwrap();
+            let grad = leaf
+                .mul(&weights)
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .backward()
+                .unwrap()
+                .wrt_input(&leaf)
+                .unwrap();
+            let expected = if dtype == DType::F16 { 0.0 } else { 1.0 };
+            assert_eq!(grad.item().unwrap(), expected);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -771,6 +949,21 @@ mod tests {
     }
 
     #[test]
+    fn repeated_reduced_grads_merges_retain_the_wide_accumulator() {
+        for dtype in [DType::F16, DType::BF16] {
+            let x = Tensor::ones((), dtype, &CPU).unwrap().traced().unwrap();
+            let one_grad = || x.mul_scalar(1.0).unwrap().backward().unwrap();
+            let mut merged = one_grad();
+            for _ in 1..4096 {
+                merged = merged.merge(one_grad()).unwrap();
+            }
+            let grad = merged.wrt_input(&x).unwrap();
+            assert_eq!(grad.dtype(), dtype);
+            assert_eq!(grad.item().unwrap(), 4096.0);
+        }
+    }
+
+    #[test]
     fn scale_multiplies_every_entry() {
         let (xt, g) = grads_of(&t(&[1.0, 1.0], [2]), 4.0);
         let g = g.scale(0.25).unwrap();
@@ -823,6 +1016,25 @@ mod tests {
     }
 
     #[test]
+    fn reduced_clip_norm_widens_before_square_and_sum() {
+        for dtype in [DType::F16, DType::BF16] {
+            let x = Tensor::ones([4096], dtype, &CPU).unwrap().traced().unwrap();
+            let grads = x.sum_all().unwrap().backward().unwrap();
+            let clipped = grads.clip_norm(32.0).unwrap().wrt_input(&x).unwrap();
+            assert_eq!(clipped.dtype(), dtype);
+            assert!(
+                clipped
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .iter()
+                    .all(|&value| value == 0.5)
+            );
+        }
+    }
+
+    #[test]
     fn lookups_are_loud_about_the_wrong_binding() {
         let x = t(&[1.0, 2.0], [2]);
         let (xt, g) = grads_of(&x, 2.0);
@@ -865,9 +1077,9 @@ mod tests {
             .backward()
             .unwrap();
         assert!(g.contains(p.grad_key()));
-        assert_eq!(v(&g.take(p.grad_key()).unwrap()), vec![3.0]);
+        assert_eq!(v(&g.take(p.grad_key()).unwrap().unwrap()), vec![3.0]);
         assert!(!g.contains(p.grad_key()));
-        assert!(g.take(p.grad_key()).is_none());
+        assert!(g.take(p.grad_key()).unwrap().is_none());
         assert!(g.is_empty());
     }
 

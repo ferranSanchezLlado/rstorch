@@ -950,6 +950,33 @@ mod tests {
     }
 
     #[test]
+    fn bf16_matmul_accumulates_in_f32() {
+        let k = 4096usize;
+        let one = half::bf16::from_f32(1.0);
+        let a = Storage::Cpu(CpuStorage::BF16(Arc::new(vec![one; k])));
+        let b = Storage::Cpu(CpuStorage::BF16(Arc::new(vec![one; k * 2])));
+        let la = Layout::contiguous([1, k]).unwrap();
+        let lb = Layout::contiguous([k, 2]).unwrap();
+        let r = matmul(View::new(&a, &la), View::new(&b, &lb)).unwrap();
+        let Storage::Cpu(CpuStorage::BF16(out)) = r else {
+            panic!("expected bf16")
+        };
+        assert!(out.iter().all(|value| value.to_f32() == 4096.0));
+
+        let transposed = Storage::Cpu(CpuStorage::BF16(Arc::new(vec![one; k * 2])));
+        let transposed_layout = Layout::contiguous([2, k]).unwrap().transpose(0, 1).unwrap();
+        let r = matmul(
+            View::new(&a, &la),
+            View::new(&transposed, &transposed_layout),
+        )
+        .unwrap();
+        let Storage::Cpu(CpuStorage::BF16(out)) = r else {
+            panic!("expected bf16")
+        };
+        assert!(out.iter().all(|value| value.to_f32() == 4096.0));
+    }
+
+    #[test]
     fn i64_matmul_accumulates_in_i64() {
         // Values whose products/sum exceed i32 range.
         let a = Storage::Cpu(CpuStorage::I64(Arc::new(vec![100_000, 100_000])));

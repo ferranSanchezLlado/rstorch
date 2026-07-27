@@ -282,17 +282,17 @@ pub(crate) fn full(len: usize, dtype: DType, value: f64) -> Result<Storage> {
     Ok(Storage::Cpu(storage))
 }
 
-/// See [`BackendOps::cast`](crate::backend::BackendOps::cast). Lanes now:
-/// F32↔I64, F32↔Bool, I64↔Bool (T60 adds F16/BF16).
+/// See [`BackendOps::cast`](crate::backend::BackendOps::cast). Supports the
+/// reduced-precision matrix used by public algorithms: F16/BF16 with F32,
+/// each other, I64, and Bool, plus the existing F32/I64/Bool lanes.
 ///
 /// The source view is first materialized in row-major order, then each
 /// element is converted with familiar Rust/PyTorch semantics:
 /// float→int is a saturating truncation toward zero (Rust `as`), numeric→bool
 /// is `x != 0`, and bool→numeric is `0`/`1`. An identity cast (`to` equals
-/// the source dtype) returns a contiguous copy. Any lane outside the set
-/// above — notably every `F16`/`BF16` lane, deferred to T60 — is
-/// [`Error::Unsupported`](crate::Error::Unsupported), never a silent
-/// reinterpretation.
+/// the source dtype) returns a contiguous copy. F64 lanes remain outside this
+/// task's cast scope and return [`Error::Unsupported`](crate::Error::Unsupported),
+/// never a silent reinterpretation.
 pub(crate) fn cast(x: View<'_>, to: DType) -> Result<Storage> {
     let from = x.dtype();
     let unsupported = || Error::Unsupported {
@@ -311,7 +311,45 @@ pub(crate) fn cast(x: View<'_>, to: DType) -> Result<Storage> {
         // Identity: a contiguous copy, no conversion.
         (a, b) if a == b => src,
 
-        // F32 <-> I64.
+        // Reduced floats <-> F32 and each other.
+        (DType::F16, DType::F32) => match &src {
+            CpuStorage::F16(v) => {
+                CpuStorage::F32(std::sync::Arc::new(v.iter().map(|e| e.to_f32()).collect()))
+            }
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::F32, DType::F16) => match &src {
+            CpuStorage::F32(v) => CpuStorage::F16(std::sync::Arc::new(
+                v.iter().map(|&e| half::f16::from_f32(e)).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::BF16, DType::F32) => match &src {
+            CpuStorage::BF16(v) => {
+                CpuStorage::F32(std::sync::Arc::new(v.iter().map(|e| e.to_f32()).collect()))
+            }
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::F32, DType::BF16) => match &src {
+            CpuStorage::F32(v) => CpuStorage::BF16(std::sync::Arc::new(
+                v.iter().map(|&e| half::bf16::from_f32(e)).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::F16, DType::BF16) => match &src {
+            CpuStorage::F16(v) => CpuStorage::BF16(std::sync::Arc::new(
+                v.iter().map(|e| half::bf16::from_f32(e.to_f32())).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::BF16, DType::F16) => match &src {
+            CpuStorage::BF16(v) => CpuStorage::F16(std::sync::Arc::new(
+                v.iter().map(|e| half::f16::from_f32(e.to_f32())).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+
+        // Float <-> I64.
         (DType::F32, DType::I64) => match &src {
             CpuStorage::F32(v) => {
                 CpuStorage::I64(std::sync::Arc::new(v.iter().map(|&e| e as i64).collect()))
@@ -322,6 +360,30 @@ pub(crate) fn cast(x: View<'_>, to: DType) -> Result<Storage> {
             CpuStorage::I64(v) => {
                 CpuStorage::F32(std::sync::Arc::new(v.iter().map(|&e| e as f32).collect()))
             }
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::F16, DType::I64) => match &src {
+            CpuStorage::F16(v) => CpuStorage::I64(std::sync::Arc::new(
+                v.iter().map(|e| e.to_f32() as i64).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::I64, DType::F16) => match &src {
+            CpuStorage::I64(v) => CpuStorage::F16(std::sync::Arc::new(
+                v.iter().map(|&e| half::f16::from_f32(e as f32)).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::BF16, DType::I64) => match &src {
+            CpuStorage::BF16(v) => CpuStorage::I64(std::sync::Arc::new(
+                v.iter().map(|e| e.to_f32() as i64).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::I64, DType::BF16) => match &src {
+            CpuStorage::I64(v) => CpuStorage::BF16(std::sync::Arc::new(
+                v.iter().map(|&e| half::bf16::from_f32(e as f32)).collect(),
+            )),
             _ => unreachable!("materialized dtype disagrees with view dtype"),
         },
 
@@ -335,6 +397,34 @@ pub(crate) fn cast(x: View<'_>, to: DType) -> Result<Storage> {
         (DType::Bool, DType::F32) => match &src {
             CpuStorage::Bool(v) => CpuStorage::F32(std::sync::Arc::new(
                 v.iter().map(|&e| if e { 1.0 } else { 0.0 }).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::F16, DType::Bool) => match &src {
+            CpuStorage::F16(v) => CpuStorage::Bool(std::sync::Arc::new(
+                v.iter().map(|e| e.to_f32() != 0.0).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::Bool, DType::F16) => match &src {
+            CpuStorage::Bool(v) => CpuStorage::F16(std::sync::Arc::new(
+                v.iter()
+                    .map(|&e| half::f16::from_f32(if e { 1.0 } else { 0.0 }))
+                    .collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::BF16, DType::Bool) => match &src {
+            CpuStorage::BF16(v) => CpuStorage::Bool(std::sync::Arc::new(
+                v.iter().map(|e| e.to_f32() != 0.0).collect(),
+            )),
+            _ => unreachable!("materialized dtype disagrees with view dtype"),
+        },
+        (DType::Bool, DType::BF16) => match &src {
+            CpuStorage::Bool(v) => CpuStorage::BF16(std::sync::Arc::new(
+                v.iter()
+                    .map(|&e| half::bf16::from_f32(if e { 1.0 } else { 0.0 }))
+                    .collect(),
             )),
             _ => unreachable!("materialized dtype disagrees with view dtype"),
         },
@@ -353,8 +443,7 @@ pub(crate) fn cast(x: View<'_>, to: DType) -> Result<Storage> {
             _ => unreachable!("materialized dtype disagrees with view dtype"),
         },
 
-        // Every remaining lane (all F16/BF16 lanes, plus F64 lanes) is
-        // deferred: loud, never a silent reinterpretation.
+        // F64 cast scope remains deferred: loud, never a silent reinterpretation.
         _ => return Err(unsupported()),
     };
 
@@ -776,6 +865,15 @@ mod tests {
         let layout = Layout::contiguous([3]).unwrap();
         let out = cast(View::new(&storage, &layout), DType::F32).unwrap();
         assert_eq!(as_f32(cpu(&out)), vec![1.0, 2.0, 3.0]);
+
+        let buffer = Arc::new(vec![half::bf16::from_f32(1.0); 3]);
+        let storage = Storage::Cpu(CpuStorage::BF16(Arc::clone(&buffer)));
+        let out = cast(View::new(&storage, &layout), DType::BF16).unwrap();
+        let Storage::Cpu(CpuStorage::BF16(out)) = out else {
+            panic!("expected bf16")
+        };
+        assert!(!Arc::ptr_eq(&buffer, &out));
+        assert_eq!(buffer.as_ref(), out.as_ref());
     }
 
     #[test]
@@ -787,10 +885,15 @@ mod tests {
         let out = cast(View::new(&storage, &layout), DType::I64).unwrap();
         // Transposed row-major walk: 1,4,2,5,3,6 truncated to i64.
         assert_eq!(as_i64(cpu(&out)), vec![1, 4, 2, 5, 3, 6]);
+
+        let reduced = cast(View::new(&storage, &layout), DType::BF16).unwrap();
+        let dense = Layout::contiguous([3, 2]).unwrap();
+        let back = cast(View::new(&reduced, &dense), DType::F32).unwrap();
+        assert_eq!(as_f32(cpu(&back)), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     }
 
     // ------------------------------------------------------------------
-    // cast: unsupported lanes are loud (never a silent reinterpretation)
+    // cast: reduced-precision matrix and unchanged F64 scope
     // ------------------------------------------------------------------
 
     // `Storage` (the Ok payload) is intentionally not `Debug`, so these
@@ -798,34 +901,39 @@ mod tests {
     // calling `unwrap_err` (which would require `T: Debug`).
 
     #[test]
-    fn cast_f16_lanes_are_unsupported() {
-        let storage = f32_storage(vec![1.0, 2.0]);
-        let layout = Layout::contiguous([2]).unwrap();
-        assert!(matches!(
-            cast(View::new(&storage, &layout), DType::F16),
-            Err(Error::Unsupported {
-                op: "to_dtype",
-                dtype: DType::F32,
-                ..
-            })
-        ));
-    }
+    fn reduced_cast_matrix_covers_float_integer_and_bool_lanes() {
+        let layout = Layout::contiguous([4]).unwrap();
+        for reduced in [DType::F16, DType::BF16] {
+            let source = cast(
+                View::new(&f32_storage(vec![0.0, 1.75, -2.25, 3.5]), &layout),
+                reduced,
+            )
+            .unwrap();
+            let f32s = cast(View::new(&source, &layout), DType::F32).unwrap();
+            assert_eq!(as_f32(cpu(&f32s)), vec![0.0, 1.75, -2.25, 3.5]);
 
-    #[test]
-    fn cast_from_f16_is_unsupported() {
-        let storage = Storage::Cpu(CpuStorage::F16(Arc::new(vec![
-            half::f16::from_f32(1.0),
-            half::f16::from_f32(2.0),
-        ])));
-        let layout = Layout::contiguous([2]).unwrap();
-        assert!(matches!(
-            cast(View::new(&storage, &layout), DType::F32),
-            Err(Error::Unsupported {
-                op: "to_dtype",
-                dtype: DType::F16,
-                ..
-            })
-        ));
+            let ints = cast(View::new(&source, &layout), DType::I64).unwrap();
+            assert_eq!(as_i64(cpu(&ints)), vec![0, 1, -2, 3]);
+            let from_ints = cast(View::new(&ints, &layout), reduced).unwrap();
+            let ints_back = cast(View::new(&from_ints, &layout), DType::F32).unwrap();
+            assert_eq!(as_f32(cpu(&ints_back)), vec![0.0, 1.0, -2.0, 3.0]);
+
+            let bools = cast(View::new(&source, &layout), DType::Bool).unwrap();
+            assert_eq!(as_bool(cpu(&bools)), vec![false, true, true, true]);
+            let from_bools = cast(View::new(&bools, &layout), reduced).unwrap();
+            let bools_back = cast(View::new(&from_bools, &layout), DType::F32).unwrap();
+            assert_eq!(as_f32(cpu(&bools_back)), vec![0.0, 1.0, 1.0, 1.0]);
+        }
+
+        let f16 = cast(
+            View::new(&f32_storage(vec![0.5, -1.5, 2.0, 4.0]), &layout),
+            DType::F16,
+        )
+        .unwrap();
+        let bf16 = cast(View::new(&f16, &layout), DType::BF16).unwrap();
+        let round_trip = cast(View::new(&bf16, &layout), DType::F16).unwrap();
+        let round_trip_f32 = cast(View::new(&round_trip, &layout), DType::F32).unwrap();
+        assert_eq!(as_f32(cpu(&round_trip_f32)), vec![0.5, -1.5, 2.0, 4.0]);
     }
 
     #[test]

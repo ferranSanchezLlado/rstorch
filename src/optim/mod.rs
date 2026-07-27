@@ -104,6 +104,14 @@
 //! handful of small tensor allocations per step. That was a measured hotspot in
 //! v2 at MLP scale; the fix is a fused backend kernel behind the same public
 //! surface (T48), not a different API here.
+//!
+//! # Reduced precision
+//!
+//! F16/BF16 parameters retain their storage dtype, while SGD momentum and
+//! Adam/AdamW moments are F32 and persist as F32. Update arithmetic widens the
+//! current parameter and gradient for the step and narrows the replacement
+//! parameter once. There are deliberately no persistent master weights: the
+//! checkpoint contains the reduced model values and wide optimizer state only.
 
 mod adam;
 mod engine;

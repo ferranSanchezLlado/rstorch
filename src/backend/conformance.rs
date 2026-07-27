@@ -20,8 +20,9 @@
 //!
 //! # Scope and policy
 //!
-//! - **Dtypes**: `F32`, `I64`, `Bool` — the m1 dtype scope (exploration
-//!   §4.2). T60 widens the table to `F16`/`BF16`.
+//! - **Dtypes**: `F16`, `BF16`, `F32`, `I64`, `Bool`, with dtype-appropriate
+//!   tolerances. Each dtype is a separate row, so a future Metal backend can
+//!   honestly report BF16 as unsupported without hiding its F16 coverage.
 //! - **Layouts**: cases deliberately include transposed and broadcast
 //!   views, because the kernel contract is stride-aware.
 //! - **`Unsupported` is not a mismatch.** A backend that reports
@@ -29,9 +30,10 @@
 //!   no silent fallbacks); such cases land in `Report::skipped`, and a
 //!   promotion gate asserts that list is empty. Any other error, or a value
 //!   divergence, is a failure.
-//! - **Fused ops are absent from the table** until T48 replaces the
-//!   `cpu::fused` stub (which currently `todo!()`s rather than returning
-//!   `Unsupported`).
+//! - **Fused ops are absent from the table.** Their multi-output encodings do
+//!   not fit this single-output harness; softmax, LayerNorm, and optimizer
+//!   kernels instead have direct dtype-specific CPU tests. T61 may extend the
+//!   harness when accelerator fused parity lands.
 //!
 //! Today the only backend is CPU, so the shipped test is the self-check
 //! (CPU vs CPU): it proves the whole table is runnable and exactly matched
@@ -52,6 +54,8 @@ use crate::storage::{CpuStorage, Storage};
 /// the slack exists for accelerators whose fused-multiply-add ordering
 /// differs from the reference loops.
 const DEFAULT_TOL: f64 = 1e-5;
+const F16_TOL: f64 = 2e-3;
+const BF16_TOL: f64 = 2e-2;
 
 // ---------------------------------------------------------------------------
 // Cases
@@ -182,12 +186,58 @@ pub(crate) struct Case {
 impl Case {
     /// A case with the default float tolerance.
     fn new(name: String, call: Call, operands: Vec<Operand>) -> Case {
+        let output_dtype = match &call {
+            Call::Full { dtype, .. } | Call::Cast(dtype) => *dtype,
+            Call::Compare(_) => DType::Bool,
+            Call::ArgReduce(..) => DType::I64,
+            Call::WhereCond => operands[1].host.dtype(),
+            Call::MaskedFill(_)
+            | Call::CopyStrided
+            | Call::BinaryScalar(..)
+            | Call::Unary(_)
+            | Call::Reduce(..)
+            | Call::IndexSelect(_)
+            | Call::IndexAdd(_)
+            | Call::Gather(_)
+            | Call::ScatterAdd(_)
+            | Call::Conv(..) => operands[0].host.dtype(),
+            Call::Binary(_) | Call::Matmul => operands[0].host.dtype(),
+        };
+        // Casts are deterministic representation conversions. In particular,
+        // widening a reduced value to F32 must reproduce it exactly; input
+        // dtype never grants slack to an exact output.
+        let exact_output = matches!(
+            call,
+            Call::Full { .. }
+                | Call::Cast(_)
+                | Call::CopyStrided
+                | Call::Compare(_)
+                | Call::WhereCond
+                | Call::MaskedFill(_)
+                | Call::ArgReduce(..)
+                | Call::IndexSelect(_)
+                | Call::Gather(_)
+        );
+        let tol = if exact_output {
+            0.0
+        } else {
+            dtype_tolerance(output_dtype)
+        };
         Case {
             name,
             call,
             operands,
-            tol: DEFAULT_TOL,
+            tol,
         }
+    }
+}
+
+fn dtype_tolerance(dtype: DType) -> f64 {
+    match dtype {
+        DType::F16 => F16_TOL,
+        DType::BF16 => BF16_TOL,
+        DType::F32 | DType::F64 => DEFAULT_TOL,
+        DType::I64 | DType::Bool => 0.0,
     }
 }
 
@@ -370,12 +420,51 @@ fn f32s(dims: &[usize], data: &[f32]) -> Operand {
     Operand::new(HostConv::into_cpu_storage(data.to_vec()), dims)
 }
 
+fn reduceds(dtype: DType, dims: &[usize], data: &[f32]) -> Operand {
+    let host = match dtype {
+        DType::F16 => {
+            HostConv::into_cpu_storage(data.iter().copied().map(half::f16::from_f32).collect())
+        }
+        DType::BF16 => {
+            HostConv::into_cpu_storage(data.iter().copied().map(half::bf16::from_f32).collect())
+        }
+        _ => panic!("conformance reduced operand requires F16 or BF16"),
+    };
+    Operand::new(host, dims)
+}
+
+fn reduceds_strided(dtype: DType, data: &[f32], layout: Layout) -> Operand {
+    let host = reduceds(dtype, &[data.len()], data).host;
+    Operand::strided(host, layout)
+}
+
+fn reduceds_transposed(dtype: DType, data: &[f32]) -> Operand {
+    let layout = Layout::contiguous([2, 3])
+        .and_then(|layout| layout.transpose(0, 1))
+        .expect("conformance table: transposable reduced layout");
+    reduceds_strided(dtype, data, layout)
+}
+
+fn reduceds_broadcast(dtype: DType, data: &[f32]) -> Operand {
+    let layout = Layout::contiguous([3, 1])
+        .and_then(|layout| layout.broadcast_to(&Shape::from([3, 2])))
+        .expect("conformance table: broadcastable reduced layout");
+    reduceds_strided(dtype, data, layout)
+}
+
 fn i64s(dims: &[usize], data: &[i64]) -> Operand {
     Operand::new(HostConv::into_cpu_storage(data.to_vec()), dims)
 }
 
 fn bools(dims: &[usize], data: &[bool]) -> Operand {
     Operand::new(HostConv::into_cpu_storage(data.to_vec()), dims)
+}
+
+fn bools_broadcast(data: &[bool]) -> Operand {
+    let layout = Layout::contiguous([3, 1])
+        .and_then(|layout| layout.broadcast_to(&Shape::from([3, 2])))
+        .expect("conformance table: broadcastable bool layout");
+    Operand::strided(HostConv::into_cpu_storage(data.to_vec()), layout)
 }
 
 /// A `[2, 3]` f32 operand viewed transposed to `[3, 2]` — the stride-aware
@@ -429,7 +518,13 @@ pub(crate) fn suite() -> Vec<Case> {
 
 /// Allocation, cast, and strided-materialization cases.
 fn push_host(cases: &mut Vec<Case>) {
-    for (dtype, value) in [(DType::F32, -1.5), (DType::I64, 7.0), (DType::Bool, 1.0)] {
+    for (dtype, value) in [
+        (DType::F16, -1.5),
+        (DType::BF16, -1.5),
+        (DType::F32, -1.5),
+        (DType::I64, 7.0),
+        (DType::Bool, 1.0),
+    ] {
         cases.push(Case::new(
             format!("full.{dtype}"),
             Call::Full {
@@ -456,6 +551,60 @@ fn push_host(cases: &mut Vec<Case>) {
                 vec![clone_operand(&operand)],
             ));
         }
+    }
+    for dtype in [DType::F16, DType::BF16] {
+        let label = dtype.to_string();
+        let reduced = reduceds(dtype, &[2, 3], &A_F32);
+        for to in [DType::F32, DType::I64, DType::Bool] {
+            cases.push(Case::new(
+                format!("cast.{label}_to_{to}"),
+                Call::Cast(to),
+                vec![clone_operand(&reduced)],
+            ));
+        }
+        for from in [DType::F32, DType::I64, DType::Bool] {
+            let operand = match from {
+                DType::F32 => f32s(&[2, 3], &A_F32),
+                DType::I64 => i64s(&[2, 3], &A_I64),
+                DType::Bool => bools(&[2, 3], &A_BOOL),
+                _ => unreachable!(),
+            };
+            cases.push(Case::new(
+                format!("cast.{from}_to_{label}"),
+                Call::Cast(dtype),
+                vec![operand],
+            ));
+        }
+        let other = if dtype == DType::F16 {
+            DType::BF16
+        } else {
+            DType::F16
+        };
+        cases.push(Case::new(
+            format!("cast.{label}_to_{other}"),
+            Call::Cast(other),
+            vec![reduced],
+        ));
+        cases.push(Case::new(
+            format!("cast.{label}_to_f32.transposed"),
+            Call::Cast(DType::F32),
+            vec![reduceds_transposed(dtype, &A_F32)],
+        ));
+        cases.push(Case::new(
+            format!("cast.{label}_to_f32.broadcast"),
+            Call::Cast(DType::F32),
+            vec![reduceds_broadcast(dtype, &[1.0, -2.0, 3.0])],
+        ));
+        cases.push(Case::new(
+            format!("copy_strided.{label}.transposed"),
+            Call::CopyStrided,
+            vec![reduceds_transposed(dtype, &A_F32)],
+        ));
+        cases.push(Case::new(
+            format!("copy_strided.{label}.broadcast"),
+            Call::CopyStrided,
+            vec![reduceds_broadcast(dtype, &[1.0, -2.0, 3.0])],
+        ));
     }
     cases.push(Case::new(
         "copy_strided.f32.transposed".to_string(),
@@ -498,6 +647,29 @@ fn push_elementwise(cases: &mut Vec<Case>) {
             Call::Binary(op),
             vec![f32s(&[2, 3], &A_F32), f32s(&[2, 3], &B_F32)],
         ));
+        for dtype in [DType::F16, DType::BF16] {
+            cases.push(Case::new(
+                format!("binary.{op:?}.{dtype}"),
+                Call::Binary(op),
+                vec![
+                    reduceds(dtype, &[2, 3], &A_F32),
+                    reduceds(dtype, &[2, 3], &B_F32),
+                ],
+            ));
+            cases.push(Case::new(
+                format!("binary.{op:?}.{dtype}.strided_broadcast"),
+                Call::Binary(op),
+                vec![
+                    reduceds_transposed(dtype, &A_F32),
+                    reduceds_broadcast(dtype, &[1.5, -2.5, 4.0]),
+                ],
+            ));
+            cases.push(Case::new(
+                format!("binary_scalar.{op:?}.{dtype}"),
+                Call::BinaryScalar(op, 2.5),
+                vec![reduceds(dtype, &[2, 3], &A_F32)],
+            ));
+        }
         cases.push(Case::new(
             format!("binary.{op:?}.i64"),
             Call::Binary(op),
@@ -540,6 +712,13 @@ fn push_elementwise(cases: &mut Vec<Case>) {
             Call::Unary(op),
             vec![f32s(&[2, 3], &P_F32)],
         ));
+        for dtype in [DType::F16, DType::BF16] {
+            cases.push(Case::new(
+                format!("unary.{op:?}.{dtype}"),
+                Call::Unary(op),
+                vec![reduceds(dtype, &[2, 3], &P_F32)],
+            ));
+        }
         if matches!(
             op,
             UnaryOp::Relu | UnaryOp::Gelu | UnaryOp::Tanh | UnaryOp::Sigmoid | UnaryOp::Neg
@@ -573,6 +752,16 @@ fn push_elementwise(cases: &mut Vec<Case>) {
             Call::Compare(op),
             vec![f32s(&[2, 3], &A_F32), f32s(&[2, 3], &B_F32)],
         ));
+        for dtype in [DType::F16, DType::BF16] {
+            cases.push(Case::new(
+                format!("compare.{op:?}.{dtype}"),
+                Call::Compare(op),
+                vec![
+                    reduceds(dtype, &[2, 3], &A_F32),
+                    reduceds(dtype, &[2, 3], &B_F32),
+                ],
+            ));
+        }
         cases.push(Case::new(
             format!("compare.{op:?}.i64"),
             Call::Compare(op),
@@ -606,6 +795,39 @@ fn push_elementwise(cases: &mut Vec<Case>) {
             vec![x, bools(&[2, 3], &A_BOOL)],
         ));
     }
+    for dtype in [DType::F16, DType::BF16] {
+        cases.push(Case::new(
+            format!("where_cond.{dtype}"),
+            Call::WhereCond,
+            vec![
+                bools(&[2, 3], &A_BOOL),
+                reduceds(dtype, &[2, 3], &A_F32),
+                reduceds(dtype, &[2, 3], &B_F32),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("masked_fill.{dtype}"),
+            Call::MaskedFill(-7.0),
+            vec![reduceds(dtype, &[2, 3], &A_F32), bools(&[2, 3], &A_BOOL)],
+        ));
+        cases.push(Case::new(
+            format!("where_cond.{dtype}.strided_broadcast"),
+            Call::WhereCond,
+            vec![
+                bools_broadcast(&[true, false, true]),
+                reduceds_transposed(dtype, &A_F32),
+                reduceds_broadcast(dtype, &[1.5, -2.5, 4.0]),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("masked_fill.{dtype}.strided_broadcast"),
+            Call::MaskedFill(-7.0),
+            vec![
+                reduceds_transposed(dtype, &A_F32),
+                bools_broadcast(&[true, false, true]),
+            ],
+        ));
+    }
 }
 
 /// Axis reductions and index-producing reductions, over dense and strided
@@ -619,6 +841,18 @@ fn push_reduce(cases: &mut Vec<Case>) {
                 Call::Reduce(op, axis),
                 vec![f32s(&[2, 3], &A_F32)],
             ));
+            for dtype in [DType::F16, DType::BF16] {
+                cases.push(Case::new(
+                    format!("reduce.{op:?}.{dtype}.axis{axis}"),
+                    Call::Reduce(op, axis),
+                    vec![reduceds(dtype, &[2, 3], &A_F32)],
+                ));
+                cases.push(Case::new(
+                    format!("reduce.{op:?}.{dtype}.strided.axis{axis}"),
+                    Call::Reduce(op, axis),
+                    vec![reduceds_transposed(dtype, &A_F32)],
+                ));
+            }
             cases.push(Case::new(
                 format!("reduce.{op:?}.i64.axis{axis}"),
                 Call::Reduce(op, axis),
@@ -636,6 +870,13 @@ fn push_reduce(cases: &mut Vec<Case>) {
             Call::Reduce(op, 1),
             vec![f32s_broadcast(&[1.0, 2.0, 3.0])],
         ));
+        for dtype in [DType::F16, DType::BF16] {
+            cases.push(Case::new(
+                format!("reduce.{op:?}.{dtype}.broadcast"),
+                Call::Reduce(op, 1),
+                vec![reduceds_broadcast(dtype, &[1.0, 2.0, 3.0])],
+            ));
+        }
         cases.push(Case::new(
             format!("reduce.{op:?}.bool"),
             Call::Reduce(op, 0),
@@ -649,6 +890,18 @@ fn push_reduce(cases: &mut Vec<Case>) {
                 Call::ArgReduce(op, axis),
                 vec![f32s(&[2, 3], &A_F32)],
             ));
+            for dtype in [DType::F16, DType::BF16] {
+                cases.push(Case::new(
+                    format!("arg_reduce.{op:?}.{dtype}.axis{axis}"),
+                    Call::ArgReduce(op, axis),
+                    vec![reduceds(dtype, &[2, 3], &A_F32)],
+                ));
+                cases.push(Case::new(
+                    format!("arg_reduce.{op:?}.{dtype}.strided.axis{axis}"),
+                    Call::ArgReduce(op, axis),
+                    vec![reduceds_transposed(dtype, &A_F32)],
+                ));
+            }
             cases.push(Case::new(
                 format!("arg_reduce.{op:?}.i64.axis{axis}"),
                 Call::ArgReduce(op, axis),
@@ -671,6 +924,41 @@ fn push_matmul(cases: &mut Vec<Case>) {
         Call::Matmul,
         vec![f32s(&[2, 3], &A_F32), f32s(&[3, 2], &B_F32)],
     ));
+    for dtype in [DType::F16, DType::BF16] {
+        cases.push(Case::new(
+            format!("matmul.{dtype}.2d"),
+            Call::Matmul,
+            vec![
+                reduceds(dtype, &[2, 3], &A_F32),
+                reduceds(dtype, &[3, 2], &B_F32),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("matmul.{dtype}.transposed_lhs"),
+            Call::Matmul,
+            vec![
+                reduceds_transposed(dtype, &A_F32),
+                reduceds(dtype, &[2, 2], &[1.0, 2.0, 3.0, 4.0]),
+            ],
+        ));
+        let lhs_layout = Layout::contiguous([1, 2, 3])
+            .and_then(|layout| layout.broadcast_to(&Shape::from([2, 2, 3])))
+            .expect("conformance table: broadcastable reduced matmul lhs");
+        cases.push(Case::new(
+            format!("matmul.{dtype}.stride0_batch"),
+            Call::Matmul,
+            vec![
+                reduceds_strided(dtype, &A_F32, lhs_layout),
+                reduceds(
+                    dtype,
+                    &[2, 3, 2],
+                    &[
+                        0.5, 2.0, -1.0, 4.0, 0.25, -3.0, 1.0, -0.5, 2.0, 0.75, -2.0, 3.0,
+                    ],
+                ),
+            ],
+        ));
+    }
     cases.push(Case::new(
         "matmul.i64.2d".to_string(),
         Call::Matmul,
@@ -747,6 +1035,68 @@ fn push_index(cases: &mut Vec<Case>) {
         Call::IndexSelect(0),
         vec![f32s_transposed(&A_F32), i64s(&[2], &[2, 0])],
     ));
+    for dtype in [DType::F16, DType::BF16] {
+        let x = reduceds(dtype, &[2, 3], &A_F32);
+        cases.push(Case::new(
+            format!("index_select.{dtype}.axis1"),
+            Call::IndexSelect(1),
+            vec![clone_operand(&x), i64s(&[4], &[2, 0, 2, 1])],
+        ));
+        cases.push(Case::new(
+            format!("index_select.{dtype}.strided.axis0"),
+            Call::IndexSelect(0),
+            vec![reduceds_transposed(dtype, &A_F32), i64s(&[2], &[2, 0])],
+        ));
+        cases.push(Case::new(
+            format!("index_select.{dtype}.broadcast.axis1"),
+            Call::IndexSelect(1),
+            vec![
+                reduceds_broadcast(dtype, &[1.0, 2.0, 3.0]),
+                i64s(&[3], &[1, 0, 1]),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("index_add.{dtype}.axis0"),
+            Call::IndexAdd(0),
+            vec![
+                clone_operand(&x),
+                i64s(&[1], &[1]),
+                reduceds(dtype, &[1, 3], &[1.0, 2.0, 3.0]),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("gather.{dtype}.axis1"),
+            Call::Gather(1),
+            vec![clone_operand(&x), i64s(&[2, 2], &[0, 2, 1, 1])],
+        ));
+        cases.push(Case::new(
+            format!("scatter_add.{dtype}.axis1"),
+            Call::ScatterAdd(1),
+            vec![
+                x,
+                i64s(&[2, 2], &[0, 2, 1, 1]),
+                reduceds(dtype, &[2, 2], &[10.0, 20.0, 30.0, 40.0]),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("index_add.{dtype}.repeated.strided.axis0"),
+            Call::IndexAdd(0),
+            vec![
+                reduceds_transposed(dtype, &A_F32),
+                i64s(&[3], &[2, 0, 2]),
+                reduceds_transposed(dtype, &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("scatter_add.{dtype}.repeated.strided.axis0"),
+            Call::ScatterAdd(0),
+            vec![
+                reduceds_transposed(dtype, &A_F32),
+                i64s(&[3, 2], &[2, 1, 2, 1, 0, 1]),
+                reduceds_transposed(dtype, &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+            ],
+        ));
+    }
 }
 
 /// Convolution and pooling geometry, including stride/padding/dilation.
@@ -775,12 +1125,29 @@ fn push_conv(cases: &mut Vec<Case>) {
                 f32s(&[2, 1, 2, 2], &weight),
             ],
         ));
+        for dtype in [DType::F16, DType::BF16] {
+            cases.push(Case::new(
+                format!("conv.Conv2d.{dtype}.{label}"),
+                Call::Conv(ConvOp::Conv2d, params),
+                vec![
+                    reduceds(dtype, &[1, 1, 4, 4], &input),
+                    reduceds(dtype, &[2, 1, 2, 2], &weight),
+                ],
+            ));
+        }
         for op in [ConvOp::MaxPool2d, ConvOp::AvgPool2d] {
             cases.push(Case::new(
                 format!("conv.{op:?}.f32.{label}"),
                 Call::Conv(op, params),
                 vec![f32s(&[1, 1, 4, 4], &input)],
             ));
+            for dtype in [DType::F16, DType::BF16] {
+                cases.push(Case::new(
+                    format!("conv.{op:?}.{dtype}.{label}"),
+                    Call::Conv(op, params),
+                    vec![reduceds(dtype, &[1, 1, 4, 4], &input)],
+                ));
+            }
         }
     }
 }
@@ -823,6 +1190,43 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), total, "duplicate case name in the table");
+    }
+
+    #[test]
+    fn tolerance_follows_the_output_not_the_operands() {
+        let widening = Case::new(
+            "cast.f16_to_f32.exact".to_string(),
+            Call::Cast(DType::F32),
+            vec![reduceds(DType::F16, &[2], &[1.0, -2.0])],
+        );
+        assert_eq!(widening.tol, 0.0);
+
+        let comparison = Case::new(
+            "compare.bf16.exact".to_string(),
+            Call::Compare(CmpOp::Eq),
+            vec![
+                reduceds(DType::BF16, &[2], &[1.0, -2.0]),
+                reduceds(DType::BF16, &[2], &[1.0, -2.0]),
+            ],
+        );
+        assert_eq!(comparison.tol, 0.0);
+
+        let arithmetic = Case::new(
+            "binary.bf16.output".to_string(),
+            Call::Binary(BinaryOp::Add),
+            vec![
+                reduceds(DType::BF16, &[2], &[1.0, -2.0]),
+                reduceds(DType::BF16, &[2], &[1.0, -2.0]),
+            ],
+        );
+        assert_eq!(arithmetic.tol, BF16_TOL);
+
+        let selection = Case::new(
+            "index_select.bf16.exact".to_string(),
+            Call::IndexSelect(0),
+            vec![reduceds(DType::BF16, &[2], &[1.0, -2.0]), i64s(&[1], &[1])],
+        );
+        assert_eq!(selection.tol, 0.0);
     }
 
     /// The comparator has teeth: it is the part that would silently pass a

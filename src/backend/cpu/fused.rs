@@ -62,7 +62,9 @@ impl_float_acc!(f64);
 ///
 /// - `Softmax`: `[x]`, no scalars; normalizes the last axis.
 /// - `LayerNorm`: `[x, weight, bias]`, `[eps]`; `weight` and `bias` are
-///   rank-one views matching `x`'s last axis.
+///   rank-one views matching `x`'s last axis. With `save_stats=1`, `y` keeps
+///   the input dtype while `xhat` and `inv_std` use its accumulation dtype.
+///   Backward accepts reduced `grad`/`weight` with F32 saved statistics.
 pub(crate) fn fused(op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
     match op {
         FusedOp::Softmax => softmax(inputs, scalars).map(|output| vec![output]),
@@ -556,7 +558,7 @@ fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         cpu_storage(OP, *bias)?,
     ];
     macro_rules! run {
-        ($variant:ident, $xv:expr, $wv:expr, $bv:expr, $eps:expr) => {{
+        ($variant:ident, $acc_variant:ident, $xv:expr, $wv:expr, $bv:expr, $eps:expr) => {{
             let (output, stats) = layer_norm_generic(
                 $xv,
                 x.layout(),
@@ -571,8 +573,8 @@ fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
                 CpuStorage::$variant(Arc::new(output)),
                 stats.map(|(xhat, inv_std)| {
                     (
-                        CpuStorage::$variant(Arc::new(xhat)),
-                        CpuStorage::$variant(Arc::new(inv_std)),
+                        CpuStorage::$acc_variant(Arc::new(xhat)),
+                        CpuStorage::$acc_variant(Arc::new(inv_std)),
                     )
                 }),
             )
@@ -583,22 +585,22 @@ fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
             CpuStorage::F16(xv),
             CpuStorage::F16(wv),
             CpuStorage::F16(bv),
-        ] => run!(F16, xv, wv, bv, eps as f32),
+        ] => run!(F16, F32, xv, wv, bv, eps as f32),
         [
             CpuStorage::BF16(xv),
             CpuStorage::BF16(wv),
             CpuStorage::BF16(bv),
-        ] => run!(BF16, xv, wv, bv, eps as f32),
+        ] => run!(BF16, F32, xv, wv, bv, eps as f32),
         [
             CpuStorage::F32(xv),
             CpuStorage::F32(wv),
             CpuStorage::F32(bv),
-        ] => run!(F32, xv, wv, bv, eps as f32),
+        ] => run!(F32, F32, xv, wv, bv, eps as f32),
         [
             CpuStorage::F64(xv),
             CpuStorage::F64(wv),
             CpuStorage::F64(bv),
-        ] => run!(F64, xv, wv, bv, eps),
+        ] => run!(F64, F64, xv, wv, bv, eps),
         _ => unreachable!("dtypes validated equal and float"),
     };
     let mut outputs = vec![Storage::Cpu(output)];
@@ -617,8 +619,21 @@ fn layer_norm_backward_input(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec
     };
     require_last_axis(OP, g.layout())?;
     require_float(OP, *g)?;
+    require_same_dtype(OP, *g, *weight)?;
+    let stats_dtype = match g.dtype() {
+        DType::F16 | DType::BF16 => DType::F32,
+        dtype => dtype,
+    };
+    for input in [xhat, inv_std] {
+        if input.dtype() != stats_dtype {
+            return Err(Error::DTypeMismatch {
+                op: OP,
+                expected: stats_dtype,
+                got: input.dtype(),
+            });
+        }
+    }
     for input in [xhat, inv_std, weight] {
-        require_same_dtype(OP, *g, *input)?;
         if input.device() != g.device() {
             return Err(Error::DeviceMismatch {
                 op: OP,
@@ -669,16 +684,16 @@ fn layer_norm_backward_input(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec
     let output = match storages {
         [
             CpuStorage::F16(g),
-            CpuStorage::F16(x),
-            CpuStorage::F16(s),
+            CpuStorage::F32(x),
+            CpuStorage::F32(s),
             CpuStorage::F16(w),
         ] => {
             run!(F16, g, x, s, w)
         }
         [
             CpuStorage::BF16(g),
-            CpuStorage::BF16(x),
-            CpuStorage::BF16(s),
+            CpuStorage::F32(x),
+            CpuStorage::F32(s),
             CpuStorage::BF16(w),
         ] => {
             run!(BF16, g, x, s, w)
@@ -708,9 +723,9 @@ fn layer_norm_backward_input(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec
 fn layer_norm_backward_input_generic<E: Element>(
     gradients: &[E],
     gradient_layout: &Layout,
-    xhat: &[E],
+    xhat: &[E::Acc],
     xhat_layout: &Layout,
-    inv_std: &[E],
+    inv_std: &[E::Acc],
     inv_std_layout: &Layout,
     weights: &[E],
     weight_layout: &Layout,
@@ -735,22 +750,16 @@ where
             let g = gradients[g_base + col * gradient_layout.strides()[gradient_layout.rank() - 1]];
             let x = xhat[x_base + col * xhat_layout.strides()[xhat_layout.rank() - 1]];
             let weight = weights[weight_layout.offset() + col * weight_layout.strides()[0]];
-            let value = E::from_acc(g.to_acc() * weight.to_acc());
-            sum = sum + value.to_acc();
-            projected = projected + E::from_acc(value.to_acc() * x.to_acc()).to_acc();
+            let value = g.to_acc() * weight.to_acc();
+            sum = sum + value;
+            projected = projected + value * x;
             weighted.push(value);
         }
-        let sum = E::from_acc(sum);
-        let projected = E::from_acc(projected);
-        let inverse = inv_std[stat_base].to_acc();
+        let inverse = inv_std[stat_base];
         for col in 0..width {
             let x = xhat[x_base + col * xhat_layout.strides()[xhat_layout.rank() - 1]];
-            let scaled = E::from_acc(weighted[col].to_acc() * width_acc);
-            let centered = E::from_acc(scaled.to_acc() - sum.to_acc());
-            let projection = E::from_acc(x.to_acc() * projected.to_acc());
-            let centered = E::from_acc(centered.to_acc() - projection.to_acc());
-            let normalized = E::from_acc(centered.to_acc() * inverse);
-            output.push(E::from_acc(normalized.to_acc() / width_acc));
+            let centered = weighted[col] * width_acc - sum - x * projected;
+            output.push(E::from_acc(centered * inverse / width_acc));
         }
     }
     output
@@ -766,7 +775,7 @@ fn layer_norm_generic<E>(
     bias_layout: &Layout,
     eps: E::Acc,
     save_stats: bool,
-) -> (Vec<E>, Option<(Vec<E>, Vec<E>)>)
+) -> (Vec<E>, Option<(Vec<E::Acc>, Vec<E::Acc>)>)
 where
     E: Element,
     E::Acc: FloatAcc,
@@ -786,7 +795,6 @@ where
         }
         let mean = sum / E::Acc::from_usize(width);
         let mut squared = E::Acc::ZERO;
-        let state_mean = E::from_acc(mean).to_acc();
         for col in 0..width {
             let centered = values[base + col * stride].to_acc() - mean;
             squared = squared + centered * centered;
@@ -800,22 +808,32 @@ where
             output.push(E::from_acc(normalized * weight + bias));
         }
         if let (Some(xhat), Some(inv_std)) = (&mut xhat, &mut inv_std) {
-            // Match the former composed backward-state path exactly: each
-            // generic tensor op narrowed to E before the next operation.
-            let mut state_squared = E::Acc::ZERO;
-            for col in 0..width {
-                let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
-                let centered_acc = centered.to_acc();
-                state_squared = state_squared + E::from_acc(centered_acc * centered_acc).to_acc();
-            }
-            let variance = E::from_acc(state_squared / E::Acc::from_usize(width));
-            let variance_eps = E::from_acc(variance.to_acc() + eps);
-            let std = E::from_acc(variance_eps.to_acc().sqrt());
-            let inverse = E::from_acc(E::Acc::from_usize(1) / std.to_acc());
-            inv_std.push(inverse);
-            for col in 0..width {
-                let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
-                xhat.push(E::from_acc(centered.to_acc() / std.to_acc()));
+            if matches!(E::DTYPE, DType::F16 | DType::BF16) {
+                let inverse = E::Acc::from_usize(1) / scale;
+                inv_std.push(inverse);
+                for col in 0..width {
+                    let centered = values[base + col * stride].to_acc() - mean;
+                    xhat.push(centered * inverse);
+                }
+            } else {
+                // Preserve the established F32/F64 state encoding exactly.
+                let state_mean = E::from_acc(mean).to_acc();
+                let mut state_squared = E::Acc::ZERO;
+                for col in 0..width {
+                    let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
+                    let centered_acc = centered.to_acc();
+                    state_squared =
+                        state_squared + E::from_acc(centered_acc * centered_acc).to_acc();
+                }
+                let variance = E::from_acc(state_squared / E::Acc::from_usize(width));
+                let variance_eps = E::from_acc(variance.to_acc() + eps);
+                let std = E::from_acc(variance_eps.to_acc().sqrt());
+                let inverse = E::from_acc(E::Acc::from_usize(1) / std.to_acc());
+                inv_std.push(inverse.to_acc());
+                for col in 0..width {
+                    let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
+                    xhat.push(E::from_acc(centered.to_acc() / std.to_acc()).to_acc());
+                }
             }
         }
     }
@@ -1128,6 +1146,30 @@ mod tests {
         }
     }
 
+    fn reduced_storage(dtype: DType, values: &[f32]) -> Storage {
+        match dtype {
+            DType::F16 => Storage::Cpu(CpuStorage::F16(Arc::new(
+                values.iter().copied().map(half::f16::from_f32).collect(),
+            ))),
+            DType::BF16 => Storage::Cpu(CpuStorage::BF16(Arc::new(
+                values.iter().copied().map(half::bf16::from_f32).collect(),
+            ))),
+            _ => panic!("expected reduced dtype"),
+        }
+    }
+
+    fn reduced_values(storage: Storage) -> Vec<f32> {
+        match storage {
+            Storage::Cpu(CpuStorage::F16(values)) => {
+                values.iter().map(|value| value.to_f32()).collect()
+            }
+            Storage::Cpu(CpuStorage::BF16(values)) => {
+                values.iter().map(|value| value.to_f32()).collect()
+            }
+            _ => panic!("expected reduced CPU storage"),
+        }
+    }
+
     fn close(got: &[f32], expected: &[f32]) {
         assert_eq!(got.len(), expected.len());
         for (&got, &expected) in got.iter().zip(expected) {
@@ -1162,6 +1204,24 @@ mod tests {
         close(&got, &composed);
         close(&got[..3], &[0.090_030_57, 0.244_728_48, 0.665_240_94]);
         assert_eq!(&got[3..], &[0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn reduced_softmax_matches_an_independent_f32_uniform_reference() {
+        let width = 4096;
+        let layout = Layout::contiguous([1, width]).unwrap();
+        for dtype in [DType::F16, DType::BF16] {
+            let x = reduced_storage(dtype, &vec![1.0; width]);
+            let got = reduced_values(one(
+                fused(FusedOp::Softmax, &[View::new(&x, &layout)], &[]).unwrap()
+            ));
+            let expected = match dtype {
+                DType::F16 => half::f16::from_f32(1.0 / width as f32).to_f32(),
+                DType::BF16 => half::bf16::from_f32(1.0 / width as f32).to_f32(),
+                _ => unreachable!(),
+            };
+            assert!(got.iter().all(|&value| value == expected));
+        }
     }
 
     #[test]
@@ -1316,31 +1376,171 @@ mod tests {
     }
 
     #[test]
-    fn half_layer_norm_accumulates_mean_in_f32() {
-        let x = Storage::Cpu(CpuStorage::F16(Arc::new(vec![
-            half::f16::from_f32(2048.0),
-            half::f16::from_f32(1.0),
-            half::f16::from_f32(-2048.0),
-            half::f16::from_f32(-1.0),
-        ])));
-        let weight = Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::from_f32(1.0); 4])));
-        let bias = Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::from_f32(0.0); 4])));
-        let layout = Layout::contiguous([4]).unwrap();
-        let result = one(fused(
-            FusedOp::LayerNorm,
-            &[
-                View::new(&x, &layout),
-                View::new(&weight, &layout),
-                View::new(&bias, &layout),
-            ],
-            &[1e-5],
-        )
-        .unwrap());
-        let Storage::Cpu(CpuStorage::F16(result)) = result else {
-            panic!("expected f16 CPU storage")
-        };
-        assert_eq!(result[0].to_f32(), -result[2].to_f32());
-        assert_eq!(result[1].to_f32(), -result[3].to_f32());
+    fn reduced_layer_norm_accumulates_mean_in_f32() {
+        for dtype in [DType::F16, DType::BF16] {
+            let values = [2048.0, 1.0, -2048.0, -1.0];
+            let (x, weight, bias) = match dtype {
+                DType::F16 => (
+                    Storage::Cpu(CpuStorage::F16(Arc::new(
+                        values.map(half::f16::from_f32).to_vec(),
+                    ))),
+                    Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::ONE; 4]))),
+                    Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::ZERO; 4]))),
+                ),
+                DType::BF16 => (
+                    Storage::Cpu(CpuStorage::BF16(Arc::new(
+                        values.map(half::bf16::from_f32).to_vec(),
+                    ))),
+                    Storage::Cpu(CpuStorage::BF16(Arc::new(vec![half::bf16::ONE; 4]))),
+                    Storage::Cpu(CpuStorage::BF16(Arc::new(vec![half::bf16::ZERO; 4]))),
+                ),
+                _ => unreachable!(),
+            };
+            let layout = Layout::contiguous([4]).unwrap();
+            let result = one(fused(
+                FusedOp::LayerNorm,
+                &[
+                    View::new(&x, &layout),
+                    View::new(&weight, &layout),
+                    View::new(&bias, &layout),
+                ],
+                &[1e-5],
+            )
+            .unwrap());
+            let result: Vec<f32> = match result {
+                Storage::Cpu(CpuStorage::F16(v)) => v.iter().map(|x| x.to_f32()).collect(),
+                Storage::Cpu(CpuStorage::BF16(v)) => v.iter().map(|x| x.to_f32()).collect(),
+                _ => panic!("expected reduced CPU storage"),
+            };
+            assert_eq!(result[0], -result[2]);
+            assert_eq!(result[1], -result[3]);
+        }
+    }
+
+    #[test]
+    fn reduced_layer_norm_outputs_and_saved_stats_match_an_independent_f32_reference() {
+        let input = [2048.0f32, 1.0, -2048.0, -1.0];
+        let width = input.len();
+        let mean = input.iter().sum::<f32>() / width as f32;
+        let variance = input
+            .iter()
+            .map(|&value| {
+                let centered = value - mean;
+                centered * centered
+            })
+            .sum::<f32>()
+            / width as f32;
+        let inverse = 1.0 / (variance + 1e-5).sqrt();
+        let expected_xhat: Vec<f32> = input
+            .iter()
+            .map(|&value| (value - mean) * inverse)
+            .collect();
+        let layout = Layout::contiguous([width]).unwrap();
+        for dtype in [DType::F16, DType::BF16] {
+            let x = reduced_storage(dtype, &input);
+            let weight = reduced_storage(dtype, &vec![1.0; width]);
+            let bias = reduced_storage(dtype, &vec![0.0; width]);
+            let outputs = fused(
+                FusedOp::LayerNorm,
+                &[
+                    View::new(&x, &layout),
+                    View::new(&weight, &layout),
+                    View::new(&bias, &layout),
+                ],
+                &[1e-5, 1.0],
+            )
+            .unwrap();
+            assert_eq!(outputs[0].dtype(), dtype);
+            assert_eq!(outputs[1].dtype(), DType::F32);
+            assert_eq!(outputs[2].dtype(), DType::F32);
+            let y = reduced_values(outputs[0].clone());
+            let xhat = values(outputs[1].clone());
+            let inv_std = values(outputs[2].clone());
+            for ((&got_y, &got_xhat), &reference) in y.iter().zip(&xhat).zip(&expected_xhat) {
+                let expected_y = match dtype {
+                    DType::F16 => half::f16::from_f32(reference).to_f32(),
+                    DType::BF16 => half::bf16::from_f32(reference).to_f32(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(got_y, expected_y);
+                assert!((got_xhat - reference).abs() < 1e-6);
+            }
+            assert!((inv_std[0] - inverse).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn reduced_layer_norm_backward_uses_wide_stats_at_small_eps() {
+        let layout = Layout::contiguous([1, 2]).unwrap();
+        let stat_layout = Layout::contiguous([1, 1]).unwrap();
+        let weight_layout = Layout::contiguous([2]).unwrap();
+        for dtype in [DType::F16, DType::BF16] {
+            let x = reduced_storage(dtype, &[1.0, 1.0]);
+            let weight = reduced_storage(dtype, &[1.0, 1.0]);
+            let bias = reduced_storage(dtype, &[0.0, 0.0]);
+            let outputs = fused(
+                FusedOp::LayerNorm,
+                &[
+                    View::new(&x, &layout),
+                    View::new(&weight, &weight_layout),
+                    View::new(&bias, &weight_layout),
+                ],
+                &[1e-12, 1.0],
+            )
+            .unwrap();
+            assert_eq!(outputs[1].dtype(), DType::F32);
+            assert_eq!(outputs[2].dtype(), DType::F32);
+            assert_eq!(values(outputs[1].clone()), vec![0.0, 0.0]);
+            let inverse = values(outputs[2].clone())[0];
+            assert_eq!(inverse, 1_000_000.0);
+
+            let g = reduced_storage(dtype, &[0.0, 0.001]);
+            let backward = fused(
+                FusedOp::LayerNorm,
+                &[
+                    View::new(&g, &layout),
+                    View::new(&outputs[1], &layout),
+                    View::new(&outputs[2], &stat_layout),
+                    View::new(&weight, &weight_layout),
+                ],
+                &[],
+            )
+            .unwrap();
+            let got = reduced_values(backward[0].clone());
+            let quantized_g = match dtype {
+                DType::F16 => half::f16::from_f32(0.001).to_f32(),
+                DType::BF16 => half::bf16::from_f32(0.001).to_f32(),
+                _ => unreachable!(),
+            };
+            let expected = [-0.5 * quantized_g * inverse, 0.5 * quantized_g * inverse];
+            for (&got, expected) in got.iter().zip(expected) {
+                let expected = match dtype {
+                    DType::F16 => half::f16::from_f32(expected).to_f32(),
+                    DType::BF16 => half::bf16::from_f32(expected).to_f32(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(got, expected);
+            }
+
+            let old_xhat = reduced_storage(dtype, &[0.0, 0.0]);
+            let old_inv_std = reduced_storage(dtype, &[1.0]);
+            assert!(matches!(
+                fused(
+                    FusedOp::LayerNorm,
+                    &[
+                        View::new(&g, &layout),
+                        View::new(&old_xhat, &layout),
+                        View::new(&old_inv_std, &stat_layout),
+                        View::new(&weight, &weight_layout),
+                    ],
+                    &[],
+                ),
+                Err(Error::DTypeMismatch {
+                    expected: DType::F32,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

@@ -602,6 +602,19 @@ mod tests {
     }
 
     #[test]
+    fn bf16_sum_does_not_stall_at_256() {
+        let n = 4096usize;
+        let data = vec![half::bf16::from_f32(1.0); n];
+        let s = Storage::Cpu(CpuStorage::BF16(Arc::new(data)));
+        let l = Layout::contiguous([n]).unwrap();
+        let r = reduce(ReduceOp::Sum, View::new(&s, &l), 0).unwrap();
+        let Storage::Cpu(CpuStorage::BF16(out)) = r else {
+            panic!("expected bf16")
+        };
+        assert_eq!(out[0].to_f32(), 4096.0);
+    }
+
+    #[test]
     fn f16_mean_uses_wide_count() {
         // Mean of 3000 copies of 3.0: the sum (9000) overflows f16's exact
         // integer range, but the wide accumulator + wide count divide gives

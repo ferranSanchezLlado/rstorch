@@ -760,6 +760,11 @@ mod tests {
             v.into_iter().map(half::f16::from_f32).collect(),
         )))
     }
+    fn bf16_storage(v: Vec<f32>) -> Storage {
+        Storage::Cpu(CpuStorage::BF16(Arc::new(
+            v.into_iter().map(half::bf16::from_f32).collect(),
+        )))
+    }
     fn bool_storage(v: Vec<bool>) -> Storage {
         Storage::Cpu(CpuStorage::Bool(Arc::new(v)))
     }
@@ -774,6 +779,12 @@ mod tests {
         match s {
             Storage::Cpu(CpuStorage::F16(v)) => v.iter().map(|e| e.to_f32()).collect(),
             _ => panic!("expected f16 storage"),
+        }
+    }
+    fn as_bf16(s: &Storage) -> Vec<f32> {
+        match s {
+            Storage::Cpu(CpuStorage::BF16(v)) => v.iter().map(|e| e.to_f32()).collect(),
+            _ => panic!("expected bf16 storage"),
         }
     }
     fn as_i64(s: &Storage) -> Vec<i64> {
@@ -992,6 +1003,21 @@ mod tests {
     }
 
     #[test]
+    fn bf16_index_add_accumulates_in_the_wide_acc_type() {
+        let base = bf16_storage(vec![0.0]);
+        let idx = i64_storage(vec![0; 4096]);
+        let src = bf16_storage(vec![1.0; 4096]);
+        let out = index_add(
+            View::new(&base, &lay([1])),
+            0,
+            View::new(&idx, &lay([4096])),
+            View::new(&src, &lay([4096])),
+        )
+        .unwrap();
+        assert_eq!(as_bf16(&out), vec![4096.0]);
+    }
+
+    #[test]
     fn index_add_reads_strided_bases_and_sources() {
         // Base is a transposed [2,3] -> [3,2] view; the accumulator must be
         // seeded through the strides and the output emitted row-major.
@@ -1190,6 +1216,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(as_f16(&out), vec![4096.0, 0.0]);
+    }
+
+    #[test]
+    fn bf16_scatter_add_accumulates_in_the_wide_acc_type() {
+        let base = bf16_storage(vec![0.0, 0.0]);
+        let idx = i64_storage(vec![0; 4096]);
+        let src = bf16_storage(vec![1.0; 4096]);
+        let out = scatter_add(
+            View::new(&base, &lay([1, 2])),
+            1,
+            View::new(&idx, &lay([1, 4096])),
+            View::new(&src, &lay([1, 4096])),
+        )
+        .unwrap();
+        assert_eq!(as_bf16(&out), vec![4096.0, 0.0]);
     }
 
     #[test]

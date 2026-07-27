@@ -126,6 +126,17 @@ struct LayerNormBackward {
 
 impl LayerNormBackward {
     fn grad(&self, g: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let state_dtype = self.xhat.dtype();
+        let g_wide = if g.dtype() == state_dtype {
+            g.clone()
+        } else {
+            g.to_dtype(state_dtype)?
+        };
+        let weight_wide = if self.weight.dtype() == state_dtype {
+            self.weight.clone()
+        } else {
+            self.weight.to_dtype(state_dtype)?
+        };
         let dx = match dispatch::backend(g.device()).fused(
             FusedOp::LayerNorm,
             &[
@@ -149,20 +160,28 @@ impl LayerNormBackward {
                 });
             }
             Err(Error::Unsupported { .. }) => {
-                let weighted = g.mul(&self.weight)?;
+                let weighted = g_wide.mul(&weight_wide)?;
                 let sum = weighted.sum_to(&self.stat_dims)?;
                 let projected = weighted.mul(&self.xhat)?.sum_to(&self.stat_dims)?;
-                weighted
+                let dx = weighted
                     .mul_scalar(self.width)?
                     .sub(&sum)?
                     .sub(&self.xhat.mul(&projected)?)?
                     .mul(&self.inv_std)?
-                    .div_scalar(self.width)?
+                    .div_scalar(self.width)?;
+                if dx.dtype() == g.dtype() {
+                    dx
+                } else {
+                    dx.to_dtype(g.dtype())?
+                }
             }
             Err(err) => return Err(err),
         };
-        let dweight = g.mul(&self.xhat)?.sum_to(&self.affine_dims)?;
-        let dbias = g.sum_to(&self.affine_dims)?;
+        let dweight = g_wide
+            .mul(&self.xhat)?
+            .sum_to(&self.affine_dims)?
+            .to_dtype(g.dtype())?;
+        let dbias = g_wide.sum_to(&self.affine_dims)?.to_dtype(g.dtype())?;
         Ok((dx, dweight, dbias))
     }
 }
@@ -427,7 +446,7 @@ impl Forward for LayerNorm {
         check_suffix("LayerNorm::forward", x, self.normalized_shape())?;
         let weight = self.weight.get(mode);
         let bias = self.bias.get(mode);
-        if weight.rank() != 1 || !matches!(x.dtype(), DType::F32 | DType::F64) {
+        if weight.rank() != 1 || !x.dtype().is_float() {
             return layer_norm(x, &weight, &bias, self.eps);
         }
         match fused_layer_norm(x, &weight, &bias, self.eps) {
@@ -1164,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn reduced_precision_layer_norm_explicitly_uses_the_composed_fallback() {
+    fn reduced_precision_layer_norm_uses_the_fused_wide_path() {
         for dtype in [DType::F16, DType::BF16] {
             let make = |values: &[f32], dims: &[usize]| {
                 match dtype {
@@ -1189,17 +1208,116 @@ mod tests {
             norm.weight.set(weight.clone()).unwrap();
             norm.bias.set(bias.clone()).unwrap();
             let got = norm.forward(&x, Mode::EVAL).unwrap();
-            let composed = layer_norm(&x, &weight, &bias, 1e-3).unwrap();
+            let inputs = [0.5f32, -1.5, 2.0, 0.25, -0.75, 1.25];
+            let weights = [1.5f32, -0.5, 2.0];
+            let biases = [0.25f32, -0.5, 0.75];
+            let mut expected = Vec::with_capacity(inputs.len());
+            for row in inputs.chunks_exact(3) {
+                let row: Vec<f32> = row
+                    .iter()
+                    .map(|&value| match dtype {
+                        DType::F16 => half::f16::from_f32(value).to_f32(),
+                        DType::BF16 => half::bf16::from_f32(value).to_f32(),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                let mean = row.iter().sum::<f32>() / 3.0;
+                let variance = row
+                    .iter()
+                    .map(|&value| (value - mean) * (value - mean))
+                    .sum::<f32>()
+                    / 3.0;
+                let inverse = 1.0 / (variance + 1e-3).sqrt();
+                for col in 0..3 {
+                    expected.push((row[col] - mean) * inverse * weights[col] + biases[col]);
+                }
+            }
             match dtype {
                 DType::F16 => assert_eq!(
                     got.to_vec::<half::f16>().unwrap(),
-                    composed.to_vec::<half::f16>().unwrap()
+                    expected
+                        .into_iter()
+                        .map(half::f16::from_f32)
+                        .collect::<Vec<_>>()
                 ),
                 DType::BF16 => assert_eq!(
                     got.to_vec::<half::bf16>().unwrap(),
-                    composed.to_vec::<half::bf16>().unwrap()
+                    expected
+                        .into_iter()
+                        .map(half::bf16::from_f32)
+                        .collect::<Vec<_>>()
                 ),
                 _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_precision_layer_norm_backward_reaches_input_and_affine_params() {
+        for dtype in [DType::F16, DType::BF16] {
+            let mut norm = LayerNorm::with_eps([3], 1e-3, &CPU).unwrap();
+            crate::nn::to_dtype(&mut norm, dtype).unwrap();
+            norm.weight
+                .set(t(&[1.5, -0.5, 2.0], [3]).to_dtype(dtype).unwrap())
+                .unwrap();
+            let x = t(&[0.5, -1.5, 2.0, 0.25, -0.75, 1.25], [2, 3])
+                .to_dtype(dtype)
+                .unwrap()
+                .traced()
+                .unwrap();
+            let loss = norm.forward(&x, Mode::TRAIN).unwrap().sum_all().unwrap();
+            let grads = loss.backward().unwrap();
+            let reduced_grads = [
+                grads.wrt_input(&x).unwrap(),
+                grads.wrt(&norm.weight).unwrap(),
+                grads.wrt(&norm.bias).unwrap(),
+            ];
+            for grad in &reduced_grads {
+                assert_eq!(grad.dtype(), dtype);
+                assert!(
+                    grad.to_dtype(DType::F32)
+                        .unwrap()
+                        .to_vec::<f32>()
+                        .unwrap()
+                        .iter()
+                        .all(|value| value.is_finite())
+                );
+            }
+
+            let mut reference = LayerNorm::with_eps([3], 1e-3, &CPU).unwrap();
+            reference.weight.set(t(&[1.5, -0.5, 2.0], [3])).unwrap();
+            let reference_x = x.detach().to_dtype(DType::F32).unwrap().traced().unwrap();
+            let reference_loss = reference
+                .forward(&reference_x, Mode::TRAIN)
+                .unwrap()
+                .sum_all()
+                .unwrap();
+            let reference_grads = reference_loss.backward().unwrap();
+            let expected = [
+                reference_grads.wrt_input(&reference_x).unwrap(),
+                reference_grads.wrt(&reference.weight).unwrap(),
+                reference_grads.wrt(&reference.bias).unwrap(),
+            ];
+            for (got, expected) in reduced_grads.iter().zip(expected) {
+                match dtype {
+                    DType::F16 => assert_eq!(
+                        got.to_vec::<half::f16>().unwrap(),
+                        expected
+                            .to_dtype(dtype)
+                            .unwrap()
+                            .to_vec::<half::f16>()
+                            .unwrap()
+                    ),
+                    DType::BF16 => assert_eq!(
+                        got.to_vec::<half::bf16>().unwrap(),
+                        expected
+                            .to_dtype(dtype)
+                            .unwrap()
+                            .to_vec::<half::bf16>()
+                            .unwrap()
+                    ),
+                    _ => unreachable!(),
+                }
             }
         }
     }

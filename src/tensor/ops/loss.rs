@@ -156,18 +156,41 @@ impl CrossEntropyBackward {
         let all = Tensor::index_range(self.classes, &device)?.reshape([1, self.classes])?;
         let onehot = self.safe.eq(&all)?.to_dtype(self.logp.dtype())?;
         let d = self.logp.exp()?.sub(&onehot)?;
+        let output_dtype = d.dtype();
+        let d = if d.dtype() != self.divisor.dtype() {
+            d.to_dtype(self.divisor.dtype())?
+        } else {
+            d
+        };
         let d = match &self.keep {
             Some(k) => d.mul(k)?,
             None => d,
         };
-        d.div(&self.divisor)?.mul(g)
+        let g = if g.dtype() != d.dtype() {
+            g.to_dtype(d.dtype())?
+        } else {
+            g.clone()
+        };
+        let grad = d.div(&self.divisor)?.mul(&g)?;
+        if grad.dtype() == output_dtype {
+            Ok(grad)
+        } else {
+            grad.to_dtype(output_dtype)
+        }
     }
 }
 
 /// `2·(pred − target)/n · g`, the cotangent of `mse_loss`'s prediction (the
 /// target's is its negation). `scale` is `2/n`.
 fn mse_grad(diff: &Tensor, scale: f64, g: &Tensor) -> Result<Tensor> {
-    diff.mul_scalar(scale)?.mul(g)
+    let dtype = diff.dtype();
+    if matches!(dtype, DType::F16 | DType::BF16) {
+        let diff = diff.to_dtype(DType::F32)?;
+        let g = g.to_dtype(DType::F32)?;
+        diff.mul_scalar(scale)?.mul(&g)?.to_dtype(dtype)
+    } else {
+        diff.mul_scalar(scale)?.mul(g)
+    }
 }
 
 /// The shared body of the two `cross_entropy` spellings; `ignore_index` is
@@ -204,25 +227,35 @@ fn cross_entropy_impl(
     };
 
     let nll = logp.gather(1, &safe).map_err(|e| relabel(op, e))?.neg()?;
-    let (nll, divisor) = match &keep {
+    let reduced = matches!(dtype, DType::F16 | DType::BF16);
+    let accumulation_dtype = if reduced { DType::F32 } else { dtype };
+    let nll = if reduced {
+        nll.to_dtype(accumulation_dtype)?
+    } else {
+        nll
+    };
+    let (nll, divisor, backward_keep) = match &keep {
         Some(k) => {
-            let zero = Tensor::zeros((), dtype, &device)?;
+            let zero = Tensor::zeros((), accumulation_dtype, &device)?;
             // At least one, so an all-ignored batch is 0/1 = 0, not 0/0.
-            let one = Tensor::ones((), dtype, &device)?;
-            let count = k.to_dtype(dtype)?.sum_all()?.maximum(&one)?;
-            (k.where_cond(&nll, &zero)?, count)
+            let one = Tensor::ones((), accumulation_dtype, &device)?;
+            let float_keep = k.to_dtype(accumulation_dtype)?;
+            let count = float_keep.sum_all()?.maximum(&one)?;
+            (k.where_cond(&nll, &zero)?, count, Some(float_keep))
         }
-        None => (nll, Tensor::full((), rows.max(1) as f64, dtype, &device)?),
+        None => (
+            nll,
+            Tensor::full((), rows.max(1) as f64, accumulation_dtype, &device)?,
+            None,
+        ),
     };
     let out = nll.sum_all()?.div(&divisor)?;
+    let out = if reduced { out.to_dtype(dtype)? } else { out };
 
     let bwd = CrossEntropyBackward {
         logp,
         safe,
-        keep: match &keep {
-            Some(k) => Some(k.to_dtype(dtype)?),
-            None => None,
-        },
+        keep: backward_keep,
         divisor,
         classes,
     };
@@ -382,7 +415,7 @@ impl Tensor {
         // Detached forward (see the module docs): one fused node, not a
         // sub/mul/sum graph.
         let diff = self.detach().sub(&target.detach())?;
-        let out = diff.mul(&diff)?.sum_all()?.div_scalar(n as f64)?;
+        let out = diff.mul(&diff)?.mean_all()?;
 
         let scale = 2.0 / n as f64;
         let backward: BackwardFn = Box::new(move |g| match mse_grad(&diff, scale, g) {

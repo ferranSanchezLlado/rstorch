@@ -241,7 +241,13 @@ pub(crate) fn apply(
             return;
         }
         // Passes 1–2 proved this lookup succeeds.
-        let Some(grad) = grads.take(param.grad_key()) else {
+        let Some(grad) = (match grads.take(param.grad_key()) {
+            Ok(grad) => grad,
+            Err(error) => {
+                failure = Some(error);
+                return;
+            }
+        }) else {
             failure = Some(Error::MissingGrad {
                 path: path.to_string(),
             });

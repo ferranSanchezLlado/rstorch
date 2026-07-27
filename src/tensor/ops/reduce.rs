@@ -292,15 +292,31 @@ fn axis_reduce(
 /// Reduce every axis to a rank-0 scalar, one axis at a time from the last to
 /// the first (so the axes still to be reduced keep their indices). A rank-0
 /// input is already the answer.
-fn fold_all(op: &'static str, kind: ReduceOp, x: &Tensor) -> Result<Tensor> {
+fn fold_all_wide(op: &'static str, kind: ReduceOp, x: &Tensor) -> Result<Tensor> {
     if !matches!(kind, ReduceOp::Sum) {
         require_non_empty_all(op, x)?;
     }
-    let mut cur = x.clone();
+    let mut cur = if matches!(x.dtype(), DType::F16 | DType::BF16) {
+        x.to_dtype(DType::F32)?
+    } else {
+        x.clone()
+    };
     for axis in (0..x.rank()).rev() {
         cur = axis_reduce(op, kind, &cur, axis, false)?;
     }
     Ok(cur)
+}
+
+fn narrow_all(value: Tensor, dtype: DType) -> Result<Tensor> {
+    if value.dtype() == dtype {
+        Ok(value)
+    } else {
+        value.to_dtype(dtype)
+    }
+}
+
+fn fold_all(op: &'static str, kind: ReduceOp, x: &Tensor) -> Result<Tensor> {
+    narrow_all(fold_all_wide(op, kind, x)?, x.dtype())
 }
 
 /// The shared body of `var`/`var_keepdim`/`std`/`std_keepdim`: the mean of the
@@ -323,15 +339,16 @@ fn variance(op: &'static str, x: &Tensor, axis: usize, keepdim: bool) -> Result<
 }
 
 /// The whole-tensor variance, same contract as [`variance`].
-fn variance_all(op: &'static str, x: &Tensor) -> Result<Tensor> {
+fn variance_all_wide(op: &'static str, x: &Tensor) -> Result<Tensor> {
     require_float(op, x)?;
     let n = x.num_elements();
     require_correction(op, n)?;
     let deviation = x.sub(&x.mean_all()?)?;
-    deviation
-        .mul(&deviation)?
-        .sum_all()?
-        .div_scalar((n - 1) as f64)
+    fold_all_wide(op, ReduceOp::Sum, &deviation.mul(&deviation)?)?.div_scalar((n - 1) as f64)
+}
+
+fn variance_all(op: &'static str, x: &Tensor) -> Result<Tensor> {
+    narrow_all(variance_all_wide(op, x)?, x.dtype())
 }
 
 /// The shared, numerically stable core of `softmax`/`log_softmax`.
@@ -413,7 +430,7 @@ fn relabel_fused_softmax(e: Error) -> Error {
 /// Attempt the fused contract only for its initial production scope. `None`
 /// means the caller must run the composed implementation unchanged.
 fn try_fused_softmax(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
-    if axis + 1 != x.rank() || !matches!(x.dtype(), DType::F32 | DType::F64) {
+    if axis + 1 != x.rank() || !x.dtype().is_float() {
         return Ok(None);
     }
 
@@ -550,7 +567,10 @@ impl Tensor {
     pub fn mean_all(&self) -> Result<Tensor> {
         const OP: &str = "mean_all";
         require_non_empty_all(OP, self)?;
-        self.sum_all()?.div_scalar(self.num_elements() as f64)
+        narrow_all(
+            fold_all_wide(OP, ReduceOp::Sum, self)?.div_scalar(self.num_elements() as f64)?,
+            self.dtype(),
+        )
     }
 
     // ---- max / min -------------------------------------------------------
@@ -698,7 +718,7 @@ impl Tensor {
     /// # Errors
     /// As [`var`](Tensor::var).
     pub fn std_all(&self) -> Result<Tensor> {
-        variance_all("std_all", self)?.sqrt()
+        narrow_all(variance_all_wide("std_all", self)?.sqrt()?, self.dtype())
     }
 
     // ---- softmax ---------------------------------------------------------
@@ -912,6 +932,33 @@ mod tests {
     }
 
     #[test]
+    fn reduced_all_axis_folds_narrow_only_after_the_complete_reduction() {
+        let width = 65_520;
+        let mut f16_values = vec![half::f16::ONE; width];
+        f16_values.extend(vec![half::f16::NEG_ONE; width]);
+        let f16 = Tensor::from_vec(f16_values, [2, width], &CPU).unwrap();
+        assert_eq!(f16.sum_all().unwrap().item().unwrap(), 0.0);
+        assert_eq!(f16.mean_all().unwrap().item().unwrap(), 0.0);
+
+        // Build [257, 2], then view it as a non-contiguous [2, 257]. The two
+        // logical rows sum to 257 and -256. Narrowing those partials to BF16
+        // loses the unit before the final add; one F32 fold preserves it.
+        let mut bf16_values = Vec::with_capacity(514);
+        for index in 0..257 {
+            bf16_values.push(half::bf16::ONE);
+            bf16_values.push(if index < 256 {
+                half::bf16::NEG_ONE
+            } else {
+                half::bf16::ZERO
+            });
+        }
+        let base = Tensor::from_vec(bf16_values, [257, 2], &CPU).unwrap();
+        let bf16 = re_view(&base, base.layout().transpose(0, 1).unwrap());
+        assert_eq!(bf16.sum_all().unwrap().item().unwrap(), 1.0);
+        assert!(bf16.mean_all().unwrap().item().unwrap() > 0.0);
+    }
+
+    #[test]
     fn negative_axes_count_from_the_end() {
         let x = t(&(0..24).map(|i| i as f32).collect::<Vec<_>>(), [2, 3, 4]);
         assert_eq!(v(&x.sum(-1).unwrap()), v(&x.sum(2).unwrap()));
@@ -1085,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn non_last_axis_and_reduced_precision_keep_the_composed_fallback() {
+    fn non_last_axis_falls_back_and_reduced_last_axis_is_fused() {
         let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
         assert!(try_fused_softmax(&x, 0).unwrap().is_none());
         close(
@@ -1102,13 +1149,10 @@ mod tests {
             &CPU,
         )
         .unwrap();
-        assert!(try_fused_softmax(&f16, 1).unwrap().is_none());
+        let fused = try_fused_softmax(&f16, 1).unwrap().unwrap();
         assert_eq!(
             f16.softmax(-1).unwrap().to_vec::<half::f16>().unwrap(),
-            composed_softmax("softmax", &f16, 1)
-                .unwrap()
-                .to_vec::<half::f16>()
-                .unwrap()
+            fused.to_vec::<half::f16>().unwrap()
         );
 
         let bf16 = Tensor::from_vec(
@@ -1119,13 +1163,10 @@ mod tests {
             &CPU,
         )
         .unwrap();
-        assert!(try_fused_softmax(&bf16, 1).unwrap().is_none());
+        let fused = try_fused_softmax(&bf16, 1).unwrap().unwrap();
         assert_eq!(
             bf16.softmax(-1).unwrap().to_vec::<half::bf16>().unwrap(),
-            composed_softmax("softmax", &bf16, 1)
-                .unwrap()
-                .to_vec::<half::bf16>()
-                .unwrap()
+            fused.to_vec::<half::bf16>().unwrap()
         );
     }
 
