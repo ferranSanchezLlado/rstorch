@@ -3,9 +3,12 @@
 use std::collections::HashMap;
 
 use crate::autograd::{GradKey, Grads};
+use crate::backend::{FusedOp, dispatch};
 use crate::error::{Error, Result};
+use crate::layout::Layout;
 use crate::nn::{Module, Param};
 use crate::persist::Envelope;
+use crate::storage::Storage;
 use crate::tensor::Tensor;
 
 use super::engine::{self, Groups};
@@ -14,6 +17,44 @@ use super::state::{self, OutgoingParam};
 /// The `kind` tag in a saved state section.
 const KIND: &str = "sgd";
 const HYPERS: [&str; 3] = ["lr", "momentum", "weight_decay"];
+
+fn fused_outputs(outputs: Vec<Storage>, count: usize, like: &Tensor) -> Result<Vec<Tensor>> {
+    if outputs.len() != count {
+        return Err(Error::Backend {
+            op: "step",
+            msg: format!(
+                "fused SGD returned {} outputs, expected {count}",
+                outputs.len()
+            ),
+        });
+    }
+    let mut tensors = Vec::with_capacity(count);
+    for (index, storage) in outputs.into_iter().enumerate() {
+        if storage.dtype() != like.dtype()
+            || storage.device() != like.device()
+            || storage.len() != like.num_elements()
+        {
+            return Err(Error::Backend {
+                op: "step",
+                msg: format!(
+                    "fused SGD output {index} has dtype {}, device {}, and {} elements; \
+                     expected dtype {}, device {}, and shape {}",
+                    storage.dtype(),
+                    storage.device(),
+                    storage.len(),
+                    like.dtype(),
+                    like.device(),
+                    like.shape()
+                ),
+            });
+        }
+        tensors.push(Tensor::from_parts(
+            storage,
+            Layout::contiguous(like.shape().clone())?,
+        ));
+    }
+    Ok(tensors)
+}
 
 /// The hyperparameters of one parameter group (or of the optimizer itself).
 ///
@@ -213,30 +254,72 @@ impl Sgd {
             let dtype = param.value().dtype();
             let acc = engine::accum_dtype(dtype);
             let weights = param.value().to_dtype(acc)?;
-            let mut g = grad.to_dtype(acc)?;
-            if hyper.weight_decay != 0.0 {
-                g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
+            let grad = grad.to_dtype(acc)?;
+            let previous = state.get(&param.grad_key());
+            let next_clock = previous.map_or(1, |entry| entry.clock + 1);
+            let previous_velocity = previous.and_then(|entry| entry.velocity.clone());
+            let scalars = [base_lr * hyper.lr_scale, hyper.momentum, hyper.weight_decay];
+            let mut inputs = vec![weights.view(), grad.view()];
+            if hyper.momentum != 0.0
+                && let Some(velocity) = &previous_velocity
+            {
+                inputs.push(velocity.view());
             }
-            let entry = state.entry(param.grad_key()).or_insert(SgdState {
-                clock: 0,
-                velocity: None,
-            });
-            entry.clock += 1;
-            let direction = if hyper.momentum == 0.0 {
-                g
-            } else {
-                // PyTorch's initialization: the first velocity *is* the
-                // gradient, so a momentum run and a plain run take the same
-                // first step.
-                let velocity = match &entry.velocity {
-                    Some(previous) => previous.mul_scalar(hyper.momentum)?.add(&g)?,
-                    None => g,
-                };
-                entry.velocity = Some(velocity.clone());
-                velocity
+
+            let (next, next_velocity) = match dispatch::backend(weights.device()).fused(
+                FusedOp::SgdStep,
+                &inputs,
+                &scalars,
+            ) {
+                Ok(outputs) => {
+                    let mut outputs = fused_outputs(
+                        outputs,
+                        if hyper.momentum == 0.0 { 1 } else { 2 },
+                        &weights,
+                    )?;
+                    let next = outputs.remove(0);
+                    let velocity = if hyper.momentum == 0.0 {
+                        previous_velocity
+                    } else {
+                        Some(outputs.remove(0))
+                    };
+                    (next, velocity)
+                }
+                Err(Error::Unsupported { .. }) => {
+                    let mut g = grad;
+                    if hyper.weight_decay != 0.0 {
+                        g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
+                    }
+                    let direction = if hyper.momentum == 0.0 {
+                        g
+                    } else {
+                        // PyTorch's initialization: the first velocity *is* the
+                        // gradient, so a momentum run and a plain run take the same
+                        // first step.
+                        match &previous_velocity {
+                            Some(previous) => previous.mul_scalar(hyper.momentum)?.add(&g)?,
+                            None => g,
+                        }
+                    };
+                    let velocity = if hyper.momentum == 0.0 {
+                        previous_velocity
+                    } else {
+                        Some(direction.clone())
+                    };
+                    let next = weights.sub(&direction.mul_scalar(scalars[0])?)?;
+                    (next, velocity)
+                }
+                Err(error) => return Err(error),
             };
-            let next = weights.sub(&direction.mul_scalar(base_lr * hyper.lr_scale)?)?;
-            param.set(next.to_dtype(dtype)?)
+            param.set(next.to_dtype(dtype)?)?;
+            state.insert(
+                param.grad_key(),
+                SgdState {
+                    clock: next_clock,
+                    velocity: next_velocity,
+                },
+            );
+            Ok(())
         })?;
         *steps += 1;
         Ok(())
@@ -384,6 +467,9 @@ mod tests {
             assert!(!path.is_empty());
         }
         assert_eq!(opt.steps(), 1);
+        step(&mut opt, &mut model);
+        close(f64::from(model.at("trunk.weight")), 0.8, 1e-6);
+        assert_eq!(opt.param_steps(&model.trunk.weight), 2);
     }
 
     #[test]

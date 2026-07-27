@@ -1,12 +1,14 @@
 //! [`Adam`] and [`AdamW`] — one implementation, two names (exploration §4.4).
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 
 use crate::autograd::{GradKey, Grads};
+use crate::backend::{FusedOp, dispatch};
 use crate::error::{Error, Result};
+use crate::layout::Layout;
 use crate::nn::{Module, Param};
 use crate::persist::Envelope;
+use crate::storage::Storage;
 use crate::tensor::Tensor;
 
 use super::engine::{self, Groups};
@@ -16,6 +18,41 @@ use super::state::{self, OutgoingParam};
 /// they are the same optimizer.
 const KIND: &str = "adam";
 const HYPERS: [&str; 6] = ["lr", "beta1", "beta2", "eps", "weight_decay", "decoupled"];
+
+fn fused_outputs(outputs: Vec<Storage>, like: &Tensor) -> Result<[Tensor; 3]> {
+    if outputs.len() != 3 {
+        return Err(Error::Backend {
+            op: "step",
+            msg: format!("fused Adam returned {} outputs, expected 3", outputs.len()),
+        });
+    }
+    let mut tensors = Vec::with_capacity(3);
+    for (index, storage) in outputs.into_iter().enumerate() {
+        if storage.dtype() != like.dtype()
+            || storage.device() != like.device()
+            || storage.len() != like.num_elements()
+        {
+            return Err(Error::Backend {
+                op: "step",
+                msg: format!(
+                    "fused Adam output {index} has dtype {}, device {}, and {} elements; \
+                     expected dtype {}, device {}, and shape {}",
+                    storage.dtype(),
+                    storage.device(),
+                    storage.len(),
+                    like.dtype(),
+                    like.device(),
+                    like.shape()
+                ),
+            });
+        }
+        tensors.push(Tensor::from_parts(
+            storage,
+            Layout::contiguous(like.shape().clone())?,
+        ));
+    }
+    tensors.try_into().map_err(|_| unreachable!())
+}
 
 /// The hyperparameters of one parameter group (or of the optimizer itself).
 ///
@@ -272,45 +309,80 @@ impl Adam {
             // narrowed back exactly once, at the end.
             let acc = engine::accum_dtype(dtype);
             let weights = param.value().to_dtype(acc)?;
-            let mut g = grad.to_dtype(acc)?;
-            if hyper.weight_decay != 0.0 && !decoupled {
-                g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
-            }
+            let grad = grad.to_dtype(acc)?;
 
-            let entry = match state.entry(param.grad_key()) {
-                Entry::Occupied(occupied) => occupied.into_mut(),
-                Entry::Vacant(vacant) => {
+            let previous = state.get(&param.grad_key());
+            let next_clock = previous.map_or(1, |entry| entry.clock + 1);
+            let (previous_m, previous_v) = match previous {
+                Some(entry) => (entry.m.clone(), entry.v.clone()),
+                None => {
                     let zeros = Tensor::zeros(weights.dims(), acc, &weights.device())?;
-                    vacant.insert(AdamState {
-                        clock: 0,
-                        m: zeros.clone(),
-                        v: zeros,
-                    })
+                    (zeros.clone(), zeros)
                 }
             };
             // This parameter's own clock, so a late joiner is bias-corrected
             // as a first update rather than as step `steps`.
-            entry.clock += 1;
-            let t = i32::try_from(entry.clock).unwrap_or(i32::MAX);
-            entry.m = entry
-                .m
-                .mul_scalar(hyper.beta1)?
-                .add(&g.mul_scalar(1.0 - hyper.beta1)?)?;
-            entry.v = entry
-                .v
-                .mul_scalar(hyper.beta2)?
-                .add(&g.mul(&g)?.mul_scalar(1.0 - hyper.beta2)?)?;
+            let t = i32::try_from(next_clock).unwrap_or(i32::MAX);
+            let correction1 = 1.0 - hyper.beta1.powi(t);
+            let correction2 = 1.0 - hyper.beta2.powi(t);
+            let scalars = [
+                lr,
+                hyper.beta1,
+                hyper.beta2,
+                hyper.eps,
+                hyper.weight_decay,
+                correction1,
+                correction2,
+                f64::from(u8::from(decoupled)),
+            ];
+            let inputs = [
+                weights.view(),
+                grad.view(),
+                previous_m.view(),
+                previous_v.view(),
+            ];
 
-            let m_hat = entry.m.div_scalar(1.0 - hyper.beta1.powi(t))?;
-            let v_hat = entry.v.div_scalar(1.0 - hyper.beta2.powi(t))?;
-            let direction = m_hat.div(&v_hat.sqrt()?.add_scalar(hyper.eps)?)?;
+            let [next, next_m, next_v] = match dispatch::backend(weights.device()).fused(
+                FusedOp::AdamStep,
+                &inputs,
+                &scalars,
+            ) {
+                Ok(outputs) => fused_outputs(outputs, &weights)?,
+                Err(Error::Unsupported { .. }) => {
+                    let mut g = grad;
+                    if hyper.weight_decay != 0.0 && !decoupled {
+                        g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
+                    }
+                    let next_m = previous_m
+                        .mul_scalar(hyper.beta1)?
+                        .add(&g.mul_scalar(1.0 - hyper.beta1)?)?;
+                    let next_v = previous_v
+                        .mul_scalar(hyper.beta2)?
+                        .add(&g.mul(&g)?.mul_scalar(1.0 - hyper.beta2)?)?;
 
-            let mut next = weights;
-            if hyper.weight_decay != 0.0 && decoupled {
-                next = next.mul_scalar(1.0 - lr * hyper.weight_decay)?;
-            }
-            next = next.sub(&direction.mul_scalar(lr)?)?;
-            param.set(next.to_dtype(dtype)?)
+                    let m_hat = next_m.div_scalar(correction1)?;
+                    let v_hat = next_v.div_scalar(correction2)?;
+                    let direction = m_hat.div(&v_hat.sqrt()?.add_scalar(hyper.eps)?)?;
+
+                    let mut next = weights;
+                    if hyper.weight_decay != 0.0 && decoupled {
+                        next = next.mul_scalar(1.0 - lr * hyper.weight_decay)?;
+                    }
+                    next = next.sub(&direction.mul_scalar(lr)?)?;
+                    [next, next_m, next_v]
+                }
+                Err(error) => return Err(error),
+            };
+            param.set(next.to_dtype(dtype)?)?;
+            state.insert(
+                param.grad_key(),
+                AdamState {
+                    clock: next_clock,
+                    m: next_m,
+                    v: next_v,
+                },
+            );
+            Ok(())
         })?;
         *steps += 1;
         Ok(())
