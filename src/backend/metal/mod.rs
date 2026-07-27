@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ::metal as metal_rs;
 use metal_rs::objc::rc::autoreleasepool;
 
@@ -22,6 +25,34 @@ const SOURCE: &str = include_str!("kernels.metal");
 const COMMIT_THRESHOLD: usize = 64;
 type ContextResult = std::result::Result<Arc<Context>, String>;
 type ContextRegistry = Mutex<HashMap<usize, ContextResult>>;
+
+#[cfg(test)]
+#[derive(Default)]
+struct Instrumentation {
+    dispatches: AtomicUsize,
+    commits: AtomicUsize,
+    waits: AtomicUsize,
+    transfer_in: AtomicUsize,
+    transfer_out: AtomicUsize,
+    max_dispatches_per_buffer: AtomicUsize,
+    max_pending: AtomicUsize,
+}
+
+#[cfg(test)]
+static INSTRUMENTATION: Instrumentation = Instrumentation {
+    dispatches: AtomicUsize::new(0),
+    commits: AtomicUsize::new(0),
+    waits: AtomicUsize::new(0),
+    transfer_in: AtomicUsize::new(0),
+    transfer_out: AtomicUsize::new(0),
+    max_dispatches_per_buffer: AtomicUsize::new(0),
+    max_pending: AtomicUsize::new(0),
+};
+
+#[cfg(test)]
+fn observe_max(counter: &AtomicUsize, value: usize) {
+    counter.fetch_max(value, Ordering::Relaxed);
+}
 
 pub(crate) struct MetalBackend {
     ordinal: usize,
@@ -241,12 +272,19 @@ fn reap(submission: &mut Submission) -> Result<()> {
 
 fn commit_open(submission: &mut Submission) {
     if let Some(open) = submission.open.take() {
+        #[cfg(test)]
+        {
+            INSTRUMENTATION.commits.fetch_add(1, Ordering::Relaxed);
+            observe_max(&INSTRUMENTATION.max_dispatches_per_buffer, open.dispatches);
+        }
         open.encoder.end_encoding();
         open.command.commit();
         submission.pending.push(PendingBuffer {
             command: open.command,
             _resources: open.resources,
         });
+        #[cfg(test)]
+        observe_max(&INSTRUMENTATION.max_pending, submission.pending.len());
     }
 }
 
@@ -291,6 +329,8 @@ fn encode(
         open.resources
             .extend(resources.iter().map(|buffer| (*buffer).clone()));
         open.dispatches += 1;
+        #[cfg(test)]
+        INSTRUMENTATION.dispatches.fetch_add(1, Ordering::Relaxed);
         if open.dispatches >= COMMIT_THRESHOLD {
             commit_open(&mut submission);
         }
@@ -300,15 +340,17 @@ fn encode(
 
 fn synchronize(context: &Arc<Context>) -> Result<()> {
     autoreleasepool(|| {
-        let pending = {
-            let mut submission = context
-                .submission
-                .lock()
-                .expect("Metal submission state poisoned");
-            commit_open(&mut submission);
-            std::mem::take(&mut submission.pending)
-        };
-        for pending in pending {
+        // Keep submission serialization through the wait. Otherwise another
+        // host reader can take this reader's pending buffers and return before
+        // the commands producing its storage have completed.
+        let mut submission = context
+            .submission
+            .lock()
+            .expect("Metal submission state poisoned");
+        commit_open(&mut submission);
+        for pending in std::mem::take(&mut submission.pending) {
+            #[cfg(test)]
+            INSTRUMENTATION.waits.fetch_add(1, Ordering::Relaxed);
             pending.command.wait_until_completed();
             if pending.command.status() == metal_rs::MTLCommandBufferStatus::Error {
                 return Err(Error::Backend {
@@ -352,8 +394,504 @@ fn copy_name(dtype: DType, into: bool) -> &'static str {
     }
 }
 
+fn suffix(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F16 => "f16",
+        DType::F32 => "f32",
+        DType::I64 => "i64",
+        DType::Bool => "bool",
+        DType::BF16 | DType::F64 => unreachable!("unsupported Metal dtype"),
+    }
+}
+
+fn op_code_binary(op: BinaryOp) -> u32 {
+    match op {
+        BinaryOp::Add => 0,
+        BinaryOp::Sub => 1,
+        BinaryOp::Mul => 2,
+        BinaryOp::Div => 3,
+        BinaryOp::Maximum => 4,
+        BinaryOp::Minimum => 5,
+    }
+}
+
+fn op_code_unary(op: UnaryOp) -> u32 {
+    match op {
+        UnaryOp::Relu => 0,
+        UnaryOp::Gelu => 1,
+        UnaryOp::Exp => 2,
+        UnaryOp::Ln => 3,
+        UnaryOp::Sqrt => 4,
+        UnaryOp::Tanh => 5,
+        UnaryOp::Sigmoid => 6,
+        UnaryOp::Neg => 7,
+        UnaryOp::Abs => 8,
+    }
+}
+
+fn op_code_cmp(op: CmpOp) -> u32 {
+    match op {
+        CmpOp::Eq => 0,
+        CmpOp::Ne => 1,
+        CmpOp::Lt => 2,
+        CmpOp::Le => 3,
+        CmpOp::Gt => 4,
+        CmpOp::Ge => 5,
+    }
+}
+
+fn same_dtype(op: &'static str, views: &[View<'_>]) -> Result<DType> {
+    let Some(first) = views.first() else {
+        return Err(Error::InvalidArg {
+            op,
+            msg: "missing input".to_owned(),
+        });
+    };
+    for view in &views[1..] {
+        if view.dtype() != first.dtype() {
+            return Err(Error::DTypeMismatch {
+                op,
+                expected: first.dtype(),
+                got: view.dtype(),
+            });
+        }
+        if view.device() != first.device() {
+            return Err(Error::DeviceMismatch {
+                op,
+                expected: first.device(),
+                got: view.device(),
+            });
+        }
+    }
+    supported_dtype(op, first.dtype(), first.device())?;
+    Ok(first.dtype())
+}
+
+fn output_for(context: &Arc<Context>, dtype: DType, len: usize) -> MetalStorage {
+    allocate(context, dtype, len)
+}
+
+fn encode_binary(
+    backend: &MetalBackend,
+    name: &'static str,
+    lhs: View<'_>,
+    rhs: View<'_>,
+    output_dtype: DType,
+    code: u32,
+) -> Result<Storage> {
+    let dtype = same_dtype(name, &[lhs, rhs])?;
+    let context = context(backend.ordinal)?;
+    check_context(name, &context, &[lhs, rhs])?;
+    let a = metal_storage(name, lhs)?;
+    let b = metal_storage(name, rhs)?;
+    let output = output_for(&context, output_dtype, lhs.layout().num_elements());
+    let pipe = pipeline(&context, &format!("{name}_{}", suffix(dtype)))?;
+    encode(
+        &context,
+        &pipe,
+        output.len,
+        &[&a.buffer, &b.buffer, &output.buffer],
+        |encoder| {
+            encoder.set_buffer(0, Some(&a.buffer), 0);
+            encoder.set_buffer(1, Some(&b.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            layout_args(encoder, 3, lhs.layout());
+            layout_args(encoder, 7, rhs.layout());
+            set_bytes(encoder, 11, &[output.len as u64]);
+            set_bytes(encoder, 12, &[code]);
+        },
+    )?;
+    Ok(Storage::Metal(output))
+}
+
+struct MatmulPlan {
+    batch: Vec<u64>,
+    lhs_batch: Vec<u64>,
+    rhs_batch: Vec<u64>,
+    params: [u64; 9],
+    len: usize,
+}
+
+fn matmul_plan(lhs: &Layout, rhs: &Layout) -> Result<MatmulPlan> {
+    if lhs.rank() < 2 || rhs.rank() < 2 {
+        return Err(Error::InvalidArg {
+            op: "matmul",
+            msg: "operands must be rank >= 2".to_owned(),
+        });
+    }
+    let (lr, rr) = (lhs.rank(), rhs.rank());
+    let (m, k, rk, n) = (
+        lhs.dims()[lr - 2],
+        lhs.dims()[lr - 1],
+        rhs.dims()[rr - 2],
+        rhs.dims()[rr - 1],
+    );
+    if k != rk {
+        return Err(Error::ShapeMismatch {
+            op: "matmul",
+            lhs: lhs.shape().clone(),
+            rhs: rhs.shape().clone(),
+        });
+    }
+    let lb = &lhs.dims()[..lr - 2];
+    let rb = &rhs.dims()[..rr - 2];
+    let rank = lb.len().max(rb.len());
+    let mut batch = vec![0u64; rank];
+    let mut lhs_batch = vec![0u64; rank];
+    let mut rhs_batch = vec![0u64; rank];
+    for axis in 0..rank {
+        let li = (axis + lb.len()).checked_sub(rank);
+        let ri = (axis + rb.len()).checked_sub(rank);
+        let ld = li.map_or(1, |i| lb[i]);
+        let rd = ri.map_or(1, |i| rb[i]);
+        let dim = if ld == rd {
+            ld
+        } else if ld == 1 {
+            rd
+        } else if rd == 1 {
+            ld
+        } else {
+            return Err(Error::ShapeMismatch {
+                op: "matmul",
+                lhs: lhs.shape().clone(),
+                rhs: rhs.shape().clone(),
+            });
+        };
+        batch[axis] = dim as u64;
+        lhs_batch[axis] = li
+            .filter(|&i| lb[i] != 1)
+            .map_or(0, |i| lhs.strides()[i] as u64);
+        rhs_batch[axis] = ri
+            .filter(|&i| rb[i] != 1)
+            .map_or(0, |i| rhs.strides()[i] as u64);
+    }
+    let batches: usize = batch.iter().map(|&v| v as usize).product();
+    Ok(MatmulPlan {
+        batch,
+        lhs_batch,
+        rhs_batch,
+        params: [
+            m as u64,
+            k as u64,
+            n as u64,
+            lhs.offset() as u64,
+            rhs.offset() as u64,
+            lhs.strides()[lr - 2] as u64,
+            lhs.strides()[lr - 1] as u64,
+            rhs.strides()[rr - 2] as u64,
+            rhs.strides()[rr - 1] as u64,
+        ],
+        len: batches.saturating_mul(m).saturating_mul(n),
+    })
+}
+
+fn conv_params(
+    geometry: &crate::backend::cpu::conv::Conv2dGeometry,
+    params: &Conv2dParams,
+) -> [u64; 15] {
+    let [n, ci, h, w] = geometry.input_dims();
+    let [co, _, kh, kw] = geometry.weight_dims();
+    let [_, _, oh, ow] = geometry.output_dims();
+    [
+        n,
+        ci,
+        h,
+        w,
+        co,
+        kh,
+        kw,
+        oh,
+        ow,
+        params.stride.0,
+        params.stride.1,
+        params.padding.0,
+        params.padding.1,
+        params.dilation.0,
+        params.dilation.1,
+    ]
+    .map(|value| value as u64)
+}
+
+impl MetalBackend {
+    fn fused_layer_norm(&self, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
+        if inputs.len() == 4 {
+            if !scalars.is_empty() {
+                return Err(Error::InvalidArg {
+                    op: "fused_layer_norm_backward_input",
+                    msg: "backward accepts no scalars".to_owned(),
+                });
+            }
+            let [grad, xhat, inv_std, weight] = inputs else {
+                unreachable!()
+            };
+            if !matches!(grad.dtype(), DType::F16 | DType::F32)
+                || weight.dtype() != grad.dtype()
+                || xhat.dtype() != DType::F32
+                || inv_std.dtype() != DType::F32
+            {
+                return Err(unsupported("fused_layer_norm_backward_input", *grad));
+            }
+            let width = grad.layout().dims()[grad.layout().rank() - 1];
+            let rows = grad.layout().num_elements() / width;
+            let context = context(self.ordinal)?;
+            check_context("fused_layer_norm_backward_input", &context, inputs)?;
+            let g = metal_storage("fused_layer_norm_backward_input", *grad)?;
+            let h = metal_storage("fused_layer_norm_backward_input", *xhat)?;
+            let i = metal_storage("fused_layer_norm_backward_input", *inv_std)?;
+            let w = metal_storage("fused_layer_norm_backward_input", *weight)?;
+            let output = output_for(&context, grad.dtype(), grad.layout().num_elements());
+            let pipe = pipeline(
+                &context,
+                &format!("layer_norm_backward_{}", suffix(grad.dtype())),
+            )?;
+            encode(
+                &context,
+                &pipe,
+                rows,
+                &[&g.buffer, &h.buffer, &i.buffer, &w.buffer, &output.buffer],
+                |encoder| {
+                    encoder.set_buffer(0, Some(&g.buffer), 0);
+                    encoder.set_buffer(1, Some(&h.buffer), 0);
+                    encoder.set_buffer(2, Some(&i.buffer), 0);
+                    encoder.set_buffer(3, Some(&w.buffer), 0);
+                    encoder.set_buffer(4, Some(&output.buffer), 0);
+                    layout_args(encoder, 5, grad.layout());
+                    layout_args(encoder, 9, xhat.layout());
+                    set_bytes(
+                        encoder,
+                        13,
+                        &inv_std
+                            .layout()
+                            .strides()
+                            .iter()
+                            .map(|&v| v as u64)
+                            .collect::<Vec<_>>(),
+                    );
+                    set_bytes(encoder, 14, &[inv_std.layout().offset() as u64]);
+                    set_bytes(
+                        encoder,
+                        15,
+                        &weight
+                            .layout()
+                            .strides()
+                            .iter()
+                            .map(|&v| v as u64)
+                            .collect::<Vec<_>>(),
+                    );
+                    set_bytes(encoder, 16, &[weight.layout().offset() as u64]);
+                    set_bytes(encoder, 17, &[rows as u64]);
+                    set_bytes(encoder, 18, &[width as u64]);
+                },
+            )?;
+            return Ok(vec![Storage::Metal(output)]);
+        }
+
+        if inputs.len() != 3 || !(scalars.len() == 1 || scalars.len() == 2) {
+            return Err(Error::InvalidArg {
+                op: "fused_layer_norm",
+                msg: "expected three inputs and one or two scalars".to_owned(),
+            });
+        }
+        let [x, weight, bias] = inputs else {
+            unreachable!()
+        };
+        let dtype = same_dtype("fused_layer_norm", inputs)?;
+        if !matches!(dtype, DType::F16 | DType::F32) {
+            return Err(unsupported("fused_layer_norm", *x));
+        }
+        let width = x.layout().dims()[x.layout().rank() - 1];
+        let rows = x.layout().num_elements() / width;
+        let save = scalars.get(1).is_some_and(|&value| value == 1.0);
+        let context = context(self.ordinal)?;
+        check_context("fused_layer_norm", &context, inputs)?;
+        let xv = metal_storage("fused_layer_norm", *x)?;
+        let wv = metal_storage("fused_layer_norm", *weight)?;
+        let bv = metal_storage("fused_layer_norm", *bias)?;
+        let output = output_for(&context, dtype, x.layout().num_elements());
+        let xhat = output_for(&context, DType::F32, x.layout().num_elements());
+        let inv = output_for(&context, DType::F32, rows);
+        let pipe = pipeline(&context, &format!("layer_norm_{}", suffix(dtype)))?;
+        encode(
+            &context,
+            &pipe,
+            rows,
+            &[
+                &xv.buffer,
+                &wv.buffer,
+                &bv.buffer,
+                &output.buffer,
+                &xhat.buffer,
+                &inv.buffer,
+            ],
+            |encoder| {
+                encoder.set_buffer(0, Some(&xv.buffer), 0);
+                encoder.set_buffer(1, Some(&wv.buffer), 0);
+                encoder.set_buffer(2, Some(&bv.buffer), 0);
+                encoder.set_buffer(3, Some(&output.buffer), 0);
+                encoder.set_buffer(4, Some(&xhat.buffer), 0);
+                encoder.set_buffer(5, Some(&inv.buffer), 0);
+                layout_args(encoder, 6, x.layout());
+                set_bytes(
+                    encoder,
+                    10,
+                    &weight
+                        .layout()
+                        .strides()
+                        .iter()
+                        .map(|&v| v as u64)
+                        .collect::<Vec<_>>(),
+                );
+                set_bytes(encoder, 11, &[weight.layout().offset() as u64]);
+                set_bytes(
+                    encoder,
+                    12,
+                    &bias
+                        .layout()
+                        .strides()
+                        .iter()
+                        .map(|&v| v as u64)
+                        .collect::<Vec<_>>(),
+                );
+                set_bytes(encoder, 13, &[bias.layout().offset() as u64]);
+                set_bytes(encoder, 14, &[rows as u64]);
+                set_bytes(encoder, 15, &[width as u64]);
+                set_bytes(encoder, 16, &[scalars[0] as f32]);
+                set_bytes(encoder, 17, &[u32::from(save)]);
+            },
+        )?;
+        let mut outputs = vec![Storage::Metal(output)];
+        if save {
+            outputs.push(Storage::Metal(xhat));
+            outputs.push(Storage::Metal(inv));
+        }
+        Ok(outputs)
+    }
+
+    fn fused_sgd(&self, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
+        if !(inputs.len() == 2 || inputs.len() == 3) || scalars.len() != 3 {
+            return Err(Error::InvalidArg {
+                op: "fused_sgd_step",
+                msg: "expected two or three inputs and three scalars".to_owned(),
+            });
+        }
+        let [lr, momentum, decay] = scalars else {
+            unreachable!()
+        };
+        let dtype = same_dtype("fused_sgd_step", &inputs[..2])?;
+        if !matches!(dtype, DType::F16 | DType::F32) {
+            return Err(unsupported("fused_sgd_step", inputs[0]));
+        }
+        if let Some(velocity) = inputs.get(2)
+            && velocity.dtype() != DType::F32
+        {
+            return Err(Error::DTypeMismatch {
+                op: "fused_sgd_step",
+                expected: DType::F32,
+                got: velocity.dtype(),
+            });
+        }
+        let context = context(self.ordinal)?;
+        check_context("fused_sgd_step", &context, inputs)?;
+        let p = metal_storage("fused_sgd_step", inputs[0])?;
+        let g = metal_storage("fused_sgd_step", inputs[1])?;
+        let velocity = inputs
+            .get(2)
+            .map(|view| metal_storage("fused_sgd_step", *view))
+            .transpose()?;
+        let next = output_for(&context, dtype, p.len);
+        let next_velocity = output_for(&context, DType::F32, p.len);
+        let pipe = pipeline(&context, &format!("sgd_{}", suffix(dtype)))?;
+        let hp = [*lr as f32, *momentum as f32, *decay as f32];
+        let mut resources = vec![
+            &*p.buffer,
+            &*g.buffer,
+            &*next.buffer,
+            &*next_velocity.buffer,
+        ];
+        if let Some(value) = velocity {
+            resources.push(&value.buffer);
+        }
+        let use_momentum = *momentum != 0.0;
+        encode(&context, &pipe, p.len, &resources, |encoder| {
+            encoder.set_buffer(0, Some(&p.buffer), 0);
+            encoder.set_buffer(1, Some(&g.buffer), 0);
+            encoder.set_buffer(2, velocity.map(|value| &**value.buffer), 0);
+            encoder.set_buffer(3, Some(&next.buffer), 0);
+            encoder.set_buffer(4, Some(&next_velocity.buffer), 0);
+            set_bytes(encoder, 5, &[p.len as u64]);
+            set_bytes(encoder, 6, &hp);
+            set_bytes(encoder, 7, &[u32::from(velocity.is_some())]);
+            set_bytes(encoder, 8, &[u32::from(use_momentum)]);
+        })?;
+        let mut outputs = vec![Storage::Metal(next)];
+        if use_momentum {
+            outputs.push(Storage::Metal(next_velocity));
+        }
+        Ok(outputs)
+    }
+
+    fn fused_adam(&self, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
+        if inputs.len() != 4 || scalars.len() != 8 {
+            return Err(Error::InvalidArg {
+                op: "fused_adam_step",
+                msg: "expected four inputs and eight scalars".to_owned(),
+            });
+        }
+        let dtype = same_dtype("fused_adam_step", &inputs[..2])?;
+        if !matches!(dtype, DType::F16 | DType::F32)
+            || inputs[2].dtype() != DType::F32
+            || inputs[3].dtype() != DType::F32
+        {
+            return Err(unsupported("fused_adam_step", inputs[0]));
+        }
+        let context = context(self.ordinal)?;
+        check_context("fused_adam_step", &context, inputs)?;
+        let p = metal_storage("fused_adam_step", inputs[0])?;
+        let g = metal_storage("fused_adam_step", inputs[1])?;
+        let m = metal_storage("fused_adam_step", inputs[2])?;
+        let v = metal_storage("fused_adam_step", inputs[3])?;
+        let next = output_for(&context, dtype, p.len);
+        let next_m = output_for(&context, DType::F32, p.len);
+        let next_v = output_for(&context, DType::F32, p.len);
+        let pipe = pipeline(&context, &format!("adam_{}", suffix(dtype)))?;
+        let hp: Vec<f32> = scalars.iter().map(|&value| value as f32).collect();
+        encode(
+            &context,
+            &pipe,
+            p.len,
+            &[
+                &p.buffer,
+                &g.buffer,
+                &m.buffer,
+                &v.buffer,
+                &next.buffer,
+                &next_m.buffer,
+                &next_v.buffer,
+            ],
+            |encoder| {
+                encoder.set_buffer(0, Some(&p.buffer), 0);
+                encoder.set_buffer(1, Some(&g.buffer), 0);
+                encoder.set_buffer(2, Some(&m.buffer), 0);
+                encoder.set_buffer(3, Some(&v.buffer), 0);
+                encoder.set_buffer(4, Some(&next.buffer), 0);
+                encoder.set_buffer(5, Some(&next_m.buffer), 0);
+                encoder.set_buffer(6, Some(&next_v.buffer), 0);
+                set_bytes(encoder, 7, &[p.len as u64]);
+                set_bytes(encoder, 8, &hp);
+            },
+        )?;
+        Ok(vec![
+            Storage::Metal(next),
+            Storage::Metal(next_m),
+            Storage::Metal(next_v),
+        ])
+    }
+}
+
 impl BackendOps for MetalBackend {
     fn transfer_in(&self, host: CpuStorage) -> Result<Storage> {
+        #[cfg(test)]
+        INSTRUMENTATION.transfer_in.fetch_add(1, Ordering::Relaxed);
         let context = context(self.ordinal)?;
         let dtype = host.dtype();
         supported_dtype("from_vec", dtype, Device::Metal(self.ordinal))?;
@@ -388,6 +926,8 @@ impl BackendOps for MetalBackend {
     }
 
     fn transfer_out(&self, x: View<'_>) -> Result<CpuStorage> {
+        #[cfg(test)]
+        INSTRUMENTATION.transfer_out.fetch_add(1, Ordering::Relaxed);
         metal_storage("transfer_out", x)?;
         let context = context(self.ordinal)?;
         check_context("transfer_out", &context, &[x])?;
@@ -527,93 +1067,622 @@ impl BackendOps for MetalBackend {
         Ok(Storage::Metal(storage))
     }
 
-    fn cast(&self, x: View<'_>, _to: DType) -> Result<Storage> {
-        Err(unsupported("to_dtype", x))
+    fn cast(&self, x: View<'_>, to: DType) -> Result<Storage> {
+        supported_dtype("to_dtype", x.dtype(), x.device())?;
+        supported_dtype("to_dtype", to, x.device())?;
+        if x.dtype() == to {
+            return self.copy_strided(x);
+        }
+        let context = context(self.ordinal)?;
+        check_context("to_dtype", &context, &[x])?;
+        let input = metal_storage("to_dtype", x)?;
+        let output = output_for(&context, to, x.layout().num_elements());
+        let pipe = pipeline(
+            &context,
+            &format!("cast_{}_to_{}", suffix(x.dtype()), suffix(to)),
+        )?;
+        encode(
+            &context,
+            &pipe,
+            output.len,
+            &[&input.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&input.buffer), 0);
+                encoder.set_buffer(1, Some(&output.buffer), 0);
+                layout_args(encoder, 2, x.layout());
+                set_bytes(encoder, 6, &[output.len as u64]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn binary(&self, _op: BinaryOp, lhs: View<'_>, _rhs: View<'_>) -> Result<Storage> {
-        Err(unsupported("binary", lhs))
+    fn binary(&self, op: BinaryOp, lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
+        encode_binary(self, "binary", lhs, rhs, lhs.dtype(), op_code_binary(op))
     }
-    fn binary_scalar(&self, _op: BinaryOp, x: View<'_>, _scalar: f64) -> Result<Storage> {
-        Err(unsupported("binary_scalar", x))
+    fn binary_scalar(&self, op: BinaryOp, x: View<'_>, scalar: f64) -> Result<Storage> {
+        supported_dtype("binary_scalar", x.dtype(), x.device())?;
+        if x.dtype() == DType::Bool {
+            return Err(unsupported("binary_scalar", x));
+        }
+        let context = context(self.ordinal)?;
+        check_context("binary_scalar", &context, &[x])?;
+        let input = metal_storage("binary_scalar", x)?;
+        let output = output_for(&context, x.dtype(), x.layout().num_elements());
+        let pipe = pipeline(&context, &format!("scalar_{}", suffix(x.dtype())))?;
+        encode(
+            &context,
+            &pipe,
+            output.len,
+            &[&input.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&input.buffer), 0);
+                encoder.set_buffer(1, Some(&output.buffer), 0);
+                layout_args(encoder, 2, x.layout());
+                set_bytes(encoder, 6, &[output.len as u64]);
+                if x.dtype() == DType::I64 {
+                    set_bytes(encoder, 7, &[scalar as i64]);
+                } else {
+                    set_bytes(encoder, 7, &[scalar as f32]);
+                }
+                set_bytes(encoder, 8, &[op_code_binary(op)]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn unary(&self, _op: UnaryOp, x: View<'_>) -> Result<Storage> {
-        Err(unsupported("unary", x))
+    fn unary(&self, op: UnaryOp, x: View<'_>) -> Result<Storage> {
+        supported_dtype("unary", x.dtype(), x.device())?;
+        if x.dtype() == DType::Bool
+            || (x.dtype() == DType::I64 && !matches!(op, UnaryOp::Neg | UnaryOp::Abs))
+        {
+            return Err(unsupported("unary", x));
+        }
+        let context = context(self.ordinal)?;
+        check_context("unary", &context, &[x])?;
+        let input = metal_storage("unary", x)?;
+        let output = output_for(&context, x.dtype(), x.layout().num_elements());
+        let pipe = pipeline(&context, &format!("unary_{}", suffix(x.dtype())))?;
+        encode(
+            &context,
+            &pipe,
+            output.len,
+            &[&input.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&input.buffer), 0);
+                encoder.set_buffer(1, Some(&output.buffer), 0);
+                layout_args(encoder, 2, x.layout());
+                set_bytes(encoder, 6, &[output.len as u64]);
+                set_bytes(encoder, 7, &[op_code_unary(op)]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn compare(&self, _op: CmpOp, lhs: View<'_>, _rhs: View<'_>) -> Result<Storage> {
-        Err(unsupported("compare", lhs))
+    fn compare(&self, op: CmpOp, lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
+        encode_binary(self, "compare", lhs, rhs, DType::Bool, op_code_cmp(op))
     }
-    fn where_cond(
-        &self,
-        _cond: View<'_>,
-        on_true: View<'_>,
-        _on_false: View<'_>,
-    ) -> Result<Storage> {
-        Err(unsupported("where", on_true))
+    fn where_cond(&self, cond: View<'_>, on_true: View<'_>, on_false: View<'_>) -> Result<Storage> {
+        if cond.dtype() != DType::Bool {
+            return Err(Error::DTypeMismatch {
+                op: "where",
+                expected: DType::Bool,
+                got: cond.dtype(),
+            });
+        }
+        let dtype = same_dtype("where", &[on_true, on_false])?;
+        let context = context(self.ordinal)?;
+        check_context("where", &context, &[cond, on_true, on_false])?;
+        let c = metal_storage("where", cond)?;
+        let t = metal_storage("where", on_true)?;
+        let f = metal_storage("where", on_false)?;
+        let output = output_for(&context, dtype, cond.layout().num_elements());
+        let pipe = pipeline(&context, &format!("where_{}", suffix(dtype)))?;
+        encode(
+            &context,
+            &pipe,
+            output.len,
+            &[&c.buffer, &t.buffer, &f.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&c.buffer), 0);
+                encoder.set_buffer(1, Some(&t.buffer), 0);
+                encoder.set_buffer(2, Some(&f.buffer), 0);
+                encoder.set_buffer(3, Some(&output.buffer), 0);
+                layout_args(encoder, 4, cond.layout());
+                layout_args(encoder, 8, on_true.layout());
+                layout_args(encoder, 12, on_false.layout());
+                set_bytes(encoder, 16, &[output.len as u64]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn masked_fill(&self, x: View<'_>, _mask: View<'_>, _value: f64) -> Result<Storage> {
-        Err(unsupported("masked_fill", x))
+    fn masked_fill(&self, x: View<'_>, mask: View<'_>, value: f64) -> Result<Storage> {
+        supported_dtype("masked_fill", x.dtype(), x.device())?;
+        if mask.dtype() != DType::Bool {
+            return Err(Error::DTypeMismatch {
+                op: "masked_fill",
+                expected: DType::Bool,
+                got: mask.dtype(),
+            });
+        }
+        let context = context(self.ordinal)?;
+        check_context("masked_fill", &context, &[x, mask])?;
+        let input = metal_storage("masked_fill", x)?;
+        let mask_storage = metal_storage("masked_fill", mask)?;
+        let output = output_for(&context, x.dtype(), x.layout().num_elements());
+        let pipe = pipeline(&context, &format!("masked_{}", suffix(x.dtype())))?;
+        encode(
+            &context,
+            &pipe,
+            output.len,
+            &[&input.buffer, &mask_storage.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&input.buffer), 0);
+                encoder.set_buffer(1, Some(&mask_storage.buffer), 0);
+                encoder.set_buffer(2, Some(&output.buffer), 0);
+                layout_args(encoder, 3, x.layout());
+                layout_args(encoder, 7, mask.layout());
+                set_bytes(encoder, 11, &[output.len as u64]);
+                let fill = if x.dtype() == DType::Bool {
+                    f32::from(value != 0.0)
+                } else {
+                    value as f32
+                };
+                set_bytes(encoder, 12, &[fill]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn reduce(&self, _op: ReduceOp, x: View<'_>, _axis: usize) -> Result<Storage> {
-        Err(unsupported("reduce", x))
+    fn reduce(&self, op: ReduceOp, x: View<'_>, axis: usize) -> Result<Storage> {
+        supported_dtype("reduce", x.dtype(), x.device())?;
+        if matches!(x.dtype(), DType::Bool) {
+            return Err(unsupported("reduce", x));
+        }
+        let context = context(self.ordinal)?;
+        check_context("reduce", &context, &[x])?;
+        let input = metal_storage("reduce", x)?;
+        let len = x.layout().num_elements() / x.layout().dims()[axis];
+        let output = output_for(&context, x.dtype(), len);
+        let pipe = pipeline(&context, &format!("reduce_{}", suffix(x.dtype())))?;
+        let code = match op {
+            ReduceOp::Sum => 0,
+            ReduceOp::Mean => 1,
+            ReduceOp::Max => 2,
+            ReduceOp::Min => 3,
+        };
+        encode(
+            &context,
+            &pipe,
+            len,
+            &[&input.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&input.buffer), 0);
+                encoder.set_buffer(1, Some(&output.buffer), 0);
+                layout_args(encoder, 2, x.layout());
+                set_bytes(encoder, 6, &[len as u64]);
+                set_bytes(encoder, 7, &[axis as u32]);
+                set_bytes(encoder, 8, &[code]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn arg_reduce(&self, _op: ArgReduceOp, x: View<'_>, _axis: usize) -> Result<Storage> {
-        Err(unsupported("arg_reduce", x))
+    fn arg_reduce(&self, op: ArgReduceOp, x: View<'_>, axis: usize) -> Result<Storage> {
+        supported_dtype("arg_reduce", x.dtype(), x.device())?;
+        if x.dtype() == DType::Bool {
+            return Err(unsupported("arg_reduce", x));
+        }
+        let context = context(self.ordinal)?;
+        check_context("arg_reduce", &context, &[x])?;
+        let input = metal_storage("arg_reduce", x)?;
+        let len = x.layout().num_elements() / x.layout().dims()[axis];
+        let output = output_for(&context, DType::I64, len);
+        let pipe = pipeline(&context, &format!("arg_reduce_{}", suffix(x.dtype())))?;
+        encode(
+            &context,
+            &pipe,
+            len,
+            &[&input.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&input.buffer), 0);
+                encoder.set_buffer(1, Some(&output.buffer), 0);
+                layout_args(encoder, 2, x.layout());
+                set_bytes(encoder, 6, &[len as u64]);
+                set_bytes(encoder, 7, &[axis as u32]);
+                set_bytes(encoder, 8, &[u32::from(matches!(op, ArgReduceOp::ArgMin))]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn matmul(&self, lhs: View<'_>, _rhs: View<'_>) -> Result<Storage> {
-        Err(unsupported("matmul", lhs))
+    fn matmul(&self, lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
+        let dtype = same_dtype("matmul", &[lhs, rhs])?;
+        if dtype == DType::Bool {
+            return Err(unsupported("matmul", lhs));
+        }
+        let plan = matmul_plan(lhs.layout(), rhs.layout())?;
+        let context = context(self.ordinal)?;
+        check_context("matmul", &context, &[lhs, rhs])?;
+        let a = metal_storage("matmul", lhs)?;
+        let b = metal_storage("matmul", rhs)?;
+        let output = output_for(&context, dtype, plan.len);
+        let pipe = pipeline(&context, &format!("matmul_{}", suffix(dtype)))?;
+        encode(
+            &context,
+            &pipe,
+            plan.len,
+            &[&a.buffer, &b.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&a.buffer), 0);
+                encoder.set_buffer(1, Some(&b.buffer), 0);
+                encoder.set_buffer(2, Some(&output.buffer), 0);
+                set_bytes(encoder, 3, &plan.batch);
+                set_bytes(encoder, 4, &plan.lhs_batch);
+                set_bytes(encoder, 5, &plan.rhs_batch);
+                set_bytes(encoder, 6, &[plan.batch.len() as u32]);
+                set_bytes(encoder, 7, &plan.params);
+                set_bytes(encoder, 8, &[plan.len as u64]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn index_select(&self, x: View<'_>, _axis: usize, _indices: View<'_>) -> Result<Storage> {
-        Err(unsupported("index_select", x))
+    fn index_select(&self, x: View<'_>, axis: usize, indices: View<'_>) -> Result<Storage> {
+        supported_dtype("index_select", x.dtype(), x.device())?;
+        if indices.dtype() != DType::I64 {
+            return Err(unsupported("index_select", x));
+        }
+        let context = context(self.ordinal)?;
+        check_context("index_select", &context, &[x, indices])?;
+        let input = metal_storage("index_select", x)?;
+        let index = metal_storage("index_select", indices)?;
+        let mut dims = x.layout().dims().to_vec();
+        dims[axis] = indices.layout().num_elements();
+        let len: usize = dims.iter().product();
+        let out_dims: Vec<u64> = dims.iter().map(|&v| v as u64).collect();
+        let output = output_for(&context, x.dtype(), len);
+        let pipe = pipeline(&context, &format!("index_select_{}", suffix(x.dtype())))?;
+        encode(
+            &context,
+            &pipe,
+            len,
+            &[&input.buffer, &index.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&input.buffer), 0);
+                encoder.set_buffer(1, Some(&index.buffer), 0);
+                encoder.set_buffer(2, Some(&output.buffer), 0);
+                layout_args(encoder, 3, x.layout());
+                layout_args(encoder, 7, indices.layout());
+                set_bytes(encoder, 11, &out_dims);
+                set_bytes(encoder, 12, &[axis as u32]);
+                set_bytes(encoder, 13, &[len as u64]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
     fn index_add(
         &self,
         x: View<'_>,
-        _axis: usize,
-        _indices: View<'_>,
-        _src: View<'_>,
+        axis: usize,
+        indices: View<'_>,
+        src: View<'_>,
     ) -> Result<Storage> {
-        Err(unsupported("index_add", x))
+        let dtype = same_dtype("index_add", &[x, src])?;
+        if dtype == DType::Bool || indices.dtype() != DType::I64 {
+            return Err(unsupported("index_add", x));
+        }
+        let context = context(self.ordinal)?;
+        check_context("index_add", &context, &[x, indices, src])?;
+        let xv = metal_storage("index_add", x)?;
+        let iv = metal_storage("index_add", indices)?;
+        let sv = metal_storage("index_add", src)?;
+        let output = output_for(&context, dtype, x.layout().num_elements());
+        let pipe = pipeline(&context, &format!("index_add_{}", suffix(dtype)))?;
+        encode(
+            &context,
+            &pipe,
+            output.len,
+            &[&xv.buffer, &iv.buffer, &sv.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&xv.buffer), 0);
+                encoder.set_buffer(1, Some(&iv.buffer), 0);
+                encoder.set_buffer(2, Some(&sv.buffer), 0);
+                encoder.set_buffer(3, Some(&output.buffer), 0);
+                layout_args(encoder, 4, x.layout());
+                layout_args(encoder, 8, indices.layout());
+                layout_args(encoder, 12, src.layout());
+                set_bytes(encoder, 16, &[axis as u32]);
+                set_bytes(encoder, 17, &[output.len as u64]);
+                set_bytes(encoder, 18, &[src.layout().num_elements() as u64]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn gather(&self, x: View<'_>, _axis: usize, _indices: View<'_>) -> Result<Storage> {
-        Err(unsupported("gather", x))
+    fn gather(&self, x: View<'_>, axis: usize, indices: View<'_>) -> Result<Storage> {
+        supported_dtype("gather", x.dtype(), x.device())?;
+        if indices.dtype() != DType::I64 {
+            return Err(unsupported("gather", x));
+        }
+        let context = context(self.ordinal)?;
+        check_context("gather", &context, &[x, indices])?;
+        let xv = metal_storage("gather", x)?;
+        let iv = metal_storage("gather", indices)?;
+        let output = output_for(&context, x.dtype(), indices.layout().num_elements());
+        let pipe = pipeline(&context, &format!("gather_{}", suffix(x.dtype())))?;
+        encode(
+            &context,
+            &pipe,
+            output.len,
+            &[&xv.buffer, &iv.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&xv.buffer), 0);
+                encoder.set_buffer(1, Some(&iv.buffer), 0);
+                encoder.set_buffer(2, Some(&output.buffer), 0);
+                layout_args(encoder, 3, x.layout());
+                layout_args(encoder, 7, indices.layout());
+                set_bytes(encoder, 11, &[axis as u32]);
+                set_bytes(encoder, 12, &[output.len as u64]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
     fn scatter_add(
         &self,
         x: View<'_>,
-        _axis: usize,
-        _indices: View<'_>,
-        _src: View<'_>,
+        axis: usize,
+        indices: View<'_>,
+        src: View<'_>,
     ) -> Result<Storage> {
-        Err(unsupported("scatter_add", x))
+        let dtype = same_dtype("scatter_add", &[x, src])?;
+        if dtype == DType::Bool || indices.dtype() != DType::I64 {
+            return Err(unsupported("scatter_add", x));
+        }
+        let context = context(self.ordinal)?;
+        check_context("scatter_add", &context, &[x, indices, src])?;
+        let xv = metal_storage("scatter_add", x)?;
+        let iv = metal_storage("scatter_add", indices)?;
+        let sv = metal_storage("scatter_add", src)?;
+        let output = output_for(&context, dtype, x.layout().num_elements());
+        let pipe = pipeline(&context, &format!("scatter_add_{}", suffix(dtype)))?;
+        encode(
+            &context,
+            &pipe,
+            output.len,
+            &[&xv.buffer, &iv.buffer, &sv.buffer, &output.buffer],
+            |encoder| {
+                encoder.set_buffer(0, Some(&xv.buffer), 0);
+                encoder.set_buffer(1, Some(&iv.buffer), 0);
+                encoder.set_buffer(2, Some(&sv.buffer), 0);
+                encoder.set_buffer(3, Some(&output.buffer), 0);
+                layout_args(encoder, 4, x.layout());
+                layout_args(encoder, 8, indices.layout());
+                layout_args(encoder, 12, src.layout());
+                set_bytes(encoder, 16, &[axis as u32]);
+                set_bytes(encoder, 17, &[output.len as u64]);
+                set_bytes(encoder, 18, &[src.layout().num_elements() as u64]);
+            },
+        )?;
+        Ok(Storage::Metal(output))
     }
-    fn conv(&self, _op: ConvOp, inputs: &[View<'_>], _params: &Conv2dParams) -> Result<Storage> {
+    fn conv(&self, op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Result<Storage> {
         let Some(input) = inputs.first() else {
             return Err(Error::InvalidArg {
                 op: "conv",
                 msg: "missing input".to_owned(),
             });
         };
-        Err(unsupported("conv", *input))
+        let dtype = same_dtype("conv", inputs)?;
+        if dtype == DType::Bool {
+            return Err(unsupported("conv", *input));
+        }
+        let (geometry, kernel_name, output_len, first, second, pool_code) = match (op, inputs) {
+            (ConvOp::Conv2d, [x, weight]) => {
+                let geometry = crate::backend::cpu::conv::Conv2dGeometry::conv2d(
+                    "conv2d",
+                    x.layout().dims(),
+                    weight.layout().dims(),
+                    params,
+                )?;
+                let len: usize = geometry.output_dims().iter().product();
+                (geometry, "conv2d", len, *x, Some(*weight), None)
+            }
+            (ConvOp::MaxPool2d | ConvOp::AvgPool2d, [x]) => {
+                let geometry = crate::backend::cpu::conv::Conv2dGeometry::pool(
+                    "pool2d",
+                    x.layout().dims(),
+                    params,
+                )?;
+                let len: usize = geometry.output_dims().iter().product();
+                (
+                    geometry,
+                    "pool",
+                    len,
+                    *x,
+                    None,
+                    Some(u32::from(matches!(op, ConvOp::AvgPool2d))),
+                )
+            }
+            (ConvOp::Conv2dInputGrad, [grad, weight, original_input]) => {
+                let geometry = crate::backend::cpu::conv::Conv2dGeometry::conv2d(
+                    "conv2d_backward_input",
+                    original_input.layout().dims(),
+                    weight.layout().dims(),
+                    params,
+                )?;
+                (
+                    geometry,
+                    "conv_input_grad",
+                    original_input.layout().num_elements(),
+                    *grad,
+                    Some(*weight),
+                    None,
+                )
+            }
+            (ConvOp::Conv2dWeightGrad, [grad, original_input, original_weight]) => {
+                let geometry = crate::backend::cpu::conv::Conv2dGeometry::conv2d(
+                    "conv2d_backward_weight",
+                    original_input.layout().dims(),
+                    original_weight.layout().dims(),
+                    params,
+                )?;
+                (
+                    geometry,
+                    "conv_weight_grad",
+                    original_weight.layout().num_elements(),
+                    *grad,
+                    Some(*original_input),
+                    None,
+                )
+            }
+            (ConvOp::MaxPool2dBackward | ConvOp::AvgPool2dBackward, [grad, original_input]) => {
+                let geometry = crate::backend::cpu::conv::Conv2dGeometry::pool(
+                    "pool2d_backward",
+                    original_input.layout().dims(),
+                    params,
+                )?;
+                (
+                    geometry,
+                    "pool_backward",
+                    original_input.layout().num_elements(),
+                    *grad,
+                    Some(*original_input),
+                    Some(u32::from(matches!(op, ConvOp::AvgPool2dBackward))),
+                )
+            }
+            _ => {
+                return Err(Error::InvalidArg {
+                    op: "conv",
+                    msg: format!("invalid {op:?} operand encoding"),
+                });
+            }
+        };
+        let context = context(self.ordinal)?;
+        check_context("conv", &context, inputs)?;
+        let a = metal_storage("conv", first)?;
+        let b = second.map(|view| metal_storage("conv", view)).transpose()?;
+        let output = output_for(&context, dtype, output_len);
+        let pipe = pipeline(&context, &format!("{kernel_name}_{}", suffix(dtype)))?;
+        let packed = conv_params(&geometry, params);
+        let mut resources = vec![&*a.buffer, &*output.buffer];
+        if let Some(value) = &b {
+            resources.push(&value.buffer);
+        }
+        encode(&context, &pipe, output_len, &resources, |encoder| {
+            encoder.set_buffer(0, Some(&a.buffer), 0);
+            if let Some(value) = b {
+                encoder.set_buffer(1, Some(&value.buffer), 0);
+                encoder.set_buffer(2, Some(&output.buffer), 0);
+                set_bytes(
+                    encoder,
+                    3,
+                    &first
+                        .layout()
+                        .strides()
+                        .iter()
+                        .map(|&v| v as u64)
+                        .collect::<Vec<_>>(),
+                );
+                set_bytes(encoder, 4, &[first.layout().offset() as u64]);
+                set_bytes(
+                    encoder,
+                    5,
+                    &second
+                        .unwrap()
+                        .layout()
+                        .strides()
+                        .iter()
+                        .map(|&v| v as u64)
+                        .collect::<Vec<_>>(),
+                );
+                set_bytes(encoder, 6, &[second.unwrap().layout().offset() as u64]);
+                set_bytes(encoder, 7, &packed);
+                set_bytes(encoder, 8, &[output_len as u64]);
+                if let Some(code) = pool_code {
+                    set_bytes(encoder, 9, &[code]);
+                }
+            } else {
+                encoder.set_buffer(1, Some(&output.buffer), 0);
+                set_bytes(
+                    encoder,
+                    2,
+                    &first
+                        .layout()
+                        .strides()
+                        .iter()
+                        .map(|&v| v as u64)
+                        .collect::<Vec<_>>(),
+                );
+                set_bytes(encoder, 3, &[first.layout().offset() as u64]);
+                set_bytes(encoder, 4, &packed);
+                set_bytes(encoder, 5, &[output_len as u64]);
+                set_bytes(encoder, 6, &[pool_code.unwrap_or(0)]);
+            }
+        })?;
+        Ok(Storage::Metal(output))
     }
-    fn fused(&self, _op: FusedOp, inputs: &[View<'_>], _scalars: &[f64]) -> Result<Vec<Storage>> {
+    fn fused(&self, op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         let Some(input) = inputs.first() else {
             return Err(Error::InvalidArg {
                 op: "fused",
                 msg: "missing input".to_owned(),
             });
         };
-        Err(unsupported("fused", *input))
+        match op {
+            FusedOp::Softmax => {
+                if inputs.len() != 1 || !scalars.is_empty() {
+                    return Err(Error::InvalidArg {
+                        op: "fused_softmax",
+                        msg: "expected one input and no scalars".to_owned(),
+                    });
+                }
+                let dtype = input.dtype();
+                if !matches!(dtype, DType::F16 | DType::F32) {
+                    return Err(unsupported("fused_softmax", *input));
+                }
+                let width = *input
+                    .layout()
+                    .dims()
+                    .last()
+                    .ok_or_else(|| Error::InvalidArg {
+                        op: "fused_softmax",
+                        msg: "requires rank >= 1".to_owned(),
+                    })?;
+                let rows = input.layout().num_elements() / width;
+                let context = context(self.ordinal)?;
+                check_context("fused_softmax", &context, inputs)?;
+                let x = metal_storage("fused_softmax", *input)?;
+                let output = output_for(&context, dtype, input.layout().num_elements());
+                let pipe = pipeline(&context, &format!("softmax_{}", suffix(dtype)))?;
+                encode(
+                    &context,
+                    &pipe,
+                    rows,
+                    &[&x.buffer, &output.buffer],
+                    |encoder| {
+                        encoder.set_buffer(0, Some(&x.buffer), 0);
+                        encoder.set_buffer(1, Some(&output.buffer), 0);
+                        layout_args(encoder, 2, input.layout());
+                        set_bytes(encoder, 6, &[rows as u64]);
+                        set_bytes(encoder, 7, &[width as u64]);
+                    },
+                )?;
+                Ok(vec![Storage::Metal(output)])
+            }
+            FusedOp::LayerNorm => self.fused_layer_norm(inputs, scalars),
+            FusedOp::SgdStep => self.fused_sgd(inputs, scalars),
+            FusedOp::AdamStep => self.fused_adam(inputs, scalars),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, atomic::Ordering};
+
+    use super::{COMMIT_THRESHOLD, INSTRUMENTATION};
+    use crate::backend::{FusedOp, View, dispatch};
+    use crate::layout::Layout;
     use crate::{DType, Device, Error, Tensor};
 
     const METAL: Device = Device::Metal(0);
+    static HARDWARE_LANE: Mutex<()> = Mutex::new(());
 
     #[test]
     fn storage_transfer_and_strided_copy_run_on_hardware() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
         let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3], &METAL)
             .expect("Metal device 0 must exist in the hardware lane");
         assert_eq!(x.device(), METAL);
@@ -626,6 +1695,7 @@ mod tests {
 
     #[test]
     fn cat_and_stack_are_device_side() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
         let a = Tensor::from_vec(vec![1i64, 2], [2], &METAL).unwrap();
         let b = Tensor::from_vec(vec![3i64, 4], [2], &METAL).unwrap();
         assert_eq!(
@@ -643,6 +1713,7 @@ mod tests {
 
     #[test]
     fn invalid_ordinal_is_a_structured_backend_error() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
         let err = Tensor::zeros([1], DType::F32, &Device::Metal(usize::MAX));
         assert!(matches!(
             err,
@@ -651,5 +1722,198 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn required_backend_table_matches_cpu() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let report = crate::backend::conformance::run_device(METAL);
+        eprintln!(
+            "Metal conformance: {} matched, {} skipped, {} failed\nskipped:\n{}",
+            report.matched.len(),
+            report.skipped.len(),
+            report.failures.len(),
+            report.skipped.join("\n")
+        );
+        assert!(
+            report.failures.is_empty(),
+            "Metal conformance failures:\n{}",
+            report.failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn async_submission_batches_defers_waits_and_reaps() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let before_dispatch = INSTRUMENTATION.dispatches.load(Ordering::Relaxed);
+        let before_commit = INSTRUMENTATION.commits.load(Ordering::Relaxed);
+        let before_wait = INSTRUMENTATION.waits.load(Ordering::Relaxed);
+        let mut value = Tensor::ones([16], DType::F32, &METAL).unwrap();
+        for _ in 0..COMMIT_THRESHOLD + 8 {
+            value = value.add_scalar(1.0).unwrap();
+        }
+        assert_eq!(
+            INSTRUMENTATION.waits.load(Ordering::Relaxed),
+            before_wait,
+            "device-ordered operations must not wait"
+        );
+        assert!(
+            INSTRUMENTATION.commits.load(Ordering::Relaxed) > before_commit,
+            "the threshold must commit without waiting"
+        );
+        assert_eq!(
+            value.to_vec::<f32>().unwrap(),
+            vec![(COMMIT_THRESHOLD + 9) as f32; 16]
+        );
+        assert!(INSTRUMENTATION.waits.load(Ordering::Relaxed) > before_wait);
+        assert!(
+            INSTRUMENTATION.dispatches.load(Ordering::Relaxed) - before_dispatch
+                >= COMMIT_THRESHOLD + 9
+        );
+        assert!(
+            INSTRUMENTATION
+                .max_dispatches_per_buffer
+                .load(Ordering::Relaxed)
+                >= COMMIT_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn cat_and_stack_do_not_cross_the_host_boundary() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let input_count = INSTRUMENTATION.transfer_in.load(Ordering::Relaxed);
+        let output_count = INSTRUMENTATION.transfer_out.load(Ordering::Relaxed);
+        let a = Tensor::ones([2, 3], DType::F32, &METAL).unwrap();
+        let b = Tensor::full([2, 3], 2.0, DType::F32, &METAL).unwrap();
+        let cat = Tensor::cat(&[&a, &b], 0).unwrap();
+        let stack = Tensor::stack(&[&a, &b], 1).unwrap();
+        assert_eq!(cat.device(), METAL);
+        assert_eq!(stack.device(), METAL);
+        assert_eq!(
+            INSTRUMENTATION.transfer_in.load(Ordering::Relaxed),
+            input_count
+        );
+        assert_eq!(
+            INSTRUMENTATION.transfer_out.load(Ordering::Relaxed),
+            output_count
+        );
+    }
+
+    #[test]
+    fn fused_mixed_layer_norm_and_optimizers_match_cpu() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let metal = dispatch::backend(METAL);
+        let cpu = dispatch::backend(Device::Cpu);
+
+        let x = Tensor::from_vec(
+            vec![
+                half::f16::from_f32(1.0),
+                half::f16::from_f32(2.0),
+                half::f16::from_f32(4.0),
+                half::f16::from_f32(-1.0),
+                half::f16::from_f32(0.5),
+                half::f16::from_f32(3.0),
+            ],
+            [2, 3],
+            &METAL,
+        )
+        .unwrap();
+        let weight = Tensor::ones([3], DType::F16, &METAL).unwrap();
+        let bias = Tensor::zeros([3], DType::F16, &METAL).unwrap();
+        let outputs = metal
+            .fused(
+                FusedOp::LayerNorm,
+                &[x.view(), weight.view(), bias.view()],
+                &[1e-5, 1.0],
+            )
+            .unwrap();
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].dtype(), DType::F16);
+        assert_eq!(outputs[1].dtype(), DType::F32);
+        assert_eq!(outputs[2].dtype(), DType::F32);
+
+        let layouts = [
+            Layout::contiguous([2, 3]).unwrap(),
+            Layout::contiguous([2, 3]).unwrap(),
+            Layout::contiguous([2, 1]).unwrap(),
+        ];
+        let y = metal
+            .transfer_out(View::new(&outputs[0], &layouts[0]))
+            .unwrap();
+        let xhat = metal
+            .transfer_out(View::new(&outputs[1], &layouts[1]))
+            .unwrap();
+        let inv = metal
+            .transfer_out(View::new(&outputs[2], &layouts[2]))
+            .unwrap();
+        assert_eq!(y.dtype(), DType::F16);
+        assert_eq!(xhat.dtype(), DType::F32);
+        assert_eq!(inv.dtype(), DType::F32);
+
+        let host_param = crate::storage::CpuStorage::F16(std::sync::Arc::new(vec![
+            half::f16::from_f32(1.0),
+            half::f16::from_f32(2.0),
+        ]));
+        let host_grad = crate::storage::CpuStorage::F16(std::sync::Arc::new(vec![
+            half::f16::from_f32(0.5),
+            half::f16::from_f32(-0.25),
+        ]));
+        for backend in [cpu, metal] {
+            let p = backend.transfer_in(host_param.clone()).unwrap();
+            let g = backend.transfer_in(host_grad.clone()).unwrap();
+            let layout = Layout::contiguous([2]).unwrap();
+            let next = backend
+                .fused(
+                    FusedOp::SgdStep,
+                    &[View::new(&p, &layout), View::new(&g, &layout)],
+                    &[0.1, 0.9, 0.0],
+                )
+                .unwrap();
+            assert_eq!(next.len(), 2);
+            let values = backend.transfer_out(View::new(&next[0], &layout)).unwrap();
+            let crate::storage::CpuStorage::F16(values) = values else {
+                panic!("fused SGD changed parameter dtype")
+            };
+            assert!((values[0].to_f32() - 0.950_2).abs() < 2e-3);
+            assert!((values[1].to_f32() - 2.025).abs() < 2e-3);
+        }
+    }
+
+    #[test]
+    fn conv_and_pool_backward_execute_on_metal() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let x = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            [1, 1, 3, 3],
+            &METAL,
+        )
+        .unwrap()
+        .traced()
+        .unwrap();
+        let w = Tensor::from_vec(vec![1.0f32, -1.0, 0.5, 2.0], [1, 1, 2, 2], &METAL)
+            .unwrap()
+            .traced()
+            .unwrap();
+        let loss = x
+            .conv2d(&w, (1, 1), (0, 0), (1, 1))
+            .unwrap()
+            .sum_all()
+            .unwrap();
+        let grads = loss.backward().unwrap();
+        assert_eq!(
+            grads.wrt_input(&x).unwrap().to_vec::<f32>().unwrap(),
+            vec![1.0, 0.0, -1.0, 1.5, 2.5, 1.0, 0.5, 2.5, 2.0]
+        );
+        assert_eq!(
+            grads.wrt_input(&w).unwrap().to_vec::<f32>().unwrap(),
+            vec![12.0, 16.0, 24.0, 28.0]
+        );
+
+        let pooled = x.max_pool2d((2, 2), (1, 1), (0, 0)).unwrap();
+        let pool_grads = pooled.sum_all().unwrap().backward().unwrap();
+        assert_eq!(
+            pool_grads.wrt_input(&x).unwrap().to_vec::<f32>().unwrap(),
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
+        );
     }
 }
