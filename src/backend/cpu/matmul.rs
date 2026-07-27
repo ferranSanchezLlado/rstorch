@@ -562,9 +562,9 @@ mod tests {
 
     #[test]
     fn f16_wide_accumulator_holds_on_both_loop_orders() {
-        // The `Acc` contract has to survive both paths: 1024 f16 ones summed in
-        // f16 would stall at 2048's mantissa step long before reaching 1024.
-        let (m, k, n) = (2usize, 1024usize, 6usize);
+        // The `Acc` contract has to survive both paths: f16 accumulation of
+        // ones stalls at 2048, while the required f32 accumulator reaches 4096.
+        let (m, k, n) = (2usize, 4096usize, 6usize);
         let one = half::f16::from_f32(1.0);
         let f16s = |v: Vec<half::f16>| Storage::Cpu(CpuStorage::F16(Arc::new(v)));
         let as_f16 = |s: &Storage| match s {
@@ -582,7 +582,7 @@ mod tests {
         let lbt = Layout::contiguous([n, k]).unwrap().transpose(0, 1).unwrap();
         let strided = as_f16(&matmul(View::new(&sa, &la), View::new(&sbt, &lbt)).unwrap());
 
-        assert!(row_major.iter().all(|x| x.to_f32() == 1024.0));
+        assert!(row_major.iter().all(|x| x.to_f32() == 4096.0));
         assert_eq!(row_major, strided);
     }
 
