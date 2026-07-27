@@ -1,13 +1,12 @@
-//! Fused CPU kernels for last-axis softmax and layer normalization.
+//! Fused CPU kernels for last-axis softmax, layer normalization, and optimizer
+//! updates.
 //!
 //! Optimizer variants use the multi-output encoding documented on
-//! [`BackendOps::fused`](crate::backend::BackendOps::fused). They remain loud
-//! [`Error::Unsupported`] results until their kernels are implemented.
+//! [`BackendOps::fused`](crate::backend::BackendOps::fused).
 
 use std::sync::Arc;
 
 use crate::backend::{FusedOp, View};
-use crate::device::Device;
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
@@ -67,9 +66,327 @@ pub(crate) fn fused(op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result
     match op {
         FusedOp::Softmax => softmax(inputs, scalars).map(|output| vec![output]),
         FusedOp::LayerNorm => layer_norm(inputs, scalars).map(|output| vec![output]),
-        FusedOp::SgdStep => unsupported("fused_sgd_step", inputs),
-        FusedOp::AdamStep => unsupported("fused_adam_step", inputs),
+        FusedOp::SgdStep => sgd_step(inputs, scalars),
+        FusedOp::AdamStep => adam_step(inputs, scalars),
     }
+}
+
+fn sgd_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
+    const OP: &str = "fused_sgd_step";
+    if !(inputs.len() == 2 || inputs.len() == 3) || scalars.len() != 3 {
+        return invalid_encoding(OP, inputs, scalars, "2 or 3", 3);
+    }
+    let [lr, momentum, weight_decay] = scalars else {
+        unreachable!("arity validated")
+    };
+    validate_optimizer_views(OP, inputs, 2)?;
+    validate_sgd_scalars(OP, *lr, *momentum, *weight_decay, inputs[0].dtype())?;
+    if inputs.len() == 3 && effective_scalar(*momentum, inputs[0].dtype()) == 0.0 {
+        return Err(Error::InvalidArg {
+            op: OP,
+            msg: "a velocity input requires non-zero momentum".to_owned(),
+        });
+    }
+
+    let param = cpu_storage(OP, inputs[0])?;
+    let grad = cpu_storage(OP, inputs[1])?;
+    let velocity = inputs
+        .get(2)
+        .map(|view| cpu_storage(OP, *view))
+        .transpose()?;
+    match (param, grad, velocity) {
+        (CpuStorage::F16(p), CpuStorage::F16(g), None) => {
+            let (p, v) = sgd_generic::<half::f16>(
+                p,
+                inputs[0].layout(),
+                g,
+                inputs[1].layout(),
+                None,
+                *lr as f32,
+                *momentum as f32,
+                *weight_decay as f32,
+            );
+            let mut out = vec![Storage::Cpu(CpuStorage::F16(Arc::new(p)))];
+            if let Some(v) = v {
+                out.push(Storage::Cpu(CpuStorage::F32(Arc::new(v))));
+            }
+            Ok(out)
+        }
+        (CpuStorage::BF16(p), CpuStorage::BF16(g), None) => {
+            let (p, v) = sgd_generic::<half::bf16>(
+                p,
+                inputs[0].layout(),
+                g,
+                inputs[1].layout(),
+                None,
+                *lr as f32,
+                *momentum as f32,
+                *weight_decay as f32,
+            );
+            let mut out = vec![Storage::Cpu(CpuStorage::BF16(Arc::new(p)))];
+            if let Some(v) = v {
+                out.push(Storage::Cpu(CpuStorage::F32(Arc::new(v))));
+            }
+            Ok(out)
+        }
+        (CpuStorage::F32(p), CpuStorage::F32(g), v) => {
+            let v = match v {
+                Some(CpuStorage::F32(v)) => Some((v.as_slice(), inputs[2].layout())),
+                None => None,
+                _ => unreachable!("state dtype validated"),
+            };
+            let (p, v) = sgd_generic::<f32>(
+                p,
+                inputs[0].layout(),
+                g,
+                inputs[1].layout(),
+                v,
+                *lr as f32,
+                *momentum as f32,
+                *weight_decay as f32,
+            );
+            let mut out = vec![Storage::Cpu(CpuStorage::F32(Arc::new(p)))];
+            if let Some(v) = v {
+                out.push(Storage::Cpu(CpuStorage::F32(Arc::new(v))));
+            }
+            Ok(out)
+        }
+        (CpuStorage::F64(p), CpuStorage::F64(g), v) => {
+            let v = match v {
+                Some(CpuStorage::F64(v)) => Some((v.as_slice(), inputs[2].layout())),
+                None => None,
+                _ => unreachable!("state dtype validated"),
+            };
+            let (p, v) = sgd_generic::<f64>(
+                p,
+                inputs[0].layout(),
+                g,
+                inputs[1].layout(),
+                v,
+                *lr,
+                *momentum,
+                *weight_decay,
+            );
+            let mut out = vec![Storage::Cpu(CpuStorage::F64(Arc::new(p)))];
+            if let Some(v) = v {
+                out.push(Storage::Cpu(CpuStorage::F64(Arc::new(v))));
+            }
+            Ok(out)
+        }
+        (CpuStorage::F16(p), CpuStorage::F16(g), Some(CpuStorage::F32(v))) => {
+            let (p, v) = sgd_generic::<half::f16>(
+                p,
+                inputs[0].layout(),
+                g,
+                inputs[1].layout(),
+                Some((v, inputs[2].layout())),
+                *lr as f32,
+                *momentum as f32,
+                *weight_decay as f32,
+            );
+            let Some(v) = v else {
+                return Err(Error::InvalidArg {
+                    op: OP,
+                    msg: "a velocity input requires non-zero momentum".to_owned(),
+                });
+            };
+            Ok(vec![
+                Storage::Cpu(CpuStorage::F16(Arc::new(p))),
+                Storage::Cpu(CpuStorage::F32(Arc::new(v))),
+            ])
+        }
+        (CpuStorage::BF16(p), CpuStorage::BF16(g), Some(CpuStorage::F32(v))) => {
+            let (p, v) = sgd_generic::<half::bf16>(
+                p,
+                inputs[0].layout(),
+                g,
+                inputs[1].layout(),
+                Some((v, inputs[2].layout())),
+                *lr as f32,
+                *momentum as f32,
+                *weight_decay as f32,
+            );
+            let Some(v) = v else {
+                return Err(Error::InvalidArg {
+                    op: OP,
+                    msg: "a velocity input requires non-zero momentum".to_owned(),
+                });
+            };
+            Ok(vec![
+                Storage::Cpu(CpuStorage::BF16(Arc::new(p))),
+                Storage::Cpu(CpuStorage::F32(Arc::new(v))),
+            ])
+        }
+        _ => unreachable!("parameter, gradient, and state dtypes validated"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sgd_generic<E: Element>(
+    param: &[E],
+    param_layout: &Layout,
+    grad: &[E],
+    grad_layout: &Layout,
+    velocity: Option<(&[E::Acc], &Layout)>,
+    lr: E::Acc,
+    momentum: E::Acc,
+    weight_decay: E::Acc,
+) -> (Vec<E>, Option<Vec<E::Acc>>)
+where
+    E::Acc: FloatAcc,
+{
+    let use_momentum = momentum != E::Acc::ZERO;
+    let mut next_param = Vec::with_capacity(param_layout.num_elements());
+    let mut next_velocity = use_momentum.then(|| Vec::with_capacity(param_layout.num_elements()));
+    for logical in 0..param_layout.num_elements() {
+        let p = param[offset_for_linear(param_layout, logical)].to_acc();
+        let grad = grad[offset_for_linear(grad_layout, logical)].to_acc();
+        let g = if weight_decay != E::Acc::ZERO {
+            grad + p * weight_decay
+        } else {
+            grad
+        };
+        let direction = if let Some((values, layout)) = velocity {
+            values[offset_for_linear(layout, logical)] * momentum + g
+        } else {
+            g
+        };
+        if let Some(values) = &mut next_velocity {
+            values.push(direction);
+        }
+        next_param.push(E::from_acc(p - direction * lr));
+    }
+    (next_param, next_velocity)
+}
+
+fn adam_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
+    const OP: &str = "fused_adam_step";
+    require_encoding(OP, inputs, 4, scalars, 8)?;
+    validate_optimizer_views(OP, inputs, 2)?;
+    let [
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        correction1,
+        correction2,
+        decoupled,
+    ] = scalars
+    else {
+        unreachable!("arity validated")
+    };
+    validate_adam_scalars(OP, scalars, inputs[0].dtype())?;
+    let p = cpu_storage(OP, inputs[0])?;
+    let g = cpu_storage(OP, inputs[1])?;
+    let m = cpu_storage(OP, inputs[2])?;
+    let v = cpu_storage(OP, inputs[3])?;
+
+    macro_rules! run {
+        ($element:ty, $p:expr, $g:expr, $m:expr, $v:expr, $variant:ident, $acc_variant:ident, $cast:ty) => {{
+            let (p, m, v) = adam_generic::<$element>(
+                $p,
+                inputs[0].layout(),
+                $g,
+                inputs[1].layout(),
+                $m,
+                inputs[2].layout(),
+                $v,
+                inputs[3].layout(),
+                *lr as $cast,
+                *beta1 as $cast,
+                (1.0 - *beta1) as $cast,
+                *beta2 as $cast,
+                (1.0 - *beta2) as $cast,
+                *eps as $cast,
+                *weight_decay as $cast,
+                *correction1 as $cast,
+                *correction2 as $cast,
+                (1.0 - *lr * *weight_decay) as $cast,
+                *decoupled == 1.0,
+            );
+            Ok(vec![
+                Storage::Cpu(CpuStorage::$variant(Arc::new(p))),
+                Storage::Cpu(CpuStorage::$acc_variant(Arc::new(m))),
+                Storage::Cpu(CpuStorage::$acc_variant(Arc::new(v))),
+            ])
+        }};
+    }
+    match (p, g, m, v) {
+        (CpuStorage::F16(p), CpuStorage::F16(g), CpuStorage::F32(m), CpuStorage::F32(v)) => {
+            run!(half::f16, p, g, m, v, F16, F32, f32)
+        }
+        (CpuStorage::BF16(p), CpuStorage::BF16(g), CpuStorage::F32(m), CpuStorage::F32(v)) => {
+            run!(half::bf16, p, g, m, v, BF16, F32, f32)
+        }
+        (CpuStorage::F32(p), CpuStorage::F32(g), CpuStorage::F32(m), CpuStorage::F32(v)) => {
+            run!(f32, p, g, m, v, F32, F32, f32)
+        }
+        (CpuStorage::F64(p), CpuStorage::F64(g), CpuStorage::F64(m), CpuStorage::F64(v)) => {
+            run!(f64, p, g, m, v, F64, F64, f64)
+        }
+        _ => unreachable!("parameter, gradient, and state dtypes validated"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adam_generic<E: Element>(
+    param: &[E],
+    param_layout: &Layout,
+    grad: &[E],
+    grad_layout: &Layout,
+    m: &[E::Acc],
+    m_layout: &Layout,
+    v: &[E::Acc],
+    v_layout: &Layout,
+    lr: E::Acc,
+    beta1: E::Acc,
+    one_minus_beta1: E::Acc,
+    beta2: E::Acc,
+    one_minus_beta2: E::Acc,
+    eps: E::Acc,
+    weight_decay: E::Acc,
+    correction1: E::Acc,
+    correction2: E::Acc,
+    decoupled_scale: E::Acc,
+    decoupled: bool,
+) -> (Vec<E>, Vec<E::Acc>, Vec<E::Acc>)
+where
+    E::Acc: FloatAcc,
+{
+    let mut next_param = Vec::with_capacity(param_layout.num_elements());
+    let mut next_m = Vec::with_capacity(param_layout.num_elements());
+    let mut next_v = Vec::with_capacity(param_layout.num_elements());
+    for logical in 0..param_layout.num_elements() {
+        let p = param[offset_for_linear(param_layout, logical)].to_acc();
+        let mut g = grad[offset_for_linear(grad_layout, logical)].to_acc();
+        if weight_decay != E::Acc::ZERO && !decoupled {
+            g = g + p * weight_decay;
+        }
+        let m = m[offset_for_linear(m_layout, logical)] * beta1 + g * one_minus_beta1;
+        let v = v[offset_for_linear(v_layout, logical)] * beta2 + (g * g) * one_minus_beta2;
+        let direction = (m / correction1) / ((v / correction2).sqrt() + eps);
+        let mut next = p;
+        if weight_decay != E::Acc::ZERO && decoupled {
+            next = next * decoupled_scale;
+        }
+        next = next - direction * lr;
+        next_param.push(E::from_acc(next));
+        next_m.push(m);
+        next_v.push(v);
+    }
+    (next_param, next_m, next_v)
+}
+
+fn offset_for_linear(layout: &Layout, mut logical: usize) -> usize {
+    let mut offset = layout.offset();
+    for (&dim, &stride) in layout.dims().iter().zip(layout.strides()).rev() {
+        if dim != 0 {
+            offset += (logical % dim) * stride;
+            logical /= dim;
+        }
+    }
+    offset
 }
 
 fn softmax(inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
@@ -288,6 +605,181 @@ fn row_base(layout: &Layout, row: usize) -> usize {
     base
 }
 
+fn validate_optimizer_views(
+    op: &'static str,
+    inputs: &[View<'_>],
+    parameter_inputs: usize,
+) -> Result<()> {
+    let param = inputs[0];
+    require_float(op, param)?;
+    let acc_dtype = match param.dtype() {
+        DType::F16 | DType::BF16 => DType::F32,
+        dtype => dtype,
+    };
+    for (index, &input) in inputs.iter().enumerate() {
+        if input.device() != param.device() {
+            return Err(Error::DeviceMismatch {
+                op,
+                expected: param.device(),
+                got: input.device(),
+            });
+        }
+        let expected = if index < parameter_inputs {
+            param.dtype()
+        } else {
+            acc_dtype
+        };
+        if input.dtype() != expected {
+            return Err(Error::DTypeMismatch {
+                op,
+                expected,
+                got: input.dtype(),
+            });
+        }
+        if input.layout().shape() != param.layout().shape() {
+            return Err(Error::ShapeMismatch {
+                op,
+                lhs: param.layout().shape().clone(),
+                rhs: input.layout().shape().clone(),
+            });
+        }
+        validate_view(op, input)?;
+    }
+    Ok(())
+}
+
+fn validate_sgd_scalars(
+    op: &'static str,
+    lr: f64,
+    momentum: f64,
+    weight_decay: f64,
+    dtype: DType,
+) -> Result<()> {
+    validate_nonnegative(op, "lr", lr, dtype)?;
+    validate_unit_interval(op, "momentum", momentum, false, dtype)?;
+    validate_nonnegative(op, "weight_decay", weight_decay, dtype)
+}
+
+fn validate_adam_scalars(op: &'static str, scalars: &[f64], dtype: DType) -> Result<()> {
+    let [
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        correction1,
+        correction2,
+        decoupled,
+    ] = scalars
+    else {
+        unreachable!("arity validated")
+    };
+    validate_nonnegative(op, "lr", *lr, dtype)?;
+    validate_unit_interval(op, "beta1", *beta1, false, dtype)?;
+    validate_unit_interval(op, "beta2", *beta2, false, dtype)?;
+    validate_positive(op, "eps", *eps, dtype)?;
+    validate_nonnegative(op, "weight_decay", *weight_decay, dtype)?;
+    validate_unit_interval(op, "bias_correction1", *correction1, true, dtype)?;
+    validate_unit_interval(op, "bias_correction2", *correction2, true, dtype)?;
+    if !(*decoupled == 0.0 || *decoupled == 1.0) {
+        return Err(Error::InvalidArg {
+            op,
+            msg: format!("decoupled must be encoded as 0 or 1, got {decoupled}"),
+        });
+    }
+    if *decoupled == 1.0 {
+        validate_effective(
+            op,
+            "1 - lr * weight_decay",
+            1.0 - *lr * *weight_decay,
+            dtype,
+            |_| true,
+            "finite",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_nonnegative(op: &'static str, name: &str, value: f64, dtype: DType) -> Result<()> {
+    validate_effective(
+        op,
+        name,
+        value,
+        dtype,
+        |x| x >= 0.0,
+        "finite and non-negative",
+    )
+}
+
+fn validate_positive(op: &'static str, name: &str, value: f64, dtype: DType) -> Result<()> {
+    validate_effective(op, name, value, dtype, |x| x > 0.0, "finite and positive")
+}
+
+fn validate_unit_interval(
+    op: &'static str,
+    name: &str,
+    value: f64,
+    include_zero: bool,
+    dtype: DType,
+) -> Result<()> {
+    let valid = |x: f64| {
+        if include_zero {
+            x > 0.0 && x <= 1.0
+        } else {
+            (0.0..1.0).contains(&x)
+        }
+    };
+    let expected = if include_zero {
+        "in (0, 1]"
+    } else {
+        "in [0, 1)"
+    };
+    validate_effective(op, name, value, dtype, valid, expected)
+}
+
+fn validate_effective(
+    op: &'static str,
+    name: &str,
+    value: f64,
+    dtype: DType,
+    valid: impl Fn(f64) -> bool,
+    expected: &str,
+) -> Result<()> {
+    let effective = effective_scalar(value, dtype);
+    if !value.is_finite() || !effective.is_finite() || !valid(effective) {
+        return Err(Error::InvalidArg {
+            op,
+            msg: format!("{name} must be {expected} in the accumulation dtype, got {value}"),
+        });
+    }
+    Ok(())
+}
+
+fn effective_scalar(value: f64, dtype: DType) -> f64 {
+    if dtype == DType::F64 {
+        value
+    } else {
+        f64::from(value as f32)
+    }
+}
+
+fn invalid_encoding<T>(
+    op: &'static str,
+    inputs: &[View<'_>],
+    scalars: &[f64],
+    input_count: &str,
+    scalar_count: usize,
+) -> Result<T> {
+    Err(Error::InvalidArg {
+        op,
+        msg: format!(
+            "expected {input_count} input(s) and {scalar_count} scalar(s), got {} and {}",
+            inputs.len(),
+            scalars.len()
+        ),
+    })
+}
+
 fn require_encoding(
     op: &'static str,
     inputs: &[View<'_>],
@@ -377,14 +869,6 @@ fn validate_view(op: &'static str, view: View<'_>) -> Result<()> {
         });
     }
     Ok(())
-}
-
-fn unsupported<T>(op: &'static str, inputs: &[View<'_>]) -> Result<T> {
-    Err(Error::Unsupported {
-        op,
-        device: inputs.first().map_or(Device::Cpu, View::device),
-        dtype: inputs.first().map_or(DType::F32, View::dtype),
-    })
 }
 
 #[cfg_attr(not(feature = "metal"), allow(unused_variables))]
@@ -523,7 +1007,171 @@ mod tests {
     }
 
     #[test]
-    fn invalid_encodings_and_unsupported_variants_are_loud() {
+    fn sgd_matches_scalar_reference_for_strided_coupled_decay() {
+        let param_values = Arc::new(vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
+        let grad_values = Arc::new(vec![0.5, 5.0, -1.0, 6.0, 2.0, 7.0]);
+        let param = Storage::Cpu(CpuStorage::F32(param_values.clone()));
+        let grad = Storage::Cpu(CpuStorage::F32(grad_values.clone()));
+        let layout = Layout::contiguous([3, 2]).unwrap().transpose(0, 1).unwrap();
+        let got = values(
+            fused(
+                FusedOp::SgdStep,
+                &[View::new(&param, &layout), View::new(&grad, &layout)],
+                &[0.1, 0.0, 0.2],
+            )
+            .unwrap()
+            .remove(0),
+        );
+        let logical_param = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0];
+        let logical_grad = [0.5, -1.0, 2.0, 5.0, 6.0, 7.0];
+        let expected: Vec<_> = logical_param
+            .iter()
+            .zip(logical_grad)
+            .map(|(&p, g)| p - (g + p * 0.2) * 0.1)
+            .collect();
+        close(&got, &expected);
+        assert_eq!(param_values.as_slice(), &[1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
+        assert_eq!(grad_values.as_slice(), &[0.5, 5.0, -1.0, 6.0, 2.0, 7.0]);
+    }
+
+    #[test]
+    fn sgd_first_and_later_momentum_steps_preserve_wide_half_velocity() {
+        let param = Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::from_f32(2048.0)])));
+        let grad = Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::from_f32(1.0)])));
+        let layout = Layout::contiguous([1]).unwrap();
+        let first = fused(
+            FusedOp::SgdStep,
+            &[View::new(&param, &layout), View::new(&grad, &layout)],
+            &[0.0, 0.999, 0.0],
+        )
+        .unwrap();
+        assert_eq!(first.len(), 2);
+        let Storage::Cpu(CpuStorage::F32(first_velocity)) = &first[1] else {
+            panic!("expected wide f32 velocity")
+        };
+        assert_eq!(first_velocity.as_slice(), &[1.0]);
+
+        let velocity = Storage::Cpu(CpuStorage::F32(Arc::new(vec![2048.0])));
+        let later = fused(
+            FusedOp::SgdStep,
+            &[
+                View::new(&param, &layout),
+                View::new(&grad, &layout),
+                View::new(&velocity, &layout),
+            ],
+            &[0.0, 0.999, 0.0],
+        )
+        .unwrap();
+        let Storage::Cpu(CpuStorage::F32(next_velocity)) = &later[1] else {
+            panic!("expected wide f32 velocity")
+        };
+        let expected = 2048.0f32 * 0.999 + 1.0;
+        assert_eq!(next_velocity[0], expected);
+        assert_ne!(next_velocity[0], half::f16::from_f32(expected).to_f32());
+    }
+
+    #[test]
+    fn adam_and_adamw_match_scalar_reference_with_strided_state() {
+        let param = storage(vec![1.0, 10.0, -2.0, 20.0]);
+        let grad = storage(vec![0.5, 5.0, -0.25, 6.0]);
+        let m = storage(vec![0.1, 1.0, -0.2, 2.0]);
+        let v = storage(vec![0.3, 3.0, 0.4, 4.0]);
+        let layout = Layout::contiguous([2, 2]).unwrap().transpose(0, 1).unwrap();
+        let lr = 0.01f32;
+        let beta1 = 0.9f32;
+        let beta2 = 0.99f32;
+        let eps = 1e-6f32;
+        let decay = 0.1f32;
+        let correction1 = 0.19f32;
+        let correction2 = 0.0199f32;
+        for decoupled in [false, true] {
+            let outputs = fused(
+                FusedOp::AdamStep,
+                &[
+                    View::new(&param, &layout),
+                    View::new(&grad, &layout),
+                    View::new(&m, &layout),
+                    View::new(&v, &layout),
+                ],
+                &[
+                    f64::from(lr),
+                    f64::from(beta1),
+                    f64::from(beta2),
+                    f64::from(eps),
+                    f64::from(decay),
+                    f64::from(correction1),
+                    f64::from(correction2),
+                    f64::from(u8::from(decoupled)),
+                ],
+            )
+            .unwrap();
+            let got_p = values(outputs[0].clone());
+            let got_m = values(outputs[1].clone());
+            let got_v = values(outputs[2].clone());
+            let ps = [1.0f32, -2.0, 10.0, 20.0];
+            let gs = [0.5f32, -0.25, 5.0, 6.0];
+            let ms = [0.1f32, -0.2, 1.0, 2.0];
+            let vs = [0.3f32, 0.4, 3.0, 4.0];
+            for i in 0..ps.len() {
+                let g = if decoupled {
+                    gs[i]
+                } else {
+                    gs[i] + ps[i] * decay
+                };
+                let next_m = ms[i] * beta1 + g * (1.0 - beta1);
+                let next_v = vs[i] * beta2 + (g * g) * (1.0 - beta2);
+                let direction = (next_m / correction1) / ((next_v / correction2).sqrt() + eps);
+                let mut next_p = ps[i];
+                if decoupled {
+                    next_p *= 1.0 - lr * decay;
+                }
+                next_p -= direction * lr;
+                assert_eq!(got_m[i], next_m);
+                assert_eq!(got_v[i], next_v);
+                assert_eq!(got_p[i], next_p);
+            }
+        }
+    }
+
+    #[test]
+    fn optimizer_kernels_support_bf16_and_f64_parameters() {
+        let layout = Layout::contiguous([2]).unwrap();
+        let bf16 = |values: &[f32]| {
+            Storage::Cpu(CpuStorage::BF16(Arc::new(
+                values.iter().copied().map(half::bf16::from_f32).collect(),
+            )))
+        };
+        let p = bf16(&[1.0, -2.0]);
+        let g = bf16(&[0.5, -0.25]);
+        let bf16_out = fused(
+            FusedOp::SgdStep,
+            &[View::new(&p, &layout), View::new(&g, &layout)],
+            &[0.1, 0.0, 0.0],
+        )
+        .unwrap();
+        assert!(matches!(bf16_out[0], Storage::Cpu(CpuStorage::BF16(_))));
+
+        let f64_storage = |values: Vec<f64>| Storage::Cpu(CpuStorage::F64(Arc::new(values)));
+        let p = f64_storage(vec![1.0, -2.0]);
+        let g = f64_storage(vec![0.5, -0.25]);
+        let m = f64_storage(vec![0.0, 0.0]);
+        let v = f64_storage(vec![0.0, 0.0]);
+        let f64_out = fused(
+            FusedOp::AdamStep,
+            &[
+                View::new(&p, &layout),
+                View::new(&g, &layout),
+                View::new(&m, &layout),
+                View::new(&v, &layout),
+            ],
+            &[0.1, 0.9, 0.999, 1e-8, 0.0, 0.1, 0.001, 0.0],
+        )
+        .unwrap();
+        assert!(matches!(f64_out[0], Storage::Cpu(CpuStorage::F64(_))));
+    }
+
+    #[test]
+    fn optimizer_invalid_encodings_hyperparameters_and_metadata_are_structured() {
         let x = storage(vec![1.0, 2.0]);
         let layout = Layout::contiguous([2]).unwrap();
         let view = View::new(&x, &layout);
@@ -536,15 +1184,88 @@ mod tests {
         ));
         assert!(matches!(
             fused(FusedOp::SgdStep, &[view], &[]),
-            Err(Error::Unsupported {
+            Err(Error::InvalidArg {
                 op: "fused_sgd_step",
                 ..
             })
         ));
         assert!(matches!(
             fused(FusedOp::AdamStep, &[view], &[]),
-            Err(Error::Unsupported {
+            Err(Error::InvalidArg {
                 op: "fused_adam_step",
+                ..
+            })
+        ));
+
+        let wrong_shape = Layout::contiguous([1, 2]).unwrap();
+        assert!(matches!(
+            fused(
+                FusedOp::SgdStep,
+                &[view, View::new(&x, &wrong_shape)],
+                &[0.1, 0.0, 0.0]
+            ),
+            Err(Error::ShapeMismatch { .. })
+        ));
+        let f64_grad = Storage::Cpu(CpuStorage::F64(Arc::new(vec![1.0, 2.0])));
+        assert!(matches!(
+            fused(
+                FusedOp::SgdStep,
+                &[view, View::new(&f64_grad, &layout)],
+                &[0.1, 0.0, 0.0]
+            ),
+            Err(Error::DTypeMismatch { .. })
+        ));
+        assert!(matches!(
+            fused(FusedOp::SgdStep, &[view, view], &[f64::NAN, 0.0, 0.0]),
+            Err(Error::InvalidArg { .. })
+        ));
+        assert!(matches!(
+            fused(FusedOp::SgdStep, &[view, view], &[0.1, 1.0, 0.0]),
+            Err(Error::InvalidArg { .. })
+        ));
+        let half = Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::ZERO; 2])));
+        let velocity = storage(vec![0.0, 0.0]);
+        assert!(matches!(
+            fused(
+                FusedOp::SgdStep,
+                &[
+                    View::new(&half, &layout),
+                    View::new(&half, &layout),
+                    View::new(&velocity, &layout),
+                ],
+                &[0.1, f64::MIN_POSITIVE, 0.0]
+            ),
+            Err(Error::InvalidArg { .. })
+        ));
+        let zero = storage(vec![0.0, 0.0]);
+        assert!(matches!(
+            fused(
+                FusedOp::AdamStep,
+                &[
+                    view,
+                    view,
+                    View::new(&zero, &layout),
+                    View::new(&zero, &layout)
+                ],
+                &[0.1, 0.9, 0.999, 0.0, 0.0, 0.1, 0.001, 2.0]
+            ),
+            Err(Error::InvalidArg { .. })
+        ));
+
+        assert!(matches!(
+            fused(
+                FusedOp::AdamStep,
+                &[
+                    View::new(&half, &layout),
+                    View::new(&half, &layout),
+                    View::new(&half, &layout),
+                    View::new(&half, &layout),
+                ],
+                &[0.1, 0.9, 0.999, 1e-8, 0.0, 0.1, 0.001, 0.0]
+            ),
+            Err(Error::DTypeMismatch {
+                expected: DType::F32,
+                got: DType::F16,
                 ..
             })
         ));
