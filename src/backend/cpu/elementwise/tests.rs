@@ -37,7 +37,7 @@ impl Prng {
 fn out_slice<E: TypedSlice>(storage: &Storage) -> Vec<E> {
     match storage {
         Storage::Cpu(cpu) => E::slice(cpu, "test").unwrap().to_vec(),
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         _ => panic!("non-cpu storage in cpu test"),
     }
 }

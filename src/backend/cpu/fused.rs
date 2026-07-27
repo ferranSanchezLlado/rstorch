@@ -1118,11 +1118,14 @@ fn validate_view(op: &'static str, view: View<'_>) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "metal"), allow(unused_variables))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(unused_variables)
+)]
 fn cpu_storage<'a>(op: &'static str, view: View<'a>) -> Result<&'a CpuStorage> {
     match view.storage() {
         Storage::Cpu(storage) => Ok(storage),
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         Storage::Metal(_) => Err(Error::Unsupported {
             op,
             device: view.device(),

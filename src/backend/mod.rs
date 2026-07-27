@@ -39,6 +39,8 @@
 // against the CPU reference (`conformance::run`).
 pub(crate) mod conformance;
 pub(crate) mod cpu;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub(crate) mod metal;
 // T10b: the rayon parallelism switch, compiled only under the `rayon`
 // feature (kernels fall back to sequential loops otherwise).
 #[cfg(feature = "rayon")]
@@ -286,6 +288,17 @@ pub(crate) trait BackendOps: Send + Sync {
     /// `reshape`).
     fn copy_strided(&self, x: View<'_>) -> Result<Storage>;
 
+    /// Copy `src` into an equally shaped region of an existing destination.
+    /// This construction-only primitive is the device-resident assembly path
+    /// for `cat` and `stack`; callers do not publish `dst` until all copies
+    /// have been encoded.
+    fn copy_into(
+        &self,
+        src: View<'_>,
+        dst: &mut Storage,
+        dst_layout: &crate::layout::Layout,
+    ) -> Result<()>;
+
     /// Allocate `len` elements of `dtype` filled with `value` (cast to the
     /// dtype; used by `zeros`/`ones`/`full`). `value` is a scalar carried as
     /// `f64` and narrowed by the kernel.
@@ -407,6 +420,14 @@ impl BackendOps for CpuBackend {
     fn copy_strided(&self, x: View<'_>) -> Result<Storage> {
         cpu::host::copy_strided(x)
     }
+    fn copy_into(
+        &self,
+        src: View<'_>,
+        dst: &mut Storage,
+        dst_layout: &crate::layout::Layout,
+    ) -> Result<()> {
+        cpu::host::copy_into(src, dst, dst_layout)
+    }
     fn full(&self, len: usize, dtype: DType, value: f64) -> Result<Storage> {
         cpu::host::full(len, dtype, value)
     }
@@ -489,8 +510,8 @@ pub(crate) mod dispatch {
     pub(crate) fn backend(device: Device) -> &'static dyn BackendOps {
         match device {
             Device::Cpu => &CPU,
-            #[cfg(feature = "metal")]
-            Device::Metal(_) => todo!("T61: Metal backend"),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Device::Metal(ordinal) => super::metal::backend(ordinal),
         }
     }
 }

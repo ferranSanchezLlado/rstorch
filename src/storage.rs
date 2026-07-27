@@ -62,11 +62,8 @@ impl CpuStorage {
     }
 }
 
-/// Placeholder for the Metal buffer type; T61 replaces this with the real
-/// device buffer + queue handle.
-#[cfg(feature = "metal")]
-#[derive(Clone)]
-pub(crate) struct MetalStorage;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub(crate) use crate::backend::metal::MetalStorage;
 
 /// A device-tagged element buffer.
 #[derive(Clone)]
@@ -74,7 +71,7 @@ pub(crate) enum Storage {
     /// Host memory, dtype-tagged.
     Cpu(CpuStorage),
     /// Metal device buffer (experimental; see the `metal` feature).
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(MetalStorage),
 }
 
@@ -83,8 +80,8 @@ impl Storage {
     pub(crate) fn dtype(&self) -> DType {
         match self {
             Storage::Cpu(s) => s.dtype(),
-            #[cfg(feature = "metal")]
-            Storage::Metal(_) => unimplemented!("T61: Metal storage dtype"),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Storage::Metal(s) => s.dtype(),
         }
     }
 
@@ -92,8 +89,8 @@ impl Storage {
     pub(crate) fn device(&self) -> Device {
         match self {
             Storage::Cpu(_) => Device::Cpu,
-            #[cfg(feature = "metal")]
-            Storage::Metal(_) => unimplemented!("T61: Metal storage device"),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Storage::Metal(s) => s.device(),
         }
     }
 
@@ -101,8 +98,8 @@ impl Storage {
     pub(crate) fn len(&self) -> usize {
         match self {
             Storage::Cpu(s) => s.len(),
-            #[cfg(feature = "metal")]
-            Storage::Metal(_) => unimplemented!("T61: Metal storage len"),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Storage::Metal(s) => s.len(),
         }
     }
 }

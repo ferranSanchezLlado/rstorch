@@ -19,7 +19,7 @@ use crate::storage::{CpuStorage, Storage};
 fn cpu_storage<'a>(x: &View<'a>) -> &'a CpuStorage {
     match x.storage() {
         Storage::Cpu(s) => s,
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         Storage::Metal(_) => {
             unreachable!("CPU backend received non-CPU storage; dispatcher invariant violated")
         }
@@ -267,6 +267,74 @@ pub(crate) fn copy_strided(x: View<'_>) -> Result<Storage> {
     Ok(Storage::Cpu(materialize_with!(x, copy_owned)))
 }
 
+fn copy_into_typed<T: Copy>(src: &[T], src_layout: &Layout, dst: &mut [T], dst_layout: &Layout) {
+    let len = src_layout.num_elements();
+    if len == 0 {
+        return;
+    }
+    if let (Some(from), Some(to)) = (dense_offset(src_layout), dense_offset(dst_layout)) {
+        dst[to..to + len].copy_from_slice(&src[from..from + len]);
+        return;
+    }
+    let mut walk = Walk::new(
+        src_layout.dims(),
+        [src_layout.strides(), dst_layout.strides()],
+        [src_layout.offset(), dst_layout.offset()],
+    );
+    for _ in 0..len {
+        dst[walk.index(1)] = src[walk.index(0)];
+        walk.step();
+    }
+}
+
+/// Device-independent destination-copy contract used by `cat`/`stack`.
+#[allow(clippy::infallible_destructuring_match)]
+pub(crate) fn copy_into(src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -> Result<()> {
+    if src.layout().shape() != dst_layout.shape() {
+        return Err(Error::ShapeMismatch {
+            op: "copy_into",
+            lhs: src.layout().shape().clone(),
+            rhs: dst_layout.shape().clone(),
+        });
+    }
+    if src.dtype() != dst.dtype() {
+        return Err(Error::DTypeMismatch {
+            op: "copy_into",
+            expected: src.dtype(),
+            got: dst.dtype(),
+        });
+    }
+    let src_layout = src.layout();
+    let src = cpu_storage(&src);
+    let dst = match dst {
+        Storage::Cpu(dst) => dst,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Storage::Metal(storage) => {
+            return Err(Error::DeviceMismatch {
+                op: "copy_into",
+                expected: crate::Device::Cpu,
+                got: storage.device(),
+            });
+        }
+    };
+    macro_rules! copy {
+        ($from:expr, $to:expr) => {{
+            let to = std::sync::Arc::make_mut($to);
+            copy_into_typed($from, src_layout, to.as_mut_slice(), dst_layout)
+        }};
+    }
+    match (src, dst) {
+        (CpuStorage::F16(from), CpuStorage::F16(to)) => copy!(from, to),
+        (CpuStorage::BF16(from), CpuStorage::BF16(to)) => copy!(from, to),
+        (CpuStorage::F32(from), CpuStorage::F32(to)) => copy!(from, to),
+        (CpuStorage::F64(from), CpuStorage::F64(to)) => copy!(from, to),
+        (CpuStorage::I64(from), CpuStorage::I64(to)) => copy!(from, to),
+        (CpuStorage::Bool(from), CpuStorage::Bool(to)) => copy!(from, to),
+        _ => unreachable!("copy_into dtype validated"),
+    }
+    Ok(())
+}
+
 /// See [`BackendOps::full`](crate::backend::BackendOps::full).
 pub(crate) fn full(len: usize, dtype: DType, value: f64) -> Result<Storage> {
     let storage = match dtype {
@@ -492,7 +560,7 @@ mod tests {
     fn cpu(storage: &Storage) -> &CpuStorage {
         match storage {
             Storage::Cpu(s) => s,
-            #[cfg(feature = "metal")]
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             _ => panic!("expected CPU storage"),
         }
     }

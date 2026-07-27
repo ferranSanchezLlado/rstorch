@@ -41,9 +41,7 @@ use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
-use crate::storage::CpuStorage;
 use crate::tensor::Tensor;
-use std::sync::Arc;
 
 /// Re-view `t`'s storage through `layout`, producing an **untraced** tensor.
 /// The value-level half of every zero-copy op here; the caller wraps the
@@ -61,36 +59,9 @@ fn view_of(t: &Tensor, layout: Layout) -> Tensor {
 /// the parts' sizes along it. For `stack`, `insert_axis` makes that axis an
 /// implicit size-1 dimension in every part. `parts` must be non-empty.
 ///
-/// Each part is materialized in row-major order through the backend's host
-/// interchange format (`transfer_out`) and the regions are interleaved into
-/// one buffer that is uploaded once (`transfer_in`). Viewing the geometry as
-/// `[outer, size_k, inner]` per part, the output is `outer` groups of one
-/// `size_k * inner` block per part, in part order. Stack passes its original
-/// inputs directly, avoiding temporary unsqueezed layouts and tensors.
-///
-/// # Cost
-///
-/// Every element move here is an `extend_from_slice` of a whole
-/// `size_k * inner` block, never a per-element copy. The one cost that used to
-/// sit in front of it — `transfer_out` gathering each part element by element,
-/// even a dense one — is gone: the CPU backend now hands back a shared `Arc`
-/// for a part that already is its whole buffer in order, so for the common case
-/// (`stack`/`cat` of freshly built tensors) the per-part materialization is an
-/// `Arc` bump and the only copy is the output assembly. Measured: 32 parts of
-/// 64 `f32` cost ~0.11 µs in `transfer_out` and ~0.74 µs for the whole `cat`,
-/// against ~0.20 µs for a bare 8 KB `Vec` copy.
-///
-/// # Why this shape and not a device-side region copy
-///
-/// The backend contract has no "write into an existing buffer" entry point
-/// (`copy_strided` allocates its result), so with today's frozen trait this
-/// is the only way to express `cat` without inventing one. On CPU that costs
-/// what a hand-written kernel would: `transfer_out` is the row-major
-/// materialization the copy kernels perform (sharing where it can) and
-/// `transfer_in` wraps the buffer — so the CPU path is not a "fallback" but
-/// the implementation. For an accelerator backend it *would* be a host round
-/// trip, which is why the `BackendOps` docs already earmark a crate-private
-/// `copy_into` primitive for T61; when it lands, only this function changes.
+/// Assembly uses the backend's construction-only `copy_into` primitive, so
+/// accelerator tensors never cross a host boundary. CPU's implementation
+/// retains dense slice-copy fast paths.
 fn concat_values(
     parts: &[&Tensor],
     axis: usize,
@@ -107,50 +78,20 @@ fn concat_values(
         return Ok(Tensor::from_parts(backend.full(0, dtype, 0.0)?, layout));
     }
 
-    let outer: usize = out_dims[..axis].iter().product();
-    let inner: usize = out_dims[axis + 1..].iter().product();
-    let sizes: Vec<usize> = if insert_axis {
-        vec![1; parts.len()]
-    } else {
-        parts.iter().map(|t| t.dims()[axis]).collect()
-    };
-    let blocks = parts
-        .iter()
-        .map(|t| backend.transfer_out(t.view()))
-        .collect::<Result<Vec<CpuStorage>>>()?;
-
-    // One arm per dtype; every block carries the dtype the caller validated,
-    // so the inner match is total in practice.
-    macro_rules! assemble {
-        ($variant:ident) => {{
-            let mut slices = Vec::with_capacity(blocks.len());
-            for block in &blocks {
-                match block {
-                    CpuStorage::$variant(data) => slices.push(data.as_slice()),
-                    _ => unreachable!("cat: every block carries the validated dtype"),
-                }
-            }
-            let mut out = Vec::with_capacity(total);
-            for group in 0..outer {
-                for (data, &size) in slices.iter().zip(sizes.iter()) {
-                    let chunk = size * inner;
-                    let start = group * chunk;
-                    out.extend_from_slice(&data[start..start + chunk]);
-                }
-            }
-            CpuStorage::$variant(Arc::new(out))
-        }};
+    let mut storage = backend.full(total, dtype, 0.0)?;
+    let mut start = 0;
+    for part in parts {
+        let size = if insert_axis { 1 } else { part.dims()[axis] };
+        let region = layout.narrow(axis, start, size)?;
+        let region = if insert_axis {
+            region.squeeze(axis)?
+        } else {
+            region
+        };
+        backend.copy_into(part.view(), &mut storage, &region)?;
+        start += size;
     }
-
-    let host = match dtype {
-        DType::F16 => assemble!(F16),
-        DType::BF16 => assemble!(BF16),
-        DType::F32 => assemble!(F32),
-        DType::F64 => assemble!(F64),
-        DType::I64 => assemble!(I64),
-        DType::Bool => assemble!(Bool),
-    };
-    Ok(Tensor::from_parts(backend.transfer_in(host)?, layout))
+    Ok(Tensor::from_parts(storage, layout))
 }
 
 /// The backward of [`Tensor::narrow`]: place the cotangent `g` of the
@@ -589,7 +530,7 @@ impl Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::Storage;
+    use crate::storage::{CpuStorage, Storage};
     use crate::testing::check_grad;
 
     const CPU: Device = Device::Cpu;

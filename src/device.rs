@@ -16,7 +16,7 @@ pub enum Device {
     Cpu,
     /// Apple Metal GPU, identified by device ordinal. Experimental until
     /// the T61 conformance + performance gate passes.
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(usize),
 }
 
@@ -40,7 +40,7 @@ impl std::fmt::Display for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Device::Cpu => f.write_str("cpu"),
-            #[cfg(feature = "metal")]
+            #[cfg(all(feature = "metal", target_os = "macos"))]
             Device::Metal(idx) => write!(f, "metal:{idx}"),
         }
     }

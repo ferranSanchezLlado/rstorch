@@ -336,11 +336,14 @@ pub(crate) fn arg_reduce(op: ArgReduceOp, x: View<'_>, axis: usize) -> Result<St
 /// unsupported on a non-CPU device (a Metal view never reaches a CPU kernel
 /// in practice; this keeps the match total without an `unimplemented!`).
 // `op` is only read by the `metal`-gated arm; on a CPU-only build it is unused.
-#[cfg_attr(not(feature = "metal"), allow(unused_variables))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(unused_variables)
+)]
 fn cpu_storage<'a>(x: View<'a>, op: &'static str) -> Result<&'a CpuStorage> {
     match x.storage() {
         Storage::Cpu(s) => Ok(s),
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         Storage::Metal(_) => Err(Error::Unsupported {
             op,
             device: x.device(),

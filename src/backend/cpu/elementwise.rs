@@ -345,7 +345,7 @@ where
 {
     match storage {
         Storage::Cpu(cpu) => E::slice(cpu, op),
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         _ => Err(Error::Backend {
             op,
             msg: "cpu elementwise kernel received non-cpu storage".into(),

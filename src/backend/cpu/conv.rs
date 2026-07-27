@@ -443,11 +443,14 @@ fn narrow_all<E: Element>(acc: Vec<E::Acc>) -> Vec<E> {
 /// Borrow the [`CpuStorage`] behind a CPU view, or report the op as
 /// unsupported on a non-CPU device (no silent host round-trip).
 // `op` is only read by the `metal`-gated arm; on a CPU-only build it is unused.
-#[cfg_attr(not(feature = "metal"), allow(unused_variables))]
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(unused_variables)
+)]
 fn cpu_storage<'a>(op: &'static str, x: View<'a>) -> Result<&'a CpuStorage> {
     match x.storage() {
         Storage::Cpu(s) => Ok(s),
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         Storage::Metal(_) => Err(Error::Unsupported {
             op,
             device: x.device(),
