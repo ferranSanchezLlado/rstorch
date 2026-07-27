@@ -12,11 +12,21 @@
 //!   [`Layout::offset`](crate::layout::Layout::offset), so transposed,
 //!   narrowed, and broadcast inputs are read in place. Outputs are freshly
 //!   allocated, dense, row-major buffers.
-//! - **One coordinate walk.** All four kernels are the same loop: decode a
-//!   row-major logical position into per-axis coordinates, replace the
-//!   indexed axis's coordinate with a looked-up index, and address the other
-//!   side. [`place_values`] gives each axis its row-major place value, so the
-//!   decode is two integer ops per axis.
+//! - **One coordinate walk.** All four kernels are the same loop: advance a
+//!   row-major position, replace the indexed axis's coordinate with a
+//!   looked-up index, and address the other side. The walk is the shared
+//!   `super::host::Walk` odometer, which carries one running storage index per
+//!   side and advances it by strides — so no division runs per element.
+//!   [`place_values`] gives each axis of the (dense) output its row-major
+//!   place value, which is that side's stride vector.
+//! - **Whole rows at a time where the layout allows it.** When the axes
+//!   *inside* the indexed one are contiguous in storage, one index selects a
+//!   contiguous run of `Π dims[axis+1..]` elements, and that run is moved with
+//!   a single slice copy instead of one decode per element — an embedding
+//!   lookup or a `[batch, features]` gather becomes one `memcpy` per row.
+//!   `index_select`/`index_add` take that path; `gather`/`scatter_add` cannot
+//!   (their index grid picks per element, so the run is one element by
+//!   construction) and only get the division-free walk.
 //! - **Bounds first, work second.** The whole index buffer is read and
 //!   validated into `usize` positions *before* any element is touched: a bad
 //!   index is [`Error::IndexOutOfBounds`](crate::Error::IndexOutOfBounds)
@@ -28,6 +38,7 @@
 //!   so an `f16` embedding gradient with thousands of repeated rows does not
 //!   saturate (the v2 sum-saturation bug, fixed by contract).
 
+use super::host::{Walk, dense_offset};
 use crate::backend::View;
 use crate::device::Device;
 use crate::dtype::{DType, Element};
@@ -61,8 +72,8 @@ fn cpu_storage<'a>(x: View<'a>, op: &'static str) -> Result<&'a CpuStorage> {
 /// Row-major place values for `dims`: `place[a]` is the product of every
 /// dimension to the right of axis `a` (1 for the innermost axis).
 ///
-/// The coordinate of logical position `i` on axis `a` is then
-/// `(i / place[a]) % dims[a]` — the odometer decode every kernel below uses.
+/// These are exactly the strides of a dense row-major buffer of `dims`, so a
+/// kernel writing its output uses them as that side's stride vector.
 fn place_values(dims: &[usize]) -> Vec<usize> {
     let mut place = vec![1usize; dims.len()];
     for a in (0..dims.len().saturating_sub(1)).rev() {
@@ -71,26 +82,46 @@ fn place_values(dims: &[usize]) -> Vec<usize> {
     place
 }
 
-/// The storage index of logical (row-major) position `i` of `layout`, whose
-/// place values are `place`.
-#[inline]
-fn storage_index(layout: &Layout, place: &[usize], i: usize) -> usize {
-    let dims = layout.dims();
-    let strides = layout.strides();
-    let mut idx = layout.offset();
-    for a in 0..dims.len() {
-        idx += ((i / place[a]) % dims[a]) * strides[a];
+/// Number of elements one index selects in a single slice copy: the product of
+/// `dims[axis + 1..]` when those axes are contiguous in storage under
+/// `strides`, else `None`.
+///
+/// Size-1 axes are skipped (their only coordinate is 0, so their stride never
+/// contributes to an address), which is the same rule
+/// `super::host::dense_offset` applies to a whole view. A broadcast axis
+/// (stride 0, size > 1) inside the indexed one disqualifies the run.
+fn trailing_run(dims: &[usize], strides: &[usize], axis: usize) -> Option<usize> {
+    let mut run = 1usize;
+    for a in (axis + 1..dims.len()).rev() {
+        if dims[a] == 1 {
+            continue;
+        }
+        if strides[a] != run {
+            return None;
+        }
+        run = run.checked_mul(dims[a])?;
     }
-    idx
+    Some(run)
 }
 
-/// Read an index view into a row-major `Vec<i64>`.
+/// Read an index view in row-major order and bounds-check every value against
+/// an axis of size `size`, yielding `usize` positions.
 ///
-/// The view may be strided (a transposed or narrowed index tensor is legal);
-/// values come out in the same logical order the kernels walk. A non-`I64`
-/// index tensor is [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) —
-/// indices are `I64` by contract, never silently cast.
-fn read_indices(indices: View<'_>, op: &'static str) -> Result<Vec<i64>> {
+/// Reading and checking are one pass over one allocation: the index tensor is
+/// small but this runs once per call, and a `DataLoader` batch is nothing but
+/// these calls. The view may be strided (a transposed or narrowed index tensor
+/// is legal); values are validated in the same logical order the kernels walk,
+/// so the reported [`Error::IndexOutOfBounds`](crate::Error::IndexOutOfBounds)
+/// is the first offending value in row-major order. A non-`I64` index tensor is
+/// [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) — indices are `I64` by
+/// contract, never silently cast. Negative values are rejected, not wrapped
+/// Python-style.
+fn resolved_indices(
+    indices: View<'_>,
+    axis: usize,
+    size: usize,
+    op: &'static str,
+) -> Result<Vec<usize>> {
     let cpu = cpu_storage(indices, op)?;
     let data = match cpu {
         CpuStorage::I64(v) => v.as_slice(),
@@ -103,31 +134,29 @@ fn read_indices(indices: View<'_>, op: &'static str) -> Result<Vec<i64>> {
         }
     };
     let layout = indices.layout();
-    let place = place_values(layout.dims());
-    Ok((0..layout.num_elements())
-        .map(|i| data[storage_index(layout, &place, i)])
-        .collect())
-}
-
-/// Bounds-check raw index values against an axis of size `size`, returning
-/// them as `usize` positions.
-fn resolve_indices(
-    values: &[i64],
-    axis: usize,
-    size: usize,
-    op: &'static str,
-) -> Result<Vec<usize>> {
-    values
-        .iter()
-        .map(|&v| {
-            let oob = || Error::IndexOutOfBounds {
-                op,
-                index: v,
-                axis,
-                size,
-            };
-            let pos = usize::try_from(v).map_err(|_| oob())?;
-            if pos >= size { Err(oob()) } else { Ok(pos) }
+    let total = layout.num_elements();
+    let resolve = |v: i64| {
+        let oob = || Error::IndexOutOfBounds {
+            op,
+            index: v,
+            axis,
+            size,
+        };
+        let pos = usize::try_from(v).map_err(|_| oob())?;
+        if pos >= size { Err(oob()) } else { Ok(pos) }
+    };
+    if let Some(start) = dense_offset(layout) {
+        return data[start..start + total]
+            .iter()
+            .map(|&v| resolve(v))
+            .collect();
+    }
+    let mut walk = Walk::new(layout.dims(), [layout.strides()], [layout.offset()]);
+    (0..total)
+        .map(|_| {
+            let v = data[walk.index(0)];
+            walk.step();
+            resolve(v)
         })
         .collect()
 }
@@ -202,6 +231,10 @@ impl AccAdd for i64 {
 
 /// `out[.., k, ..] = x[.., picks[k], ..]`, where `out_dims` is `x`'s shape
 /// with `axis` resized to `picks.len()` and the output is dense row-major.
+///
+/// The output is produced in row-major order either way, so both paths write
+/// the same elements in the same order — the fast path just moves a whole row
+/// per index instead of decoding a coordinate per element.
 fn index_select_generic<E: Copy>(
     data: &[E],
     x_strides: &[usize],
@@ -210,16 +243,39 @@ fn index_select_generic<E: Copy>(
     axis: usize,
     picks: &[usize],
 ) -> Vec<E> {
-    let place = place_values(out_dims);
     let n: usize = out_dims.iter().product();
     let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut src = x_offset;
-        for a in 0..out_dims.len() {
-            let c = (i / place[a]) % out_dims[a];
-            src += if a == axis { picks[c] } else { c } * x_strides[a];
+    if n == 0 {
+        return out;
+    }
+    let axis_stride = x_strides[axis];
+
+    // Fast path: the axes inside `axis` are contiguous in the source, so each
+    // pick is one slice copy of `run` elements. `out_dims` agrees with the
+    // source dims on every axis but `axis`, which this run never spans.
+    if let Some(run) = trailing_run(out_dims, x_strides, axis) {
+        let outer = &out_dims[..axis];
+        let mut walk = Walk::new(outer, [x_strides], [x_offset]);
+        for _ in 0..outer.iter().product::<usize>() {
+            let base = walk.index(0);
+            for &pick in picks {
+                let at = base + pick * axis_stride;
+                out.extend_from_slice(&data[at..at + run]);
+            }
+            walk.step();
         }
-        out.push(data[src]);
+        return out;
+    }
+
+    // General path: one element at a time, but the walk carries the source
+    // index for every axis *except* the indexed one (stride zeroed there), so
+    // the per-element work is one multiply-add.
+    let mut strides = x_strides[..out_dims.len()].to_vec();
+    strides[axis] = 0;
+    let mut walk = Walk::new(out_dims, [&strides], [x_offset]);
+    for _ in 0..n {
+        out.push(data[walk.index(0) + picks[walk.coord(axis)] * axis_stride]);
+        walk.step();
     }
     out
 }
@@ -230,7 +286,7 @@ pub(crate) fn index_select(x: View<'_>, axis: usize, indices: View<'_>) -> Resul
     let layout = x.layout();
     check_axis(OP, axis, layout.rank())?;
     check_rank(OP, 1, indices.layout().rank())?;
-    let picks = resolve_indices(&read_indices(indices, OP)?, axis, layout.dims()[axis], OP)?;
+    let picks = resolved_indices(indices, axis, layout.dims()[axis], OP)?;
 
     let mut out_dims = layout.dims().to_vec();
     out_dims[axis] = picks.len();
@@ -278,19 +334,21 @@ fn gather_generic<E: Copy>(
     // One index per output element, by construction: `out_dims` *is* the
     // index grid's shape.
     debug_assert_eq!(picks.len(), out_dims.iter().product::<usize>());
-    let place = place_values(out_dims);
     let mut out = Vec::with_capacity(picks.len());
-    for (i, &pick) in picks.iter().enumerate() {
-        let mut src = x_offset;
-        for a in 0..out_dims.len() {
-            let c = if a == axis {
-                pick
-            } else {
-                (i / place[a]) % out_dims[a]
-            };
-            src += c * x_strides[a];
-        }
-        out.push(data[src]);
+    if picks.is_empty() {
+        return out;
+    }
+    // There is no row to copy here — consecutive outputs along the innermost
+    // axis carry different indices — so this is the division-free walk only,
+    // with the indexed axis's stride zeroed out of the walk and applied from
+    // the index grid instead.
+    let axis_stride = x_strides[axis];
+    let mut strides = x_strides[..out_dims.len()].to_vec();
+    strides[axis] = 0;
+    let mut walk = Walk::new(out_dims, [&strides], [x_offset]);
+    for &pick in picks {
+        out.push(data[walk.index(0) + pick * axis_stride]);
+        walk.step();
     }
     out
 }
@@ -313,7 +371,7 @@ pub(crate) fn gather(x: View<'_>, axis: usize, indices: View<'_>) -> Result<Stor
             });
         }
     }
-    let picks = resolve_indices(&read_indices(indices, OP)?, axis, layout.dims()[axis], OP)?;
+    let picks = resolved_indices(indices, axis, layout.dims()[axis], OP)?;
 
     let out_dims = idx_layout.dims();
     let strides = layout.strides();
@@ -347,18 +405,37 @@ pub(crate) fn gather(x: View<'_>, axis: usize, indices: View<'_>) -> Result<Stor
 
 /// Seed the wide accumulator buffer from the base tensor, in row-major order
 /// over its logical shape. Shared first step of both accumulating kernels.
-fn seed_acc<E>(x_data: &[E], x_layout: &Layout, x_place: &[usize]) -> Vec<E::Acc>
+///
+/// A dense base (the common case: `index_add`'s base is usually a freshly
+/// allocated zero tensor) widens straight off the slice; anything strided goes
+/// through the division-free walk.
+fn seed_acc<E>(x_data: &[E], x_layout: &Layout) -> Vec<E::Acc>
 where
     E: Element,
 {
-    (0..x_layout.num_elements())
-        .map(|i| x_data[storage_index(x_layout, x_place, i)].to_acc())
+    let total = x_layout.num_elements();
+    if let Some(start) = dense_offset(x_layout) {
+        return x_data[start..start + total]
+            .iter()
+            .map(|&e| e.to_acc())
+            .collect();
+    }
+    let mut walk = Walk::new(x_layout.dims(), [x_layout.strides()], [x_layout.offset()]);
+    (0..total)
+        .map(|_| {
+            let v = x_data[walk.index(0)].to_acc();
+            walk.step();
+            v
+        })
         .collect()
 }
 
 /// `out = x; out[.., picks[k], ..] += src[.., k, ..]` — the slice-wise,
 /// 1-D-index accumulate that backs `index_select`'s backward. Repeated
 /// positions in `picks` accumulate (the embedding backward's whole point).
+/// Both paths add the same contributions to each accumulator cell in the same
+/// order (outer coordinates, then index, then position within the row), so the
+/// result is bitwise identical whichever runs.
 fn index_add_generic<E>(
     x_data: &[E],
     x_layout: &Layout,
@@ -372,20 +449,50 @@ where
     E::Acc: AccAdd,
 {
     let x_place = place_values(x_layout.dims());
-    let mut acc = seed_acc(x_data, x_layout, &x_place);
+    let mut acc = seed_acc(x_data, x_layout);
 
     let src_dims = src_layout.dims();
     let src_strides = src_layout.strides();
-    let src_place = place_values(src_dims);
-    for i in 0..src_layout.num_elements() {
-        let mut from = src_layout.offset();
-        let mut dst = 0usize;
-        for a in 0..src_dims.len() {
-            let c = (i / src_place[a]) % src_dims[a];
-            from += c * src_strides[a];
-            dst += if a == axis { picks[c] } else { c } * x_place[a];
+    let total = src_layout.num_elements();
+    if total > 0 {
+        // Fast path: the axes inside `axis` are contiguous in the source. They
+        // are contiguous in the (dense) destination by construction and, since
+        // `src` has the base's dims off `axis`, both runs are the same length —
+        // so one index adds one row to one row, index-free on both sides.
+        if let Some(run) = trailing_run(src_dims, src_strides, axis) {
+            let outer = &src_dims[..axis];
+            let mut walk = Walk::new(outer, [src_strides, &x_place], [src_layout.offset(), 0]);
+            for _ in 0..outer.iter().product::<usize>() {
+                let (from_base, dst_base) = (walk.index(0), walk.index(1));
+                for (k, &pick) in picks.iter().enumerate() {
+                    let from = from_base + k * src_strides[axis];
+                    let dst = dst_base + pick * x_place[axis];
+                    for (a, &s) in acc[dst..dst + run]
+                        .iter_mut()
+                        .zip(&src_data[from..from + run])
+                    {
+                        *a = a.add(s.to_acc());
+                    }
+                }
+                walk.step();
+            }
+            return acc.into_iter().map(E::from_acc).collect();
         }
-        acc[dst] = acc[dst].add(src_data[from].to_acc());
+
+        // General path: one element at a time, with the destination stride of
+        // the indexed axis zeroed out of the walk and applied from `picks`.
+        let mut dst_strides = x_place.clone();
+        dst_strides[axis] = 0;
+        let mut walk = Walk::new(
+            src_dims,
+            [src_strides, &dst_strides],
+            [src_layout.offset(), 0],
+        );
+        for _ in 0..total {
+            let dst = walk.index(1) + picks[walk.coord(axis)] * x_place[axis];
+            acc[dst] = acc[dst].add(src_data[walk.index(0)].to_acc());
+            walk.step();
+        }
     }
 
     acc.into_iter().map(E::from_acc).collect()
@@ -408,21 +515,26 @@ where
     E::Acc: AccAdd,
 {
     let x_place = place_values(x_layout.dims());
-    let mut acc = seed_acc(x_data, x_layout, &x_place);
+    let mut acc = seed_acc(x_data, x_layout);
 
     // One index per grid position, by construction.
     debug_assert_eq!(picks.len(), idx_dims.iter().product::<usize>());
-    let idx_place = place_values(idx_dims);
-    let src_strides = src_layout.strides();
-    for (i, &pick) in picks.iter().enumerate() {
-        let mut from = src_layout.offset();
-        let mut dst = 0usize;
-        for a in 0..idx_dims.len() {
-            let c = (i / idx_place[a]) % idx_dims[a];
-            from += c * src_strides[a];
-            dst += if a == axis { pick } else { c } * x_place[a];
+    if !picks.is_empty() {
+        // Per-element by nature (see the module header): the walk carries the
+        // source and destination indices for every axis but the scattered one.
+        let mut dst_strides = x_place.clone();
+        dst_strides[axis] = 0;
+        let src_strides = src_layout.strides();
+        let mut walk = Walk::new(
+            idx_dims,
+            [src_strides, &dst_strides],
+            [src_layout.offset(), 0],
+        );
+        for &pick in picks {
+            let dst = walk.index(1) + pick * x_place[axis];
+            acc[dst] = acc[dst].add(src_data[walk.index(0)].to_acc());
+            walk.step();
         }
-        acc[dst] = acc[dst].add(src_data[from].to_acc());
     }
 
     acc.into_iter().map(E::from_acc).collect()
@@ -543,7 +655,7 @@ pub(crate) fn index_add(
     check_axis(OP, axis, x_layout.rank())?;
     check_rank(OP, 1, indices.layout().rank())?;
     check_dtype(OP, x.dtype(), src.dtype())?;
-    let picks = resolve_indices(&read_indices(indices, OP)?, axis, x_layout.dims()[axis], OP)?;
+    let picks = resolved_indices(indices, axis, x_layout.dims()[axis], OP)?;
 
     // `src` must be `x`'s shape with the indexed axis resized to the index
     // count: whole slices, one per index (PyTorch `index_add` semantics).
@@ -612,7 +724,7 @@ pub(crate) fn scatter_add(
         }
     }
 
-    let picks = resolve_indices(&read_indices(indices, OP)?, axis, x_layout.dims()[axis], OP)?;
+    let picks = resolved_indices(indices, axis, x_layout.dims()[axis], OP)?;
 
     let x_cpu = cpu_storage(x, OP)?;
     let src_cpu = cpu_storage(src, OP)?;
@@ -1135,5 +1247,503 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ----- fast paths vs. the naive per-element decode ---------------------
+    //
+    // Every kernel above grew a whole-row `memcpy` tier and a division-free
+    // odometer. Both must be *indistinguishable* from the per-element decode
+    // they replaced, so the decode is reproduced here verbatim and the two are
+    // compared over a matrix of layouts chosen to hit each tier:
+    //
+    // - dense source, indexed on the outer axis  -> row-copy tier
+    // - dense source, indexed on the innermost axis -> run length 1
+    // - transposed / inner-narrowed / broadcast source -> general walk
+    //
+    // For the accumulating kernels the comparison is `assert_eq!` on the
+    // *result elements*, which for floats is bitwise equality — the fast path
+    // is required to add the same contributions to each cell in the same
+    // order, so no tolerance is involved or allowed.
+
+    /// The storage index of logical (row-major) position `i` of `layout`,
+    /// whose place values are `place`. The decode the kernels used before the
+    /// odometer replaced it.
+    fn naive_storage_index(layout: &Layout, place: &[usize], i: usize) -> usize {
+        let dims = layout.dims();
+        let strides = layout.strides();
+        let mut idx = layout.offset();
+        for a in 0..dims.len() {
+            idx += ((i / place[a]) % dims[a]) * strides[a];
+        }
+        idx
+    }
+
+    /// Pre-optimization `index_select_generic`.
+    fn naive_index_select(
+        data: &[f32],
+        x_strides: &[usize],
+        x_offset: usize,
+        out_dims: &[usize],
+        axis: usize,
+        picks: &[usize],
+    ) -> Vec<f32> {
+        let place = place_values(out_dims);
+        let n: usize = out_dims.iter().product();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut src = x_offset;
+            for a in 0..out_dims.len() {
+                let c = (i / place[a]) % out_dims[a];
+                src += if a == axis { picks[c] } else { c } * x_strides[a];
+            }
+            out.push(data[src]);
+        }
+        out
+    }
+
+    /// Pre-optimization `gather_generic`.
+    fn naive_gather(
+        data: &[f32],
+        x_strides: &[usize],
+        x_offset: usize,
+        out_dims: &[usize],
+        axis: usize,
+        picks: &[usize],
+    ) -> Vec<f32> {
+        let place = place_values(out_dims);
+        let mut out = Vec::with_capacity(picks.len());
+        for (i, &pick) in picks.iter().enumerate() {
+            let mut src = x_offset;
+            for a in 0..out_dims.len() {
+                let c = if a == axis {
+                    pick
+                } else {
+                    (i / place[a]) % out_dims[a]
+                };
+                src += c * x_strides[a];
+            }
+            out.push(data[src]);
+        }
+        out
+    }
+
+    /// Pre-optimization `index_add_generic` (f32, so `Acc` is f32 too).
+    fn naive_index_add(
+        x_data: &[f32],
+        x_layout: &Layout,
+        src_data: &[f32],
+        src_layout: &Layout,
+        axis: usize,
+        picks: &[usize],
+    ) -> Vec<f32> {
+        let x_place = place_values(x_layout.dims());
+        let mut acc: Vec<f32> = (0..x_layout.num_elements())
+            .map(|i| x_data[naive_storage_index(x_layout, &x_place, i)])
+            .collect();
+        let src_dims = src_layout.dims();
+        let src_strides = src_layout.strides();
+        let src_place = place_values(src_dims);
+        for i in 0..src_layout.num_elements() {
+            let mut from = src_layout.offset();
+            let mut dst = 0usize;
+            for a in 0..src_dims.len() {
+                let c = (i / src_place[a]) % src_dims[a];
+                from += c * src_strides[a];
+                dst += if a == axis { picks[c] } else { c } * x_place[a];
+            }
+            acc[dst] += src_data[from];
+        }
+        acc
+    }
+
+    /// Pre-optimization `scatter_add_generic` (f32).
+    fn naive_scatter_add(
+        x_data: &[f32],
+        x_layout: &Layout,
+        src_data: &[f32],
+        src_layout: &Layout,
+        idx_dims: &[usize],
+        axis: usize,
+        picks: &[usize],
+    ) -> Vec<f32> {
+        let x_place = place_values(x_layout.dims());
+        let mut acc: Vec<f32> = (0..x_layout.num_elements())
+            .map(|i| x_data[naive_storage_index(x_layout, &x_place, i)])
+            .collect();
+        let idx_place = place_values(idx_dims);
+        let src_strides = src_layout.strides();
+        for (i, &pick) in picks.iter().enumerate() {
+            let mut from = src_layout.offset();
+            let mut dst = 0usize;
+            for a in 0..idx_dims.len() {
+                let c = (i / idx_place[a]) % idx_dims[a];
+                from += c * src_strides[a];
+                dst += if a == axis { pick } else { c } * x_place[a];
+            }
+            acc[dst] += src_data[from];
+        }
+        acc
+    }
+
+    /// `0.5, 1.0, 1.5, …` — values a float sum reorder would expose, in a
+    /// buffer long enough for every layout below plus an offset.
+    fn ramp(n: usize) -> Vec<f32> {
+        (0..n).map(|i| 0.5 * (i as f32 + 1.0)).collect()
+    }
+
+    /// The rank-3 source layouts the equivalence tests sweep, paired with the
+    /// axis to index and a label. All are views over `ramp(240)`.
+    fn source_layouts() -> Vec<(&'static str, Layout, usize)> {
+        let base = lay([3, 4, 5]);
+        vec![
+            // Dense: outer axis is the row-copy tier (run = 20).
+            ("dense, axis 0", base.clone(), 0),
+            // Dense: middle axis, run = 5.
+            ("dense, axis 1", base.clone(), 1),
+            // Dense: innermost axis, run = 1.
+            ("dense, axis 2", base.clone(), 2),
+            // Offset run: still dense, so still the row-copy tier.
+            ("outer narrow, axis 1", base.narrow(0, 1, 2).unwrap(), 1),
+            // Inner narrow: the axes inside 0 are no longer contiguous, so
+            // axis 0 falls to the general walk.
+            ("inner narrow, axis 0", base.narrow(2, 1, 3).unwrap(), 0),
+            // Transposed: reordered strides, general walk.
+            ("transposed 0/2, axis 0", base.transpose(0, 2).unwrap(), 0),
+            ("transposed 1/2, axis 1", base.transpose(1, 2).unwrap(), 1),
+            // Permuted.
+            ("permuted, axis 2", base.permute(&[2, 0, 1]).unwrap(), 2),
+            // Broadcast innermost axis: stride 0 inside the indexed axis, so
+            // the row-copy tier must refuse it.
+            (
+                "broadcast innermost, axis 0",
+                lay([3, 4, 1])
+                    .broadcast_to(&Shape::from([3, 4, 5]))
+                    .unwrap(),
+                0,
+            ),
+            // Broadcast leading axis, indexed on a later axis.
+            (
+                "broadcast leading, axis 1",
+                lay([1, 4, 5])
+                    .broadcast_to(&Shape::from([3, 4, 5]))
+                    .unwrap(),
+                1,
+            ),
+        ]
+    }
+
+    #[test]
+    fn index_select_fast_and_general_paths_match_the_naive_decode() {
+        let data = ramp(240);
+        for (name, layout, axis) in source_layouts() {
+            let size = layout.dims()[axis];
+            // Repeats, reversal and a truncated list, so `picks.len()` differs
+            // from the source size in both directions.
+            for picks in [
+                vec![0usize],
+                (0..size).collect::<Vec<_>>(),
+                (0..size).rev().collect::<Vec<_>>(),
+                vec![size - 1, 0, size - 1],
+            ] {
+                let mut out_dims = layout.dims().to_vec();
+                out_dims[axis] = picks.len();
+                let got = index_select_generic(
+                    &data,
+                    layout.strides(),
+                    layout.offset(),
+                    &out_dims,
+                    axis,
+                    &picks,
+                );
+                let want = naive_index_select(
+                    &data,
+                    layout.strides(),
+                    layout.offset(),
+                    &out_dims,
+                    axis,
+                    &picks,
+                );
+                assert_eq!(got, want, "{name} picks={picks:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn gather_matches_the_naive_decode_on_strided_sources() {
+        let data = ramp(240);
+        for (name, layout, axis) in source_layouts() {
+            let out_dims = layout.dims().to_vec();
+            let size = layout.dims()[axis];
+            // One index per output element, cycling so neighbours differ.
+            let picks: Vec<usize> = (0..out_dims.iter().product::<usize>())
+                .map(|i| (i * 3 + 1) % size)
+                .collect();
+            let got = gather_generic(
+                &data,
+                layout.strides(),
+                layout.offset(),
+                &out_dims,
+                axis,
+                &picks,
+            );
+            let want = naive_gather(
+                &data,
+                layout.strides(),
+                layout.offset(),
+                &out_dims,
+                axis,
+                &picks,
+            );
+            assert_eq!(got, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn index_add_fast_and_general_paths_match_the_naive_decode_bitwise() {
+        let x_data = ramp(240);
+        // `src` gets its own buffer so a mixed-up read is visible.
+        let src_data: Vec<f32> = ramp(240).iter().map(|v| -v - 0.25).collect();
+        let base = lay([3, 4, 5]);
+        for axis in 0..3 {
+            let size = base.dims()[axis];
+            for picks in [
+                (0..size).collect::<Vec<_>>(),
+                (0..size).rev().collect::<Vec<_>>(),
+                // Duplicates: several `src` slices land on one base slice.
+                // (What makes the *order* of those adds observable is
+                // `index_add_accumulates_duplicates_in_source_order`, below —
+                // this ramp's sums are exact in f32, so order alone would not
+                // show up here.)
+                vec![0usize; size],
+                vec![size - 1, 0, size - 1],
+            ] {
+                let mut src_dims = base.dims().to_vec();
+                src_dims[axis] = picks.len();
+                // A dense `src` (row-copy tier) and a transposed one (general
+                // walk) must both agree with the decode.
+                let dense = lay(src_dims.clone());
+                let swapped = {
+                    let (a, b) = (axis, (axis + 1) % 3);
+                    let mut d = src_dims.clone();
+                    d.swap(a, b);
+                    lay(d).transpose(a, b).unwrap()
+                };
+                for (label, src_layout) in [("dense src", dense), ("transposed src", swapped)] {
+                    assert_eq!(src_layout.dims(), &src_dims[..], "{label}: dims");
+                    let got: Vec<f32> =
+                        index_add_generic(&x_data, &base, &src_data, &src_layout, axis, &picks);
+                    let want =
+                        naive_index_add(&x_data, &base, &src_data, &src_layout, axis, &picks);
+                    assert_eq!(got, want, "axis={axis} {label} picks={picks:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_add_matches_the_naive_decode_bitwise() {
+        let x_data = ramp(240);
+        let src_data: Vec<f32> = ramp(240).iter().map(|v| -v - 0.25).collect();
+        let base = lay([3, 4, 5]);
+        for axis in 0..3 {
+            let size = base.dims()[axis];
+            let idx_dims = base.dims().to_vec();
+            let n: usize = idx_dims.iter().product();
+            // Collide deliberately: `% (size.min(2))` sends many grid cells to
+            // the same destination on every axis.
+            let picks: Vec<usize> = (0..n).map(|i| i % size.min(2)).collect();
+            for (label, src_layout) in [
+                ("dense src", lay(idx_dims.clone())),
+                (
+                    "transposed src",
+                    lay([idx_dims[1], idx_dims[0], idx_dims[2]])
+                        .transpose(0, 1)
+                        .unwrap(),
+                ),
+            ] {
+                let got: Vec<f32> = scatter_add_generic(
+                    &x_data,
+                    &base,
+                    &src_data,
+                    &src_layout,
+                    &idx_dims,
+                    axis,
+                    &picks,
+                );
+                let want = naive_scatter_add(
+                    &x_data,
+                    &base,
+                    &src_data,
+                    &src_layout,
+                    &idx_dims,
+                    axis,
+                    &picks,
+                );
+                assert_eq!(got, want, "axis={axis} {label}");
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_run_admits_only_genuinely_contiguous_inner_axes() {
+        let base = lay([3, 4, 5]);
+        // Dense: the run is the product of the axes inside the indexed one.
+        assert_eq!(trailing_run(base.dims(), base.strides(), 0), Some(20));
+        assert_eq!(trailing_run(base.dims(), base.strides(), 1), Some(5));
+        assert_eq!(trailing_run(base.dims(), base.strides(), 2), Some(1));
+
+        // Narrowing the innermost axis gives dims [3,4,3] / strides [20,5,1]:
+        // consecutive axis-1 rows are 5 apart but only 3 wide, so a gap opens
+        // and no run may span axis 1.
+        let narrowed = base.narrow(2, 1, 3).unwrap();
+        assert_eq!(trailing_run(narrowed.dims(), narrowed.strides(), 0), None);
+        // The surviving 3 innermost elements are still consecutive, though, so
+        // a pick along axis 1 copies a run of 3 — and a pick along axis 2 has
+        // no inner axes at all, hence the trivial run of 1.
+        assert_eq!(
+            trailing_run(narrowed.dims(), narrowed.strides(), 1),
+            Some(3)
+        );
+        assert_eq!(
+            trailing_run(narrowed.dims(), narrowed.strides(), 2),
+            Some(1)
+        );
+
+        // A broadcast axis inside the indexed one repeats elements and must be
+        // refused, even though its size is > 1.
+        let bcast = lay([3, 4, 1])
+            .broadcast_to(&Shape::from([3, 4, 5]))
+            .unwrap();
+        assert_eq!(trailing_run(bcast.dims(), bcast.strides(), 0), None);
+
+        // A size-1 axis contributes nothing to addressing, so an odd stride on
+        // one does not break the run.
+        let odd = Layout::from_parts(
+            Shape::from([2, 1, 6]),
+            vec![6usize, 999, 1].into_boxed_slice(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(trailing_run(odd.dims(), odd.strides(), 0), Some(6));
+    }
+
+    /// The one property the `index_add` row-copy tier could plausibly break
+    /// and the sweep above could not see: **the order** in which duplicate
+    /// picks accumulate into the same destination cell.
+    ///
+    /// `index_add` is `index_select`'s backward, so this is the embedding
+    /// gradient: many source rows summing into one row of the base. The fast
+    /// path adds a whole row at a time (outer coordinate, then `k`, then
+    /// position within the row); the decode it replaced added one element at a
+    /// time in row-major `src` order. Those are the same order, and this test
+    /// is what holds them to it.
+    ///
+    /// The values are chosen so that floating-point addition is *not*
+    /// associative over them, and the test asserts that itself before asserting
+    /// the kernel: `1.0` followed by four ties-away-from-zero-sized crumbs sums
+    /// to exactly `1.0` in ascending order (each crumb is below half an ulp of
+    /// 1.0 on its own) but to `1.0 + 1 ulp` when the crumbs are added together
+    /// first. So a reordered accumulation cannot pass.
+    #[test]
+    fn index_add_accumulates_duplicates_in_source_order() {
+        const CRUMB: f32 = 3e-8;
+        let (rows, cols) = (5usize, 3usize);
+
+        // Self-check: these values really are order-sensitive in f32.
+        let ascending = {
+            let mut a = 1.0f32;
+            for _ in 1..rows {
+                a += CRUMB;
+            }
+            a
+        };
+        let descending = {
+            let mut a = 0.0f32;
+            for _ in 1..rows {
+                a += CRUMB;
+            }
+            a + 1.0
+        };
+        assert_ne!(
+            ascending, descending,
+            "the test's own values must be order-sensitive, else it proves nothing"
+        );
+
+        // Every source row lands on base row 0.
+        let picks = vec![0usize; rows];
+        let x_layout = lay([2, cols]);
+        let x_data = vec![0.0f32; x_layout.num_elements()];
+        // Row 0 is the big value, rows 1.. are the crumbs.
+        let src_data: Vec<f32> = (0..rows * cols)
+            .map(|i| if i < cols { 1.0 } else { CRUMB })
+            .collect();
+
+        // Dense source: the row-copy tier (run = cols).
+        let dense = lay([rows, cols]);
+        assert_eq!(trailing_run(dense.dims(), dense.strides(), 0), Some(cols));
+        let got: Vec<f32> = index_add_generic(&x_data, &x_layout, &src_data, &dense, 0, &picks);
+        assert_eq!(
+            got,
+            naive_index_add(&x_data, &x_layout, &src_data, &dense, 0, &picks),
+            "row-copy tier reordered the accumulation"
+        );
+        assert_eq!(got[0], ascending, "…and the order is source order");
+
+        // Transposed source: the general element-at-a-time walk, same order.
+        let transposed = lay([cols, rows]).transpose(0, 1).unwrap();
+        assert_eq!(transposed.dims(), &[rows, cols]);
+        assert_eq!(
+            trailing_run(transposed.dims(), transposed.strides(), 0),
+            None
+        );
+        let got: Vec<f32> =
+            index_add_generic(&x_data, &x_layout, &src_data, &transposed, 0, &picks);
+        assert_eq!(
+            got,
+            naive_index_add(&x_data, &x_layout, &src_data, &transposed, 0, &picks),
+            "general walk reordered the accumulation"
+        );
+    }
+
+    /// The same order guarantee for `scatter_add`, whose grid picks one
+    /// destination per element: collide every grid cell of a column onto one
+    /// base cell and check the sum against the decode.
+    #[test]
+    fn scatter_add_accumulates_collisions_in_grid_order() {
+        const CRUMB: f32 = 3e-8;
+        let (rows, cols) = (5usize, 3usize);
+        let x_layout = lay([2, cols]);
+        let x_data = vec![0.0f32; x_layout.num_elements()];
+        let idx_dims = vec![rows, cols];
+        // Whole grid scatters onto base row 0, along axis 0.
+        let picks = vec![0usize; rows * cols];
+        let src_data: Vec<f32> = (0..rows * cols)
+            .map(|i| if i < cols { 1.0 } else { CRUMB })
+            .collect();
+        let src_layout = lay([rows, cols]);
+        let got: Vec<f32> = scatter_add_generic(
+            &x_data,
+            &x_layout,
+            &src_data,
+            &src_layout,
+            &idx_dims,
+            0,
+            &picks,
+        );
+        assert_eq!(
+            got,
+            naive_scatter_add(
+                &x_data,
+                &x_layout,
+                &src_data,
+                &src_layout,
+                &idx_dims,
+                0,
+                &picks
+            ),
+            "scatter_add reordered the accumulation"
+        );
+        // Ascending grid order: 1.0 first, then the crumbs, each lost.
+        assert_eq!(got[0], 1.0f32);
     }
 }

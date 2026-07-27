@@ -26,71 +26,229 @@ fn cpu_storage<'a>(x: &View<'a>) -> &'a CpuStorage {
     }
 }
 
-/// Row-major storage indices of every logical element of `layout`, in
-/// row-major (C-order) logical order.
+/// Incremental row-major odometer over `dims`, carrying one running storage
+/// index per *lane*.
 ///
-/// This is the one place strided/permuted/broadcast views are flattened
-/// into contiguous order: it walks the logical coordinate space like an
-/// odometer (rightmost axis fastest) and, for each coordinate, computes the
-/// storage index `offset + Σ coord[a] * stride[a]`. Broadcast axes (stride
-/// 0) repeat the same element, exactly as the layout contract specifies.
+/// Each lane pairs a stride slice with a running index seeded from that lane's
+/// storage offset. [`Walk::step`] advances the logical position by one
+/// (rightmost axis fastest) and fixes up every lane's index with additions and
+/// subtractions of strides only — never the
+/// `offset + Σ (i / place[a]) % dims[a] * stride[a]` recomputation (two
+/// divisions per axis) that the first version of these kernels paid *per
+/// element*. This is the shared walk behind [`copy_view`] and the
+/// `super::index` kernels.
 ///
-/// The returned vector has [`Layout::num_elements`] entries (empty for an
-/// empty view).
-fn row_major_indices(layout: &Layout) -> Vec<usize> {
-    let dims = layout.dims();
-    let strides = layout.strides();
+/// A lane's stride slice may be **longer** than `dims`; only its first
+/// `dims.len()` entries are read, so a caller can walk the outer axes of a
+/// full stride vector without copying it. `dims` may be empty (a rank-0 view,
+/// or a walk whose axes are all covered by an inner block): the walk then has
+/// exactly one position.
+///
+/// Stepping past the last position wraps back to the start instead of
+/// panicking; callers drive exactly `dims.iter().product()` positions.
+pub(super) struct Walk<'a, const L: usize> {
+    dims: &'a [usize],
+    strides: [&'a [usize]; L],
+    coords: Vec<usize>,
+    index: [usize; L],
+}
+
+impl<'a, const L: usize> Walk<'a, L> {
+    /// Start a walk at the all-zero coordinate, with lane `l` addressing
+    /// `strides[l]` from `start[l]`.
+    pub(super) fn new(dims: &'a [usize], strides: [&'a [usize]; L], start: [usize; L]) -> Self {
+        debug_assert!(strides.iter().all(|s| s.len() >= dims.len()));
+        Walk {
+            dims,
+            strides,
+            coords: vec![0usize; dims.len()],
+            index: start,
+        }
+    }
+
+    /// Lane `lane`'s storage index at the current logical position.
+    #[inline]
+    pub(super) fn index(&self, lane: usize) -> usize {
+        self.index[lane]
+    }
+
+    /// The current coordinate on `axis`.
+    #[inline]
+    pub(super) fn coord(&self, axis: usize) -> usize {
+        self.coords[axis]
+    }
+
+    /// Advance one logical position (rightmost axis fastest).
+    #[inline]
+    pub(super) fn step(&mut self) {
+        let mut axis = self.coords.len();
+        while axis > 0 {
+            axis -= 1;
+            if self.coords[axis] + 1 < self.dims[axis] {
+                self.coords[axis] += 1;
+                for l in 0..L {
+                    self.index[l] += self.strides[l][axis];
+                }
+                return;
+            }
+            // Carry: rewind this axis. Subtracting the contribution already
+            // accumulated (rather than adding a step and correcting) keeps
+            // every lane's index inside its addressable range at all times.
+            for l in 0..L {
+                self.index[l] -= self.coords[axis] * self.strides[l][axis];
+            }
+            self.coords[axis] = 0;
+        }
+    }
+}
+
+/// The storage offset of a view whose row-major logical walk *is* the storage
+/// run `offset .. offset + num_elements`, or `None` when it is not.
+///
+/// This is the `memcpy` predicate for [`copy_view`]: a layout qualifies when
+/// every axis of size > 1 carries the canonical row-major stride (computed
+/// right-to-left from a unit innermost stride). Size-1 axes are skipped
+/// because their only coordinate is 0, so their stride never contributes to an
+/// address — which makes this strictly more permissive than
+/// `Layout::is_contiguous` (it also accepts any non-zero offset, e.g. a
+/// `narrow` of the outermost axis, and an unsqueezed axis carrying a
+/// non-canonical stride). Broadcast axes (stride 0 with size > 1) never
+/// qualify: they repeat elements and so cannot be a straight run.
+///
+/// Shared with the `super::index` kernels, which use it to seed an
+/// accumulator from a dense base tensor without a coordinate walk.
+pub(super) fn dense_offset(layout: &Layout) -> Option<usize> {
+    let mut expected = 1usize;
+    for (&dim, &stride) in layout.dims().iter().zip(layout.strides()).rev() {
+        if dim == 1 {
+            continue;
+        }
+        if stride != expected {
+            return None;
+        }
+        expected = expected.checked_mul(dim)?;
+    }
+    Some(layout.offset())
+}
+
+/// Copy the logical elements a view addresses out of its full backing buffer
+/// `src` into a fresh row-major `Vec`.
+///
+/// Three tiers, in cost order, all producing exactly the same elements in
+/// exactly the same order (the difference is only how many at a time):
+///
+/// 1. **Whole-view run** ([`dense_offset`]): one `[T]::to_vec`, i.e. one
+///    `memcpy`. This is the overwhelmingly common case — every freshly
+///    allocated tensor and every `narrow` of the outermost axis.
+/// 2. **Row runs**: the longest *trailing* group of axes that is contiguous in
+///    storage is copied with one `extend_from_slice` per run, and only the
+///    remaining outer axes are walked. A transposed matrix of rows, a
+///    broadcast over leading axes, and an inner-axis `narrow` all land here.
+/// 3. **Element by element**: when even the innermost axis is strided the run
+///    length is 1 and this degenerates to the odometer walk, still without the
+///    O(numel) index buffer the first implementation allocated.
+///
+/// The outer walk is a [`Walk`], so no division is executed per output element
+/// in any tier.
+fn copy_view<T: Copy>(src: &[T], layout: &Layout) -> Vec<T> {
     let total = layout.num_elements();
     if total == 0 {
         return Vec::new();
     }
-    let mut out = Vec::with_capacity(total);
-    let mut coords = vec![0usize; dims.len()];
-    loop {
-        let mut idx = layout.offset();
-        for (c, s) in coords.iter().zip(strides.iter()) {
-            idx += c * s;
-        }
-        out.push(idx);
-        // Odometer increment, rightmost axis fastest. A rank-0 (scalar) view
-        // has one element and no axes: the first `push` above emits it and we
-        // fall straight through to the return.
-        let mut axis = dims.len();
-        loop {
-            if axis == 0 {
-                return out;
-            }
-            axis -= 1;
-            coords[axis] += 1;
-            if coords[axis] < dims[axis] {
+    if let Some(start) = dense_offset(layout) {
+        return src[start..start + total].to_vec();
+    }
+
+    let dims = layout.dims();
+    let strides = layout.strides();
+    // Longest trailing group of axes that is contiguous in storage: `run`
+    // elements per copy, `dims[..outer]` left for the odometer.
+    let mut run = 1usize;
+    let mut outer = dims.len();
+    for a in (0..dims.len()).rev() {
+        if dims[a] != 1 {
+            if strides[a] != run {
                 break;
             }
-            coords[axis] = 0;
+            run *= dims[a];
         }
+        outer = a;
     }
+
+    let mut out = Vec::with_capacity(total);
+    let mut walk = Walk::new(&dims[..outer], [strides], [layout.offset()]);
+    for _ in 0..total / run {
+        let at = walk.index(0);
+        out.extend_from_slice(&src[at..at + run]);
+        walk.step();
+    }
+    out
 }
 
-/// Gather a source buffer into a fresh contiguous vector following the
-/// view's row-major walk. `src` is the full backing buffer; `indices` are
-/// the storage positions produced by [`row_major_indices`].
-fn gather<T: Copy>(src: &[T], indices: &[usize]) -> Vec<T> {
-    indices.iter().map(|&i| src[i]).collect()
+/// Whether `layout` addresses **the whole of** a buffer of `len` elements, in
+/// order — the one case a row-major materialization can skip entirely.
+fn is_whole_buffer(layout: &Layout, len: usize) -> bool {
+    layout.num_elements() == len && dense_offset(layout) == Some(0)
 }
 
-/// Materialize a view into a fresh contiguous [`CpuStorage`] in row-major
-/// order, preserving dtype. This is the shared core of
-/// [`transfer_out`] and [`copy_strided`].
-fn materialize(x: View<'_>) -> CpuStorage {
-    let storage = cpu_storage(&x);
-    let indices = row_major_indices(x.layout());
-    match storage {
-        CpuStorage::F16(v) => CpuStorage::F16(std::sync::Arc::new(gather(v, &indices))),
-        CpuStorage::BF16(v) => CpuStorage::BF16(std::sync::Arc::new(gather(v, &indices))),
-        CpuStorage::F32(v) => CpuStorage::F32(std::sync::Arc::new(gather(v, &indices))),
-        CpuStorage::F64(v) => CpuStorage::F64(std::sync::Arc::new(gather(v, &indices))),
-        CpuStorage::I64(v) => CpuStorage::I64(std::sync::Arc::new(gather(v, &indices))),
-        CpuStorage::Bool(v) => CpuStorage::Bool(std::sync::Arc::new(gather(v, &indices))),
+/// Row-major materialization of one typed buffer under `layout`, for the
+/// *host-interchange* path.
+///
+/// When the view is the whole buffer in order the buffer is **shared** (an
+/// `Arc` bump, no copy at all). That is sound because storage buffers are
+/// immutable once constructed — nothing in the crate takes a mutable borrow of
+/// a `CpuStorage` payload, and every host reader clones for itself
+/// (`HostConv::try_from_cpu_storage`) — so sharing is indistinguishable from
+/// copying apart from the cost. `transfer_out`'s contract is "download as a
+/// contiguous `CpuStorage`", which this satisfies; it promises no fresh
+/// allocation, unlike [`copy_strided`].
+///
+/// This is what makes `cat`/`stack` cheap: their host assembly calls
+/// `transfer_out` once per part, and for the usual dense part that is now free
+/// instead of a per-element gather.
+fn share_or_copy<T: Copy>(buf: &std::sync::Arc<Vec<T>>, layout: &Layout) -> std::sync::Arc<Vec<T>> {
+    if is_whole_buffer(layout, buf.len()) {
+        return std::sync::Arc::clone(buf);
     }
+    std::sync::Arc::new(copy_view(buf, layout))
+}
+
+/// Row-major materialization into a **freshly allocated** buffer, for
+/// [`copy_strided`], whose contract explicitly promises a fresh buffer.
+///
+/// The whole-buffer case still copies here, so `contiguous()` and the copying
+/// branch of `reshape` keep handing back storage that shares nothing with
+/// their input. Everything strided takes the same [`copy_view`] tiers as
+/// [`share_or_copy`], so the fast paths are not given up — only the
+/// zero-copy case is, and that case is unreachable from `copy_strided`'s
+/// callers anyway (both test contiguity first).
+fn copy_owned<T: Copy>(buf: &std::sync::Arc<Vec<T>>, layout: &Layout) -> std::sync::Arc<Vec<T>> {
+    if is_whole_buffer(layout, buf.len()) {
+        return std::sync::Arc::new(buf.as_ref().clone());
+    }
+    std::sync::Arc::new(copy_view(buf, layout))
+}
+
+/// Materialize a view into a contiguous row-major [`CpuStorage`], preserving
+/// dtype, dispatching each dtype arm to `per_buffer`.
+///
+/// The two callers differ only in whether the whole-buffer case may share:
+/// [`transfer_out`] passes [`share_or_copy`], [`copy_strided`] passes
+/// [`copy_owned`].
+macro_rules! materialize_with {
+    ($x:expr, $per_buffer:ident) => {{
+        let x = $x;
+        let storage = cpu_storage(&x);
+        let layout = x.layout();
+        match storage {
+            CpuStorage::F16(v) => CpuStorage::F16($per_buffer(v, layout)),
+            CpuStorage::BF16(v) => CpuStorage::BF16($per_buffer(v, layout)),
+            CpuStorage::F32(v) => CpuStorage::F32($per_buffer(v, layout)),
+            CpuStorage::F64(v) => CpuStorage::F64($per_buffer(v, layout)),
+            CpuStorage::I64(v) => CpuStorage::I64($per_buffer(v, layout)),
+            CpuStorage::Bool(v) => CpuStorage::Bool($per_buffer(v, layout)),
+        }
+    }};
 }
 
 /// See [`BackendOps::transfer_in`](crate::backend::BackendOps::transfer_in).
@@ -101,12 +259,12 @@ pub(crate) fn transfer_in(host: CpuStorage) -> Result<Storage> {
 
 /// See [`BackendOps::transfer_out`](crate::backend::BackendOps::transfer_out).
 pub(crate) fn transfer_out(x: View<'_>) -> Result<CpuStorage> {
-    Ok(materialize(x))
+    Ok(materialize_with!(x, share_or_copy))
 }
 
 /// See [`BackendOps::copy_strided`](crate::backend::BackendOps::copy_strided).
 pub(crate) fn copy_strided(x: View<'_>) -> Result<Storage> {
-    Ok(Storage::Cpu(materialize(x)))
+    Ok(Storage::Cpu(materialize_with!(x, copy_owned)))
 }
 
 /// See [`BackendOps::full`](crate::backend::BackendOps::full).
@@ -144,8 +302,10 @@ pub(crate) fn cast(x: View<'_>, to: DType) -> Result<Storage> {
     };
 
     // Materialize the (possibly strided) source contiguously first so the
-    // per-lane conversion is a flat map.
-    let src = materialize(x);
+    // per-lane conversion is a flat map. `copy_owned`, not `share_or_copy`:
+    // the identity lane hands `src` straight back as the result storage, and
+    // this function documents that as "a contiguous copy".
+    let src = materialize_with!(x, copy_owned);
 
     let out = match (from, to) {
         // Identity: a contiguous copy, no conversion.
@@ -390,6 +550,152 @@ mod tests {
         let new_layout = Layout::contiguous([4, 3]).unwrap();
         let got = as_f32(&transfer_out(View::new(&copied, &new_layout)).unwrap());
         assert_eq!(got, expected);
+    }
+
+    // ------------------------------------------------------------------
+    // Fast paths: the three copy tiers must all agree with the naive
+    // per-element gather they replaced, and the whole-buffer case must not
+    // copy at all.
+    // ------------------------------------------------------------------
+
+    /// The original implementation: enumerate every logical position and read
+    /// `offset + Σ coord[a] * stride[a]`. The reference every tier of
+    /// [`copy_view`] is checked against.
+    fn naive_gather(src: &[f32], layout: &Layout) -> Vec<f32> {
+        let dims = layout.dims();
+        let strides = layout.strides();
+        let total = layout.num_elements();
+        let mut out = Vec::with_capacity(total);
+        let mut coords = vec![0usize; dims.len()];
+        for _ in 0..total {
+            let mut idx = layout.offset();
+            for (c, s) in coords.iter().zip(strides.iter()) {
+                idx += c * s;
+            }
+            out.push(src[idx]);
+            let mut axis = dims.len();
+            while axis > 0 {
+                axis -= 1;
+                coords[axis] += 1;
+                if coords[axis] < dims[axis] {
+                    break;
+                }
+                coords[axis] = 0;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn copy_view_matches_the_naive_gather_on_every_layout_shape() {
+        let data: Vec<f32> = (0..120).map(|x| x as f32).collect();
+        let base3 = Layout::contiguous([2, 3, 4]).unwrap();
+        let cases: Vec<(&str, Layout)> = vec![
+            ("contiguous", base3.clone()),
+            ("scalar", Layout::contiguous(()).unwrap()),
+            ("empty", Layout::contiguous([0, 5]).unwrap()),
+            // Dense with a non-zero offset: the `memcpy` tier.
+            ("outer narrow", base3.narrow(0, 1, 1).unwrap()),
+            // Row runs: the trailing axes stay contiguous.
+            ("inner narrow", base3.narrow(1, 1, 2).unwrap()),
+            ("transposed outer", base3.transpose(0, 1).unwrap()),
+            (
+                "broadcast leading",
+                Layout::contiguous([1, 4])
+                    .unwrap()
+                    .broadcast_to(&Shape::from([3, 2, 4]))
+                    .unwrap(),
+            ),
+            // Run length 1: the element-at-a-time tier.
+            ("transposed inner", base3.transpose(1, 2).unwrap()),
+            (
+                "broadcast innermost",
+                Layout::contiguous([3, 1])
+                    .unwrap()
+                    .broadcast_to(&Shape::from([3, 4]))
+                    .unwrap(),
+            ),
+            ("permuted", base3.permute(&[2, 0, 1]).unwrap()),
+            // A size-1 axis whose stride is not the canonical one still
+            // qualifies as dense: its only coordinate is 0.
+            (
+                "size-1 axis, odd stride",
+                Layout::from_parts(Shape::from([1, 6]), vec![99usize, 1].into_boxed_slice(), 3)
+                    .unwrap(),
+            ),
+        ];
+        for (name, layout) in cases {
+            let got = copy_view(&data, &layout);
+            assert_eq!(got, naive_gather(&data, &layout), "{name}");
+            assert_eq!(got.len(), layout.num_elements(), "{name}: length");
+        }
+    }
+
+    #[test]
+    fn transfer_out_shares_a_whole_contiguous_buffer_instead_of_copying() {
+        let buf = Arc::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let storage = Storage::Cpu(CpuStorage::F32(Arc::clone(&buf)));
+        let layout = Layout::contiguous([2, 3]).unwrap();
+        let out = transfer_out(View::new(&storage, &layout)).unwrap();
+        match &out {
+            CpuStorage::F32(v) => assert!(
+                Arc::ptr_eq(v, &buf),
+                "a whole-buffer contiguous view must be shared, not copied"
+            ),
+            other => panic!("expected F32, got {}", other.dtype()),
+        }
+
+        // A partial view of the same buffer must *not* share it: it has to be
+        // the narrowed window's own row-major buffer.
+        let part = layout.narrow(0, 1, 1).unwrap();
+        let out = transfer_out(View::new(&storage, &part)).unwrap();
+        match &out {
+            CpuStorage::F32(v) => {
+                assert!(!Arc::ptr_eq(v, &buf));
+                assert_eq!(v.as_ref(), &vec![4.0, 5.0, 6.0]);
+            }
+            other => panic!("expected F32, got {}", other.dtype()),
+        }
+    }
+
+    #[test]
+    fn copy_strided_always_allocates_even_for_a_whole_contiguous_buffer() {
+        // `BackendOps::copy_strided` documents a *fresh* buffer, so unlike
+        // `transfer_out` it must not take the sharing shortcut: `contiguous()`
+        // and the copying branch of `reshape` are specified to hand back
+        // storage that shares nothing with their input.
+        let buf = Arc::new(vec![1.0f32, 2.0, 3.0, 4.0]);
+        let storage = Storage::Cpu(CpuStorage::F32(Arc::clone(&buf)));
+        let layout = Layout::contiguous([2, 2]).unwrap();
+        let out = copy_strided(View::new(&storage, &layout)).unwrap();
+        match &out {
+            Storage::Cpu(CpuStorage::F32(v)) => {
+                assert!(!Arc::ptr_eq(v, &buf), "copy_strided must allocate");
+                assert_eq!(v.as_ref(), buf.as_ref(), "…with the same elements");
+            }
+            other => panic!("expected a CPU F32 storage, got {:?}", other.dtype()),
+        }
+    }
+
+    #[test]
+    fn dense_offset_accepts_offsets_and_rejects_reordering() {
+        let base = Layout::contiguous([4, 5]).unwrap();
+        assert_eq!(dense_offset(&base), Some(0));
+        // Narrowing the outermost axis keeps a single run, at an offset.
+        assert_eq!(dense_offset(&base.narrow(0, 2, 2).unwrap()), Some(10));
+        // Narrowing an inner axis leaves gaps.
+        assert_eq!(dense_offset(&base.narrow(1, 1, 2).unwrap()), None);
+        // Transposing reorders; broadcasting repeats.
+        assert_eq!(dense_offset(&base.transpose(0, 1).unwrap()), None);
+        assert_eq!(
+            dense_offset(
+                &Layout::contiguous([1, 5])
+                    .unwrap()
+                    .broadcast_to(&Shape::from([4, 5]))
+                    .unwrap()
+            ),
+            None
+        );
     }
 
     // ------------------------------------------------------------------
