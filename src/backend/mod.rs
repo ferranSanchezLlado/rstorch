@@ -212,8 +212,11 @@ pub(crate) struct Conv2dParams {
 /// sanctioned fallback: same device, no host round-trip).
 ///
 /// Encodings are crate-private but frozen across the kernel and its callers:
-/// `Softmax` takes `[x]`/`[]` and returns `[y]`; `LayerNorm` takes
-/// `[x, weight, bias]`/`[eps]` and returns `[y]`; `SgdStep` takes
+/// `Softmax` takes `[x]`/`[]` and returns `[y]`. `LayerNorm` forward takes
+/// `[x, weight, bias]`/`[eps]` and returns `[y]`, or accepts
+/// `[eps, save_stats=1]` and returns `[y, xhat, inv_std]`; its input-gradient
+/// form takes `[grad, xhat, inv_std, weight]`/`[]` and returns `[grad_x]`.
+/// `SgdStep` takes
 /// `[param, grad]` or `[param, grad, velocity]` plus
 /// `[lr, momentum, weight_decay]` and returns `[next_param]` or
 /// `[next_param, next_velocity]`; `AdamStep` takes `[param, grad, m, v]` plus
