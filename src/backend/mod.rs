@@ -210,6 +210,15 @@ pub(crate) struct Conv2dParams {
 /// [`Error::Unsupported`](crate::Error::Unsupported) until T48 implements a
 /// given variant, and the op layer composes the unfused form (the only
 /// sanctioned fallback: same device, no host round-trip).
+///
+/// Encodings are crate-private but frozen across the kernel and its callers:
+/// `Softmax` takes `[x]`/`[]` and returns `[y]`; `LayerNorm` takes
+/// `[x, weight, bias]`/`[eps]` and returns `[y]`; `SgdStep` takes
+/// `[param, grad]` or `[param, grad, velocity]` plus
+/// `[lr, momentum, weight_decay]` and returns `[next_param]` or
+/// `[next_param, next_velocity]`; `AdamStep` takes `[param, grad, m, v]` plus
+/// `[lr, beta1, beta2, eps, weight_decay, bias_correction1,
+/// bias_correction2, decoupled]` and returns `[next_param, next_m, next_v]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FusedOp {
     /// Numerically stable softmax over the last view axis.
@@ -357,7 +366,7 @@ pub(crate) trait BackendOps: Send + Sync {
     /// A fused kernel (see [`FusedOp`]). Returns
     /// [`Error::Unsupported`](crate::Error::Unsupported) for any variant not
     /// yet implemented, so the op layer falls back to the composed form.
-    fn fused(&self, op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage>;
+    fn fused(&self, op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>>;
 }
 
 /// The CPU reference backend: a zero-sized dispatcher that delegates each
@@ -438,7 +447,7 @@ impl BackendOps for CpuBackend {
     fn conv(&self, op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Result<Storage> {
         cpu::conv::conv(op, inputs, params)
     }
-    fn fused(&self, op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
+    fn fused(&self, op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         cpu::fused::fused(op, inputs, scalars)
     }
 }

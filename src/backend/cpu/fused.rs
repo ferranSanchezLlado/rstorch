@@ -1,10 +1,8 @@
 //! Fused CPU kernels for last-axis softmax and layer normalization.
 //!
-//! Optimizer fusion needs more than the frozen single-[`Storage`] return can
-//! represent: momentum SGD produces a parameter and velocity, while Adam
-//! produces a parameter and two moments. Those variants therefore remain loud
-//! [`Error::Unsupported`] results rather than mutating immutable input storage
-//! or silently dropping updated state.
+//! Optimizer variants use the multi-output encoding documented on
+//! [`BackendOps::fused`](crate::backend::BackendOps::fused). They remain loud
+//! [`Error::Unsupported`] results until their kernels are implemented.
 
 use std::sync::Arc;
 
@@ -65,10 +63,10 @@ impl_float_acc!(f64);
 /// - `Softmax`: `[x]`, no scalars; normalizes the last axis.
 /// - `LayerNorm`: `[x, weight, bias]`, `[eps]`; `weight` and `bias` are
 ///   rank-one views matching `x`'s last axis.
-pub(crate) fn fused(op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
+pub(crate) fn fused(op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
     match op {
-        FusedOp::Softmax => softmax(inputs, scalars),
-        FusedOp::LayerNorm => layer_norm(inputs, scalars),
+        FusedOp::Softmax => softmax(inputs, scalars).map(|output| vec![output]),
+        FusedOp::LayerNorm => layer_norm(inputs, scalars).map(|output| vec![output]),
         FusedOp::SgdStep => unsupported("fused_sgd_step", inputs),
         FusedOp::AdamStep => unsupported("fused_adam_step", inputs),
     }
@@ -381,7 +379,7 @@ fn validate_view(op: &'static str, view: View<'_>) -> Result<()> {
     Ok(())
 }
 
-fn unsupported(op: &'static str, inputs: &[View<'_>]) -> Result<Storage> {
+fn unsupported<T>(op: &'static str, inputs: &[View<'_>]) -> Result<T> {
     Err(Error::Unsupported {
         op,
         device: inputs.first().map_or(Device::Cpu, View::device),
@@ -424,6 +422,11 @@ mod tests {
         }
     }
 
+    fn one(mut outputs: Vec<Storage>) -> Storage {
+        assert_eq!(outputs.len(), 1);
+        outputs.pop().unwrap()
+    }
+
     #[test]
     fn softmax_is_stable_and_handles_fully_masked_rows() {
         let x = storage(vec![
@@ -440,7 +443,9 @@ mod tests {
             .unwrap()
             .to_vec::<f32>()
             .unwrap();
-        let got = values(fused(FusedOp::Softmax, &[View::new(&x, &layout)], &[]).unwrap());
+        let got = values(one(
+            fused(FusedOp::Softmax, &[View::new(&x, &layout)], &[]).unwrap()
+        ));
         close(&got, &composed);
         close(&got[..3], &[0.090_030_57, 0.244_728_48, 0.665_240_94]);
         assert_eq!(&got[3..], &[0.0, 0.0, 0.0]);
@@ -451,7 +456,12 @@ mod tests {
         let x = storage(vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
         let base = Layout::contiguous([3, 2]).unwrap();
         let transposed = base.transpose(0, 1).unwrap();
-        let got = values(fused(FusedOp::Softmax, &[View::new(&x, &transposed)], &[]).unwrap());
+        let got = values(one(fused(
+            FusedOp::Softmax,
+            &[View::new(&x, &transposed)],
+            &[],
+        )
+        .unwrap()));
         close(&got[..3], &[0.090_030_57, 0.244_728_48, 0.665_240_94]);
         assert!(got[3] < 1e-8);
         assert!(got[4] < 1e-4);
@@ -470,18 +480,16 @@ mod tests {
             0,
         )
         .unwrap();
-        let got = values(
-            fused(
-                FusedOp::LayerNorm,
-                &[
-                    View::new(&x, &x_layout),
-                    View::new(&weight, &affine_layout),
-                    View::new(&bias, &affine_layout),
-                ],
-                &[1e-5],
-            )
-            .unwrap(),
-        );
+        let got = values(one(fused(
+            FusedOp::LayerNorm,
+            &[
+                View::new(&x, &x_layout),
+                View::new(&weight, &affine_layout),
+                View::new(&bias, &affine_layout),
+            ],
+            &[1e-5],
+        )
+        .unwrap()));
         close(&got[..3], &[-1.449_471_2, -1.0, 5.398_942_5]);
         close(&got[3..], &[-1.449_485_3, -1.0, 5.398_970_6]);
     }
@@ -497,7 +505,7 @@ mod tests {
         let weight = Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::from_f32(1.0); 4])));
         let bias = Storage::Cpu(CpuStorage::F16(Arc::new(vec![half::f16::from_f32(0.0); 4])));
         let layout = Layout::contiguous([4]).unwrap();
-        let result = fused(
+        let result = one(fused(
             FusedOp::LayerNorm,
             &[
                 View::new(&x, &layout),
@@ -506,7 +514,7 @@ mod tests {
             ],
             &[1e-5],
         )
-        .unwrap();
+        .unwrap());
         let Storage::Cpu(CpuStorage::F16(result)) = result else {
             panic!("expected f16 CPU storage")
         };
