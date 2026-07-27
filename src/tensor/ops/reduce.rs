@@ -47,16 +47,18 @@
 //! | `sum(axis)` | broadcast the cotangent back along `axis` |
 //! | `mean(axis)` | the same, scaled by `1/n` |
 //! | `max`/`min(axis)` | route to the winners, splitting ties evenly; a line whose extremum is `NaN` has no winner and gets an all-`NaN` cotangent |
-//! | `var`/`std`, `softmax`, `log_softmax` | none of their own — they are *composed* from recorded ops (`mean`/`sub`/`mul`/`sum`/`exp`/`div`), so the engine differentiates the composition |
+//! | `var`/`std`, `log_softmax` | none of their own — they are *composed* from recorded ops (`mean`/`sub`/`mul`/`sum`/`exp`/`div`), so the engine differentiates the composition |
+//! | `softmax` | the fused last-axis `F32`/`F64` path records one node with `y · (g − Σ(g · y))`; other variants retain the composed path |
 //! | `argmax`/`argmin` | not differentiable ([`I64`](crate::DType::I64) output); they never reach the record seam |
 //!
-//! The `max`/`min` backward is the only one that captures tensors: the
-//! **detached** input and the **detached** output (the detached-output capture
-//! rule, exploration §4.3), built before the traced output is assembled. Its
-//! `NaN` rule is stated in full on `route_to_extrema`.
+//! The `max`/`min` backward captures the **detached** input and output, while
+//! fused softmax captures its **detached** output `y` (the detached-output
+//! capture rule, exploration §4.3). Each is built before the traced output is
+//! assembled. The extrema `NaN` rule is stated in full on `route_to_extrema`.
 
 use crate::autograd::{BackwardFn, record};
-use crate::backend::{ArgReduceOp, ReduceOp, dispatch};
+use crate::backend::{ArgReduceOp, FusedOp, ReduceOp, dispatch};
+use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::tensor::Tensor;
@@ -359,6 +361,88 @@ fn softmax_parts(op: &'static str, x: &Tensor, axis: usize) -> Result<(Tensor, T
     Ok((z, e, denom))
 }
 
+/// The existing composed softmax, kept as the exact fallback for unsupported
+/// fused variants and for axes/dtypes outside the initial fused scope.
+fn composed_softmax(op: &'static str, x: &Tensor, axis: usize) -> Result<Tensor> {
+    let (_z, e, denom) = softmax_parts(op, x, axis)?;
+    e.div(&denom)
+}
+
+/// Relabel every backend error carrying an operation name at the public seam.
+fn relabel_fused_softmax(e: Error) -> Error {
+    const OP: &str = "softmax";
+    match e {
+        Error::ShapeMismatch { lhs, rhs, .. } => Error::ShapeMismatch { op: OP, lhs, rhs },
+        Error::RankMismatch { expected, got, .. } => Error::RankMismatch {
+            op: OP,
+            expected,
+            got,
+        },
+        Error::InvalidAxis { axis, rank, .. } => Error::InvalidAxis { op: OP, axis, rank },
+        Error::DTypeMismatch { expected, got, .. } => Error::DTypeMismatch {
+            op: OP,
+            expected,
+            got,
+        },
+        Error::DeviceMismatch { expected, got, .. } => Error::DeviceMismatch {
+            op: OP,
+            expected,
+            got,
+        },
+        Error::ReshapeMismatch { from, to, .. } => Error::ReshapeMismatch { op: OP, from, to },
+        Error::IndexOutOfBounds {
+            index, axis, size, ..
+        } => Error::IndexOutOfBounds {
+            op: OP,
+            index,
+            axis,
+            size,
+        },
+        Error::Unsupported { device, dtype, .. } => Error::Unsupported {
+            op: OP,
+            device,
+            dtype,
+        },
+        Error::NotTraced { .. } => Error::NotTraced { op: OP },
+        Error::InvalidArg { msg, .. } => Error::InvalidArg { op: OP, msg },
+        Error::Backend { msg, .. } => Error::Backend { op: OP, msg },
+        other => other,
+    }
+}
+
+/// Attempt the fused contract only for its initial production scope. `None`
+/// means the caller must run the composed implementation unchanged.
+fn try_fused_softmax(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
+    if axis + 1 != x.rank() || !matches!(x.dtype(), DType::F32 | DType::F64) {
+        return Ok(None);
+    }
+
+    let mut outputs = match dispatch::backend(x.device()).fused(FusedOp::Softmax, &[x.view()], &[])
+    {
+        Ok(outputs) => outputs,
+        Err(Error::Unsupported { .. }) => return Ok(None),
+        Err(e) => return Err(relabel_fused_softmax(e)),
+    };
+    if outputs.len() != 1 {
+        return Err(Error::Backend {
+            op: "softmax",
+            msg: format!(
+                "fused softmax returned {} outputs, expected exactly one",
+                outputs.len()
+            ),
+        });
+    }
+    let storage = outputs.pop().expect("length checked");
+    let layout = Layout::contiguous(x.dims())?;
+    Ok(Some(Tensor::from_parts(storage, layout)))
+}
+
+/// `dx = y * (g - sum(g * y, axis, keepdim=true))`.
+fn softmax_backward(g: &Tensor, y: &Tensor, axis: usize) -> Result<Tensor> {
+    let projected = g.mul(y)?.sum_keepdim(axis as isize)?;
+    y.mul(&g.sub(&projected)?)
+}
+
 /// One index reduction (`argmax`/`argmin`). Never differentiable: the result
 /// is an [`I64`](crate::DType::I64) tensor of positions, so it does not go
 /// through the record seam at all.
@@ -638,8 +722,18 @@ impl Tensor {
     pub fn softmax(&self, axis: isize) -> Result<Tensor> {
         const OP: &str = "softmax";
         let ax = self.shape().resolve_axis(axis, OP)?;
-        let (_z, e, denom) = softmax_parts(OP, self, ax)?;
-        e.div(&denom)
+        require_float(OP, self)?;
+        require_non_empty(OP, self, ax)?;
+        let Some(out) = try_fused_softmax(self, ax)? else {
+            return composed_softmax(OP, self, ax);
+        };
+        let y = out.detach();
+        Ok(record(
+            OP,
+            out,
+            &[self],
+            Box::new(move |g| vec![softmax_backward(g, &y, ax).ok()]),
+        ))
     }
 
     /// Log-softmax over `axis`: `(xᵢ − max x) − ln Σ exp(x − max x)`.
@@ -966,6 +1060,88 @@ mod tests {
     }
 
     #[test]
+    fn fused_softmax_scope_and_numerics_match_the_composed_path() {
+        let x = t(&[1000.0, 1001.0, 1002.0, -3.0, 0.5, 7.0], [2, 3]);
+        let expected = composed_softmax("softmax", &x, 1).unwrap();
+        let fused = try_fused_softmax(&x, 1).unwrap().unwrap();
+        assert!(fused.is_contiguous());
+        assert_eq!(fused.dims(), x.dims());
+        close(&v(&fused), &v(&expected), 1e-6);
+        close(&v(&x.softmax(-1).unwrap()), &v(&expected), 1e-6);
+
+        let x64 = Tensor::from_vec(vec![1000.0f64, 1001.0, 1002.0], [1, 3], &CPU).unwrap();
+        let expected64 = composed_softmax("softmax", &x64, 1)
+            .unwrap()
+            .to_vec::<f64>()
+            .unwrap();
+        let fused64 = try_fused_softmax(&x64, 1)
+            .unwrap()
+            .unwrap()
+            .to_vec::<f64>()
+            .unwrap();
+        for (got, expected) in fused64.iter().zip(expected64) {
+            assert!((got - expected).abs() <= 1e-15, "{fused64:?}");
+        }
+    }
+
+    #[test]
+    fn non_last_axis_and_reduced_precision_keep_the_composed_fallback() {
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+        assert!(try_fused_softmax(&x, 0).unwrap().is_none());
+        close(
+            &v(&x.softmax(0).unwrap()),
+            &v(&composed_softmax("softmax", &x, 0).unwrap()),
+            1e-6,
+        );
+
+        let f16 = Tensor::from_vec(
+            [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+                .map(half::f16::from_f32)
+                .to_vec(),
+            [2, 3],
+            &CPU,
+        )
+        .unwrap();
+        assert!(try_fused_softmax(&f16, 1).unwrap().is_none());
+        assert_eq!(
+            f16.softmax(-1).unwrap().to_vec::<half::f16>().unwrap(),
+            composed_softmax("softmax", &f16, 1)
+                .unwrap()
+                .to_vec::<half::f16>()
+                .unwrap()
+        );
+
+        let bf16 = Tensor::from_vec(
+            [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+                .map(half::bf16::from_f32)
+                .to_vec(),
+            [2, 3],
+            &CPU,
+        )
+        .unwrap();
+        assert!(try_fused_softmax(&bf16, 1).unwrap().is_none());
+        assert_eq!(
+            bf16.softmax(-1).unwrap().to_vec::<half::bf16>().unwrap(),
+            composed_softmax("softmax", &bf16, 1)
+                .unwrap()
+                .to_vec::<half::bf16>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn fused_softmax_reads_a_strided_input_and_returns_contiguous_output() {
+        let base = t(&[1.0, 10.0, 2.0, 20.0, 3.0, 30.0], [3, 2]);
+        let x = base.transpose(0, 1).unwrap();
+        assert!(!x.is_contiguous());
+        let expected = composed_softmax("softmax", &x, 1).unwrap();
+        let got = x.softmax(-1).unwrap();
+        assert!(got.is_contiguous());
+        assert_eq!(got.dims(), &[2, 3]);
+        close(&v(&got), &v(&expected), 1e-6);
+    }
+
+    #[test]
     fn softmax_is_stable_and_shift_invariant() {
         // The naive exp of these overflows to +inf; the max shift does not.
         let big = t(&[1000.0, 1000.0, 1000.0], [3]);
@@ -1005,6 +1181,38 @@ mod tests {
         assert!(v(&l)[..3].iter().all(|p| *p == f32::NEG_INFINITY));
         close(&v(&l)[3..5], &[(e[0] / z).ln(), (e[1] / z).ln()], 1e-6);
         assert_eq!(v(&l)[5], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn fused_softmax_backward_is_exact_and_masked_rows_stay_zero() {
+        let x = t(
+            &[
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                0.3,
+                -1.2,
+                2.0,
+            ],
+            [2, 3],
+        )
+        .traced()
+        .unwrap();
+        let w = t(&[0.25, 0.75, -0.5, 1.0, -2.0, 0.5], [2, 3]);
+        let y = x.softmax(-1).unwrap();
+        assert!(y.node().is_some());
+        assert_eq!(&v(&y)[..3], &[0.0, 0.0, 0.0]);
+
+        let expected = softmax_backward(&w, &y.detach(), 1).unwrap();
+        let loss = y.mul(&w).unwrap().sum_all().unwrap();
+        let grads = loss.backward().unwrap();
+        let got = grads.wrt_input(&x).unwrap();
+        close(&v(&got), &v(&expected), 1e-6);
+        assert!(v(&got)[..3].iter().all(|value| *value == 0.0));
+        assert!(v(&got).iter().all(|value| !value.is_nan()));
+
+        let plain = t(&[1.0, 2.0, 3.0], [3]).softmax(-1).unwrap();
+        assert!(plain.node().is_none());
     }
 
     #[test]
