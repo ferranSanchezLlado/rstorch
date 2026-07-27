@@ -46,9 +46,12 @@
 //! recording axis, through `Param::get`. [`BatchNorm2d`] reads **both**: see
 //! its docs for the two-branch table.
 
+use crate::autograd::{self, BackwardFn};
+use crate::backend::{FusedOp, dispatch};
 use crate::device::Device;
 use crate::dtype::DType;
 use crate::error::{Error, Result};
+use crate::layout::Layout;
 use crate::nn::{Forward, Mode, Param};
 use crate::shape::Shape;
 use crate::tensor::Tensor;
@@ -109,6 +112,86 @@ fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Result<Te
     let var = mean_last(&centered.mul(&centered)?, axes)?;
     let xhat = centered.div(&scale_from_var(&var, eps)?)?;
     affine(&xhat, weight, Some(bias))
+}
+
+/// The detached values needed by the single-node fused LayerNorm backward.
+struct LayerNormBackward {
+    xhat: Tensor,
+    inv_std: Tensor,
+    weight: Tensor,
+    stat_dims: Vec<usize>,
+    affine_dims: Vec<usize>,
+    width: f64,
+}
+
+impl LayerNormBackward {
+    fn grad(&self, g: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let weighted = g.mul(&self.weight)?;
+        let sum = weighted.sum_to(&self.stat_dims)?;
+        let projected = weighted.mul(&self.xhat)?.sum_to(&self.stat_dims)?;
+        let dx = weighted
+            .mul_scalar(self.width)?
+            .sub(&sum)?
+            .sub(&self.xhat.mul(&projected)?)?
+            .mul(&self.inv_std)?
+            .div_scalar(self.width)?;
+        let dweight = g.mul(&self.xhat)?.sum_to(&self.affine_dims)?;
+        let dbias = g.sum_to(&self.affine_dims)?;
+        Ok((dx, dweight, dbias))
+    }
+}
+
+/// Last-axis LayerNorm through the optional fused backend contract.
+fn fused_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Result<Tensor> {
+    const OP: &str = "LayerNorm::forward";
+    let outputs = dispatch::backend(x.device()).fused(
+        FusedOp::LayerNorm,
+        &[x.view(), weight.view(), bias.view()],
+        &[eps],
+    )?;
+    if outputs.len() != 1 {
+        return Err(Error::InvalidArg {
+            op: OP,
+            msg: format!(
+                "fused LayerNorm backend returned {} outputs, expected exactly 1",
+                outputs.len()
+            ),
+        });
+    }
+    let out = Tensor::from_parts(
+        outputs.into_iter().next().expect("length validated"),
+        Layout::contiguous(x.shape().clone())?,
+    );
+
+    if [x, weight, bias].iter().all(|input| input.node().is_none()) {
+        return Ok(out);
+    }
+
+    let detached = x.detach();
+    let mu = mean_last(&detached, 1)?;
+    let centered = detached.sub(&mu)?;
+    let var = mean_last(&centered.mul(&centered)?, 1)?;
+    let std = scale_from_var(&var, eps)?;
+    let xhat = centered.div(&std)?.detach();
+    let inv_std = Tensor::ones(std.dims(), std.dtype(), &std.device())?
+        .div(&std)?
+        .detach();
+    let mut stat_dims = x.dims().to_vec();
+    let width = stat_dims[stat_dims.len() - 1];
+    *stat_dims.last_mut().expect("LayerNorm input has a suffix") = 1;
+    let backward_state = LayerNormBackward {
+        xhat,
+        inv_std,
+        weight: weight.detach(),
+        stat_dims,
+        affine_dims: weight.dims().to_vec(),
+        width: width as f64,
+    };
+    let backward: BackwardFn = Box::new(move |g| match backward_state.grad(g) {
+        Ok((dx, dweight, dbias)) => vec![Some(dx), Some(dweight), Some(dbias)],
+        Err(_) => vec![None, None, None],
+    });
+    Ok(autograd::record(OP, out, &[x, weight, bias], backward))
 }
 
 /// The [`RMSNorm`] formula over plain tensors: divide by the root mean square
@@ -323,7 +406,16 @@ impl Forward for LayerNorm {
     /// the parameters — convert one side explicitly.
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         check_suffix("LayerNorm::forward", x, self.normalized_shape())?;
-        layer_norm(x, &self.weight.get(mode), &self.bias.get(mode), self.eps)
+        let weight = self.weight.get(mode);
+        let bias = self.bias.get(mode);
+        if weight.rank() != 1 || !matches!(x.dtype(), DType::F32 | DType::F64) {
+            return layer_norm(x, &weight, &bias, self.eps);
+        }
+        match fused_layer_norm(x, &weight, &bias, self.eps) {
+            Ok(out) => Ok(out),
+            Err(Error::Unsupported { .. }) => layer_norm(x, &weight, &bias, self.eps),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -717,6 +809,10 @@ mod tests {
         x.to_vec::<f32>().unwrap()
     }
 
+    fn t64(data: &[f64], shape: impl Into<Shape>) -> Tensor {
+        Tensor::from_vec(data.to_vec(), shape, &CPU).unwrap()
+    }
+
     /// Assert element-wise closeness against hand-computed values.
     #[track_caller]
     fn close(got: &Tensor, want: &[f32], tol: f32) {
@@ -1009,6 +1105,84 @@ mod tests {
             ],
             1e-5,
         );
+    }
+
+    #[test]
+    fn fused_layer_norm_handles_f64_and_constant_rows() {
+        let mut norm = LayerNorm::with_eps([3], 1e-4, &CPU).unwrap();
+        norm.weight.set(t64(&[1.5, -0.5, 2.0], [3])).unwrap();
+        norm.bias.set(t64(&[0.25, -0.75, 1.0], [3])).unwrap();
+        let x = t64(&[2.0, 2.0, 2.0, 0.5, -1.5, 2.0], [2, 3]);
+        let got = norm.forward(&x, Mode::EVAL).unwrap();
+        let want = layer_norm(
+            &x,
+            &t64(&[1.5, -0.5, 2.0], [3]),
+            &t64(&[0.25, -0.75, 1.0], [3]),
+            1e-4,
+        )
+        .unwrap();
+        let got = got.to_vec::<f64>().unwrap();
+        let want = want.to_vec::<f64>().unwrap();
+        for (g, w) in got.iter().zip(&want) {
+            assert!((g - w).abs() < 1e-12, "got {got:?}, want {want:?}");
+        }
+        assert!(got.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn multi_axis_layer_norm_explicitly_uses_the_composed_fallback() {
+        let mut norm = LayerNorm::with_eps([2, 2], 1e-4, &CPU).unwrap();
+        let x = t(&[0.5, -1.5, 2.0, 0.25, -0.75, 1.25, 0.75, -0.25], [2, 2, 2]);
+        let weight = t(&[1.5, -0.5, 2.0, 0.5], [2, 2]);
+        let bias = t(&[0.25, -0.5, 0.75, 0.0], [2, 2]);
+        load(
+            &mut norm,
+            &[("weight", weight.clone()), ("bias", bias.clone())],
+        );
+        let got = norm.forward(&x, Mode::EVAL).unwrap();
+        let composed = layer_norm(&x, &weight, &bias, 1e-4).unwrap();
+        assert_eq!(v(&got), v(&composed));
+    }
+
+    #[test]
+    fn reduced_precision_layer_norm_explicitly_uses_the_composed_fallback() {
+        for dtype in [DType::F16, DType::BF16] {
+            let make = |values: &[f32], dims: &[usize]| {
+                match dtype {
+                    DType::F16 => Tensor::from_vec(
+                        values.iter().copied().map(half::f16::from_f32).collect(),
+                        dims.to_vec(),
+                        &CPU,
+                    ),
+                    DType::BF16 => Tensor::from_vec(
+                        values.iter().copied().map(half::bf16::from_f32).collect(),
+                        dims.to_vec(),
+                        &CPU,
+                    ),
+                    _ => unreachable!(),
+                }
+                .unwrap()
+            };
+            let mut norm = LayerNorm::with_eps([3], 1e-3, &CPU).unwrap();
+            let x = make(&[0.5, -1.5, 2.0, 0.25, -0.75, 1.25], &[2, 3]);
+            let weight = make(&[1.5, -0.5, 2.0], &[3]);
+            let bias = make(&[0.25, -0.5, 0.75], &[3]);
+            norm.weight.set(weight.clone()).unwrap();
+            norm.bias.set(bias.clone()).unwrap();
+            let got = norm.forward(&x, Mode::EVAL).unwrap();
+            let composed = layer_norm(&x, &weight, &bias, 1e-3).unwrap();
+            match dtype {
+                DType::F16 => assert_eq!(
+                    got.to_vec::<half::f16>().unwrap(),
+                    composed.to_vec::<half::f16>().unwrap()
+                ),
+                DType::BF16 => assert_eq!(
+                    got.to_vec::<half::bf16>().unwrap(),
+                    composed.to_vec::<half::bf16>().unwrap()
+                ),
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]
@@ -1501,6 +1675,61 @@ mod tests {
             TOL,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn grad_fused_layer_norm_wrt_input_weight_and_bias() {
+        let x = t(&[0.5, -1.5, 2.0, 0.25, -0.75, 1.25], [2, 3]);
+        let weight = t(&[1.5, -0.5, 2.0], [3]);
+        let bias = t(&[0.25, -0.5, 0.75], [3]);
+        let c = coef(&[2, 3]);
+        check_grad(
+            |xs| {
+                fused_layer_norm(&xs[0], &xs[1], &xs[2], LayerNorm::DEFAULT_EPS)?
+                    .mul(&c)?
+                    .sum_all()
+            },
+            &[x, weight, bias],
+            EPS,
+            TOL,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fused_layer_norm_preserves_mode_and_parameter_freezing() {
+        let x = t(&[0.5, -1.5, 2.0, 0.25, -0.75, 1.25], [2, 3]);
+        let mut norm = LayerNorm::new([3], &CPU).unwrap();
+
+        let eval = norm.forward(&x, Mode::EVAL).unwrap();
+        assert!(matches!(eval.backward(), Err(Error::NotTraced { .. })));
+        let frozen_mode = norm.forward(&x, Mode::TRAIN.frozen()).unwrap();
+        assert!(matches!(
+            frozen_mode.backward(),
+            Err(Error::NotTraced { .. })
+        ));
+
+        norm.weight.freeze();
+        let grads = norm
+            .forward(&x, Mode::EVAL.recorded())
+            .unwrap()
+            .mul(&coef(&[2, 3]))
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(grads.len(), 1, "only the unfrozen bias receives a gradient");
+
+        let traced = x.traced().unwrap();
+        let grads = norm
+            .forward(&traced, Mode::TRAIN.frozen())
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(grads.wrt_input(&traced).unwrap().dims(), &[2, 3]);
     }
 
     #[test]
