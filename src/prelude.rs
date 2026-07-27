@@ -34,3 +34,6 @@ pub use crate::nn::{Embedding, MultiHeadAttention};
 // with the `Module` trait above under the one name: a single
 // `use rstorch::prelude::*;` brings both, and `#[derive(Module)]` resolves.
 pub use crate::Module;
+
+// Config-driven decoder language model and its incremental cache (T52).
+pub use crate::models::{DecoderTransformer, KvCache, TransformerConfig};

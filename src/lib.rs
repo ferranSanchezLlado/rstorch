@@ -38,6 +38,7 @@ pub(crate) mod storage;
 
 // ---- subsystems ----------------------------------------------------------
 pub mod data;
+pub mod models;
 pub mod nn;
 pub mod optim;
 pub mod persist;
