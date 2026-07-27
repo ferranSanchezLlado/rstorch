@@ -22,10 +22,9 @@
 //! from the `rhs` strides:
 //!
 //! - **`rhs_n_stride == 1`** (row-major `rhs`, the plain `a @ b` case) —
-//!   `i` → `p` → `j`, accumulating a whole output row at once against
-//!   consecutive `rhs` rows. The row accumulator and the `rhs` row are
-//!   unit-stride slices of equal length, so the inner loop is a
-//!   bounds-check-free `axpy` that auto-vectorizes. This is v2's fix verbatim.
+//!   `i` → `p` → `j`, accumulating output rows against consecutive `rhs`
+//!   rows. F32 handles four rows together so each `rhs` value is loaded once;
+//!   the generic path uses one bounds-check-free, vectorizable row `axpy`.
 //! - **otherwise** — `i` → `j` → `p` dot products, `COL_BLOCK` output columns
 //!   at a time. The case that matters is a transposed `rhs` view
 //!   (`rhs_k_stride == 1`), which is what
@@ -33,6 +32,8 @@
 //!   contiguous axis there, so the naive nest was cache-friendly but
 //!   latency-bound on one dependent add chain. Blocking over `j` gives
 //!   `COL_BLOCK` independent chains and reuses each `lhs` load across them.
+//!   F32 with a contiguous matrix axis on both inputs instead uses a 4×4
+//!   output tile, reusing both activation and weight loads.
 //!
 //! Both orders accumulate every output element's `k` terms in ascending `p`
 //! into one `Acc` slot and narrow once, so each is bitwise-identical to the
@@ -207,6 +208,143 @@ fn output_shape(plan: &Plan) -> Shape {
 /// added overlap buys.
 const COL_BLOCK: usize = 8;
 
+/// Adjacent logical rows processed together on the F32 row-major-rhs path.
+/// This reuses each rhs load and also turns the strided lhs walk used by
+/// weight-gradient products (`x.T @ grad`) into adjacent loads, without
+/// changing any output element's ascending-`k` accumulation order.
+const ROW_BLOCK: usize = 4;
+
+/// F32's common row-major-rhs path. Keeping the output in its final allocation
+/// avoids the generic accumulator row's refill/copy and reuses rhs values
+/// across four independent output rows.
+fn matmul_f32_row_major_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> {
+    let (m, k, n) = (plan.m, plan.k, plan.n);
+    let batch_count: usize = plan.batch.iter().product();
+    if batch_count == 0 || m == 0 || n == 0 {
+        return Vec::new();
+    }
+
+    let mut out = vec![0.0; batch_count * m * n];
+    for b in 0..batch_count {
+        let (lhs_base, rhs_base) = batch_bases(plan, b);
+        let out_base = b * m * n;
+        let mut i = 0;
+        while i + ROW_BLOCK <= m {
+            let start = out_base + i * n;
+            let block = &mut out[start..start + ROW_BLOCK * n];
+            let (out0, rest) = block.split_at_mut(n);
+            let (out1, rest) = rest.split_at_mut(n);
+            let (out2, out3) = rest.split_at_mut(n);
+            for p in 0..k {
+                let rhs_row = &rhs[rhs_base + p * plan.rhs_k_stride..][..n];
+                let lhs_col = lhs_base + p * plan.lhs_k_stride;
+                let a0 = lhs[lhs_col + i * plan.lhs_m_stride];
+                let a1 = lhs[lhs_col + (i + 1) * plan.lhs_m_stride];
+                let a2 = lhs[lhs_col + (i + 2) * plan.lhs_m_stride];
+                let a3 = lhs[lhs_col + (i + 3) * plan.lhs_m_stride];
+                for j in 0..n {
+                    let value = rhs_row[j];
+                    out0[j] += a0 * value;
+                    out1[j] += a1 * value;
+                    out2[j] += a2 * value;
+                    out3[j] += a3 * value;
+                }
+            }
+            i += ROW_BLOCK;
+        }
+        while i < m {
+            let lhs_row = lhs_base + i * plan.lhs_m_stride;
+            let start = out_base + i * n;
+            let out_row = &mut out[start..start + n];
+            for p in 0..k {
+                let a = lhs[lhs_row + p * plan.lhs_k_stride];
+                let rhs_row = &rhs[rhs_base + p * plan.rhs_k_stride..][..n];
+                for (slot, &value) in out_row.iter_mut().zip(rhs_row) {
+                    *slot += a * value;
+                }
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// F32 kernel for the `Linear` forward layout: a row-major lhs multiplied by
+/// a transposed row-major weight. A 4x4 output tile reuses each activation and
+/// weight load while every one of its 16 accumulators still visits `k` in
+/// ascending order.
+fn matmul_f32_transposed_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> {
+    const TILE: usize = 4;
+    let (m, k, n) = (plan.m, plan.k, plan.n);
+    let batch_count: usize = plan.batch.iter().product();
+    if batch_count == 0 || m == 0 || n == 0 {
+        return Vec::new();
+    }
+
+    let mut out = vec![0.0; batch_count * m * n];
+    for b in 0..batch_count {
+        let (lhs_base, rhs_base) = batch_bases(plan, b);
+        let out_base = b * m * n;
+        let mut i = 0;
+        while i + TILE <= m {
+            let mut j = 0;
+            while j + TILE <= n {
+                let mut acc = [[0.0f32; TILE]; TILE];
+                for p in 0..k {
+                    let lhs_col = lhs_base + p * plan.lhs_k_stride;
+                    let rhs_row = rhs_base + p * plan.rhs_k_stride;
+                    let av = [
+                        lhs[lhs_col + i * plan.lhs_m_stride],
+                        lhs[lhs_col + (i + 1) * plan.lhs_m_stride],
+                        lhs[lhs_col + (i + 2) * plan.lhs_m_stride],
+                        lhs[lhs_col + (i + 3) * plan.lhs_m_stride],
+                    ];
+                    let bv = [
+                        rhs[rhs_row + j * plan.rhs_n_stride],
+                        rhs[rhs_row + (j + 1) * plan.rhs_n_stride],
+                        rhs[rhs_row + (j + 2) * plan.rhs_n_stride],
+                        rhs[rhs_row + (j + 3) * plan.rhs_n_stride],
+                    ];
+                    for ii in 0..TILE {
+                        for jj in 0..TILE {
+                            acc[ii][jj] += av[ii] * bv[jj];
+                        }
+                    }
+                }
+                for (ii, acc_row) in acc.iter().enumerate() {
+                    let start = out_base + (i + ii) * n + j;
+                    out[start..start + TILE].copy_from_slice(acc_row);
+                }
+                j += TILE;
+            }
+            while j < n {
+                for ii in 0..TILE {
+                    let mut acc = 0.0;
+                    for p in 0..k {
+                        acc += lhs[lhs_base + (i + ii) * plan.lhs_m_stride + p * plan.lhs_k_stride]
+                            * rhs[rhs_base + p * plan.rhs_k_stride + j * plan.rhs_n_stride];
+                    }
+                    out[out_base + (i + ii) * n + j] = acc;
+                }
+                j += 1;
+            }
+            i += TILE;
+        }
+        while i < m {
+            for j in 0..n {
+                let mut acc = 0.0;
+                for p in 0..k {
+                    acc += lhs[lhs_base + i * plan.lhs_m_stride + p * plan.lhs_k_stride]
+                        * rhs[rhs_base + p * plan.rhs_k_stride + j * plan.rhs_n_stride];
+                }
+                out[out_base + i * n + j] = acc;
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Generic batched matmul accumulating each inner product in `E::Acc` and
 /// casting once at output. `lhs`/`rhs` are the whole backing buffers. See the
 /// module docs for why the loop order is chosen from the `rhs` strides.
@@ -328,7 +466,14 @@ pub(crate) fn matmul(lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
             CpuStorage::BF16(std::sync::Arc::new(matmul_generic(a, b, &plan)))
         }
         (CpuStorage::F32(a), CpuStorage::F32(b)) => {
-            CpuStorage::F32(std::sync::Arc::new(matmul_generic(a, b, &plan)))
+            let out = if plan.rhs_n_stride == 1 {
+                matmul_f32_row_major_rhs(a, b, &plan)
+            } else if plan.lhs_k_stride == 1 && plan.rhs_k_stride == 1 {
+                matmul_f32_transposed_rhs(a, b, &plan)
+            } else {
+                matmul_generic(a, b, &plan)
+            };
+            CpuStorage::F32(std::sync::Arc::new(out))
         }
         (CpuStorage::F64(a), CpuStorage::F64(b)) => {
             CpuStorage::F64(std::sync::Arc::new(matmul_generic(a, b, &plan)))
@@ -556,6 +701,59 @@ mod tests {
                 &row_major[bi * m * n..(bi + 1) * m * n],
                 &expected,
                 &format!("batch {bi}"),
+            );
+        }
+    }
+
+    #[test]
+    fn transposed_lhs_f32_path_is_bitwise_exact_for_training_shape() {
+        // The first MLP weight gradient is `[784, 64] @ [64, 128]`; these
+        // reduced dimensions exercise the identical transposed-lhs stride
+        // pattern, a non-multiple row-block tail, and a non-trivial inner sum.
+        let (m, k, n) = (131usize, 64usize, 19usize);
+        let mut rng = Prng(0xA11C_E5E5_1234_5678);
+        let logical_a: Vec<f32> = (0..m * k).map(|_| rng.wide()).collect();
+        let stored_a: Vec<f32> = (0..k * m)
+            .map(|idx| logical_a[(idx % m) * k + idx / m])
+            .collect();
+        let b: Vec<f32> = (0..k * n).map(|_| rng.wide()).collect();
+        let expected = naive(&logical_a, &b, m, k, n);
+
+        let sa = f32_storage(stored_a);
+        let la = Layout::contiguous([k, m]).unwrap().transpose(0, 1).unwrap();
+        let sb = f32_storage(b);
+        let lb = Layout::contiguous([k, n]).unwrap();
+        let got = as_f32(&matmul(View::new(&sa, &la), View::new(&sb, &lb)).unwrap());
+
+        assert_eq!(matmul_shape(&la, &lb).dims(), &[m, n]);
+        assert_bitwise_eq(&got, &expected, "training transposed lhs");
+    }
+
+    #[test]
+    fn transposed_lhs_f32_path_preserves_batched_broadcasting() {
+        let (batch, m, k, n) = (3usize, 9usize, 17usize, 7usize);
+        let mut rng = Prng(0xBA7C_4ED0_1234_5678);
+        let logical_a: Vec<f32> = (0..m * k).map(|_| rng.wide()).collect();
+        let stored_a: Vec<f32> = (0..k * m)
+            .map(|idx| logical_a[(idx % m) * k + idx / m])
+            .collect();
+        let b: Vec<f32> = (0..batch * k * n).map(|_| rng.wide()).collect();
+        let sa = f32_storage(stored_a);
+        let la = Layout::contiguous([1, k, m])
+            .unwrap()
+            .transpose(1, 2)
+            .unwrap();
+        let sb = f32_storage(b.clone());
+        let lb = Layout::contiguous([batch, k, n]).unwrap();
+        let got = as_f32(&matmul(View::new(&sa, &la), View::new(&sb, &lb)).unwrap());
+
+        assert_eq!(matmul_shape(&la, &lb).dims(), &[batch, m, n]);
+        for bi in 0..batch {
+            let expected = naive(&logical_a, &b[bi * k * n..(bi + 1) * k * n], m, k, n);
+            assert_bitwise_eq(
+                &got[bi * m * n..(bi + 1) * m * n],
+                &expected,
+                &format!("transposed lhs broadcast batch {bi}"),
             );
         }
     }
