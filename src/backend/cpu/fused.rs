@@ -400,11 +400,51 @@ fn softmax(inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
     let output = match cpu_storage(OP, x)? {
         CpuStorage::F16(values) => CpuStorage::F16(Arc::new(softmax_generic(values, x.layout()))),
         CpuStorage::BF16(values) => CpuStorage::BF16(Arc::new(softmax_generic(values, x.layout()))),
+        CpuStorage::F32(values) if x.layout().is_contiguous() => {
+            CpuStorage::F32(Arc::new(softmax_contiguous_f32(values, x.layout())))
+        }
         CpuStorage::F32(values) => CpuStorage::F32(Arc::new(softmax_generic(values, x.layout()))),
         CpuStorage::F64(values) => CpuStorage::F64(Arc::new(softmax_generic(values, x.layout()))),
         CpuStorage::I64(_) | CpuStorage::Bool(_) => unreachable!("validated float dtype"),
     };
     Ok(Storage::Cpu(output))
+}
+
+fn softmax_contiguous_f32(values: &[f32], layout: &Layout) -> Vec<f32> {
+    let width = layout.dims()[layout.rank() - 1];
+    let mut output = vec![0.0; layout.num_elements()];
+
+    for (input_row, output_row) in values
+        .chunks_exact(width)
+        .zip(output.chunks_exact_mut(width))
+    {
+        let mut peak = f32::NEG_INFINITY;
+        let mut has_nan = false;
+        for &value in input_row {
+            peak = peak.max(value);
+            has_nan |= value.is_nan();
+        }
+        if has_nan {
+            output_row.fill(f32::NAN);
+            continue;
+        }
+
+        if peak == f32::NEG_INFINITY {
+            continue;
+        }
+
+        let mut denominator = 0.0;
+        for (output, &value) in output_row.iter_mut().zip(input_row) {
+            let exponent = (value - peak).exp();
+            denominator += exponent;
+            *output = exponent;
+        }
+        let scale = denominator.recip();
+        for value in output_row {
+            *value *= scale;
+        }
+    }
+    output
 }
 
 fn softmax_generic<E>(values: &[E], layout: &Layout) -> Vec<E>
@@ -950,6 +990,29 @@ mod tests {
         assert!(got[3] < 1e-8);
         assert!(got[4] < 1e-4);
         assert!(got[5] > 0.9999);
+    }
+
+    #[test]
+    fn contiguous_f32_softmax_preserves_special_value_policy() {
+        let layout = Layout::contiguous([3, 3]).unwrap();
+        let x = storage(vec![
+            1.0,
+            2.0,
+            3.0,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            4.0,
+            f32::NAN,
+            5.0,
+        ]);
+        let got = values(one(
+            fused(FusedOp::Softmax, &[View::new(&x, &layout)], &[]).unwrap()
+        ));
+
+        close(&got[..3], &[0.090_030_57, 0.244_728_48, 0.665_240_94]);
+        assert_eq!(&got[3..6], &[0.0, 0.0, 0.0]);
+        assert!(got[6..].iter().all(|value| value.is_nan()));
     }
 
     #[test]
