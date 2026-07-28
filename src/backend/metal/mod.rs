@@ -369,18 +369,44 @@ fn synchronize(context: &Arc<Context>) -> Result<()> {
             .lock()
             .expect("Metal submission state poisoned");
         commit_open(&mut submission);
-        for pending in std::mem::take(&mut submission.pending) {
-            #[cfg(test)]
-            INSTRUMENTATION.waits.fetch_add(1, Ordering::Relaxed);
-            pending.command.wait_until_completed();
-            if pending.command.status() == metal_rs::MTLCommandBufferStatus::Error {
-                return Err(Error::Backend {
-                    op: "transfer_out",
-                    msg: "Metal command buffer completed with an error".to_owned(),
-                });
-            }
+        drain_results(
+            std::mem::take(&mut submission.pending)
+                .into_iter()
+                .map(|pending| {
+                    #[cfg(test)]
+                    INSTRUMENTATION.waits.fetch_add(1, Ordering::Relaxed);
+                    pending.command.wait_until_completed();
+                    if pending.command.status() == metal_rs::MTLCommandBufferStatus::Error {
+                        Err(Error::Backend {
+                            op: "transfer_out",
+                            msg: "Metal command buffer completed with an error".to_owned(),
+                        })
+                    } else {
+                        Ok(())
+                    }
+                }),
+        )
+    })
+}
+
+fn drain_results(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
+    let mut first_error = None;
+    for result in results {
+        if let Err(error) = result
+            && first_error.is_none()
+        {
+            first_error = Some(error);
         }
-        Ok(())
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn checked_product(op: &'static str, values: impl IntoIterator<Item = usize>) -> Result<usize> {
+    values.into_iter().try_fold(1usize, |product, value| {
+        product.checked_mul(value).ok_or_else(|| Error::InvalidArg {
+            op,
+            msg: "output element count overflows usize".to_owned(),
+        })
     })
 }
 
@@ -1488,7 +1514,7 @@ impl BackendOps for MetalBackend {
         let index = metal_storage("index_select", indices)?;
         let mut dims = x.layout().dims().to_vec();
         dims[axis] = indices.layout().num_elements();
-        let len: usize = dims.iter().product();
+        let len = checked_product("index_select", dims.iter().copied())?;
         let out_dims: Vec<u64> = dims.iter().map(|&v| v as u64).collect();
         let output = output_for(&context, x.dtype(), len)?;
         let pipe = pipeline(&context, &format!("index_select_{}", suffix(x.dtype())))?;
@@ -1733,7 +1759,7 @@ impl BackendOps for MetalBackend {
                     weight.layout().dims(),
                     params,
                 )?;
-                let len: usize = geometry.output_dims().iter().product();
+                let len = checked_product("conv2d", geometry.output_dims())?;
                 (geometry, "conv2d", len, *x, Some(*weight), None)
             }
             (ConvOp::MaxPool2d | ConvOp::AvgPool2d, [x]) => {
@@ -1742,7 +1768,7 @@ impl BackendOps for MetalBackend {
                     x.layout().dims(),
                     params,
                 )?;
-                let len: usize = geometry.output_dims().iter().product();
+                let len = checked_product("pool2d", geometry.output_dims())?;
                 (
                     geometry,
                     "pool",
@@ -2275,7 +2301,10 @@ mod tests {
     #[test]
     fn gelu_matches_cpu_on_adversarial_inputs() {
         let _lane = HARDWARE_LANE.lock().unwrap();
-        let values = vec![
+        let mut values: Vec<f32> = (-12_000..=12_000)
+            .map(|value| value as f32 / 1000.0)
+            .collect();
+        values.extend([
             -12.0f32,
             -8.0,
             -5.0,
@@ -2293,25 +2322,127 @@ mod tests {
             5.0,
             8.0,
             12.0,
-        ];
+        ]);
         let cpu = Tensor::from_vec(values.clone(), [values.len()], &Device::Cpu)
             .unwrap()
             .gelu()
             .unwrap()
             .to_vec::<f32>()
             .unwrap();
-        let metal = Tensor::from_vec(values, [cpu.len()], &METAL)
+        let metal = Tensor::from_vec(values.clone(), [cpu.len()], &METAL)
             .unwrap()
             .gelu()
             .unwrap()
             .to_vec::<f32>()
             .unwrap();
-        for (index, (&want, &got)) in cpu.iter().zip(&metal).enumerate() {
+        let mut max_abs = 0.0f32;
+        let mut max_ulp = 0u32;
+        for (index, ((&input, &want), &got)) in values.iter().zip(&cpu).zip(&metal).enumerate() {
+            max_abs = max_abs.max((want - got).abs());
+            if input.abs() <= 5.0
+                && want.abs() >= 1e-4
+                && want.is_sign_positive() == got.is_sign_positive()
+            {
+                max_ulp = max_ulp.max(want.to_bits().abs_diff(got.to_bits()));
+            }
             assert!(
                 (want - got).abs() <= 2.0 * f32::EPSILON * want.abs().max(1.0),
                 "GELU element {index}: expected {want:?}, got {got:?}"
             );
         }
+        eprintln!("dense GELU sweep: max_abs={max_abs:e}, max_central_ulp={max_ulp}");
+    }
+
+    #[test]
+    fn float_to_i64_casts_match_rust_saturation() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let values = vec![
+            f32::NAN,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::from_bits(0xdf00_0000),
+            f32::from_bits(0x5f00_0000),
+            f32::from_bits(0xdeff_ffff),
+            f32::from_bits(0x5eff_ffff),
+            f32::from_bits(0xdf00_0001),
+            f32::from_bits(0x5f00_0001),
+            -123.75,
+            -0.75,
+            0.75,
+            123.75,
+            16_777_216.0,
+        ];
+        let expected = Tensor::from_vec(values.clone(), [values.len()], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::I64)
+            .unwrap()
+            .to_vec::<i64>()
+            .unwrap();
+        let got = Tensor::from_vec(values, [expected.len()], &METAL)
+            .unwrap()
+            .to_dtype(DType::I64)
+            .unwrap()
+            .to_vec::<i64>()
+            .unwrap();
+        assert_eq!(got, expected);
+
+        let halves = vec![
+            half::f16::NAN,
+            half::f16::NEG_INFINITY,
+            half::f16::INFINITY,
+            half::f16::from_f32(-123.75),
+            half::f16::from_f32(-0.75),
+            half::f16::from_f32(0.75),
+            half::f16::from_f32(123.75),
+        ];
+        let expected = Tensor::from_vec(halves.clone(), [halves.len()], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::I64)
+            .unwrap()
+            .to_vec::<i64>()
+            .unwrap();
+        let got = Tensor::from_vec(halves, [expected.len()], &METAL)
+            .unwrap()
+            .to_dtype(DType::I64)
+            .unwrap()
+            .to_vec::<i64>()
+            .unwrap();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn checked_output_products_reject_overflow_without_allocating() {
+        assert!(matches!(
+            super::checked_product("test_grid", [usize::MAX, 2]),
+            Err(Error::InvalidArg {
+                op: "test_grid",
+                ..
+            })
+        ));
+        assert_eq!(
+            super::checked_product("test_grid", [3, 0, usize::MAX]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn synchronization_error_drain_evaluates_every_pending_result() {
+        use std::cell::Cell;
+
+        let evaluated = Cell::new(0usize);
+        let result = super::drain_results((0..3).map(|index| {
+            evaluated.set(evaluated.get() + 1);
+            if index < 2 {
+                Err(Error::Backend {
+                    op: if index == 0 { "first" } else { "second" },
+                    msg: index.to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }));
+        assert_eq!(evaluated.get(), 3);
+        assert!(matches!(result, Err(Error::Backend { op: "first", .. })));
     }
 
     #[test]

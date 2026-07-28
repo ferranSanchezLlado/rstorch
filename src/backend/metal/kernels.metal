@@ -275,11 +275,19 @@ SELECT_KERNELS(uchar,bool,uchar,float)
 kernel void cast_##FN##_to_##TN(device const FROM* x [[buffer(0)]],device TO* out [[buffer(1)]], \
  constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]],constant ulong& off [[buffer(5)]], \
  constant ulong& len [[buffer(6)]],uint gid [[thread_position_in_grid]]){if(gid<len){FROM v=x[view_offset(gid,d,s,r,off)];out[gid]=(EXPR);}}
+static long float_to_i64(float value) {
+    if (isnan(value)) return 0;
+    // f32 cannot represent i64::MAX. 2^63 is the first source value at or
+    // above it, while -2^63 is exactly representable.
+    if (value >= 0x1p63f) return as_type<long>(0x7fffffffffffffffUL);
+    if (value <= -0x1p63f) return as_type<long>(0x8000000000000000UL);
+    return long(value);
+}
 CAST_KERNEL(half,float,f16,f32,float(v))
 CAST_KERNEL(float,half,f32,f16,half(v))
-CAST_KERNEL(half,long,f16,i64,long(v))
+CAST_KERNEL(half,long,f16,i64,float_to_i64(float(v)))
 CAST_KERNEL(long,half,i64,f16,half(v))
-CAST_KERNEL(float,long,f32,i64,long(v))
+CAST_KERNEL(float,long,f32,i64,float_to_i64(v))
 CAST_KERNEL(long,float,i64,f32,float(v))
 CAST_KERNEL(half,uchar,f16,bool,uchar(v!=half(0)))
 CAST_KERNEL(uchar,half,bool,f16,half(v!=0))

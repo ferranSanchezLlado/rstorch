@@ -234,11 +234,10 @@ fn bench_transformer(c: &mut Criterion) {
 
         group.bench_function("forward", |b| {
             b.iter(|| {
-                black_box(
-                    model
-                        .logits(black_box(&ids), &positions, &mask, Mode::EVAL)
-                        .unwrap(),
-                )
+                let output = model
+                    .logits(black_box(&ids), &positions, &mask, Mode::EVAL)
+                    .unwrap();
+                black_box(output.to_vec::<f32>().unwrap().first().copied())
             });
         });
 
@@ -247,7 +246,9 @@ fn bench_transformer(c: &mut Criterion) {
                 let loss = model
                     .loss(&ids, &positions, &mask, &targets, Mode::TRAIN)
                     .unwrap();
-                let _ = black_box(loss.backward().unwrap());
+                let grads = loss.backward().unwrap();
+                let _ = black_box(grads);
+                black_box(loss.item().unwrap());
             });
         });
 
