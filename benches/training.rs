@@ -44,9 +44,10 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use rstorch::prelude::*;
 
 fn benchmark_devices() -> Vec<Device> {
-    let mut devices = vec![Device::Cpu];
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    devices.push(Device::Metal(0));
+    let devices = vec![Device::Cpu, Device::Metal(0)];
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    let devices = vec![Device::Cpu];
     devices
 }
 
