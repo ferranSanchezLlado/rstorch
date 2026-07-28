@@ -1,0 +1,457 @@
+use super::{ArgKeepDimOutput, ArgOutput, KeepDimOutput, RemoveAxisOutput, ScalarOutput};
+use crate::typed::tensor::checked_wrap;
+use crate::typed::{
+    DYN, FloatElement, NumericElement, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4,
+    Tensor5, Tensor6, Tensor7, Tensor8, TypedTensor,
+};
+use crate::{Result, Tensor};
+use std::sync::Arc;
+
+fn wrap<T: TypedTensor, O: TypedTensor>(input: &T, output: Tensor, op: &'static str) -> Result<O> {
+    checked_wrap(output, Arc::clone(input.binding()), op)
+}
+
+macro_rules! numeric_reductions {
+    ($name:ident, [$($dim:ident),+], $removed:ty, $dynamic:ty, $arg_removed:ty, $arg_dynamic:ty) => {
+        impl<$(const $dim: usize,)+ E: NumericElement, P: Placement>
+            $name<$($dim,)+ E, P>
+        {
+            pub fn sum<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
+            where
+                Self: RemoveAxisOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().sum(AXIS as isize)?, "sum")
+            }
+
+            pub fn sum_keepdim<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
+            where
+                Self: KeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().sum_keepdim(AXIS as isize)?,
+                    "sum_keepdim",
+                )
+            }
+
+            pub fn sum_all(&self) -> Result<<Self as ScalarOutput>::Output> {
+                wrap(self, self.as_dynamic().sum_all()?, "sum_all")
+            }
+
+            pub fn mean<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
+            where
+                Self: RemoveAxisOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().mean(AXIS as isize)?, "mean")
+            }
+
+            pub fn mean_keepdim<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
+            where
+                Self: KeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().mean_keepdim(AXIS as isize)?,
+                    "mean_keepdim",
+                )
+            }
+
+            pub fn mean_all(&self) -> Result<<Self as ScalarOutput>::Output> {
+                wrap(self, self.as_dynamic().mean_all()?, "mean_all")
+            }
+
+            pub fn max<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
+            where
+                Self: RemoveAxisOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().max(AXIS as isize)?, "max")
+            }
+
+            pub fn max_keepdim<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
+            where
+                Self: KeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().max_keepdim(AXIS as isize)?,
+                    "max_keepdim",
+                )
+            }
+
+            pub fn max_all(&self) -> Result<<Self as ScalarOutput>::Output> {
+                wrap(self, self.as_dynamic().max_all()?, "max_all")
+            }
+
+            pub fn min<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
+            where
+                Self: RemoveAxisOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().min(AXIS as isize)?, "min")
+            }
+
+            pub fn min_keepdim<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
+            where
+                Self: KeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().min_keepdim(AXIS as isize)?,
+                    "min_keepdim",
+                )
+            }
+
+            pub fn min_all(&self) -> Result<<Self as ScalarOutput>::Output> {
+                wrap(self, self.as_dynamic().min_all()?, "min_all")
+            }
+
+            pub fn argmax<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as ArgOutput<AXIS>>::Output>
+            where
+                Self: ArgOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().argmax(AXIS as isize)?, "argmax")
+            }
+
+            pub fn argmax_keepdim<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as ArgKeepDimOutput<AXIS>>::Output>
+            where
+                Self: ArgKeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().argmax_keepdim(AXIS as isize)?,
+                    "argmax_keepdim",
+                )
+            }
+
+            pub fn argmin<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as ArgOutput<AXIS>>::Output>
+            where
+                Self: ArgOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().argmin(AXIS as isize)?, "argmin")
+            }
+
+            pub fn argmin_keepdim<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as ArgKeepDimOutput<AXIS>>::Output>
+            where
+                Self: ArgKeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().argmin_keepdim(AXIS as isize)?,
+                    "argmin_keepdim",
+                )
+            }
+
+            pub fn sum_dyn(&self, axis: isize) -> Result<$removed> {
+                wrap(self, self.as_dynamic().sum(axis)?, "sum")
+            }
+
+            pub fn sum_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
+                wrap(self, self.as_dynamic().sum_keepdim(axis)?, "sum_keepdim")
+            }
+
+            pub fn mean_dyn(&self, axis: isize) -> Result<$removed> {
+                wrap(self, self.as_dynamic().mean(axis)?, "mean")
+            }
+
+            pub fn mean_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
+                wrap(self, self.as_dynamic().mean_keepdim(axis)?, "mean_keepdim")
+            }
+
+            pub fn max_dyn(&self, axis: isize) -> Result<$removed> {
+                wrap(self, self.as_dynamic().max(axis)?, "max")
+            }
+
+            pub fn max_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
+                wrap(self, self.as_dynamic().max_keepdim(axis)?, "max_keepdim")
+            }
+
+            pub fn min_dyn(&self, axis: isize) -> Result<$removed> {
+                wrap(self, self.as_dynamic().min(axis)?, "min")
+            }
+
+            pub fn min_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
+                wrap(self, self.as_dynamic().min_keepdim(axis)?, "min_keepdim")
+            }
+
+            pub fn argmax_dyn(&self, axis: isize) -> Result<$arg_removed> {
+                wrap(self, self.as_dynamic().argmax(axis)?, "argmax")
+            }
+
+            pub fn argmax_keepdim_dyn(&self, axis: isize) -> Result<$arg_dynamic> {
+                wrap(self, self.as_dynamic().argmax_keepdim(axis)?, "argmax_keepdim")
+            }
+
+            pub fn argmin_dyn(&self, axis: isize) -> Result<$arg_removed> {
+                wrap(self, self.as_dynamic().argmin(axis)?, "argmin")
+            }
+
+            pub fn argmin_keepdim_dyn(&self, axis: isize) -> Result<$arg_dynamic> {
+                wrap(self, self.as_dynamic().argmin_keepdim(axis)?, "argmin_keepdim")
+            }
+        }
+    };
+}
+
+macro_rules! float_reductions {
+    ($name:ident, [$($dim:ident),+], $removed:ty, $dynamic:ty) => {
+        impl<$(const $dim: usize,)+ E: FloatElement, P: Placement>
+            $name<$($dim,)+ E, P>
+        {
+            pub fn var<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
+            where
+                Self: RemoveAxisOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().var(AXIS as isize)?, "var")
+            }
+
+            pub fn var_keepdim<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
+            where
+                Self: KeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().var_keepdim(AXIS as isize)?,
+                    "var_keepdim",
+                )
+            }
+
+            pub fn var_all(&self) -> Result<<Self as ScalarOutput>::Output> {
+                wrap(self, self.as_dynamic().var_all()?, "var_all")
+            }
+
+            pub fn std<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
+            where
+                Self: RemoveAxisOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().std(AXIS as isize)?, "std")
+            }
+
+            pub fn std_keepdim<const AXIS: usize>(
+                &self,
+            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
+            where
+                Self: KeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().std_keepdim(AXIS as isize)?,
+                    "std_keepdim",
+                )
+            }
+
+            pub fn std_all(&self) -> Result<<Self as ScalarOutput>::Output> {
+                wrap(self, self.as_dynamic().std_all()?, "std_all")
+            }
+
+            pub fn softmax<const AXIS: usize>(&self) -> Result<Self>
+            where
+                Self: KeepDimOutput<AXIS>,
+            {
+                wrap(self, self.as_dynamic().softmax(AXIS as isize)?, "softmax")
+            }
+
+            pub fn log_softmax<const AXIS: usize>(&self) -> Result<Self>
+            where
+                Self: KeepDimOutput<AXIS>,
+            {
+                wrap(
+                    self,
+                    self.as_dynamic().log_softmax(AXIS as isize)?,
+                    "log_softmax",
+                )
+            }
+
+            pub fn var_dyn(&self, axis: isize) -> Result<$removed> {
+                wrap(self, self.as_dynamic().var(axis)?, "var")
+            }
+
+            pub fn var_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
+                wrap(self, self.as_dynamic().var_keepdim(axis)?, "var_keepdim")
+            }
+
+            pub fn std_dyn(&self, axis: isize) -> Result<$removed> {
+                wrap(self, self.as_dynamic().std(axis)?, "std")
+            }
+
+            pub fn std_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
+                wrap(self, self.as_dynamic().std_keepdim(axis)?, "std_keepdim")
+            }
+
+            pub fn softmax_dyn(&self, axis: isize) -> Result<Self> {
+                wrap(self, self.as_dynamic().softmax(axis)?, "softmax")
+            }
+
+            pub fn log_softmax_dyn(&self, axis: isize) -> Result<Self> {
+                wrap(self, self.as_dynamic().log_softmax(axis)?, "log_softmax")
+            }
+        }
+    };
+}
+
+macro_rules! reductions_for_rank {
+    ($name:ident, [$($dim:ident),+], $removed:ty, $dynamic:ty, $arg_removed:ty, $arg_dynamic:ty) => {
+        numeric_reductions!($name, [$($dim),+], $removed, $dynamic, $arg_removed, $arg_dynamic);
+        float_reductions!($name, [$($dim),+], $removed, $dynamic);
+    };
+}
+
+reductions_for_rank!(Tensor1, [D0], Tensor0<E, P>, Tensor1<DYN, E, P>, Tensor0<i64, P>, Tensor1<DYN, i64, P>);
+reductions_for_rank!(Tensor2, [D0, D1], Tensor1<DYN, E, P>, Tensor2<DYN, DYN, E, P>, Tensor1<DYN, i64, P>, Tensor2<DYN, DYN, i64, P>);
+reductions_for_rank!(Tensor3, [D0, D1, D2], Tensor2<DYN, DYN, E, P>, Tensor3<DYN, DYN, DYN, E, P>, Tensor2<DYN, DYN, i64, P>, Tensor3<DYN, DYN, DYN, i64, P>);
+reductions_for_rank!(Tensor4, [D0, D1, D2, D3], Tensor3<DYN, DYN, DYN, E, P>, Tensor4<DYN, DYN, DYN, DYN, E, P>, Tensor3<DYN, DYN, DYN, i64, P>, Tensor4<DYN, DYN, DYN, DYN, i64, P>);
+reductions_for_rank!(Tensor5, [D0, D1, D2, D3, D4], Tensor4<DYN, DYN, DYN, DYN, E, P>, Tensor5<DYN, DYN, DYN, DYN, DYN, E, P>, Tensor4<DYN, DYN, DYN, DYN, i64, P>, Tensor5<DYN, DYN, DYN, DYN, DYN, i64, P>);
+reductions_for_rank!(Tensor6, [D0, D1, D2, D3, D4, D5], Tensor5<DYN, DYN, DYN, DYN, DYN, E, P>, Tensor6<DYN, DYN, DYN, DYN, DYN, DYN, E, P>, Tensor5<DYN, DYN, DYN, DYN, DYN, i64, P>, Tensor6<DYN, DYN, DYN, DYN, DYN, DYN, i64, P>);
+reductions_for_rank!(Tensor7, [D0, D1, D2, D3, D4, D5, D6], Tensor6<DYN, DYN, DYN, DYN, DYN, DYN, E, P>, Tensor7<DYN, DYN, DYN, DYN, DYN, DYN, DYN, E, P>, Tensor6<DYN, DYN, DYN, DYN, DYN, DYN, i64, P>, Tensor7<DYN, DYN, DYN, DYN, DYN, DYN, DYN, i64, P>);
+reductions_for_rank!(Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7], Tensor7<DYN, DYN, DYN, DYN, DYN, DYN, DYN, E, P>, Tensor8<DYN, DYN, DYN, DYN, DYN, DYN, DYN, DYN, E, P>, Tensor7<DYN, DYN, DYN, DYN, DYN, DYN, DYN, i64, P>, Tensor8<DYN, DYN, DYN, DYN, DYN, DYN, DYN, DYN, i64, P>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::typed::{Cpu, DeviceCtx};
+    use crate::{Error, Grads};
+
+    trait Same<T> {}
+    impl<T> Same<T> for T {}
+
+    fn exact<T: Same<Expected>, Expected>(_: &T) {}
+
+    #[test]
+    fn frozen_outputs_are_exact_for_every_rank() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let t1 = Tensor1::<1>::from_vec(vec![1.0], [1], &ctx).unwrap();
+        let t2 = Tensor2::<1, 1>::from_vec(vec![1.0], [1, 1], &ctx).unwrap();
+        let t3 = Tensor3::<1, 1, 1>::from_vec(vec![1.0], [1, 1, 1], &ctx).unwrap();
+        let t4 = Tensor4::<1, 1, 1, 1>::from_vec(vec![1.0], [1, 1, 1, 1], &ctx).unwrap();
+        let t5 = Tensor5::<1, 1, 1, 1, 1>::from_vec(vec![1.0], [1, 1, 1, 1, 1], &ctx).unwrap();
+        let t6 =
+            Tensor6::<1, 1, 1, 1, 1, 1>::from_vec(vec![1.0], [1, 1, 1, 1, 1, 1], &ctx).unwrap();
+        let t7 = Tensor7::<1, 1, 1, 1, 1, 1, 1>::from_vec(vec![1.0], [1, 1, 1, 1, 1, 1, 1], &ctx)
+            .unwrap();
+        let t8 =
+            Tensor8::<1, 1, 1, 1, 1, 1, 1, 1>::from_vec(vec![1.0], [1, 1, 1, 1, 1, 1, 1, 1], &ctx)
+                .unwrap();
+
+        exact::<_, Tensor0>(&t1.sum::<0>().unwrap());
+        exact::<_, Tensor1<1>>(&t2.sum::<0>().unwrap());
+        exact::<_, Tensor2<1, 1>>(&t3.sum::<0>().unwrap());
+        exact::<_, Tensor3<1, 1, 1>>(&t4.sum::<0>().unwrap());
+        exact::<_, Tensor4<1, 1, 1, 1>>(&t5.sum::<0>().unwrap());
+        exact::<_, Tensor5<1, 1, 1, 1, 1>>(&t6.sum::<0>().unwrap());
+        exact::<_, Tensor6<1, 1, 1, 1, 1, 1>>(&t7.sum::<0>().unwrap());
+        exact::<_, Tensor7<1, 1, 1, 1, 1, 1, 1>>(&t8.sum::<0>().unwrap());
+        exact::<_, Tensor8<1, 1, 1, 1, 1, 1, 1, 1>>(&t8.max_keepdim::<7>().unwrap());
+        exact::<_, Tensor7<1, 1, 1, 1, 1, 1, 1, i64>>(&t8.argmax::<7>().unwrap());
+    }
+
+    #[test]
+    fn typed_values_match_runtime_and_runtime_axes_erase_markers() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let x =
+            Tensor2::<2, 3>::from_vec(vec![1.0f32, 5.0, 3.0, 4.0, 2.0, 6.0], [2, 3], &ctx).unwrap();
+
+        assert_eq!(
+            x.sum::<1>().unwrap().as_dynamic().to_vec::<f32>().unwrap(),
+            x.as_dynamic().sum(1).unwrap().to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            x.mean::<0>().unwrap().as_dynamic().to_vec::<f32>().unwrap(),
+            x.as_dynamic().mean(0).unwrap().to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            x.var::<1>().unwrap().as_dynamic().to_vec::<f32>().unwrap(),
+            x.as_dynamic().var(1).unwrap().to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            x.softmax::<1>()
+                .unwrap()
+                .as_dynamic()
+                .to_vec::<f32>()
+                .unwrap(),
+            x.as_dynamic().softmax(1).unwrap().to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            x.argmax::<1>()
+                .unwrap()
+                .as_dynamic()
+                .to_vec::<i64>()
+                .unwrap(),
+            vec![1i64, 2]
+        );
+
+        let erased: Tensor1<DYN> = x.sum_dyn(-1).unwrap();
+        let kept: Tensor2<DYN, DYN> = x.mean_keepdim_dyn(0).unwrap();
+        let args: Tensor1<DYN, i64> = x.argmin_dyn(1).unwrap();
+        assert_eq!(erased.dims(), [2]);
+        assert_eq!(kept.dims(), [1, 3]);
+        assert_eq!(args.as_dynamic().to_vec::<i64>().unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn runtime_errors_and_empty_policies_are_preserved() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let x = Tensor2::<2, 3>::from_vec(vec![0.0f32; 6], [2, 3], &ctx).unwrap();
+        assert!(matches!(x.sum_dyn(2), Err(Error::InvalidAxis { .. })));
+
+        let empty = Tensor2::<2, 0>::from_vec(Vec::<f32>::new(), [2, 0], &ctx).unwrap();
+        assert_eq!(
+            empty
+                .sum::<1>()
+                .unwrap()
+                .as_dynamic()
+                .to_vec::<f32>()
+                .unwrap(),
+            vec![0.0, 0.0]
+        );
+        assert!(matches!(empty.mean::<1>(), Err(Error::InvalidArg { .. })));
+        assert!(matches!(empty.max::<1>(), Err(Error::InvalidArg { .. })));
+        assert!(matches!(
+            empty.softmax::<1>(),
+            Err(Error::InvalidArg { .. })
+        ));
+    }
+
+    #[test]
+    fn typed_reductions_preserve_runtime_gradients() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let runtime = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &ctx.device())
+            .unwrap()
+            .traced()
+            .unwrap();
+        let input = Tensor2::<2, 2>::try_from_dynamic(runtime.clone(), &ctx).unwrap();
+        let loss = input.mean::<1>().unwrap().sum_all().unwrap();
+        let grads: Grads = loss.as_dynamic().backward().unwrap();
+        assert_eq!(
+            grads.wrt_input(&runtime).unwrap().to_vec::<f32>().unwrap(),
+            vec![0.5; 4]
+        );
+    }
+}

@@ -168,6 +168,8 @@ mod sealed {
     pub trait OutputContract {}
 }
 
+mod reduce;
+
 /// Changes only element type.
 #[doc(hidden)]
 pub trait WithElement<F: Element>: sealed::OutputContract {
