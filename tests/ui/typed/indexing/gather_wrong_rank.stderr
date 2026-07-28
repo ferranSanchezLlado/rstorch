@@ -9,15 +9,15 @@ error[E0308]: mismatched types
     = note: expected reference `&Tensor2<_, _, i64>`
                found reference `&Tensor1<1, i64>`
 note: method defined here
-   --> $WORKSPACE/src/typed/ops/index.rs:123:1
+   --> $WORKSPACE/src/typed/ops/index.rs:143:1
     |
-123 | / impl_typed_indexing! {
-124 | |     (Tensor1, [D0]),
-125 | |     (Tensor2, [D0, D1]),
-126 | |     (Tensor3, [D0, D1, D2]),
+143 | / impl_typed_indexing! {
+144 | |     (Tensor1, [D0]),
+145 | |     (Tensor2, [D0, D1]),
+146 | |     (Tensor3, [D0, D1, D2]),
 ...   |
-131 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
-132 | | }
+151 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+152 | | }
     | |_^
     = note: this error originates in the macro `impl_typed_indexing` (in Nightly builds, run with -Z macro-backtrace for more info)
 

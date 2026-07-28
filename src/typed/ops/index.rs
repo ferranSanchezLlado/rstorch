@@ -6,7 +6,7 @@ use crate::typed::device::validate_binding;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
 use crate::typed::tensor::checked_wrap;
 use crate::typed::{DYN, DeviceBinding, DeviceCtx, Placement, Tensor1, Tensor2, TypedTensor};
-use crate::{DType, Element, Error, Result, Tensor};
+use crate::{Element, Error, Result, Shape, Tensor};
 use std::sync::Arc;
 
 fn validate_operand<P: Placement>(
@@ -41,7 +41,27 @@ impl<const LEN: usize, P: Placement> Tensor1<LEN, i64, P> {
     /// The resulting runtime length must equal `LEN`, unless `LEN` is [`DYN`].
     pub fn arange(start: i64, end: i64, ctx: &DeviceCtx<P>) -> Result<Self> {
         validate_binding::<P>(ctx.binding(), "arange")?;
-        let tensor = Tensor::arange(start as f64, end as f64, 1.0, DType::I64, &ctx.device())?;
+        let count = (i128::from(end) - i128::from(start)).max(0);
+        let count = usize::try_from(count).map_err(|_| Error::InvalidArg {
+            op: "arange",
+            msg: format!("range {start}..{end} has too many elements"),
+        })?;
+        if LEN != DYN && LEN != count {
+            return Err(Error::ShapeMismatch {
+                op: "arange",
+                lhs: Shape::from([count]),
+                rhs: Shape::from([LEN]),
+            });
+        }
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(count)
+            .map_err(|_| Error::InvalidArg {
+                op: "arange",
+                msg: format!("range {start}..{end} has too many elements"),
+            })?;
+        values.extend(start..end);
+        let tensor = Tensor::from_vec(values, [count], &ctx.device())?;
         checked_wrap(tensor, Arc::clone(ctx.binding()), "arange")
     }
 
@@ -223,6 +243,26 @@ mod tests {
             gathered.as_dynamic().to_vec::<f32>().unwrap(),
             expected.to_vec::<f32>().unwrap()
         );
+    }
+
+    #[test]
+    fn arange_preserves_i64_values_above_f64_integer_precision() {
+        let ctx = cpu();
+        let start = (1i64 << 53) + 1;
+        let range = Tensor1::<3, i64>::arange(start, start + 3, &ctx).unwrap();
+        assert_eq!(
+            range.as_dynamic().to_vec::<i64>().unwrap(),
+            vec![start, start + 1, start + 2]
+        );
+    }
+
+    #[test]
+    fn arange_rejects_static_length_mismatch_before_allocation() {
+        let ctx = cpu();
+        assert!(matches!(
+            Tensor1::<1, i64>::arange(i64::MIN, i64::MAX, &ctx),
+            Err(Error::ShapeMismatch { op: "arange", .. })
+        ));
     }
 
     #[test]

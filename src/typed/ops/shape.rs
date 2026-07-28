@@ -3,13 +3,37 @@ use super::{
     ReplaceAxisOutput, ReshapeOutput, StackOutput, TransposeOutput,
 };
 use crate::typed::const_check::{assert_broadcast, assert_reshape_numel, assert_squeezable};
+use crate::typed::device::validate_binding;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
 use crate::typed::tensor::checked_wrap;
 use crate::typed::{
     DYN, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4, Tensor5, Tensor6, Tensor7,
     Tensor8, TypedTensor,
 };
-use crate::{Element, Result, Shape, Tensor};
+use crate::{Element, Error, Result, Shape, Tensor};
+use std::sync::Arc;
+
+fn dynamic<'a, T: TypedTensor>(input: &'a T, op: &'static str) -> Result<&'a Tensor> {
+    validate_binding::<T::Placement>(input.binding(), op)?;
+    Ok(input.dynamic())
+}
+
+fn validate_operands<T: TypedTensor>(tensors: &[&T], op: &'static str) -> Result<()> {
+    let Some(first) = tensors.first() else {
+        return Ok(());
+    };
+    validate_binding::<T::Placement>(first.binding(), op)?;
+    for tensor in &tensors[1..] {
+        validate_binding::<T::Placement>(tensor.binding(), op)?;
+        if !Arc::ptr_eq(first.binding(), tensor.binding()) {
+            return Err(Error::InvalidArg {
+                op,
+                msg: "operands do not share the canonical placement binding".into(),
+            });
+        }
+    }
+    Ok(())
+}
 
 macro_rules! impl_shape_ops {
     ($(($name:ident, [$($dim:ident),*])),+ $(,)?) => {
@@ -27,7 +51,7 @@ macro_rules! impl_shape_ops {
                             <Target as SealedTypedTensor>::MARKERS,
                         )
                     };
-                    let tensor = self.dynamic().reshape(Shape::from(dims.as_ref().to_vec()))?;
+                    let tensor = dynamic(self, "reshape")?.reshape(Shape::from(dims.as_ref().to_vec()))?;
                     checked_wrap::<Target>(tensor, self.binding().clone(), "reshape")
                 }
 
@@ -43,15 +67,14 @@ macro_rules! impl_shape_ops {
                             <Target as SealedTypedTensor>::MARKERS,
                         )
                     };
-                    let tensor = self
-                        .dynamic()
+                    let tensor = dynamic(self, "broadcast_to")?
                         .broadcast_to(Shape::from(dims.as_ref().to_vec()))?;
                     checked_wrap::<Target>(tensor, self.binding().clone(), "broadcast_to")
                 }
 
                 /// Permutes runtime axes and erases every dimension marker.
                 pub fn permute(&self, axes: &[isize]) -> Result<<Self as DynamicOutput>::Output> {
-                    let tensor = self.dynamic().permute(axes)?;
+                    let tensor = dynamic(self, "permute")?.permute(axes)?;
                     checked_wrap::<<Self as DynamicOutput>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -86,7 +109,7 @@ macro_rules! impl_existing_axis_ops {
                 where
                     Self: TransposeOutput<A, B>,
                 {
-                    let tensor = self.dynamic().transpose(A as isize, B as isize)?;
+                    let tensor = dynamic(self, "transpose")?.transpose(A as isize, B as isize)?;
                     checked_wrap::<<Self as TransposeOutput<A, B>>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -100,7 +123,7 @@ macro_rules! impl_existing_axis_ops {
                     a: isize,
                     b: isize,
                 ) -> Result<<Self as DynamicOutput>::Output> {
-                    let tensor = self.dynamic().transpose(a, b)?;
+                    let tensor = dynamic(self, "transpose_dyn")?.transpose(a, b)?;
                     checked_wrap::<<Self as DynamicOutput>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -118,7 +141,7 @@ macro_rules! impl_existing_axis_ops {
                     const {
                         assert_squeezable(<Self as SealedTypedTensor>::MARKERS[AXIS])
                     };
-                    let tensor = self.dynamic().squeeze(AXIS as isize)?;
+                    let tensor = dynamic(self, "squeeze")?.squeeze(AXIS as isize)?;
                     checked_wrap::<<Self as RemoveAxisOutput<AXIS>>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -128,7 +151,7 @@ macro_rules! impl_existing_axis_ops {
 
                 /// Removes a runtime axis and returns the dynamic tensor escape.
                 pub fn squeeze_dyn(&self, axis: isize) -> Result<Tensor> {
-                    self.dynamic().squeeze(axis)
+                    dynamic(self, "squeeze_dyn")?.squeeze(axis)
                 }
 
                 /// Narrows a compile-time axis and erases that axis marker.
@@ -140,7 +163,7 @@ macro_rules! impl_existing_axis_ops {
                 where
                     Self: ReplaceAxisOutput<AXIS, DYN>,
                 {
-                    let tensor = self.dynamic().narrow(AXIS as isize, start, len)?;
+                    let tensor = dynamic(self, "narrow")?.narrow(AXIS as isize, start, len)?;
                     checked_wrap::<<Self as ReplaceAxisOutput<AXIS, DYN>>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -155,7 +178,7 @@ macro_rules! impl_existing_axis_ops {
                     start: usize,
                     len: usize,
                 ) -> Result<<Self as DynamicOutput>::Output> {
-                    let tensor = self.dynamic().narrow(axis, start, len)?;
+                    let tensor = dynamic(self, "narrow_dyn")?.narrow(axis, start, len)?;
                     checked_wrap::<<Self as DynamicOutput>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -170,6 +193,7 @@ macro_rules! impl_existing_axis_ops {
                 where
                     Self: ConcatOutput<AXIS>,
                 {
+                    validate_operands(tensors, "cat")?;
                     let dynamic = tensors.iter().map(|tensor| tensor.dynamic()).collect::<Vec<_>>();
                     let tensor = Tensor::cat(&dynamic, AXIS as isize)?;
                     let binding = tensors
@@ -206,7 +230,7 @@ macro_rules! impl_rank_increasing_ops {
                 where
                     Self: InsertAxisOutput<AXIS, 1>,
                 {
-                    let tensor = self.dynamic().unsqueeze(AXIS as isize)?;
+                    let tensor = dynamic(self, "unsqueeze")?.unsqueeze(AXIS as isize)?;
                     checked_wrap::<<Self as InsertAxisOutput<AXIS, 1>>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -216,7 +240,7 @@ macro_rules! impl_rank_increasing_ops {
 
                 /// Inserts a runtime axis and returns the dynamic tensor escape.
                 pub fn unsqueeze_dyn(&self, axis: isize) -> Result<Tensor> {
-                    self.dynamic().unsqueeze(axis)
+                    dynamic(self, "unsqueeze_dyn")?.unsqueeze(axis)
                 }
 
                 /// Stacks homogeneous typed tensors at a compile-time axis.
@@ -226,6 +250,7 @@ macro_rules! impl_rank_increasing_ops {
                 where
                     Self: StackOutput<AXIS>,
                 {
+                    validate_operands(tensors, "stack")?;
                     let dynamic = tensors.iter().map(|tensor| tensor.dynamic()).collect::<Vec<_>>();
                     let tensor = Tensor::stack(&dynamic, AXIS as isize)?;
                     let binding = tensors
@@ -254,8 +279,8 @@ impl_rank_increasing_ops! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::{Cpu, DeviceCtx};
-    use crate::{Error, testing::check_grad};
+    use crate::typed::{Cpu, DeviceBinding, DeviceCtx};
+    use crate::{Device, Error, testing::check_grad};
 
     fn ctx() -> DeviceCtx<Cpu> {
         DeviceCtx::cpu().unwrap()
@@ -363,6 +388,29 @@ mod tests {
                 op: "broadcast_to",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn shape_ops_reject_noncanonical_bindings_before_delegation() {
+        let ctx = ctx();
+        let dynamic = Tensor::from_vec(vec![1.0f32, 2.0], [2], &Device::Cpu).unwrap();
+        let forged = Arc::new(DeviceBinding {
+            device: Device::Cpu,
+        });
+        let forged = <Tensor1<2> as SealedTypedTensor>::trusted_from_validated(dynamic, forged);
+        let canonical = Tensor1::<2>::from_vec(vec![3.0, 4.0], [2], &ctx).unwrap();
+
+        assert!(matches!(
+            forged.unsqueeze::<0>(),
+            Err(Error::InvalidArg {
+                op: "unsqueeze",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Tensor1::cat::<0>(&[&canonical, &forged]),
+            Err(Error::InvalidArg { op: "cat", .. })
         ));
     }
 

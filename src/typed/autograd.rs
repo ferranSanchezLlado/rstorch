@@ -1,9 +1,15 @@
+use super::device::validate_binding;
 use super::ops::{WithElement, WithPlacement};
 use super::sealed::TypedTensor as SealedTypedTensor;
 use super::tensor::checked_wrap;
 use super::{DeviceCtx, FloatElement, Placement, TypedTensor, typed_rank_table};
-use crate::{Element, Grads, Result};
+use crate::{Element, Grads, Result, Tensor};
 use std::sync::Arc;
+
+fn dynamic<'a, T: TypedTensor>(input: &'a T, op: &'static str) -> Result<&'a Tensor> {
+    validate_binding::<T::Placement>(SealedTypedTensor::binding(input), op)?;
+    Ok(SealedTypedTensor::dynamic(input))
+}
 
 macro_rules! impl_typed_core {
     ($(($name:ident, $rank:literal, [$($dim:ident),*])),+ $(,)?) => {
@@ -14,7 +20,7 @@ macro_rules! impl_typed_core {
                 /// Returns an untraced tensor sharing this tensor's storage and layout.
                 pub fn detach(&self) -> Result<Self> {
                     checked_wrap(
-                        SealedTypedTensor::dynamic(self).detach(),
+                        dynamic(self, "detach")?.detach(),
                         Arc::clone(SealedTypedTensor::binding(self)),
                         "detach",
                     )
@@ -23,7 +29,7 @@ macro_rules! impl_typed_core {
                 /// Returns a row-major contiguous tensor with unchanged typed metadata.
                 pub fn contiguous(&self) -> Result<Self> {
                     checked_wrap(
-                        SealedTypedTensor::dynamic(self).contiguous()?,
+                        dynamic(self, "contiguous")?.contiguous()?,
                         Arc::clone(SealedTypedTensor::binding(self)),
                         "contiguous",
                     )
@@ -35,7 +41,7 @@ macro_rules! impl_typed_core {
                     Self: WithElement<F>,
                 {
                     checked_wrap(
-                        SealedTypedTensor::dynamic(self).to_dtype(F::DTYPE)?,
+                        dynamic(self, "to_dtype")?.to_dtype(F::DTYPE)?,
                         Arc::clone(SealedTypedTensor::binding(self)),
                         "to_dtype",
                     )
@@ -49,6 +55,8 @@ macro_rules! impl_typed_core {
                 where
                     Self: WithPlacement<Q>,
                 {
+                    dynamic(self, "to_device")?;
+                    validate_binding::<Q>(target.binding(), "to_device")?;
                     checked_wrap(
                         SealedTypedTensor::dynamic(self).to_device(&target.device())?,
                         Arc::clone(target.binding()),
@@ -58,17 +66,17 @@ macro_rules! impl_typed_core {
 
                 /// Copies the elements to host memory in row-major order.
                 pub fn to_vec(&self) -> Result<Vec<E>> {
-                    SealedTypedTensor::dynamic(self).to_vec::<E>()
+                    dynamic(self, "to_vec")?.to_vec::<E>()
                 }
 
                 /// Reads the sole element using this tensor's element type.
                 pub fn to_scalar(&self) -> Result<E> {
-                    SealedTypedTensor::dynamic(self).to_scalar::<E>()
+                    dynamic(self, "to_scalar")?.to_scalar::<E>()
                 }
 
                 /// Reads the sole element as `f64` regardless of element type.
                 pub fn item(&self) -> Result<f64> {
-                    SealedTypedTensor::dynamic(self).item()
+                    dynamic(self, "item")?.item()
                 }
             }
 
@@ -78,7 +86,7 @@ macro_rules! impl_typed_core {
                 /// Returns a traced leaf for gradient lookup by typed input.
                 pub fn traced(&self) -> Result<Self> {
                     checked_wrap(
-                        SealedTypedTensor::dynamic(self).traced()?,
+                        dynamic(self, "traced")?.traced()?,
                         Arc::clone(SealedTypedTensor::binding(self)),
                         "traced",
                     )
@@ -86,7 +94,7 @@ macro_rules! impl_typed_core {
 
                 /// Runs reverse-mode autodiff from this tensor.
                 pub fn backward(&self) -> Result<Grads> {
-                    SealedTypedTensor::dynamic(self).backward()
+                    dynamic(self, "backward")?.backward()
                 }
             }
         )+
@@ -103,8 +111,9 @@ pub trait TypedGradsExt {
 
 impl TypedGradsExt for Grads {
     fn wrt_typed_input<T: TypedTensor>(&self, input: &T) -> Result<T> {
+        let input_dynamic = dynamic(input, "wrt_typed_input")?;
         checked_wrap(
-            self.wrt_input(SealedTypedTensor::dynamic(input))?,
+            self.wrt_input(input_dynamic)?,
             Arc::clone(SealedTypedTensor::binding(input)),
             "wrt_typed_input",
         )
@@ -114,7 +123,7 @@ impl TypedGradsExt for Grads {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::{Cpu, Tensor0, Tensor1, Tensor2};
+    use crate::typed::{Cpu, DeviceBinding, Tensor0, Tensor1, Tensor2};
     use crate::{DType, Device, Error, Tensor};
 
     struct OtherCpu;
@@ -181,6 +190,24 @@ mod tests {
         assert!(matches!(
             traced.traced(),
             Err(Error::InvalidArg { op: "traced", .. })
+        ));
+    }
+
+    #[test]
+    fn core_ops_reject_noncanonical_bindings_before_delegation() {
+        let dynamic = Tensor::from_vec(vec![1.0f32], [1], &Device::Cpu).unwrap();
+        let forged = Arc::new(DeviceBinding {
+            device: Device::Cpu,
+        });
+        let forged = <Tensor1<1> as SealedTypedTensor>::trusted_from_validated(dynamic, forged);
+
+        assert!(matches!(
+            forged.to_vec(),
+            Err(Error::InvalidArg { op: "to_vec", .. })
+        ));
+        assert!(matches!(
+            forged.backward(),
+            Err(Error::InvalidArg { op: "backward", .. })
         ));
     }
 
