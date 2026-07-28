@@ -88,9 +88,8 @@
 //! and checks every buffer against the parameter it belongs to before it
 //! replaces any of the optimizer's own state.
 //!
-//! **Scope.** This layer owns *optimizer* state and the crate-internal
-//! `Tensor` ↔ [`HostTensor`](crate::persist::HostTensor) bridge that carries it.
-//! It deliberately does not decide the model-level checkpoint surface — which
+//! **Scope.** This layer owns *optimizer* state. It deliberately does not decide
+//! the model-level checkpoint surface — which
 //! sections a full checkpoint carries, how `config` + weights reconstruct a
 //! model, or where the [`Rng`](crate::Rng) section is written. Those are one
 //! decision (T52's), and inventing half of it here would be the wrong half.
@@ -118,12 +117,6 @@ mod engine;
 pub mod schedule;
 mod sgd;
 mod state;
-
-// The `Tensor` ↔ `HostTensor` bridge. Crate-visible rather than private to this
-// module because `persist` names "the nn/optim runtime (T40/T44)" as its owner
-// and the model-level checkpoint surface (T52) needs the same two functions;
-// nothing in it is public.
-pub(crate) mod host;
 
 pub use adam::{Adam, AdamGroup, AdamW};
 pub use sgd::{Sgd, SgdGroup};

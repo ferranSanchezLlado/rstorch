@@ -5,10 +5,10 @@
 //! # Scope: host data only
 //!
 //! This layer speaks in [`HostTensor`]s — dtype + dims + contiguous
-//! little-endian bytes — and never touches a live [`Tensor`](crate::Tensor),
-//! its storage, or its layout. The `nn`/`optim` runtime (T40/T44) bridges
-//! tensors to and from `HostTensor`s and drives the transactional swaps; this
-//! module owns the fallible, on-disk half. Keeping the two apart lets the
+//! little-endian bytes — and never touches a live runtime tensor, its storage,
+//! or its layout. The crate's checkpoint runtime bridges tensors
+//! to and from `HostTensor`s and drives the transactional swaps; this module
+//! owns the fallible, on-disk half. Keeping the two apart lets the
 //! file format and the tensor core evolve independently (exploration §4.6).
 //!
 //! # What lives here

@@ -36,7 +36,7 @@ use crate::error::{Error, Result};
 use crate::persist::{Envelope, HostTensor};
 use crate::tensor::Tensor;
 
-use super::host::to_host_tensor;
+use crate::checkpoint::{from_host_tensor, to_host_tensor};
 
 /// The envelope section name (the one `persist` documents for this purpose).
 const SECTION: &str = "optimizer";
@@ -340,7 +340,7 @@ pub(crate) fn restore_buffer(
             ),
         });
     }
-    super::host::from_host_tensor(host, &param.device())
+    from_host_tensor(host, &param.device())
 }
 
 /// Parse one numeric field, naming the key on failure.

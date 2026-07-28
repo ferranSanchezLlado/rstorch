@@ -1,19 +1,15 @@
-//! The `Tensor` ↔ `HostTensor` bridge (implementation-plan §4, T44).
+//! The crate-internal `Tensor` ↔ `HostTensor` checkpoint bridge.
 //!
 //! [`persist`](crate::persist) deliberately speaks only in
-//! [`HostTensor`](crate::persist::HostTensor)s — dtype + dims + contiguous
-//! little-endian bytes — and names "the `nn`/`optim` runtime (T40/T44)" as the
-//! owner of the conversion. This module is that owner, kept deliberately
-//! minimal: exactly the two directions optimizer-state persistence needs.
+//! [`HostTensor`](crate::persist::HostTensor)s: dtype + dims + contiguous
+//! little-endian bytes. This neutral runtime module owns conversion for every
+//! checkpoint producer and consumer without coupling persistence to live
+//! tensors.
 //!
 //! A `HostTensor` is always canonical row-major, so the outbound direction
 //! reads the tensor's *logical* order (a view of a permuted tensor converts
 //! correctly) and the inbound direction produces a fresh contiguous tensor with
-//! no autograd history.
-//!
-//! Scope note: the model-level save/load surface — which sections a checkpoint
-//! carries, how a checkpoint reconstructs a model — is T52's decision, not
-//! this bridge's. Nothing here is public.
+//! no autograd history. Nothing here is public.
 
 use half::{bf16, f16};
 
@@ -98,6 +94,44 @@ mod tests {
     }
 
     #[test]
+    fn remaining_numeric_dtypes_round_trip() {
+        let f16s =
+            Tensor::from_vec(vec![f16::from_f32(1.5), f16::from_f32(-2.0)], [2], &CPU).unwrap();
+        let host = to_host_tensor(&f16s).unwrap();
+        assert_eq!(host.dtype(), DType::F16);
+        assert_eq!(
+            from_host_tensor(&host, &CPU)
+                .unwrap()
+                .to_vec::<f16>()
+                .unwrap(),
+            f16s.to_vec::<f16>().unwrap()
+        );
+
+        let bf16s =
+            Tensor::from_vec(vec![bf16::from_f32(0.25), bf16::from_f32(8.0)], [2], &CPU).unwrap();
+        let host = to_host_tensor(&bf16s).unwrap();
+        assert_eq!(host.dtype(), DType::BF16);
+        assert_eq!(
+            from_host_tensor(&host, &CPU)
+                .unwrap()
+                .to_vec::<bf16>()
+                .unwrap(),
+            bf16s.to_vec::<bf16>().unwrap()
+        );
+
+        let f64s = Tensor::from_vec(vec![1.5f64, -2.0], [2], &CPU).unwrap();
+        let host = to_host_tensor(&f64s).unwrap();
+        assert_eq!(host.dtype(), DType::F64);
+        assert_eq!(
+            from_host_tensor(&host, &CPU)
+                .unwrap()
+                .to_vec::<f64>()
+                .unwrap(),
+            f64s.to_vec::<f64>().unwrap()
+        );
+    }
+
+    #[test]
     fn i64_and_bool_round_trip() {
         let ints = Tensor::from_vec(vec![-1i64, 0, 7], [3], &CPU).unwrap();
         let host = to_host_tensor(&ints).unwrap();
@@ -118,6 +152,32 @@ mod tests {
                 .to_vec::<bool>()
                 .unwrap(),
             vec![true, false, true]
+        );
+    }
+
+    #[test]
+    fn scalar_and_empty_round_trip() {
+        let scalar = Tensor::full((), 7.0, DType::F32, &CPU).unwrap();
+        let host = to_host_tensor(&scalar).unwrap();
+        assert!(host.dims().is_empty());
+        assert_eq!(
+            from_host_tensor(&host, &CPU)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap(),
+            7.0
+        );
+
+        let empty = Tensor::zeros([0, 3], DType::F32, &CPU).unwrap();
+        let host = to_host_tensor(&empty).unwrap();
+        assert_eq!(host.dims(), &[0, 3]);
+        assert!(host.bytes().is_empty());
+        assert!(
+            from_host_tensor(&host, &CPU)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()
+                .is_empty()
         );
     }
 

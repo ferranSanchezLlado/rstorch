@@ -28,6 +28,7 @@ pub mod shape;
 
 // ---- flat vocabulary: private modules, root re-exports ------------------
 mod autograd;
+mod checkpoint;
 mod rng;
 mod tensor;
 

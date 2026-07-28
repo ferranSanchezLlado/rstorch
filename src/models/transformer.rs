@@ -397,7 +397,7 @@ impl DecoderTransformer {
         let mut envelope = Envelope::new();
         envelope.set_section("config", self.config.encode())?;
         for (name, tensor) in nn::state_dict(self) {
-            envelope.insert_tensor(name, crate::optim::host::to_host_tensor(&tensor)?);
+            envelope.insert_tensor(name, crate::checkpoint::to_host_tensor(&tensor)?);
         }
         envelope.save(path, limits)
     }
@@ -429,7 +429,7 @@ impl DecoderTransformer {
             .map(|(name, host)| {
                 Ok((
                     name.clone(),
-                    crate::optim::host::from_host_tensor(host, device)?,
+                    crate::checkpoint::from_host_tensor(host, device)?,
                 ))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;

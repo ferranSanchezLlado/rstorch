@@ -1,9 +1,9 @@
 //! [`HostTensor`]: dtype + dims + raw little-endian bytes, with **no**
-//! dependency on [`Tensor`](crate::Tensor).
+//! dependency on the live runtime tensor type.
 //!
-//! This is the persistence layer's currency. The `nn`/`optim` runtime bridges
-//! its [`Tensor`](crate::Tensor)s to and from `HostTensor`s (T40/T44); this
-//! module never touches a live tensor, storage, or layout. Keeping the two
+//! This is the persistence layer's currency. The crate's checkpoint runtime
+//! bridges live tensors to and from `HostTensor`s; this module never touches a
+//! live tensor, storage, or layout. Keeping the two
 //! apart means the on-disk format can evolve without a tensor-core change and
 //! vice-versa (exploration §4.6).
 
