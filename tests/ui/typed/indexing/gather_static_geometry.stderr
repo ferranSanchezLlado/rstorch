@@ -1,0 +1,48 @@
+error[E0080]: evaluation of `typed::const_check::assert_gather_dimension` failed
+   --> $WORKSPACE/src/typed/ops/index.rs:123:1
+    |
+123 | / impl_typed_indexing! {
+124 | |     (Tensor1, [D0]),
+125 | |     (Tensor2, [D0, D1]),
+126 | |     (Tensor3, [D0, D1, D2]),
+...   |
+131 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+132 | | }
+    | |_^ evaluation panicked: typed gather non-selected dimensions are incompatible
+    |
+note: inside `rstorch::typed::ops::index::assert_gather_geometry`
+   --> $WORKSPACE/src/typed/ops/index.rs:32:13
+    |
+32  |             assert_gather_dimension(source[current], indices[current]);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `typed::const_check::assert_gather_dimension`
+   --> $WORKSPACE/src/typed/const_check.rs:31:5
+    |
+31  | /     assert!(
+32  | |         dimensions_compatible(source, indices),
+33  | |         "typed gather non-selected dimensions are incompatible"
+34  | |     );
+    | |_____^ the failure occurred here
+
+note: erroneous constant encountered
+   --> $WORKSPACE/src/typed/ops/index.rs:123:1
+    |
+123 | / impl_typed_indexing! {
+124 | |     (Tensor1, [D0]),
+125 | |     (Tensor2, [D0, D1]),
+126 | |     (Tensor3, [D0, D1, D2]),
+...   |
+131 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+132 | | }
+    | |_^
+    |
+    = note: this note originates in the macro `impl_typed_indexing` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: the above error was encountered while instantiating `fn rstorch::typed::ops::index::<impl rstorch::typed::Tensor2<2, 3>>::gather::<1, rstorch::typed::Tensor2<1, 1, i64>>`
+ --> src/main.rs:9:13
+  |
+9 |     let _ = source.gather::<1, _>(&indices);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `rstorch-typed-ui-gather-static-geometry` (bin "rstorch-typed-ui-gather-static-geometry") due to 1 previous error

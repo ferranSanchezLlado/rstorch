@@ -1,0 +1,2 @@
+error[E0080]
+typed gather non-selected dimensions are incompatible
