@@ -1,15 +1,11 @@
 use super::device::validate_binding;
-use super::dim::RankMetadata;
 use super::ops::{DynamicOutput, RefinementOf};
+use super::sealed::TypedTensor as SealedTypedTensor;
 use super::{DYN, DeviceBinding, DeviceCtx, Placement, TypedTensor, typed_rank_table};
 use crate::{Element, Error, Result, Shape, Tensor};
 use std::sync::Arc;
 
-pub(crate) trait TrustedTensor: TypedTensor + RankMetadata {
-    fn trusted_from_validated(tensor: Tensor, binding: Arc<DeviceBinding>) -> Self;
-}
-
-fn validate<T: TypedTensor + RankMetadata>(
+fn validate<T: TypedTensor>(
     tensor: &Tensor,
     binding: &Arc<DeviceBinding>,
     op: &'static str,
@@ -22,7 +18,11 @@ fn validate<T: TypedTensor + RankMetadata>(
         });
     }
 
-    for (axis, (&marker, &actual)) in T::MARKERS.iter().zip(tensor.dims()).enumerate() {
+    for (axis, (&marker, &actual)) in <T as SealedTypedTensor>::MARKERS
+        .iter()
+        .zip(tensor.dims())
+        .enumerate()
+    {
         if marker != DYN && marker != actual {
             let mut expected = tensor.dims().to_vec();
             expected[axis] = marker;
@@ -51,30 +51,20 @@ fn validate<T: TypedTensor + RankMetadata>(
     validate_binding::<T::Placement>(binding, op)
 }
 
-fn checked_wrap<T: TrustedTensor>(
+pub(in crate::typed) fn checked_wrap<T: TypedTensor>(
     tensor: Tensor,
     binding: Arc<DeviceBinding>,
     op: &'static str,
 ) -> Result<T> {
     validate::<T>(&tensor, &binding, op)?;
-    Ok(T::trusted_from_validated(tensor, binding))
+    Ok(<T as SealedTypedTensor>::trusted_from_validated(
+        tensor, binding,
+    ))
 }
 
 macro_rules! impl_tensor_boundary {
     ($(($name:ident, $rank:literal, [$($dim:ident),*])),+ $(,)?) => {
         $(
-            impl<$(const $dim: usize,)* E: Element, P: Placement> TrustedTensor
-                for super::$name<$($dim,)* E, P>
-            {
-                fn trusted_from_validated(tensor: Tensor, binding: Arc<DeviceBinding>) -> Self {
-                    Self {
-                        inner: tensor,
-                        binding,
-                        marker: std::marker::PhantomData,
-                    }
-                }
-            }
-
             impl<$(const $dim: usize,)* E: Element, P: Placement>
                 super::$name<$($dim,)* E, P>
             {
@@ -85,13 +75,15 @@ macro_rules! impl_tensor_boundary {
                     ctx: &DeviceCtx<P>,
                 ) -> Result<Self> {
                     validate_binding::<P>(ctx.binding(), "from_vec")?;
-                    for (&marker, &actual) in Self::MARKERS.iter().zip(&dims) {
+                    for (&marker, &actual) in
+                        <Self as SealedTypedTensor>::MARKERS.iter().zip(&dims)
+                    {
                         if marker != DYN && marker != actual {
                             return Err(Error::ShapeMismatch {
                                 op: "from_vec",
                                 lhs: Shape::from(dims.to_vec()),
                                 rhs: Shape::from(
-                                    Self::MARKERS
+                                    <Self as SealedTypedTensor>::MARKERS
                                         .iter()
                                         .zip(&dims)
                                         .map(|(&m, &d)| if m == DYN { d } else { m })
@@ -119,7 +111,7 @@ macro_rules! impl_tensor_boundary {
 
                 /// Borrows the unchanged runtime tensor.
                 pub fn as_dynamic(&self) -> &Tensor {
-                    &self.inner
+                    <Self as SealedTypedTensor>::dynamic(self)
                 }
 
                 /// Removes compile-time metadata without copying the runtime tensor.
@@ -135,10 +127,9 @@ macro_rules! impl_tensor_boundary {
                 }
 
                 /// Checks this tensor against a more precise shape of the same rank.
-                #[allow(private_bounds)]
                 pub fn refine<Target>(self) -> Result<Target>
                 where
-                    Target: RefinementOf<Self> + TrustedTensor,
+                    Target: RefinementOf<Self>,
                 {
                     checked_wrap::<Target>(self.inner, self.binding, "refine")
                 }
@@ -174,7 +165,10 @@ mod tests {
         let original = dynamic.clone();
         let typed = Tensor2::<DYN, 2>::try_from_dynamic(dynamic, &ctx).unwrap();
         assert!(original.ptr_eq(typed.as_dynamic()));
-        assert!(Arc::ptr_eq(&typed.binding, ctx.binding()));
+        assert!(Arc::ptr_eq(
+            <Tensor2<DYN, 2> as SealedTypedTensor>::binding(&typed),
+            ctx.binding()
+        ));
 
         let refined = typed.refine::<Tensor2<1, 2>>().unwrap();
         assert!(original.ptr_eq(refined.as_dynamic()));
@@ -196,6 +190,30 @@ mod tests {
             Err(Error::InvalidArg {
                 op: "trusted_test",
                 ..
+            })
+        ));
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn wrong_runtime_device_is_rejected_without_metal_storage() {
+        use crate::typed::{Metal, Tensor1};
+
+        let dynamic = Tensor::zeros([1], f32::DTYPE, &crate::Device::Cpu).unwrap();
+        let forged_metal_binding = Arc::new(DeviceBinding {
+            device: crate::Device::Metal(0),
+        });
+
+        assert!(matches!(
+            checked_wrap::<Tensor1<1, f32, Metal<0>>>(
+                dynamic,
+                forged_metal_binding,
+                "wrong_device_test"
+            ),
+            Err(Error::DeviceMismatch {
+                op: "wrong_device_test",
+                expected: crate::Device::Metal(0),
+                got: crate::Device::Cpu,
             })
         ));
     }

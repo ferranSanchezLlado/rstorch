@@ -72,7 +72,7 @@ fn zero_is_a_static_dimension_and_empty_data_is_valid() {
 }
 
 #[test]
-fn dynamic_reentry_rejects_rank_static_dimension_dtype_and_device() {
+fn dynamic_reentry_rejects_rank_static_dimension_and_dtype() {
     let ctx = cpu();
     let wrong_rank = Tensor::zeros([2], DType::F32, &Device::Cpu).unwrap();
     assert!(matches!(
@@ -102,21 +102,6 @@ fn dynamic_reentry_rejects_rank_static_dimension_dtype_and_device() {
             got: DType::I64
         })
     ));
-
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    {
-        struct OtherDevice;
-        impl Placement for OtherDevice {}
-        let other = DeviceCtx::<OtherDevice>::bind(Device::Metal(0)).unwrap();
-        let runtime = Tensor::zeros([1], DType::F32, &Device::Cpu).unwrap();
-        assert!(matches!(
-            Tensor1::<1, f32, OtherDevice>::try_from_dynamic(runtime, &other),
-            Err(Error::DeviceMismatch {
-                op: "try_from_dynamic",
-                ..
-            })
-        ));
-    }
 }
 
 #[test]
@@ -134,6 +119,31 @@ fn refinement_erasure_and_dynamic_roundtrip_preserve_values_and_metadata() {
     assert_eq!(runtime.to_vec::<i64>().unwrap(), vec![1, 2, 3, 4, 5, 6]);
     let roundtrip = Tensor2::<2, 3, i64>::try_from_dynamic(runtime, &ctx).unwrap();
     assert_eq!(roundtrip.dims(), [2, 3]);
+}
+
+#[test]
+fn public_refine_and_erase_work_for_every_rank() {
+    macro_rules! assert_refine_erase {
+        ($source:ty => $target:ty, $dims:expr) => {{
+            let ctx = cpu();
+            let source = <$source>::from_vec(vec![1.0f32], $dims, &ctx).unwrap();
+            let refined: $target = source.refine().unwrap();
+            assert_eq!(refined.dims(), $dims);
+            let erased = refined.erase_shape().unwrap();
+            assert_eq!(erased.dims(), $dims);
+            assert_eq!(erased.into_dynamic().to_vec::<f32>().unwrap(), vec![1.0]);
+        }};
+    }
+
+    assert_refine_erase!(Tensor0<f32, Cpu> => Tensor0<f32, Cpu>, [] as [usize; 0]);
+    assert_refine_erase!(Tensor1<DYN> => Tensor1<1>, [1]);
+    assert_refine_erase!(Tensor2<DYN, DYN> => Tensor2<1, 1>, [1, 1]);
+    assert_refine_erase!(Tensor3<DYN, DYN, DYN> => Tensor3<1, 1, 1>, [1, 1, 1]);
+    assert_refine_erase!(Tensor4<DYN, DYN, DYN, DYN> => Tensor4<1, 1, 1, 1>, [1, 1, 1, 1]);
+    assert_refine_erase!(Tensor5<DYN, DYN, DYN, DYN, DYN> => Tensor5<1, 1, 1, 1, 1>, [1, 1, 1, 1, 1]);
+    assert_refine_erase!(Tensor6<DYN, DYN, DYN, DYN, DYN, DYN> => Tensor6<1, 1, 1, 1, 1, 1>, [1, 1, 1, 1, 1, 1]);
+    assert_refine_erase!(Tensor7<DYN, DYN, DYN, DYN, DYN, DYN, DYN> => Tensor7<1, 1, 1, 1, 1, 1, 1>, [1, 1, 1, 1, 1, 1, 1]);
+    assert_refine_erase!(Tensor8<DYN, DYN, DYN, DYN, DYN, DYN, DYN, DYN> => Tensor8<1, 1, 1, 1, 1, 1, 1, 1>, [1, 1, 1, 1, 1, 1, 1, 1]);
 }
 
 #[test]
