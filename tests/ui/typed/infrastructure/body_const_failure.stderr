@@ -1,0 +1,28 @@
+error[E0080]: evaluation of `relational_check::<7, 8>::{constant#0}` failed
+  --> src/main.rs:7:9
+   |
+7  | /         assert!(
+8  | |             LEFT == DYN || RIGHT == DYN || LEFT == RIGHT,
+9  | |             "typed relational dimensions are incompatible"
+10 | |         )
+   | |_________^ evaluation panicked: typed relational dimensions are incompatible
+
+note: erroneous constant encountered
+  --> src/main.rs:6:5
+   |
+6  | /     const {
+7  | |         assert!(
+8  | |             LEFT == DYN || RIGHT == DYN || LEFT == RIGHT,
+9  | |             "typed relational dimensions are incompatible"
+10 | |         )
+11 | |     };
+   | |_____^
+
+note: the above error was encountered while instantiating `fn relational_check::<7, 8>`
+  --> src/main.rs:15:5
+   |
+15 |     relational_check::<7, 8>();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `rstorch-typed-ui-body-const-failure` (bin "rstorch-typed-ui-body-const-failure") due to 1 previous error

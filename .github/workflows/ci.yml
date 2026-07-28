@@ -105,6 +105,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test all UI suites (all features)
         run: cargo +1.88 test --workspace --all-features
+      - name: Test typed check and build diagnostics
+        run: cargo +1.88 test --test typed_ui --features typed
       - name: Test Grads linearity diagnostics
         run: cargo +1.88 test --test linearity_ui
       - name: Test derive diagnostics
