@@ -121,14 +121,29 @@ mod device;
 mod dim;
 #[doc(hidden)]
 pub mod ops;
-mod tensor;
+pub(in crate::typed) mod tensor;
 
 pub use dim::DYN;
 
-mod sealed {
+pub(in crate::typed) mod sealed {
+    use super::{Arc, Device, Tensor};
+
+    #[derive(Debug)]
+    pub struct DeviceBinding {
+        pub(in crate::typed) device: Device,
+    }
+
     pub trait ElementCapability {}
-    pub trait TypedTensor {}
+    pub trait TypedTensor: Sized {
+        const MARKERS: &'static [usize];
+
+        fn trusted_from_validated(tensor: Tensor, binding: Arc<DeviceBinding>) -> Self;
+        fn dynamic(&self) -> &Tensor;
+        fn binding(&self) -> &Arc<DeviceBinding>;
+    }
 }
+
+pub(in crate::typed) use sealed::DeviceBinding;
 
 /// An element type accepted by floating-point-only typed operations.
 pub trait FloatElement: Element + sealed::ElementCapability {}
@@ -224,11 +239,6 @@ impl<const N: usize> Placement for Metal<N> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct DeviceBinding {
-    pub(in crate::typed) device: Device,
-}
-
 /// A canonical process-lifetime binding from `P` to one runtime device.
 pub struct DeviceCtx<P: Placement> {
     pub(in crate::typed) binding: Arc<DeviceBinding>,
@@ -296,7 +306,28 @@ macro_rules! define_typed_tensors {
 
             impl<$(const $dim: usize,)* E: Element, P: Placement> sealed::TypedTensor
                 for $name<$($dim,)* E, P>
-            {}
+            {
+                const MARKERS: &'static [usize] = &[$($dim),*];
+
+                fn trusted_from_validated(
+                    tensor: Tensor,
+                    binding: Arc<DeviceBinding>,
+                ) -> Self {
+                    Self {
+                        inner: tensor,
+                        binding,
+                        marker: PhantomData,
+                    }
+                }
+
+                fn dynamic(&self) -> &Tensor {
+                    &self.inner
+                }
+
+                fn binding(&self) -> &Arc<DeviceBinding> {
+                    &self.binding
+                }
+            }
 
             impl<$(const $dim: usize,)* E: Element, P: Placement> TypedTensor
                 for $name<$($dim,)* E, P>

@@ -260,7 +260,7 @@ pub trait BroadcastOutput<Target: TypedTensor>: sealed::OutputContract {
 
 /// Checked refinement from another typed wrapper.
 #[doc(hidden)]
-pub trait RefinementOf<Source: TypedTensor>: sealed::OutputContract {}
+pub trait RefinementOf<Source: TypedTensor>: TypedTensor + sealed::OutputContract {}
 
 /// Matmul output under the exact-prefix policy.
 #[doc(hidden)]
