@@ -116,15 +116,12 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+pub(crate) mod const_check;
+mod dim;
 #[doc(hidden)]
 pub mod ops;
 
-/// A type-level dimension whose value is retained only at runtime.
-///
-/// Each occurrence is independent. `usize::MAX` is reserved for this wildcard;
-/// zero is a valid static dimension. Rust cannot distinguish another spelling
-/// of the literal `usize::MAX` from [`DYN`].
-pub const DYN: usize = usize::MAX;
+pub use dim::DYN;
 
 mod sealed {
     pub trait ElementCapability {}
