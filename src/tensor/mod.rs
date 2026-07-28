@@ -99,6 +99,12 @@ impl Tensor {
         self.0.node.as_ref()
     }
 
+    /// Whether two handles name the same storage/layout/autograd body.
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Tensor) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     // ---- accessors -------------------------------------------------------
 
     /// The logical shape.

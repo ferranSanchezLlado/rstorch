@@ -121,6 +121,7 @@ mod device;
 mod dim;
 #[doc(hidden)]
 pub mod ops;
+mod tensor;
 
 pub use dim::DYN;
 
