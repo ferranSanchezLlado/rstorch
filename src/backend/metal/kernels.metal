@@ -85,7 +85,26 @@ static bool value_nan(half value) { return isnan(value); }
 static bool value_nan(float value) { return isnan(value); }
 static bool value_nan(long value) { (void)value; return false; }
 
-#define NUMERIC_KERNELS(TYPE, ACC, NAME, TO_ACC, FROM_ACC, DIV) \
+kernel void validate_indices(
+    device const long* idx [[buffer(0)]], device long* result [[buffer(1)]],
+    constant ulong* dims [[buffer(2)]], constant ulong* strides [[buffer(3)]],
+    constant uint& rank [[buffer(4)]], constant ulong& offset [[buffer(5)]],
+    constant ulong& len [[buffer(6)]], constant ulong& bound [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]) {
+    if (gid != 0) return;
+    result[0] = 0;
+    result[1] = 0;
+    for (ulong i = 0; i < len; ++i) {
+        long value = idx[view_offset(i, dims, strides, rank, offset)];
+        if (value < 0 || ulong(value) >= bound) {
+            result[0] = 1;
+            result[1] = value;
+            return;
+        }
+    }
+}
+
+#define NUMERIC_KERNELS(TYPE, ACC, NAME, TO_ACC, FROM_ACC, ADD, SUB, MUL, DIV) \
 kernel void binary_##NAME( \
     device const TYPE* lhs [[buffer(0)]], device const TYPE* rhs [[buffer(1)]], \
     device TYPE* out [[buffer(2)]], constant ulong* ld [[buffer(3)]], \
@@ -97,8 +116,8 @@ kernel void binary_##NAME( \
     if (gid >= len) return; \
     TYPE a = lhs[view_offset(gid, ld, ls, lr, lo)]; \
     TYPE b = rhs[view_offset(gid, rd, rs, rr, ro)]; \
-    switch (op) { case 0: out[gid]=a+b; break; case 1: out[gid]=a-b; break; \
-      case 2: out[gid]=a*b; break; case 3: out[gid]=DIV(a,b); break; \
+    switch (op) { case 0: out[gid]=ADD(a,b); break; case 1: out[gid]=SUB(a,b); break; \
+      case 2: out[gid]=MUL(a,b); break; case 3: out[gid]=DIV(a,b); break; \
       case 4: out[gid]=value_nan(a)?b:(value_nan(b)?a:(a>=b?a:b)); break; \
       default: out[gid]=value_nan(a)?b:(value_nan(b)?a:(a<=b?a:b)); } \
 } \
@@ -109,7 +128,7 @@ kernel void scalar_##NAME( \
     constant ulong& len [[buffer(6)]], constant ACC& scalar [[buffer(7)]], \
     constant uint& op [[buffer(8)]], uint gid [[thread_position_in_grid]]) { \
     if (gid >= len) return; ACC a=TO_ACC(x[view_offset(gid,d,s,r,off)]), b=scalar, v; \
-    switch(op){case 0:v=a+b;break;case 1:v=a-b;break;case 2:v=a*b;break; \
+    switch(op){case 0:v=ADD(a,b);break;case 1:v=SUB(a,b);break;case 2:v=MUL(a,b);break; \
       case 3:v=DIV(a,b);break;case 4:v=value_nan(a)?b:(value_nan(b)?a:(a>=b?a:b));break;default:v=value_nan(a)?b:(value_nan(b)?a:(a<=b?a:b));} \
     out[gid]=FROM_ACC(v); \
 } \
@@ -163,12 +182,18 @@ kernel void matmul_##NAME( \
 #define FROM_F16(x) half(x)
 #define FROM_F32(x) float(x)
 #define FROM_I64(x) long(x)
+#define NORMAL_ADD(a,b) ((a)+(b))
+#define NORMAL_SUB(a,b) ((a)-(b))
+#define NORMAL_MUL(a,b) ((a)*(b))
 #define FLOAT_DIV(a,b) ((a)/(b))
-#define LONG_LOW (-9223372036854775807L - 1L)
+#define LONG_LOW as_type<long>(0x8000000000000000UL)
+#define WRAP_ADD(a,b) as_type<long>(as_type<ulong>(a)+as_type<ulong>(b))
+#define WRAP_SUB(a,b) as_type<long>(as_type<ulong>(a)-as_type<ulong>(b))
+#define WRAP_MUL(a,b) as_type<long>(as_type<ulong>(a)*as_type<ulong>(b))
 #define INT_DIV(a,b) ((b)==0?0:((a)==LONG_LOW&&(b)==-1?LONG_LOW:(a)/(b)))
-NUMERIC_KERNELS(half, float, f16, IDENTITY_F32, FROM_F16, FLOAT_DIV)
-NUMERIC_KERNELS(float, float, f32, IDENTITY_F32, FROM_F32, FLOAT_DIV)
-NUMERIC_KERNELS(long, long, i64, IDENTITY_I64, FROM_I64, INT_DIV)
+NUMERIC_KERNELS(half, float, f16, IDENTITY_F32, FROM_F16, NORMAL_ADD, NORMAL_SUB, NORMAL_MUL, FLOAT_DIV)
+NUMERIC_KERNELS(float, float, f32, IDENTITY_F32, FROM_F32, NORMAL_ADD, NORMAL_SUB, NORMAL_MUL, FLOAT_DIV)
+NUMERIC_KERNELS(long, long, i64, IDENTITY_I64, FROM_I64, WRAP_ADD, WRAP_SUB, WRAP_MUL, INT_DIV)
 
 kernel void compare_bool(
     device const uchar* lhs [[buffer(0)]], device const uchar* rhs [[buffer(1)]],
@@ -184,17 +209,34 @@ kernel void compare_bool(
       case 3:v=a<=b;break;case 4:v=a>b;break;default:v=a>=b;} out[gid]=uchar(v);
 }
 
-// Metal shading language has no erf intrinsic. This is the fdlibm single-
-// precision approximation (well below one f32 ulp over the GELU input range),
-// not the much looser five-coefficient approximation used by the old backend.
+// Single-precision fdlibm rational forms on the cancellation-sensitive core;
+// the asymptotic branch is only used once GELU is already in its rounded tail.
 static float erf_accurate(float x) {
-    float ax = fabs(x);
-    float t = 1.0f / (1.0f + 0.5f * ax);
-    float tau = t * exp(-ax * ax - 1.26551223f + t * (1.00002368f
-        + t * (0.37409196f + t * (0.09678418f + t * (-0.18628806f
-        + t * (0.27886807f + t * (-1.13520398f + t * (1.48851587f
-        + t * (-0.82215223f + t * 0.17087277f)))))))));
-    float value = 1.0f - tau;
+    float ax = fabs(x), value;
+    if (ax < 0.84375f) {
+        float z = ax * ax;
+        float r = 0.1283791671f + z * (-0.3250421073f + z * (-0.0284817498f
+            + z * (-0.0057702702f + z * -0.0000237630f)));
+        float s = 1.0f + z * (0.3979172111f + z * (0.0650222525f
+            + z * (0.0050813062f + z * (0.0001324947f + z * -0.0000039602f))));
+        value = ax + ax * (r / s);
+    } else if (ax < 1.25f) {
+        float z = ax - 1.0f;
+        float p = -0.0023621186f + z * (0.4148561060f + z * (-0.3722078800f
+            + z * (0.3183466196f + z * (-0.1108946949f
+            + z * (0.0354783051f + z * -0.0021663755f)))));
+        float q = 1.0f + z * (0.1064208820f + z * (0.5403979421f
+            + z * (0.0718286559f + z * (0.1261712164f
+            + z * (0.0136370836f + z * 0.0119845001f)))));
+        value = 0.8450629115f + p / q;
+    } else {
+        float t = 1.0f / (1.0f + 0.5f * ax);
+        float tau = t * exp(-ax * ax - 1.26551223f + t * (1.00002368f
+            + t * (0.37409196f + t * (0.09678418f + t * (-0.18628806f
+            + t * (0.27886807f + t * (-1.13520398f + t * (1.48851587f
+            + t * (-0.82215223f + t * 0.17087277f)))))))));
+        value = 1.0f - tau;
+    }
     return x < 0.0f ? -value : value;
 }
 
@@ -211,10 +253,10 @@ FLOAT_UNARY(float,f32,FROM_F32)
 kernel void unary_i64(device const long* x [[buffer(0)]],device long* out [[buffer(1)]],
  constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]],
  constant ulong& off [[buffer(5)]],constant ulong& len [[buffer(6)]],constant uint& op [[buffer(7)]],uint gid [[thread_position_in_grid]]){
- if(gid>=len)return;long v=x[view_offset(gid,d,s,r,off)];out[gid]=op==7?-v:(v<0?-v:v);
+ if(gid>=len)return;long v=x[view_offset(gid,d,s,r,off)];long neg=as_type<long>(0UL-as_type<ulong>(v));out[gid]=op==7?neg:(v<0?neg:v);
 }
 
-#define SELECT_KERNELS(TYPE, NAME, FROM) \
+#define SELECT_KERNELS(TYPE, NAME, FROM, FILL) \
 kernel void where_##NAME(device const uchar* c [[buffer(0)]],device const TYPE* t [[buffer(1)]],device const TYPE* f [[buffer(2)]],device TYPE* out [[buffer(3)]], \
  constant ulong* cd [[buffer(4)]],constant ulong* cs [[buffer(5)]],constant uint& cr [[buffer(6)]],constant ulong& co [[buffer(7)]], \
  constant ulong* td [[buffer(8)]],constant ulong* ts [[buffer(9)]],constant uint& tr [[buffer(10)]],constant ulong& to [[buffer(11)]], \
@@ -223,11 +265,11 @@ kernel void where_##NAME(device const uchar* c [[buffer(0)]],device const TYPE* 
 kernel void masked_##NAME(device const TYPE* x [[buffer(0)]],device const uchar* m [[buffer(1)]],device TYPE* out [[buffer(2)]], \
  constant ulong* xd [[buffer(3)]],constant ulong* xs [[buffer(4)]],constant uint& xr [[buffer(5)]],constant ulong& xo [[buffer(6)]], \
  constant ulong* md [[buffer(7)]],constant ulong* ms [[buffer(8)]],constant uint& mr [[buffer(9)]],constant ulong& mo [[buffer(10)]], \
- constant ulong& len [[buffer(11)]],constant float& fill [[buffer(12)]],uint gid [[thread_position_in_grid]]){if(gid<len)out[gid]=m[view_offset(gid,md,ms,mr,mo)]?FROM(fill):x[view_offset(gid,xd,xs,xr,xo)];}
-SELECT_KERNELS(half,f16,FROM_F16)
-SELECT_KERNELS(float,f32,FROM_F32)
-SELECT_KERNELS(long,i64,FROM_I64)
-SELECT_KERNELS(uchar,bool,uchar)
+ constant ulong& len [[buffer(11)]],constant FILL& fill [[buffer(12)]],uint gid [[thread_position_in_grid]]){if(gid<len)out[gid]=m[view_offset(gid,md,ms,mr,mo)]?FROM(fill):x[view_offset(gid,xd,xs,xr,xo)];}
+SELECT_KERNELS(half,f16,FROM_F16,float)
+SELECT_KERNELS(float,f32,FROM_F32,float)
+SELECT_KERNELS(long,i64,FROM_I64,long)
+SELECT_KERNELS(uchar,bool,uchar,float)
 
 #define CAST_KERNEL(FROM, TO, FN, TN, EXPR) \
 kernel void cast_##FN##_to_##TN(device const FROM* x [[buffer(0)]],device TO* out [[buffer(1)]], \
@@ -291,10 +333,10 @@ static bool source_pos(ulong out,ulong window,ulong stride,ulong dilation,ulong 
 
 #define CONV_KERNELS(TYPE, ACC, NAME, TO_ACC, FROM_ACC) \
 kernel void conv2d_##NAME(device const TYPE* x [[buffer(0)]],device const TYPE* w [[buffer(1)]],device TYPE* out [[buffer(2)]],constant ulong* xs [[buffer(3)]],constant ulong& xo [[buffer(4)]],constant ulong* ws [[buffer(5)]],constant ulong& wo [[buffer(6)]],constant ConvParams& p [[buffer(7)]],constant ulong& len [[buffer(8)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong ow=gid%p.ow,t=gid/p.ow,oh=t%p.oh;t/=p.oh;ulong oc=t%p.co,b=t/p.co;ACC acc=ACC(0);for(ulong ic=0;ic<p.ci;ic++)for(ulong kh=0;kh<p.kh;kh++){ulong ih;if(!source_pos(oh,kh,p.sh,p.dh,p.ph,p.h,ih))continue;for(ulong kw=0;kw<p.kw;kw++){ulong iw;if(source_pos(ow,kw,p.sw,p.dw,p.pw,p.w,iw))acc+=TO_ACC(x[xo+b*xs[0]+ic*xs[1]+ih*xs[2]+iw*xs[3]])*TO_ACC(w[wo+oc*ws[0]+ic*ws[1]+kh*ws[2]+kw*ws[3]]);}}out[gid]=FROM_ACC(acc);} \
-kernel void pool_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[buffer(1)]],constant ulong* xs [[buffer(2)]],constant ulong& xo [[buffer(3)]],constant ConvParams& p [[buffer(4)]],constant ulong& len [[buffer(5)]],constant uint& op [[buffer(6)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong ow=gid%p.ow,t=gid/p.ow,oh=t%p.oh;t/=p.oh;ulong c=t%p.ci,b=t/p.ci;ACC acc=ACC(0);bool first=true;for(ulong kh=0;kh<p.kh;kh++){ulong ih;if(!source_pos(oh,kh,p.sh,1,p.ph,p.h,ih))continue;for(ulong kw=0;kw<p.kw;kw++){ulong iw;if(!source_pos(ow,kw,p.sw,1,p.pw,p.w,iw))continue;ACC v=TO_ACC(x[xo+b*xs[0]+c*xs[1]+ih*xs[2]+iw*xs[3]]);if(op==0){if(first||value_nan(v)||(!value_nan(acc)&&v>acc))acc=v;}else acc+=v;first=false;}}if(op==1)acc/=ACC(p.kh*p.kw);out[gid]=FROM_ACC(acc);} \
+kernel void pool_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[buffer(1)]],constant ulong* xs [[buffer(2)]],constant ulong& xo [[buffer(3)]],constant ConvParams& p [[buffer(4)]],constant ulong& len [[buffer(5)]],constant uint& op [[buffer(6)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong ow=gid%p.ow,t=gid/p.ow,oh=t%p.oh;t/=p.oh;ulong c=t%p.ci,b=t/p.ci;ACC acc=ACC(0);bool first=true;for(ulong kh=0;kh<p.kh;kh++){ulong ih;if(!source_pos(oh,kh,p.sh,1,p.ph,p.h,ih))continue;for(ulong kw=0;kw<p.kw;kw++){ulong iw;if(!source_pos(ow,kw,p.sw,1,p.pw,p.w,iw))continue;ACC v=TO_ACC(x[xo+b*xs[0]+c*xs[1]+ih*xs[2]+iw*xs[3]]);if(op==0){if(first||(!value_nan(acc)&&(value_nan(v)||v>acc)))acc=v;}else acc+=v;first=false;}}if(op==1)acc/=ACC(p.kh*p.kw);out[gid]=FROM_ACC(acc);} \
 kernel void conv_input_grad_##NAME(device const TYPE* g [[buffer(0)]],device const TYPE* w [[buffer(1)]],device TYPE* out [[buffer(2)]],constant ulong* gs [[buffer(3)]],constant ulong& go [[buffer(4)]],constant ulong* ws [[buffer(5)]],constant ulong& wo [[buffer(6)]],constant ConvParams& p [[buffer(7)]],constant ulong& len [[buffer(8)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong iw=gid%p.w,t=gid/p.w,ih=t%p.h;t/=p.h;ulong ic=t%p.ci,b=t/p.ci;ACC acc=ACC(0);for(ulong oc=0;oc<p.co;oc++)for(ulong oh=0;oh<p.oh;oh++)for(ulong ow=0;ow<p.ow;ow++)for(ulong kh=0;kh<p.kh;kh++){ulong sh;if(!source_pos(oh,kh,p.sh,p.dh,p.ph,p.h,sh)||sh!=ih)continue;for(ulong kw=0;kw<p.kw;kw++){ulong sw;if(source_pos(ow,kw,p.sw,p.dw,p.pw,p.w,sw)&&sw==iw)acc+=TO_ACC(g[go+b*gs[0]+oc*gs[1]+oh*gs[2]+ow*gs[3]])*TO_ACC(w[wo+oc*ws[0]+ic*ws[1]+kh*ws[2]+kw*ws[3]]);}}out[gid]=FROM_ACC(acc);} \
 kernel void conv_weight_grad_##NAME(device const TYPE* g [[buffer(0)]],device const TYPE* x [[buffer(1)]],device TYPE* out [[buffer(2)]],constant ulong* gs [[buffer(3)]],constant ulong& go [[buffer(4)]],constant ulong* xs [[buffer(5)]],constant ulong& xo [[buffer(6)]],constant ConvParams& p [[buffer(7)]],constant ulong& len [[buffer(8)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong kw=gid%p.kw,t=gid/p.kw,kh=t%p.kh;t/=p.kh;ulong ic=t%p.ci,oc=t/p.ci;ACC acc=ACC(0);for(ulong b=0;b<p.n;b++)for(ulong oh=0;oh<p.oh;oh++){ulong ih;if(!source_pos(oh,kh,p.sh,p.dh,p.ph,p.h,ih))continue;for(ulong ow=0;ow<p.ow;ow++){ulong iw;if(source_pos(ow,kw,p.sw,p.dw,p.pw,p.w,iw))acc+=TO_ACC(g[go+b*gs[0]+oc*gs[1]+oh*gs[2]+ow*gs[3]])*TO_ACC(x[xo+b*xs[0]+ic*xs[1]+ih*xs[2]+iw*xs[3]]);}}out[gid]=FROM_ACC(acc);} \
-kernel void pool_backward_##NAME(device const TYPE* g [[buffer(0)]],device const TYPE* x [[buffer(1)]],device TYPE* out [[buffer(2)]],constant ulong* gs [[buffer(3)]],constant ulong& go [[buffer(4)]],constant ulong* xs [[buffer(5)]],constant ulong& xo [[buffer(6)]],constant ConvParams& p [[buffer(7)]],constant ulong& len [[buffer(8)]],constant uint& op [[buffer(9)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong iw=gid%p.w,t=gid/p.w,ih=t%p.h;t/=p.h;ulong c=t%p.ci,b=t/p.ci;ACC acc=ACC(0);for(ulong oh=0;oh<p.oh;oh++)for(ulong ow=0;ow<p.ow;ow++){bool owns=op==1;ACC peak=ACC(0);ulong besth=0,bestw=0;bool first=true;for(ulong kh=0;kh<p.kh;kh++){ulong sh;if(!source_pos(oh,kh,p.sh,1,p.ph,p.h,sh))continue;for(ulong kw=0;kw<p.kw;kw++){ulong sw;if(!source_pos(ow,kw,p.sw,1,p.pw,p.w,sw))continue;ACC v=TO_ACC(x[xo+b*xs[0]+c*xs[1]+sh*xs[2]+sw*xs[3]]);if(first||value_nan(v)||(!value_nan(peak)&&v>peak)){peak=v;besth=sh;bestw=sw;}first=false;}}if(op==0)owns=besth==ih&&bestw==iw;else owns=owns&&ih+p.ph>=oh*p.sh&&ih+p.ph<oh*p.sh+p.kh&&iw+p.pw>=ow*p.sw&&iw+p.pw<ow*p.sw+p.kw;if(owns){ACC v=TO_ACC(g[go+b*gs[0]+c*gs[1]+oh*gs[2]+ow*gs[3]]);acc+=op==1?v/ACC(p.kh*p.kw):v;}}out[gid]=FROM_ACC(acc);}
+kernel void pool_backward_##NAME(device const TYPE* g [[buffer(0)]],device const TYPE* x [[buffer(1)]],device TYPE* out [[buffer(2)]],constant ulong* gs [[buffer(3)]],constant ulong& go [[buffer(4)]],constant ulong* xs [[buffer(5)]],constant ulong& xo [[buffer(6)]],constant ConvParams& p [[buffer(7)]],constant ulong& len [[buffer(8)]],constant uint& op [[buffer(9)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong iw=gid%p.w,t=gid/p.w,ih=t%p.h;t/=p.h;ulong c=t%p.ci,b=t/p.ci;ACC acc=ACC(0);for(ulong oh=0;oh<p.oh;oh++)for(ulong ow=0;ow<p.ow;ow++){bool owns=op==1;ACC peak=ACC(0);ulong besth=0,bestw=0;bool first=true;for(ulong kh=0;kh<p.kh;kh++){ulong sh;if(!source_pos(oh,kh,p.sh,1,p.ph,p.h,sh))continue;for(ulong kw=0;kw<p.kw;kw++){ulong sw;if(!source_pos(ow,kw,p.sw,1,p.pw,p.w,sw))continue;ACC v=TO_ACC(x[xo+b*xs[0]+c*xs[1]+sh*xs[2]+sw*xs[3]]);if(first||(!value_nan(peak)&&(value_nan(v)||v>peak))){peak=v;besth=sh;bestw=sw;}first=false;}}if(op==0)owns=besth==ih&&bestw==iw;else owns=owns&&ih+p.ph>=oh*p.sh&&ih+p.ph<oh*p.sh+p.kh&&iw+p.pw>=ow*p.sw&&iw+p.pw<ow*p.sw+p.kw;if(owns){ACC v=TO_ACC(g[go+b*gs[0]+c*gs[1]+oh*gs[2]+ow*gs[3]]);acc+=op==1?v/ACC(p.kh*p.kw):v;}}out[gid]=FROM_ACC(acc);}
 CONV_KERNELS(half,float,f16,IDENTITY_F32,FROM_F16)
 CONV_KERNELS(float,float,f32,IDENTITY_F32,FROM_F32)
 CONV_KERNELS(long,long,i64,IDENTITY_I64,FROM_I64)

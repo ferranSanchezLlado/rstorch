@@ -23,6 +23,7 @@ use crate::storage::{CpuStorage, Storage};
 
 const SOURCE: &str = include_str!("kernels.metal");
 const COMMIT_THRESHOLD: usize = 64;
+const MAX_GRID_SIZE: usize = u32::MAX as usize;
 type ContextResult = std::result::Result<Arc<Context>, String>;
 type ContextRegistry = Mutex<HashMap<usize, ContextResult>>;
 
@@ -198,29 +199,43 @@ fn supported_dtype(op: &'static str, dtype: DType, device: Device) -> Result<()>
     }
 }
 
-fn byte_len(dtype: DType, len: usize) -> u64 {
-    let size = match dtype {
+fn element_size(dtype: DType) -> usize {
+    match dtype {
         DType::F16 => 2,
         DType::F32 => 4,
         DType::I64 => 8,
         DType::Bool => 1,
         DType::BF16 => 2,
         DType::F64 => 8,
-    };
-    len.max(1).saturating_mul(size) as u64
+    }
 }
 
-fn allocate(context: &Arc<Context>, dtype: DType, len: usize) -> MetalStorage {
+fn byte_len(dtype: DType, len: usize) -> Result<u64> {
+    let size = element_size(dtype);
+    let bytes = len
+        .max(1)
+        .checked_mul(size)
+        .ok_or_else(|| Error::InvalidArg {
+            op: "metal_allocate",
+            msg: format!("buffer byte length overflows usize for {len} {dtype} elements"),
+        })?;
+    u64::try_from(bytes).map_err(|_| Error::InvalidArg {
+        op: "metal_allocate",
+        msg: format!("buffer byte length {bytes} exceeds u64::MAX"),
+    })
+}
+
+fn allocate(context: &Arc<Context>, dtype: DType, len: usize) -> Result<MetalStorage> {
     let buffer = context.raw.new_buffer(
-        byte_len(dtype, len),
+        byte_len(dtype, len)?,
         metal_rs::MTLResourceOptions::StorageModeShared,
     );
-    MetalStorage {
+    Ok(MetalStorage {
         buffer: Arc::new(buffer),
         dtype,
         len,
         context: Arc::clone(context),
-    }
+    })
 }
 
 fn pipeline(context: &Context, name: &str) -> Result<Arc<metal_rs::ComputePipelineState>> {
@@ -308,6 +323,12 @@ fn encode(
 ) -> Result<()> {
     if len == 0 {
         return Ok(());
+    }
+    if len > MAX_GRID_SIZE {
+        return Err(Error::InvalidArg {
+            op: "metal_dispatch",
+            msg: format!("grid size {len} exceeds u32::MAX"),
+        });
     }
     autoreleasepool(|| {
         let mut submission = context
@@ -479,7 +500,83 @@ fn check_axis(op: &'static str, view: View<'_>, axis: usize) -> Result<()> {
     }
 }
 
-fn output_for(context: &Arc<Context>, dtype: DType, len: usize) -> MetalStorage {
+fn validate_fused_optimizer_views(
+    op: &'static str,
+    inputs: &[View<'_>],
+    parameter_inputs: usize,
+) -> Result<()> {
+    let param = inputs[0];
+    let acc_dtype = if param.dtype() == DType::F16 {
+        DType::F32
+    } else {
+        param.dtype()
+    };
+    for (index, &input) in inputs.iter().enumerate() {
+        let expected = if index < parameter_inputs {
+            param.dtype()
+        } else {
+            acc_dtype
+        };
+        if input.dtype() != expected {
+            return Err(Error::DTypeMismatch {
+                op,
+                expected,
+                got: input.dtype(),
+            });
+        }
+        if input.layout().shape() != param.layout().shape() {
+            return Err(Error::ShapeMismatch {
+                op,
+                lhs: param.layout().shape().clone(),
+                rhs: input.layout().shape().clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_indices(op: &'static str, indices: View<'_>, axis: usize, bound: usize) -> Result<()> {
+    let context = context(match indices.device() {
+        Device::Metal(ordinal) => ordinal,
+        Device::Cpu => {
+            return Err(Error::DeviceMismatch {
+                op,
+                expected: indices.device(),
+                got: Device::Cpu,
+            });
+        }
+    })?;
+    let input = metal_storage(op, indices)?;
+    let result = allocate(&context, DType::I64, 2)?;
+    let pipe = pipeline(&context, "validate_indices")?;
+    encode(
+        &context,
+        &pipe,
+        1,
+        &[&input.buffer, &result.buffer],
+        |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&result.buffer), 0);
+            layout_args(encoder, 2, indices.layout());
+            set_bytes(encoder, 6, &[indices.layout().num_elements() as u64]);
+            set_bytes(encoder, 7, &[bound as u64]);
+        },
+    )?;
+    synchronize(&context)?;
+    let values = unsafe { std::slice::from_raw_parts(result.buffer.contents().cast::<i64>(), 2) };
+    if values[0] != 0 {
+        Err(Error::IndexOutOfBounds {
+            op,
+            index: values[1],
+            axis,
+            size: bound,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn output_for(context: &Arc<Context>, dtype: DType, len: usize) -> Result<MetalStorage> {
     allocate(context, dtype, len)
 }
 
@@ -496,7 +593,7 @@ fn encode_binary(
     check_context(name, &context, &[lhs, rhs])?;
     let a = metal_storage(name, lhs)?;
     let b = metal_storage(name, rhs)?;
-    let output = output_for(&context, output_dtype, lhs.layout().num_elements());
+    let output = output_for(&context, output_dtype, lhs.layout().num_elements())?;
     let pipe = pipeline(&context, &format!("{name}_{}", suffix(dtype)))?;
     encode(
         &context,
@@ -577,7 +674,21 @@ fn matmul_plan(lhs: &Layout, rhs: &Layout) -> Result<MatmulPlan> {
             .filter(|&i| rb[i] != 1)
             .map_or(0, |i| rhs.strides()[i] as u64);
     }
-    let batches: usize = batch.iter().map(|&v| v as usize).product();
+    let batches = batch.iter().try_fold(1usize, |count, &dim| {
+        count
+            .checked_mul(dim as usize)
+            .ok_or_else(|| Error::InvalidArg {
+                op: "matmul",
+                msg: "broadcast batch size overflows usize".to_owned(),
+            })
+    })?;
+    let len = batches
+        .checked_mul(m)
+        .and_then(|value| value.checked_mul(n))
+        .ok_or_else(|| Error::InvalidArg {
+            op: "matmul",
+            msg: "output element count overflows usize".to_owned(),
+        })?;
     Ok(MatmulPlan {
         batch,
         lhs_batch,
@@ -593,7 +704,7 @@ fn matmul_plan(lhs: &Layout, rhs: &Layout) -> Result<MatmulPlan> {
             rhs.strides()[rr - 2] as u64,
             rhs.strides()[rr - 1] as u64,
         ],
-        len: batches.saturating_mul(m).saturating_mul(n),
+        len,
     })
 }
 
@@ -651,7 +762,7 @@ impl MetalBackend {
             let h = metal_storage("fused_layer_norm_backward_input", *xhat)?;
             let i = metal_storage("fused_layer_norm_backward_input", *inv_std)?;
             let w = metal_storage("fused_layer_norm_backward_input", *weight)?;
-            let output = output_for(&context, grad.dtype(), grad.layout().num_elements());
+            let output = output_for(&context, grad.dtype(), grad.layout().num_elements())?;
             let pipe = pipeline(
                 &context,
                 &format!("layer_norm_backward_{}", suffix(grad.dtype())),
@@ -719,9 +830,9 @@ impl MetalBackend {
         let xv = metal_storage("fused_layer_norm", *x)?;
         let wv = metal_storage("fused_layer_norm", *weight)?;
         let bv = metal_storage("fused_layer_norm", *bias)?;
-        let output = output_for(&context, dtype, x.layout().num_elements());
-        let xhat = output_for(&context, DType::F32, x.layout().num_elements());
-        let inv = output_for(&context, DType::F32, rows);
+        let output = output_for(&context, dtype, x.layout().num_elements())?;
+        let xhat = output_for(&context, DType::F32, x.layout().num_elements())?;
+        let inv = output_for(&context, DType::F32, rows)?;
         let pipe = pipeline(&context, &format!("layer_norm_{}", suffix(dtype)))?;
         encode(
             &context,
@@ -802,16 +913,25 @@ impl MetalBackend {
                 got: velocity.dtype(),
             });
         }
+        validate_fused_optimizer_views("fused_sgd_step", inputs, 2)?;
         let context = context(self.ordinal)?;
         check_context("fused_sgd_step", &context, inputs)?;
-        let p = metal_storage("fused_sgd_step", inputs[0])?;
-        let g = metal_storage("fused_sgd_step", inputs[1])?;
-        let velocity = inputs
-            .get(2)
-            .map(|view| metal_storage("fused_sgd_step", *view))
-            .transpose()?;
-        let next = output_for(&context, dtype, p.len);
-        let next_velocity = output_for(&context, DType::F32, p.len);
+        let dense = inputs
+            .iter()
+            .map(|&input| self.copy_strided(input))
+            .collect::<Result<Vec<_>>>()?;
+        let values: Vec<&MetalStorage> = dense
+            .iter()
+            .map(|storage| match storage {
+                Storage::Metal(value) => value,
+                Storage::Cpu(_) => unreachable!(),
+            })
+            .collect();
+        let p = values[0];
+        let g = values[1];
+        let velocity = values.get(2).copied();
+        let next = output_for(&context, dtype, p.len)?;
+        let next_velocity = output_for(&context, DType::F32, p.len)?;
         let pipe = pipeline(&context, &format!("sgd_{}", suffix(dtype)))?;
         let hp = [*lr as f32, *momentum as f32, *decay as f32];
         let mut resources = vec![
@@ -856,15 +976,26 @@ impl MetalBackend {
         {
             return Err(unsupported("fused_adam_step", inputs[0]));
         }
+        validate_fused_optimizer_views("fused_adam_step", inputs, 2)?;
         let context = context(self.ordinal)?;
         check_context("fused_adam_step", &context, inputs)?;
-        let p = metal_storage("fused_adam_step", inputs[0])?;
-        let g = metal_storage("fused_adam_step", inputs[1])?;
-        let m = metal_storage("fused_adam_step", inputs[2])?;
-        let v = metal_storage("fused_adam_step", inputs[3])?;
-        let next = output_for(&context, dtype, p.len);
-        let next_m = output_for(&context, DType::F32, p.len);
-        let next_v = output_for(&context, DType::F32, p.len);
+        let dense = inputs
+            .iter()
+            .map(|&input| self.copy_strided(input))
+            .collect::<Result<Vec<_>>>()?;
+        let values: Vec<&MetalStorage> = dense
+            .iter()
+            .map(|storage| match storage {
+                Storage::Metal(value) => value,
+                Storage::Cpu(_) => unreachable!(),
+            })
+            .collect();
+        let [p, g, m, v] = values.as_slice() else {
+            unreachable!()
+        };
+        let next = output_for(&context, dtype, p.len)?;
+        let next_m = output_for(&context, DType::F32, p.len)?;
+        let next_v = output_for(&context, DType::F32, p.len)?;
         let pipe = pipeline(&context, &format!("adam_{}", suffix(dtype)))?;
         let hp: Vec<f32> = scalars.iter().map(|&value| value as f32).collect();
         encode(
@@ -907,7 +1038,7 @@ impl BackendOps for MetalBackend {
         let context = context(self.ordinal)?;
         let dtype = host.dtype();
         supported_dtype("from_vec", dtype, Device::Metal(self.ordinal))?;
-        let storage = allocate(&context, dtype, host.len());
+        let storage = allocate(&context, dtype, host.len())?;
         unsafe {
             match host {
                 CpuStorage::F16(values) => std::ptr::copy_nonoverlapping(
@@ -987,7 +1118,7 @@ impl BackendOps for MetalBackend {
         supported_dtype("copy_strided", x.dtype(), x.device())?;
         let context = context(self.ordinal)?;
         check_context("copy_strided", &context, &[x])?;
-        let output = allocate(&context, x.dtype(), x.layout().num_elements());
+        let output = allocate(&context, x.dtype(), x.layout().num_elements())?;
         let pipe = pipeline(&context, copy_name(x.dtype(), false))?;
         encode(
             &context,
@@ -1053,7 +1184,7 @@ impl BackendOps for MetalBackend {
     fn full(&self, len: usize, dtype: DType, value: f64) -> Result<Storage> {
         let context = context(self.ordinal)?;
         supported_dtype("full", dtype, Device::Metal(self.ordinal))?;
-        let storage = allocate(&context, dtype, len);
+        let storage = allocate(&context, dtype, len)?;
         unsafe {
             match dtype {
                 DType::F16 => std::slice::from_raw_parts_mut(
@@ -1088,7 +1219,7 @@ impl BackendOps for MetalBackend {
         let context = context(self.ordinal)?;
         check_context("to_dtype", &context, &[x])?;
         let input = metal_storage("to_dtype", x)?;
-        let output = output_for(&context, to, x.layout().num_elements());
+        let output = output_for(&context, to, x.layout().num_elements())?;
         let pipe = pipeline(
             &context,
             &format!("cast_{}_to_{}", suffix(x.dtype()), suffix(to)),
@@ -1118,7 +1249,7 @@ impl BackendOps for MetalBackend {
         let context = context(self.ordinal)?;
         check_context("binary_scalar", &context, &[x])?;
         let input = metal_storage("binary_scalar", x)?;
-        let output = output_for(&context, x.dtype(), x.layout().num_elements());
+        let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
         let pipe = pipeline(&context, &format!("scalar_{}", suffix(x.dtype())))?;
         encode(
             &context,
@@ -1150,7 +1281,7 @@ impl BackendOps for MetalBackend {
         let context = context(self.ordinal)?;
         check_context("unary", &context, &[x])?;
         let input = metal_storage("unary", x)?;
-        let output = output_for(&context, x.dtype(), x.layout().num_elements());
+        let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
         let pipe = pipeline(&context, &format!("unary_{}", suffix(x.dtype())))?;
         encode(
             &context,
@@ -1184,7 +1315,7 @@ impl BackendOps for MetalBackend {
         let c = metal_storage("where", cond)?;
         let t = metal_storage("where", on_true)?;
         let f = metal_storage("where", on_false)?;
-        let output = output_for(&context, dtype, cond.layout().num_elements());
+        let output = output_for(&context, dtype, cond.layout().num_elements())?;
         let pipe = pipeline(&context, &format!("where_{}", suffix(dtype)))?;
         encode(
             &context,
@@ -1217,7 +1348,7 @@ impl BackendOps for MetalBackend {
         check_context("masked_fill", &context, &[x, mask])?;
         let input = metal_storage("masked_fill", x)?;
         let mask_storage = metal_storage("masked_fill", mask)?;
-        let output = output_for(&context, x.dtype(), x.layout().num_elements());
+        let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
         let pipe = pipeline(&context, &format!("masked_{}", suffix(x.dtype())))?;
         encode(
             &context,
@@ -1231,12 +1362,13 @@ impl BackendOps for MetalBackend {
                 layout_args(encoder, 3, x.layout());
                 layout_args(encoder, 7, mask.layout());
                 set_bytes(encoder, 11, &[output.len as u64]);
-                let fill = if x.dtype() == DType::Bool {
-                    f32::from(value != 0.0)
+                if x.dtype() == DType::Bool {
+                    set_bytes(encoder, 12, &[f32::from(value != 0.0)]);
+                } else if x.dtype() == DType::I64 {
+                    set_bytes(encoder, 12, &[value as i64]);
                 } else {
-                    value as f32
-                };
-                set_bytes(encoder, 12, &[fill]);
+                    set_bytes(encoder, 12, &[value as f32]);
+                }
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1250,7 +1382,7 @@ impl BackendOps for MetalBackend {
         check_context("reduce", &context, &[x])?;
         let input = metal_storage("reduce", x)?;
         let len = x.layout().num_elements() / x.layout().dims()[axis];
-        let output = output_for(&context, x.dtype(), len);
+        let output = output_for(&context, x.dtype(), len)?;
         let pipe = pipeline(&context, &format!("reduce_{}", suffix(x.dtype())))?;
         let code = match op {
             ReduceOp::Sum => 0,
@@ -1283,7 +1415,7 @@ impl BackendOps for MetalBackend {
         check_context("arg_reduce", &context, &[x])?;
         let input = metal_storage("arg_reduce", x)?;
         let len = x.layout().num_elements() / x.layout().dims()[axis];
-        let output = output_for(&context, DType::I64, len);
+        let output = output_for(&context, DType::I64, len)?;
         let pipe = pipeline(&context, &format!("arg_reduce_{}", suffix(x.dtype())))?;
         encode(
             &context,
@@ -1311,7 +1443,7 @@ impl BackendOps for MetalBackend {
         check_context("matmul", &context, &[lhs, rhs])?;
         let a = metal_storage("matmul", lhs)?;
         let b = metal_storage("matmul", rhs)?;
-        let output = output_for(&context, dtype, plan.len);
+        let output = output_for(&context, dtype, plan.len)?;
         let pipe = pipeline(&context, &format!("matmul_{}", suffix(dtype)))?;
         encode(
             &context,
@@ -1351,13 +1483,14 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("index_select", &context, &[x, indices])?;
+        validate_indices("index_select", indices, axis, x.layout().dims()[axis])?;
         let input = metal_storage("index_select", x)?;
         let index = metal_storage("index_select", indices)?;
         let mut dims = x.layout().dims().to_vec();
         dims[axis] = indices.layout().num_elements();
         let len: usize = dims.iter().product();
         let out_dims: Vec<u64> = dims.iter().map(|&v| v as u64).collect();
-        let output = output_for(&context, x.dtype(), len);
+        let output = output_for(&context, x.dtype(), len)?;
         let pipe = pipeline(&context, &format!("index_select_{}", suffix(x.dtype())))?;
         encode(
             &context,
@@ -1414,10 +1547,11 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("index_add", &context, &[x, indices, src])?;
+        validate_indices("index_add", indices, axis, x.layout().dims()[axis])?;
         let xv = metal_storage("index_add", x)?;
         let iv = metal_storage("index_add", indices)?;
         let sv = metal_storage("index_add", src)?;
-        let output = output_for(&context, dtype, x.layout().num_elements());
+        let output = output_for(&context, dtype, x.layout().num_elements())?;
         let pipe = pipeline(&context, &format!("index_add_{}", suffix(dtype)))?;
         encode(
             &context,
@@ -1473,9 +1607,10 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("gather", &context, &[x, indices])?;
+        validate_indices("gather", indices, axis, x.layout().dims()[axis])?;
         let xv = metal_storage("gather", x)?;
         let iv = metal_storage("gather", indices)?;
-        let output = output_for(&context, x.dtype(), indices.layout().num_elements());
+        let output = output_for(&context, x.dtype(), indices.layout().num_elements())?;
         let pipe = pipeline(&context, &format!("gather_{}", suffix(x.dtype())))?;
         encode(
             &context,
@@ -1553,10 +1688,11 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("scatter_add", &context, &[x, indices, src])?;
+        validate_indices("scatter_add", indices, axis, x.layout().dims()[axis])?;
         let xv = metal_storage("scatter_add", x)?;
         let iv = metal_storage("scatter_add", indices)?;
         let sv = metal_storage("scatter_add", src)?;
-        let output = output_for(&context, dtype, x.layout().num_elements());
+        let output = output_for(&context, dtype, x.layout().num_elements())?;
         let pipe = pipeline(&context, &format!("scatter_add_{}", suffix(dtype)))?;
         encode(
             &context,
@@ -1623,6 +1759,15 @@ impl BackendOps for MetalBackend {
                     weight.layout().dims(),
                     params,
                 )?;
+                if grad.layout().dims() != geometry.output_dims()
+                    || weight.layout().dims() != geometry.weight_dims()
+                {
+                    return Err(Error::ShapeMismatch {
+                        op: "conv2d_backward_input",
+                        lhs: grad.layout().shape().clone(),
+                        rhs: crate::shape::Shape::from(geometry.output_dims()),
+                    });
+                }
                 (
                     geometry,
                     "conv_input_grad",
@@ -1639,6 +1784,15 @@ impl BackendOps for MetalBackend {
                     original_weight.layout().dims(),
                     params,
                 )?;
+                if grad.layout().dims() != geometry.output_dims()
+                    || original_input.layout().dims() != geometry.input_dims()
+                {
+                    return Err(Error::ShapeMismatch {
+                        op: "conv2d_backward_weight",
+                        lhs: grad.layout().shape().clone(),
+                        rhs: crate::shape::Shape::from(geometry.output_dims()),
+                    });
+                }
                 (
                     geometry,
                     "conv_weight_grad",
@@ -1654,6 +1808,13 @@ impl BackendOps for MetalBackend {
                     original_input.layout().dims(),
                     params,
                 )?;
+                if grad.layout().dims() != geometry.output_dims() {
+                    return Err(Error::ShapeMismatch {
+                        op: "pool2d_backward",
+                        lhs: grad.layout().shape().clone(),
+                        rhs: crate::shape::Shape::from(geometry.output_dims()),
+                    });
+                }
                 (
                     geometry,
                     "pool_backward",
@@ -1674,7 +1835,7 @@ impl BackendOps for MetalBackend {
         check_context("conv", &context, inputs)?;
         let a = metal_storage("conv", first)?;
         let b = second.map(|view| metal_storage("conv", view)).transpose()?;
-        let output = output_for(&context, dtype, output_len);
+        let output = output_for(&context, dtype, output_len)?;
         let pipe = pipeline(&context, &format!("{kernel_name}_{}", suffix(dtype)))?;
         let packed = conv_params(&geometry, params);
         let mut resources = vec![&*a.buffer, &*output.buffer];
@@ -1765,7 +1926,7 @@ impl BackendOps for MetalBackend {
                 let context = context(self.ordinal)?;
                 check_context("fused_softmax", &context, inputs)?;
                 let x = metal_storage("fused_softmax", *input)?;
-                let output = output_for(&context, dtype, input.layout().num_elements());
+                let output = output_for(&context, dtype, input.layout().num_elements())?;
                 let pipe = pipeline(&context, &format!("softmax_{}", suffix(dtype)))?;
                 encode(
                     &context,
@@ -2071,39 +2232,119 @@ mod tests {
     }
 
     #[test]
-    fn index_family_guards_bad_bounds_without_gpu_addressing() {
+    fn index_family_reports_public_bounds_errors() {
         let _lane = HARDWARE_LANE.lock().unwrap();
         let backend = dispatch::backend(METAL);
         let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &METAL).unwrap();
         for index in [-1i64, 3] {
             let indices = Tensor::from_vec(vec![index], [1], &METAL).unwrap();
-            let before = INSTRUMENTATION.transfer_out.load(Ordering::Relaxed);
-            let output = backend.index_select(x.view(), 0, indices.view()).unwrap();
-            let layout = Layout::contiguous([1]).unwrap();
-            let values = backend.transfer_out(View::new(&output, &layout)).unwrap();
-            assert_eq!(
-                INSTRUMENTATION.transfer_out.load(Ordering::Relaxed),
-                before + 1,
-                "bounds checking must stay on the device"
-            );
-            let crate::storage::CpuStorage::F32(values) = values else {
-                panic!("index_select changed dtype")
-            };
-            assert!(
-                values[0] == 0.0,
-                "invalid index {index} must not address storage"
-            );
+            let err = x.index_select(0, &indices).unwrap_err();
+            assert!(matches!(
+                err,
+                Error::IndexOutOfBounds {
+                    op: "index_select",
+                    index: got,
+                    axis: 0,
+                    size: 3,
+                } if got == index
+            ));
+
+            let base = Tensor::zeros([3], DType::F32, &METAL).unwrap();
+            let src = Tensor::ones([1], DType::F32, &METAL).unwrap();
+            assert!(matches!(
+                backend.index_add(base.view(), 0, indices.view(), src.view()),
+                Err(Error::IndexOutOfBounds { op: "index_add", index: got, .. }) if got == index
+            ));
         }
 
         let matrix = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &METAL).unwrap();
-        let bad = Tensor::from_vec(vec![0i64, 2], [1, 2], &METAL).unwrap();
-        let output = backend.gather(matrix.view(), 1, bad.view()).unwrap();
-        let layout = Layout::contiguous([2]).unwrap();
-        let values = backend.transfer_out(View::new(&output, &layout)).unwrap();
-        let crate::storage::CpuStorage::F32(values) = values else {
-            panic!("gather changed dtype")
-        };
-        assert_eq!(values.as_slice(), &[1.0, 0.0]);
+        for index in [-1i64, 2] {
+            let bad = Tensor::from_vec(vec![0i64, index], [1, 2], &METAL).unwrap();
+            assert!(matches!(
+                matrix.gather(1, &bad),
+                Err(Error::IndexOutOfBounds { op: "gather", index: got, .. }) if got == index
+            ));
+            let src = Tensor::ones([1, 2], DType::F32, &METAL).unwrap();
+            assert!(matches!(
+                backend.scatter_add(matrix.view(), 1, bad.view(), src.view()),
+                Err(Error::IndexOutOfBounds { op: "scatter_add", index: got, .. }) if got == index
+            ));
+        }
+    }
+
+    #[test]
+    fn gelu_matches_cpu_on_adversarial_inputs() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let values = vec![
+            -12.0f32,
+            -8.0,
+            -5.0,
+            -3.0,
+            -1.0,
+            -0.1,
+            -1e-4,
+            -f32::EPSILON,
+            0.0,
+            f32::EPSILON,
+            1e-4,
+            0.1,
+            1.0,
+            3.0,
+            5.0,
+            8.0,
+            12.0,
+        ];
+        let cpu = Tensor::from_vec(values.clone(), [values.len()], &Device::Cpu)
+            .unwrap()
+            .gelu()
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let metal = Tensor::from_vec(values, [cpu.len()], &METAL)
+            .unwrap()
+            .gelu()
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        for (index, (&want, &got)) in cpu.iter().zip(&metal).enumerate() {
+            assert!(
+                (want - got).abs() <= 2.0 * f32::EPSILON * want.abs().max(1.0),
+                "GELU element {index}: expected {want:?}, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_pool_first_tie_and_first_nan_own_gradient() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        for values in [
+            vec![2.0f32, 2.0, 1.0, 0.0],
+            vec![f32::NAN, f32::NAN, 1.0, 0.0],
+        ] {
+            let run = |device| {
+                let x = Tensor::from_vec(values.clone(), [1, 1, 2, 2], &device)
+                    .unwrap()
+                    .traced()
+                    .unwrap();
+                let y = x.max_pool2d((2, 2), (1, 1), (0, 0)).unwrap();
+                let forward = y.to_vec::<f32>().unwrap();
+                let grad = y
+                    .sum_all()
+                    .unwrap()
+                    .backward()
+                    .unwrap()
+                    .wrt_input(&x)
+                    .unwrap()
+                    .to_vec::<f32>()
+                    .unwrap();
+                (forward, grad)
+            };
+            let cpu = run(Device::Cpu);
+            let metal = run(METAL);
+            assert_eq!(cpu.1, metal.1);
+            assert_eq!(metal.1, vec![1.0, 0.0, 0.0, 0.0]);
+            assert_eq!(cpu.0[0].is_nan(), metal.0[0].is_nan());
+        }
     }
 
     #[test]

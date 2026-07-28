@@ -294,7 +294,7 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
     for case in suite() {
         match (evaluate(reference, &case), evaluate(candidate, &case)) {
             (Err(Error::Unsupported { .. }), _) | (_, Err(Error::Unsupported { .. })) => {
-                if expected_unsupported(device, &case.name) {
+                if expected_unsupported(device, &case) {
                     report.expected_unsupported.push(case.name);
                 } else {
                     report.skipped.push(case.name);
@@ -315,27 +315,39 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
     report
 }
 
-fn expected_unsupported(_device: Device, name: &str) -> bool {
-    let outside_common_contract = [
-        "unary.Relu.i64",
-        "unary.Gelu.i64",
-        "unary.Exp.i64",
-        "unary.Ln.i64",
-        "unary.Sqrt.i64",
-        "unary.Tanh.i64",
-        "unary.Sigmoid.i64",
-        "reduce.Sum.bool",
-        "reduce.Mean.bool",
-        "reduce.Max.bool",
-        "reduce.Min.bool",
-    ]
-    .contains(&name);
+fn expected_unsupported(_device: Device, case: &Case) -> bool {
+    let input_dtype = case.operands.first().map(|operand| operand.host.dtype());
+    let outside_common_contract = matches!(
+        (&case.call, input_dtype),
+        (
+            Call::Unary(
+                UnaryOp::Relu
+                    | UnaryOp::Gelu
+                    | UnaryOp::Exp
+                    | UnaryOp::Ln
+                    | UnaryOp::Sqrt
+                    | UnaryOp::Tanh
+                    | UnaryOp::Sigmoid
+            ),
+            Some(DType::I64)
+        ) | (Call::Reduce(..), Some(DType::Bool))
+    );
     if outside_common_contract {
         return true;
     }
     #[cfg(all(feature = "metal", target_os = "macos"))]
     if matches!(_device, Device::Metal(_)) {
-        return name.contains("bf16") || name.contains("f64");
+        return case
+            .operands
+            .iter()
+            .any(|operand| matches!(operand.host.dtype(), DType::BF16 | DType::F64))
+            || matches!(
+                case.call,
+                Call::Full {
+                    dtype: DType::BF16 | DType::F64,
+                    ..
+                } | Call::Cast(DType::BF16 | DType::F64)
+            );
     }
     false
 }

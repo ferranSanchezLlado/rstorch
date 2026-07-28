@@ -63,6 +63,20 @@ fn labels(rows: usize, classes: usize, offset: usize, device: &Device) -> Tensor
     Tensor::from_vec(values, [rows], device).expect("bench labels")
 }
 
+fn observe_model(module: &dyn Module) {
+    let value = rstorch::nn::state_dict(module)
+        .into_values()
+        .next()
+        .expect("bench model has parameters");
+    black_box(
+        value
+            .to_vec::<f32>()
+            .expect("bench completion read")
+            .first()
+            .copied(),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The tiny decoder-only transformer (v2's `DecoderOnlyTransformer<6,3,4,2,2,8,2>`)
 // ---------------------------------------------------------------------------
@@ -240,6 +254,13 @@ fn bench_transformer(c: &mut Criterion) {
         let mut rng = Rng::seed(7);
         let mut train_model = TinyTransformer::new(&mut rng, &dev).unwrap();
         let mut opt = AdamW::new(1e-3, 0.0);
+        let warm_grads = train_model
+            .loss(&ids, &positions, &mask, &targets, Mode::TRAIN)
+            .unwrap()
+            .backward()
+            .unwrap();
+        opt.step(&mut train_model, warm_grads).unwrap();
+        observe_model(&train_model);
         group.bench_function("train_step_adamw", |b| {
             b.iter(|| {
                 let grads = train_model
@@ -248,6 +269,7 @@ fn bench_transformer(c: &mut Criterion) {
                     .backward()
                     .unwrap();
                 opt.step(&mut train_model, grads).unwrap();
+                observe_model(&train_model);
             });
         });
 
@@ -283,6 +305,18 @@ fn bench_mlp_epoch(c: &mut Criterion) {
             })
             .collect();
 
+        for (input, targets) in &batches {
+            let grads = model
+                .forward(input, Mode::TRAIN)
+                .unwrap()
+                .cross_entropy(targets)
+                .unwrap()
+                .backward()
+                .unwrap();
+            opt.step(&mut model, grads).unwrap();
+        }
+        observe_model(&model);
+
         group.bench_function("train_epoch_sgd/8x64x784", |b| {
             b.iter(|| {
                 for (input, targets) in &batches {
@@ -295,6 +329,7 @@ fn bench_mlp_epoch(c: &mut Criterion) {
                         .unwrap();
                     opt.step(&mut model, grads).unwrap();
                 }
+                observe_model(&model);
             });
         });
 
