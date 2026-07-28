@@ -116,6 +116,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+mod autograd;
 pub(crate) mod const_check;
 mod device;
 mod dim;
@@ -123,6 +124,7 @@ mod dim;
 pub mod ops;
 pub(in crate::typed) mod tensor;
 
+pub use autograd::TypedGradsExt;
 pub use dim::DYN;
 
 pub(in crate::typed) mod sealed {
