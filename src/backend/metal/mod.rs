@@ -735,7 +735,7 @@ fn matmul_plan(lhs: &Layout, rhs: &Layout) -> Result<MatmulPlan> {
 }
 
 fn conv_params(
-    geometry: &crate::backend::cpu::conv::Conv2dGeometry,
+    geometry: &crate::backend::conv_geometry::Conv2dGeometry,
     params: &Conv2dParams,
 ) -> [u64; 15] {
     let [n, ci, h, w] = geometry.input_dims();
@@ -1753,7 +1753,7 @@ impl BackendOps for MetalBackend {
         }
         let (geometry, kernel_name, output_len, first, second, pool_code) = match (op, inputs) {
             (ConvOp::Conv2d, [x, weight]) => {
-                let geometry = crate::backend::cpu::conv::Conv2dGeometry::conv2d(
+                let geometry = crate::backend::conv_geometry::Conv2dGeometry::conv2d(
                     "conv2d",
                     x.layout().dims(),
                     weight.layout().dims(),
@@ -1763,7 +1763,7 @@ impl BackendOps for MetalBackend {
                 (geometry, "conv2d", len, *x, Some(*weight), None)
             }
             (ConvOp::MaxPool2d | ConvOp::AvgPool2d, [x]) => {
-                let geometry = crate::backend::cpu::conv::Conv2dGeometry::pool(
+                let geometry = crate::backend::conv_geometry::Conv2dGeometry::pool(
                     "pool2d",
                     x.layout().dims(),
                     params,
@@ -1779,7 +1779,7 @@ impl BackendOps for MetalBackend {
                 )
             }
             (ConvOp::Conv2dInputGrad, [grad, weight, original_input]) => {
-                let geometry = crate::backend::cpu::conv::Conv2dGeometry::conv2d(
+                let geometry = crate::backend::conv_geometry::Conv2dGeometry::conv2d(
                     "conv2d_backward_input",
                     original_input.layout().dims(),
                     weight.layout().dims(),
@@ -1804,7 +1804,7 @@ impl BackendOps for MetalBackend {
                 )
             }
             (ConvOp::Conv2dWeightGrad, [grad, original_input, original_weight]) => {
-                let geometry = crate::backend::cpu::conv::Conv2dGeometry::conv2d(
+                let geometry = crate::backend::conv_geometry::Conv2dGeometry::conv2d(
                     "conv2d_backward_weight",
                     original_input.layout().dims(),
                     original_weight.layout().dims(),
@@ -1829,7 +1829,7 @@ impl BackendOps for MetalBackend {
                 )
             }
             (ConvOp::MaxPool2dBackward | ConvOp::AvgPool2dBackward, [grad, original_input]) => {
-                let geometry = crate::backend::cpu::conv::Conv2dGeometry::pool(
+                let geometry = crate::backend::conv_geometry::Conv2dGeometry::pool(
                     "pool2d_backward",
                     original_input.layout().dims(),
                     params,

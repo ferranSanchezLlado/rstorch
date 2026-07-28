@@ -14,7 +14,7 @@
 //! call the gradient kernels that live next to the forward ones.
 
 use crate::autograd;
-use crate::backend::cpu::conv::Conv2dGeometry;
+use crate::backend::conv_geometry::Conv2dGeometry;
 use crate::backend::{Conv2dParams, ConvOp, dispatch};
 use crate::error::{Error, Result};
 use crate::layout::Layout;

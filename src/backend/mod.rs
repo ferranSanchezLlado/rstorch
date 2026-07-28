@@ -38,6 +38,7 @@
 // T19: the table-driven op × dtype harness that validates any backend
 // against the CPU reference (`conformance::run`).
 pub(crate) mod conformance;
+pub(crate) mod conv_geometry;
 pub(crate) mod cpu;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) mod metal;
