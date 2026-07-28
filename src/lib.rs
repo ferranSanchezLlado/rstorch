@@ -46,6 +46,9 @@ pub mod persist;
 pub mod prelude;
 pub mod testing;
 pub mod text;
+/// Compile-time checked tensor and neural-network APIs.
+#[cfg(feature = "typed")]
+pub mod typed;
 
 // ---- root re-exports: the design's flat vocabulary ----------------------
 pub use autograd::Grads;

@@ -64,6 +64,7 @@ harness = false
 
 [features]
 default = []
+typed = []
 hub = ["dep:flate2", "dep:ureq"]
 rayon = ["dep:rayon"]
 # Experimental until the T61 conformance + perf gate passes

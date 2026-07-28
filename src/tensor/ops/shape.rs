@@ -41,7 +41,9 @@ use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
+use crate::storage::CpuStorage;
 use crate::tensor::Tensor;
+use std::sync::Arc;
 
 /// Re-view `t`'s storage through `layout`, producing an **untraced** tensor.
 /// The value-level half of every zero-copy op here; the caller wraps the
@@ -76,6 +78,53 @@ fn concat_values(
         // No elements to move: allocate the (empty) buffer and be done. This
         // also covers a zero-sized axis anywhere in `out_dims`.
         return Ok(Tensor::from_parts(backend.full(0, dtype, 0.0)?, layout));
+    }
+
+    // Dense CPU inputs can be assembled in one allocation. The generic
+    // copy-into path below remains necessary to keep accelerator data on-device.
+    if parts[0].device() == Device::Cpu {
+        let outer: usize = out_dims[..axis].iter().product();
+        let inner: usize = out_dims[axis + 1..].iter().product();
+        let sizes: Vec<usize> = if insert_axis {
+            vec![1; parts.len()]
+        } else {
+            parts.iter().map(|t| t.dims()[axis]).collect()
+        };
+        let blocks = parts
+            .iter()
+            .map(|t| backend.transfer_out(t.view()))
+            .collect::<Result<Vec<CpuStorage>>>()?;
+
+        macro_rules! assemble {
+            ($variant:ident) => {{
+                let mut slices = Vec::with_capacity(blocks.len());
+                for block in &blocks {
+                    match block {
+                        CpuStorage::$variant(data) => slices.push(data.as_slice()),
+                        _ => unreachable!("cat: every block carries the validated dtype"),
+                    }
+                }
+                let mut out = Vec::with_capacity(total);
+                for group in 0..outer {
+                    for (data, &size) in slices.iter().zip(&sizes) {
+                        let chunk = size * inner;
+                        let start = group * chunk;
+                        out.extend_from_slice(&data[start..start + chunk]);
+                    }
+                }
+                CpuStorage::$variant(Arc::new(out))
+            }};
+        }
+
+        let host = match dtype {
+            DType::F16 => assemble!(F16),
+            DType::BF16 => assemble!(BF16),
+            DType::F32 => assemble!(F32),
+            DType::F64 => assemble!(F64),
+            DType::I64 => assemble!(I64),
+            DType::Bool => assemble!(Bool),
+        };
+        return Ok(Tensor::from_parts(backend.transfer_in(host)?, layout));
     }
 
     let mut storage = backend.full(total, dtype, 0.0)?;

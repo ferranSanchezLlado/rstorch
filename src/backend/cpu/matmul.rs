@@ -305,9 +305,9 @@ fn matmul_f32_transposed_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> 
                         rhs[rhs_row + (j + 2) * plan.rhs_n_stride],
                         rhs[rhs_row + (j + 3) * plan.rhs_n_stride],
                     ];
-                    for ii in 0..TILE {
-                        for jj in 0..TILE {
-                            acc[ii][jj] += av[ii] * bv[jj];
+                    for (acc_row, a) in acc.iter_mut().zip(av) {
+                        for (cell, b) in acc_row.iter_mut().zip(bv) {
+                            *cell += a * b;
                         }
                     }
                 }

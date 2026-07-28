@@ -1,14 +1,14 @@
 # restart-v3 CI (implementation-plan §1.2): stable + MSRV, fmt, clippy
 # -D warnings, doc build, and a cargo-public-api diff against the committed
 # baseline. Branch filters keep pushed task branches from triggering this;
-# only restart-v3 itself and PRs targeting it run.
+# only integration branches and PRs targeting them run.
 name: CI
 
 on:
   push:
-    branches: [restart-v3]
+    branches: [restart-v3, compile-time]
   pull_request:
-    branches: [restart-v3]
+    branches: [restart-v3, compile-time]
 
 env:
   CARGO_TERM_COLOR: always
@@ -64,6 +64,35 @@ jobs:
       - name: Test hub and rayon
         run: cargo test --workspace --features hub,rayon
 
+  surfaces:
+    name: Surface (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            feature_args: ""
+          - name: typed
+            feature_args: --features typed
+          - name: all features
+            feature_args: --all-features
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --workspace ${{ matrix.feature_args }}
+      - name: Test
+        run: cargo test --workspace ${{ matrix.feature_args }}
+      - name: Docs
+        run: cargo doc --workspace --no-deps ${{ matrix.feature_args }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   ui:
     name: UI (Rust 1.88 pinned)
     runs-on: ubuntu-latest
@@ -74,6 +103,8 @@ jobs:
       - name: Install Rust 1.88
         run: rustup toolchain install 1.88 --profile minimal
       - uses: Swatinem/rust-cache@v2
+      - name: Test all UI suites (all features)
+        run: cargo +1.88 test --workspace --all-features
       - name: Test Grads linearity diagnostics
         run: cargo +1.88 test --test linearity_ui
       - name: Test derive diagnostics
@@ -87,12 +118,40 @@ jobs:
       - name: Install toolchains
         run: |
           rustup toolchain install stable --profile minimal
-          rustup toolchain install nightly --profile minimal
+          rustup toolchain install nightly-2026-06-15 --profile minimal
           rustup default stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-public-api
-        run: cargo install cargo-public-api --locked
-      - name: Diff against committed baseline
+        run: cargo install cargo-public-api --version 0.52.0 --locked
+      - name: Diff dynamic and typed surfaces
         run: |
-          cargo public-api --simplified > /tmp/current-public-api.txt
-          diff -u docs/restart-v3/public-api-baseline.txt /tmp/current-public-api.txt
+          test "$(shasum -a 256 src/prelude.rs | cut -d ' ' -f 1)" = d51c608f4a8e8f83e78572374b70c401f12b37c532c22056139b7847b9abcbea
+          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features > /tmp/dynamic-default.txt
+          diff -u docs/restart-v3/public-api-baseline.txt /tmp/dynamic-default.txt
+          diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-default.txt /tmp/dynamic-default.txt
+          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features hub,rayon > /tmp/dynamic-portable.txt
+          diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-portable.txt /tmp/dynamic-portable.txt
+          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features typed > /tmp/typed.txt
+          diff -u docs/restart-v3/ct00-baselines/public-api-typed.txt /tmp/typed.txt
+          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features typed,hub,rayon > /tmp/typed-portable.txt
+          diff -u docs/restart-v3/ct00-baselines/public-api-typed-portable.txt /tmp/typed-portable.txt
+
+  public-api-macos:
+    name: Public API diff (macOS all features)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup toolchain install nightly-2026-06-15 --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-public-api
+        run: cargo install cargo-public-api --version 0.52.0 --locked
+      - name: Diff macOS all-feature surfaces
+        run: |
+          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features hub,rayon,metal > /tmp/dynamic-macos.txt
+          diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-macos-all-runtime.txt /tmp/dynamic-macos.txt
+          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --all-features > /tmp/typed-macos.txt
+          diff -u docs/restart-v3/ct00-baselines/public-api-typed-macos-all-features.txt /tmp/typed-macos.txt
