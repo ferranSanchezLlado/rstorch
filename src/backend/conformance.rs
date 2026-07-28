@@ -27,9 +27,9 @@
 //!   views, because the kernel contract is stride-aware.
 //! - **`Unsupported` is not a mismatch.** A backend that reports
 //!   [`Error::Unsupported`] for a case has *loudly* declined it (there are
-//!   no silent fallbacks); such cases land in `Report::skipped`, and a
-//!   promotion gate asserts that list is empty. Any other error, or a value
-//!   divergence, is a failure.
+//!   no silent fallbacks). Declared out-of-scope rows land in
+//!   `Report::expected_unsupported`; any other decline lands in
+//!   `Report::skipped`, which a promotion gate requires to be empty.
 //! - **Fused ops are absent from the table.** Their multi-output encodings do
 //!   not fit this single-output harness; softmax, LayerNorm, and optimizer
 //!   kernels instead have direct dtype-specific CPU tests. T61 may extend the
@@ -252,6 +252,9 @@ pub(crate) struct Report {
     /// Cases one of the two backends declined with [`Error::Unsupported`].
     /// Not a failure — but a promotion gate should require this to be empty.
     pub(crate) skipped: Vec<String>,
+    /// Rows outside the candidate's declared capability, such as BF16 on
+    /// Metal, or operation/dtype pairs the common backend contract excludes.
+    pub(crate) expected_unsupported: Vec<String>,
     /// Cases that diverged or errored, one rendered message each.
     pub(crate) failures: Vec<String>,
 }
@@ -268,7 +271,10 @@ impl Report {
             msg: format!(
                 "{} of {} case(s) diverged from the cpu reference on {device}:\n  {}",
                 self.failures.len(),
-                self.matched.len() + self.skipped.len() + self.failures.len(),
+                self.matched.len()
+                    + self.skipped.len()
+                    + self.expected_unsupported.len()
+                    + self.failures.len(),
                 self.failures.join("\n  ")
             ),
         })
@@ -282,12 +288,17 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
     let mut report = Report {
         matched: Vec::new(),
         skipped: Vec::new(),
+        expected_unsupported: Vec::new(),
         failures: Vec::new(),
     };
     for case in suite() {
         match (evaluate(reference, &case), evaluate(candidate, &case)) {
             (Err(Error::Unsupported { .. }), _) | (_, Err(Error::Unsupported { .. })) => {
-                report.skipped.push(case.name);
+                if expected_unsupported(device, &case.name) {
+                    report.expected_unsupported.push(case.name);
+                } else {
+                    report.skipped.push(case.name);
+                }
             }
             (Err(e), _) => report
                 .failures
@@ -302,6 +313,31 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
         }
     }
     report
+}
+
+fn expected_unsupported(_device: Device, name: &str) -> bool {
+    let outside_common_contract = [
+        "unary.Relu.i64",
+        "unary.Gelu.i64",
+        "unary.Exp.i64",
+        "unary.Ln.i64",
+        "unary.Sqrt.i64",
+        "unary.Tanh.i64",
+        "unary.Sigmoid.i64",
+        "reduce.Sum.bool",
+        "reduce.Mean.bool",
+        "reduce.Max.bool",
+        "reduce.Min.bool",
+    ]
+    .contains(&name);
+    if outside_common_contract {
+        return true;
+    }
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    if matches!(_device, Device::Metal(_)) {
+        return name.contains("bf16") || name.contains("f64");
+    }
+    false
 }
 
 /// Run the suite against the backend registered for `device`.
@@ -1163,7 +1199,12 @@ mod tests {
     fn cpu_is_conformant_with_itself() {
         let report = run_device(Device::Cpu);
         let matched = report.matched.len();
-        let skipped = report.skipped.clone();
+        let skipped = report.expected_unsupported.clone();
+        assert!(
+            report.skipped.is_empty(),
+            "unexpected skips: {:?}",
+            report.skipped
+        );
         report.into_result(Device::Cpu).expect("cpu self-check");
         assert!(matched > 100, "suite is too thin: {matched} matched cases");
         // Exactly the rows the op enums put out of contract: the float-only

@@ -251,25 +251,25 @@ kernel void index_select_##NAME(device const TYPE* x [[buffer(0)]],device const 
  constant ulong* xd [[buffer(3)]],constant ulong* xs [[buffer(4)]],constant uint& xr [[buffer(5)]],constant ulong& xo [[buffer(6)]], \
  constant ulong* id [[buffer(7)]],constant ulong* is [[buffer(8)]],constant uint& ir [[buffer(9)]],constant ulong& io [[buffer(10)]], \
  constant ulong* od [[buffer(11)]],constant uint& axis [[buffer(12)]],constant ulong& len [[buffer(13)]],uint gid [[thread_position_in_grid]]){ \
- if(gid>=len)return;ulong pick=ulong(idx[view_offset(logical_coord(gid,od,xr,axis),id,is,ir,io)]);ulong base=xo; \
+ if(gid>=len)return;long raw=idx[view_offset(logical_coord(gid,od,xr,axis),id,is,ir,io)];if(raw<0||ulong(raw)>=xd[axis]){out[gid]=TYPE(0);return;}ulong pick=ulong(raw);ulong base=xo; \
  for(uint a=0;a<xr;a++){ulong c=logical_coord(gid,od,xr,a);base+=(a==axis?pick:c)*xs[a];}out[gid]=x[base];} \
 kernel void gather_##NAME(device const TYPE* x [[buffer(0)]],device const long* idx [[buffer(1)]],device TYPE* out [[buffer(2)]], \
  constant ulong* xd [[buffer(3)]],constant ulong* xs [[buffer(4)]],constant uint& xr [[buffer(5)]],constant ulong& xo [[buffer(6)]], \
  constant ulong* id [[buffer(7)]],constant ulong* is [[buffer(8)]],constant uint& ir [[buffer(9)]],constant ulong& io [[buffer(10)]], \
- constant uint& axis [[buffer(11)]],constant ulong& len [[buffer(12)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong pick=ulong(idx[view_offset(gid,id,is,ir,io)]),base=xo; \
+ constant uint& axis [[buffer(11)]],constant ulong& len [[buffer(12)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;long raw=idx[view_offset(gid,id,is,ir,io)];if(raw<0||ulong(raw)>=xd[axis]){out[gid]=TYPE(0);return;}ulong pick=ulong(raw),base=xo; \
  for(uint a=0;a<xr;a++){ulong c=logical_coord(gid,id,ir,a);base+=(a==axis?pick:c)*xs[a];}out[gid]=x[base];} \
 kernel void index_add_##NAME(device const TYPE* x [[buffer(0)]],device const long* idx [[buffer(1)]],device const TYPE* src [[buffer(2)]],device TYPE* out [[buffer(3)]], \
  constant ulong* xd [[buffer(4)]],constant ulong* xs [[buffer(5)]],constant uint& xr [[buffer(6)]],constant ulong& xo [[buffer(7)]], \
  constant ulong* id [[buffer(8)]],constant ulong* is [[buffer(9)]],constant uint& ir [[buffer(10)]],constant ulong& io [[buffer(11)]], \
  constant ulong* sd [[buffer(12)]],constant ulong* ss [[buffer(13)]],constant uint& sr [[buffer(14)]],constant ulong& so [[buffer(15)]], \
  constant uint& axis [[buffer(16)]],constant ulong& out_len [[buffer(17)]],constant ulong& src_len [[buffer(18)]],uint gid [[thread_position_in_grid]]){if(gid>=out_len)return;ACC acc=TO_ACC(x[view_offset(gid,xd,xs,xr,xo)]); \
- for(ulong q=0;q<src_len;q++){bool same=true;for(uint a=0;a<xr;a++){ulong dc=logical_coord(gid,xd,xr,a),sc=logical_coord(q,sd,sr,a);if(a==axis)sc=ulong(idx[view_offset(sc,id,is,ir,io)]);if(dc!=sc)same=false;}if(same)acc+=TO_ACC(src[view_offset(q,sd,ss,sr,so)]);}out[gid]=FROM_ACC(acc);} \
+ for(ulong q=0;q<src_len;q++){bool same=true;for(uint a=0;a<xr;a++){ulong dc=logical_coord(gid,xd,xr,a),sc=logical_coord(q,sd,sr,a);if(a==axis){long raw=idx[view_offset(sc,id,is,ir,io)];if(raw<0||ulong(raw)>=xd[axis]){same=false;break;}sc=ulong(raw);}if(dc!=sc)same=false;}if(same)acc+=TO_ACC(src[view_offset(q,sd,ss,sr,so)]);}out[gid]=FROM_ACC(acc);} \
 kernel void scatter_add_##NAME(device const TYPE* x [[buffer(0)]],device const long* idx [[buffer(1)]],device const TYPE* src [[buffer(2)]],device TYPE* out [[buffer(3)]], \
  constant ulong* xd [[buffer(4)]],constant ulong* xs [[buffer(5)]],constant uint& xr [[buffer(6)]],constant ulong& xo [[buffer(7)]], \
  constant ulong* id [[buffer(8)]],constant ulong* is [[buffer(9)]],constant uint& ir [[buffer(10)]],constant ulong& io [[buffer(11)]], \
  constant ulong* sd [[buffer(12)]],constant ulong* ss [[buffer(13)]],constant uint& sr [[buffer(14)]],constant ulong& so [[buffer(15)]], \
  constant uint& axis [[buffer(16)]],constant ulong& out_len [[buffer(17)]],constant ulong& src_len [[buffer(18)]],uint gid [[thread_position_in_grid]]){if(gid>=out_len)return;ACC acc=TO_ACC(x[view_offset(gid,xd,xs,xr,xo)]); \
- for(ulong q=0;q<src_len;q++){bool same=true;for(uint a=0;a<xr;a++){ulong dc=logical_coord(gid,xd,xr,a),sc=logical_coord(q,id,ir,a);if(a==axis)sc=ulong(idx[view_offset(q,id,is,ir,io)]);if(dc!=sc)same=false;}if(same)acc+=TO_ACC(src[view_offset(q,sd,ss,sr,so)]);}out[gid]=FROM_ACC(acc);}
+ for(ulong q=0;q<src_len;q++){bool same=true;for(uint a=0;a<xr;a++){ulong dc=logical_coord(gid,xd,xr,a),sc=logical_coord(q,id,ir,a);if(a==axis){long raw=idx[view_offset(q,id,is,ir,io)];if(raw<0||ulong(raw)>=xd[axis]){same=false;break;}sc=ulong(raw);}if(dc!=sc)same=false;}if(same)acc+=TO_ACC(src[view_offset(q,sd,ss,sr,so)]);}out[gid]=FROM_ACC(acc);}
 INDEX_KERNELS(half,float,f16,IDENTITY_F32,FROM_F16)
 INDEX_KERNELS(float,float,f32,IDENTITY_F32,FROM_F32)
 INDEX_KERNELS(long,long,i64,IDENTITY_I64,FROM_I64)
@@ -278,12 +278,12 @@ kernel void index_select_bool(device const uchar* x [[buffer(0)]],device const l
  constant ulong* xd [[buffer(3)]],constant ulong* xs [[buffer(4)]],constant uint& xr [[buffer(5)]],constant ulong& xo [[buffer(6)]],
  constant ulong* id [[buffer(7)]],constant ulong* is [[buffer(8)]],constant uint& ir [[buffer(9)]],constant ulong& io [[buffer(10)]],
  constant ulong* od [[buffer(11)]],constant uint& axis [[buffer(12)]],constant ulong& len [[buffer(13)]],uint gid [[thread_position_in_grid]]){
- if(gid>=len)return;ulong pick=ulong(idx[view_offset(logical_coord(gid,od,xr,axis),id,is,ir,io)]),base=xo;
+ if(gid>=len)return;long raw=idx[view_offset(logical_coord(gid,od,xr,axis),id,is,ir,io)];if(raw<0||ulong(raw)>=xd[axis]){out[gid]=0;return;}ulong pick=ulong(raw),base=xo;
  for(uint a=0;a<xr;a++){ulong c=logical_coord(gid,od,xr,a);base+=(a==axis?pick:c)*xs[a];}out[gid]=x[base];}
 kernel void gather_bool(device const uchar* x [[buffer(0)]],device const long* idx [[buffer(1)]],device uchar* out [[buffer(2)]],
  constant ulong* xd [[buffer(3)]],constant ulong* xs [[buffer(4)]],constant uint& xr [[buffer(5)]],constant ulong& xo [[buffer(6)]],
  constant ulong* id [[buffer(7)]],constant ulong* is [[buffer(8)]],constant uint& ir [[buffer(9)]],constant ulong& io [[buffer(10)]],
- constant uint& axis [[buffer(11)]],constant ulong& len [[buffer(12)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;ulong pick=ulong(idx[view_offset(gid,id,is,ir,io)]),base=xo;
+ constant uint& axis [[buffer(11)]],constant ulong& len [[buffer(12)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;long raw=idx[view_offset(gid,id,is,ir,io)];if(raw<0||ulong(raw)>=xd[axis]){out[gid]=0;return;}ulong pick=ulong(raw),base=xo;
  for(uint a=0;a<xr;a++){ulong c=logical_coord(gid,id,ir,a);base+=(a==axis?pick:c)*xs[a];}out[gid]=x[base];}
 
 struct ConvParams { ulong n, ci, h, w, co, kh, kw, oh, ow, sh, sw, ph, pw, dh, dw; };

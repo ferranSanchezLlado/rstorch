@@ -43,17 +43,24 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 use rstorch::prelude::*;
 
+fn benchmark_devices() -> Vec<Device> {
+    let mut devices = vec![Device::Cpu];
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    devices.push(Device::Metal(0));
+    devices
+}
+
 /// Deterministic uniform `[-1, 1)` f32 tensor on the CPU.
-fn uniform(rng: &mut Rng, dims: &[usize]) -> Tensor {
+fn uniform(rng: &mut Rng, dims: &[usize], device: &Device) -> Tensor {
     let len: usize = dims.iter().product();
     let values: Vec<f32> = (0..len).map(|_| rng.uniform(-1.0, 1.0) as f32).collect();
-    Tensor::from_vec(values, dims.to_vec(), &Device::Cpu).expect("bench input")
+    Tensor::from_vec(values, dims.to_vec(), device).expect("bench input")
 }
 
 /// `[rows]` I64 class labels cycling through `classes`.
-fn labels(rows: usize, classes: usize, offset: usize) -> Tensor {
+fn labels(rows: usize, classes: usize, offset: usize, device: &Device) -> Tensor {
     let values: Vec<i64> = (0..rows).map(|i| ((i + offset) % classes) as i64).collect();
-    Tensor::from_vec(values, [rows], &Device::Cpu).expect("bench labels")
+    Tensor::from_vec(values, [rows], device).expect("bench labels")
 }
 
 // ---------------------------------------------------------------------------
@@ -172,79 +179,80 @@ impl TinyTransformer {
 
 /// The v2 `transformer` group: forward, forward+backward, and an AdamW step.
 fn bench_transformer(c: &mut Criterion) {
-    let dev = Device::Cpu;
-    let mut group = c.benchmark_group("transformer");
+    for dev in benchmark_devices() {
+        let mut group = c.benchmark_group(format!("transformer/{dev}"));
 
-    let ids = Tensor::from_vec(vec![2i64, 4, 5, 4, 5, 3], [BATCH, SEQ], &dev).unwrap();
-    let targets = Tensor::from_vec(vec![4i64, 5, 3, 5, 3, 0], [BATCH * SEQ], &dev).unwrap();
-    let positions = Tensor::index_range(SEQ, &dev).unwrap();
-    let mask = Tensor::causal_mask(SEQ, &dev).unwrap();
+        let ids = Tensor::from_vec(vec![2i64, 4, 5, 4, 5, 3], [BATCH, SEQ], &dev).unwrap();
+        let targets = Tensor::from_vec(vec![4i64, 5, 3, 5, 3, 0], [BATCH * SEQ], &dev).unwrap();
+        let positions = Tensor::index_range(SEQ, &dev).unwrap();
+        let mask = Tensor::causal_mask(SEQ, &dev).unwrap();
 
-    let mut rng = Rng::seed(7);
-    let mut model = TinyTransformer::new(&mut rng, &dev).unwrap();
+        let mut rng = Rng::seed(7);
+        let mut model = TinyTransformer::new(&mut rng, &dev).unwrap();
 
-    // Self-check: the ported model must actually train. A finite loss proves
-    // the forward composes; a `Sgd::step` that returns `Ok` proves *every*
-    // non-frozen parameter received a gradient (the `MissingGrad` pre-pass),
-    // which is the failure mode a hand-ported model is most likely to hide —
-    // an untraced weight would make these numbers meaninglessly fast.
-    {
-        // 418 trainable scalars is the v2 tiny config's parameter count: 24 + 12
-        // for the two tables, 172 per block, 8 for the final norm, 30 for the
-        // head. Pinning it means a later edit to the ported model cannot quietly
-        // change the workload these numbers describe.
-        assert_eq!(
-            rstorch::nn::num_params(&model),
-            418,
-            "ported transformer must match the v2 tiny config's parameter count"
-        );
-        let loss = model
-            .loss(&ids, &positions, &mask, &targets, Mode::TRAIN)
-            .unwrap();
-        assert!(
-            loss.item().unwrap().is_finite(),
-            "transformer loss diverged"
-        );
-        let grads = loss.backward().unwrap();
-        Sgd::new(0.0)
-            .step(&mut model, grads)
-            .expect("every transformer parameter must receive a gradient");
-    }
-
-    group.bench_function("forward", |b| {
-        b.iter(|| {
-            black_box(
-                model
-                    .logits(black_box(&ids), &positions, &mask, Mode::EVAL)
-                    .unwrap(),
-            )
-        });
-    });
-
-    group.bench_function("forward_backward", |b| {
-        b.iter(|| {
+        // Self-check: the ported model must actually train. A finite loss proves
+        // the forward composes; a `Sgd::step` that returns `Ok` proves *every*
+        // non-frozen parameter received a gradient (the `MissingGrad` pre-pass),
+        // which is the failure mode a hand-ported model is most likely to hide —
+        // an untraced weight would make these numbers meaninglessly fast.
+        {
+            // 418 trainable scalars is the v2 tiny config's parameter count: 24 + 12
+            // for the two tables, 172 per block, 8 for the final norm, 30 for the
+            // head. Pinning it means a later edit to the ported model cannot quietly
+            // change the workload these numbers describe.
+            assert_eq!(
+                rstorch::nn::num_params(&model),
+                418,
+                "ported transformer must match the v2 tiny config's parameter count"
+            );
             let loss = model
                 .loss(&ids, &positions, &mask, &targets, Mode::TRAIN)
                 .unwrap();
-            let _ = black_box(loss.backward().unwrap());
-        });
-    });
+            assert!(
+                loss.item().unwrap().is_finite(),
+                "transformer loss diverged"
+            );
+            let grads = loss.backward().unwrap();
+            Sgd::new(0.0)
+                .step(&mut model, grads)
+                .expect("every transformer parameter must receive a gradient");
+        }
 
-    let mut rng = Rng::seed(7);
-    let mut train_model = TinyTransformer::new(&mut rng, &dev).unwrap();
-    let mut opt = AdamW::new(1e-3, 0.0);
-    group.bench_function("train_step_adamw", |b| {
-        b.iter(|| {
-            let grads = train_model
-                .loss(&ids, &positions, &mask, &targets, Mode::TRAIN)
-                .unwrap()
-                .backward()
-                .unwrap();
-            opt.step(&mut train_model, grads).unwrap();
+        group.bench_function("forward", |b| {
+            b.iter(|| {
+                black_box(
+                    model
+                        .logits(black_box(&ids), &positions, &mask, Mode::EVAL)
+                        .unwrap(),
+                )
+            });
         });
-    });
 
-    group.finish();
+        group.bench_function("forward_backward", |b| {
+            b.iter(|| {
+                let loss = model
+                    .loss(&ids, &positions, &mask, &targets, Mode::TRAIN)
+                    .unwrap();
+                let _ = black_box(loss.backward().unwrap());
+            });
+        });
+
+        let mut rng = Rng::seed(7);
+        let mut train_model = TinyTransformer::new(&mut rng, &dev).unwrap();
+        let mut opt = AdamW::new(1e-3, 0.0);
+        group.bench_function("train_step_adamw", |b| {
+            b.iter(|| {
+                let grads = train_model
+                    .loss(&ids, &positions, &mask, &targets, Mode::TRAIN)
+                    .unwrap()
+                    .backward()
+                    .unwrap();
+                opt.step(&mut train_model, grads).unwrap();
+            });
+        });
+
+        group.finish();
+    }
 }
 
 /// A 784 → 128 → 10 MLP, the shape both `mlp` and `autograd_overhead` use.
@@ -258,34 +266,40 @@ fn mnist_mlp(rng: &mut Rng, dev: &Device) -> Sequential {
 /// One epoch of an MNIST-shaped MLP over eight synthetic 64-sample batches:
 /// forward, cross-entropy, backward, SGD step per batch.
 fn bench_mlp_epoch(c: &mut Criterion) {
-    let dev = Device::Cpu;
-    let mut group = c.benchmark_group("mlp");
-    group.sample_size(10);
+    for dev in benchmark_devices() {
+        let mut group = c.benchmark_group(format!("mlp/{dev}"));
+        group.sample_size(10);
 
-    let mut rng = Rng::seed(0);
-    let mut model = mnist_mlp(&mut rng, &dev);
-    let mut opt = Sgd::new(0.01);
+        let mut rng = Rng::seed(0);
+        let mut model = mnist_mlp(&mut rng, &dev);
+        let mut opt = Sgd::new(0.01);
 
-    let batches: Vec<(Tensor, Tensor)> = (0..8)
-        .map(|batch| (uniform(&mut rng, &[64, 784]), labels(64, 10, batch)))
-        .collect();
+        let batches: Vec<(Tensor, Tensor)> = (0..8)
+            .map(|batch| {
+                (
+                    uniform(&mut rng, &[64, 784], &dev),
+                    labels(64, 10, batch, &dev),
+                )
+            })
+            .collect();
 
-    group.bench_function("train_epoch_sgd/8x64x784", |b| {
-        b.iter(|| {
-            for (input, targets) in &batches {
-                let grads = model
-                    .forward(input, Mode::TRAIN)
-                    .unwrap()
-                    .cross_entropy(targets)
-                    .unwrap()
-                    .backward()
-                    .unwrap();
-                opt.step(&mut model, grads).unwrap();
-            }
+        group.bench_function("train_epoch_sgd/8x64x784", |b| {
+            b.iter(|| {
+                for (input, targets) in &batches {
+                    let grads = model
+                        .forward(input, Mode::TRAIN)
+                        .unwrap()
+                        .cross_entropy(targets)
+                        .unwrap()
+                        .backward()
+                        .unwrap();
+                    opt.step(&mut model, grads).unwrap();
+                }
+            });
         });
-    });
 
-    group.finish();
+        group.finish();
+    }
 }
 
 /// Forward-only vs recorded-forward vs forward+backward on the same MLP graph.
@@ -298,8 +312,8 @@ fn bench_autograd_overhead(c: &mut Criterion) {
 
     let mut rng = Rng::seed(1);
     let mut model = mnist_mlp(&mut rng, &dev);
-    let input = uniform(&mut rng, &[64, 784]);
-    let targets = labels(64, 10, 0);
+    let input = uniform(&mut rng, &[64, 784], &dev);
+    let targets = labels(64, 10, 0, &dev);
 
     group.bench_function("forward_no_grad", |b| {
         b.iter(|| {
@@ -350,9 +364,9 @@ fn bench_conv_pool(c: &mut Criterion) {
 
     let mut rng = Rng::seed(2);
     // Kaiming-uniform fan_in for a 1x3x3 patch, matching v2's `Conv2d`.
-    let weight = Param::new(uniform(&mut rng, &[8, 1, 3, 3]));
+    let weight = Param::new(uniform(&mut rng, &[8, 1, 3, 3], &dev));
     let bias = Param::new(Tensor::zeros([8, 1, 1], DType::F32, &dev).unwrap());
-    let input = uniform(&mut rng, &[4, 1, 16, 16]);
+    let input = uniform(&mut rng, &[4, 1, 16, 16], &dev);
 
     let conv = |mode: Mode| -> Result<Tensor> {
         input
@@ -428,7 +442,7 @@ fn bench_reduce_all(c: &mut Criterion) {
     let mut rng = Rng::seed(4);
     for (label, shapes) in &sizes {
         for dims in shapes {
-            let x = uniform(&mut rng, dims);
+            let x = uniform(&mut rng, dims, &Device::Cpu);
             let param = Param::new(x.clone());
             let rank = dims.len();
 

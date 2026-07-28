@@ -467,6 +467,18 @@ fn same_dtype(op: &'static str, views: &[View<'_>]) -> Result<DType> {
     Ok(first.dtype())
 }
 
+fn check_axis(op: &'static str, view: View<'_>, axis: usize) -> Result<()> {
+    if axis < view.layout().rank() {
+        Ok(())
+    } else {
+        Err(Error::InvalidAxis {
+            op,
+            axis: axis as isize,
+            rank: view.layout().rank(),
+        })
+    }
+}
+
 fn output_for(context: &Arc<Context>, dtype: DType, len: usize) -> MetalStorage {
     allocate(context, dtype, len)
 }
@@ -1322,8 +1334,20 @@ impl BackendOps for MetalBackend {
     }
     fn index_select(&self, x: View<'_>, axis: usize, indices: View<'_>) -> Result<Storage> {
         supported_dtype("index_select", x.dtype(), x.device())?;
+        check_axis("index_select", x, axis)?;
         if indices.dtype() != DType::I64 {
-            return Err(unsupported("index_select", x));
+            return Err(Error::DTypeMismatch {
+                op: "index_select",
+                expected: DType::I64,
+                got: indices.dtype(),
+            });
+        }
+        if indices.layout().rank() != 1 {
+            return Err(Error::RankMismatch {
+                op: "index_select",
+                expected: 1,
+                got: indices.layout().rank(),
+            });
         }
         let context = context(self.ordinal)?;
         check_context("index_select", &context, &[x, indices])?;
@@ -1361,8 +1385,32 @@ impl BackendOps for MetalBackend {
         src: View<'_>,
     ) -> Result<Storage> {
         let dtype = same_dtype("index_add", &[x, src])?;
-        if dtype == DType::Bool || indices.dtype() != DType::I64 {
+        check_axis("index_add", x, axis)?;
+        if dtype == DType::Bool {
             return Err(unsupported("index_add", x));
+        }
+        if indices.dtype() != DType::I64 {
+            return Err(Error::DTypeMismatch {
+                op: "index_add",
+                expected: DType::I64,
+                got: indices.dtype(),
+            });
+        }
+        if indices.layout().rank() != 1 {
+            return Err(Error::RankMismatch {
+                op: "index_add",
+                expected: 1,
+                got: indices.layout().rank(),
+            });
+        }
+        let mut expected = x.layout().dims().to_vec();
+        expected[axis] = indices.layout().num_elements();
+        if src.layout().dims() != expected {
+            return Err(Error::ShapeMismatch {
+                op: "index_add",
+                lhs: crate::shape::Shape::from(expected),
+                rhs: src.layout().shape().clone(),
+            });
         }
         let context = context(self.ordinal)?;
         check_context("index_add", &context, &[x, indices, src])?;
@@ -1393,8 +1441,35 @@ impl BackendOps for MetalBackend {
     }
     fn gather(&self, x: View<'_>, axis: usize, indices: View<'_>) -> Result<Storage> {
         supported_dtype("gather", x.dtype(), x.device())?;
+        check_axis("gather", x, axis)?;
         if indices.dtype() != DType::I64 {
-            return Err(unsupported("gather", x));
+            return Err(Error::DTypeMismatch {
+                op: "gather",
+                expected: DType::I64,
+                got: indices.dtype(),
+            });
+        }
+        if indices.layout().rank() != x.layout().rank() {
+            return Err(Error::RankMismatch {
+                op: "gather",
+                expected: x.layout().rank(),
+                got: indices.layout().rank(),
+            });
+        }
+        for (other, (&index_dim, &source_dim)) in indices
+            .layout()
+            .dims()
+            .iter()
+            .zip(x.layout().dims())
+            .enumerate()
+        {
+            if other != axis && index_dim > source_dim {
+                return Err(Error::ShapeMismatch {
+                    op: "gather",
+                    lhs: x.layout().shape().clone(),
+                    rhs: indices.layout().shape().clone(),
+                });
+            }
         }
         let context = context(self.ordinal)?;
         check_context("gather", &context, &[x, indices])?;
@@ -1427,8 +1502,54 @@ impl BackendOps for MetalBackend {
         src: View<'_>,
     ) -> Result<Storage> {
         let dtype = same_dtype("scatter_add", &[x, src])?;
-        if dtype == DType::Bool || indices.dtype() != DType::I64 {
+        check_axis("scatter_add", x, axis)?;
+        if dtype == DType::Bool {
             return Err(unsupported("scatter_add", x));
+        }
+        if indices.dtype() != DType::I64 {
+            return Err(Error::DTypeMismatch {
+                op: "scatter_add",
+                expected: DType::I64,
+                got: indices.dtype(),
+            });
+        }
+        if indices.layout().rank() != x.layout().rank() {
+            return Err(Error::RankMismatch {
+                op: "scatter_add",
+                expected: x.layout().rank(),
+                got: indices.layout().rank(),
+            });
+        }
+        if src.layout().rank() != x.layout().rank() {
+            return Err(Error::RankMismatch {
+                op: "scatter_add",
+                expected: x.layout().rank(),
+                got: src.layout().rank(),
+            });
+        }
+        for (&index_dim, &src_dim) in indices.layout().dims().iter().zip(src.layout().dims()) {
+            if index_dim > src_dim {
+                return Err(Error::ShapeMismatch {
+                    op: "scatter_add",
+                    lhs: src.layout().shape().clone(),
+                    rhs: indices.layout().shape().clone(),
+                });
+            }
+        }
+        for (other, (&index_dim, &output_dim)) in indices
+            .layout()
+            .dims()
+            .iter()
+            .zip(x.layout().dims())
+            .enumerate()
+        {
+            if other != axis && index_dim > output_dim {
+                return Err(Error::ShapeMismatch {
+                    op: "scatter_add",
+                    lhs: x.layout().shape().clone(),
+                    rhs: indices.layout().shape().clone(),
+                });
+            }
         }
         let context = context(self.ordinal)?;
         check_context("scatter_add", &context, &[x, indices, src])?;
@@ -1675,6 +1796,9 @@ mod tests {
     use super::{COMMIT_THRESHOLD, INSTRUMENTATION};
     use crate::backend::{FusedOp, View, dispatch};
     use crate::layout::Layout;
+    use crate::nn::{Forward, Linear, Mode, Param};
+    use crate::optim::AdamW;
+    use crate::rng::Rng;
     use crate::{DType, Device, Error, Tensor};
 
     const METAL: Device = Device::Metal(0);
@@ -1729,11 +1853,16 @@ mod tests {
         let _lane = HARDWARE_LANE.lock().unwrap();
         let report = crate::backend::conformance::run_device(METAL);
         eprintln!(
-            "Metal conformance: {} matched, {} skipped, {} failed\nskipped:\n{}",
+            "Metal conformance: {} matched, {} expected unsupported, {} unexpected skips, {} failed",
             report.matched.len(),
+            report.expected_unsupported.len(),
             report.skipped.len(),
-            report.failures.len(),
-            report.skipped.join("\n")
+            report.failures.len()
+        );
+        assert!(
+            report.skipped.is_empty(),
+            "unexpected skips: {:?}",
+            report.skipped
         );
         assert!(
             report.failures.is_empty(),
@@ -1775,6 +1904,23 @@ mod tests {
                 .max_dispatches_per_buffer
                 .load(Ordering::Relaxed)
                 >= COMMIT_THRESHOLD
+        );
+        let context = super::context(0).unwrap();
+        let submission = context.submission.lock().unwrap();
+        assert!(submission.open.is_none());
+        assert!(
+            submission.pending.is_empty(),
+            "host read must reap pending buffers"
+        );
+        eprintln!(
+            "async counters: dispatches={}, commits={}, waits={}, max_dispatches_per_buffer={}, max_pending={}",
+            INSTRUMENTATION.dispatches.load(Ordering::Relaxed) - before_dispatch,
+            INSTRUMENTATION.commits.load(Ordering::Relaxed) - before_commit,
+            INSTRUMENTATION.waits.load(Ordering::Relaxed) - before_wait,
+            INSTRUMENTATION
+                .max_dispatches_per_buffer
+                .load(Ordering::Relaxed),
+            INSTRUMENTATION.max_pending.load(Ordering::Relaxed),
         );
     }
 
@@ -1915,5 +2061,133 @@ mod tests {
             pool_grads.wrt_input(&x).unwrap().to_vec::<f32>().unwrap(),
             vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
         );
+
+        let avg = x.avg_pool2d((2, 2), (1, 1), (0, 0)).unwrap();
+        let avg_grads = avg.sum_all().unwrap().backward().unwrap();
+        assert_eq!(
+            avg_grads.wrt_input(&x).unwrap().to_vec::<f32>().unwrap(),
+            vec![0.25, 0.5, 0.25, 0.5, 1.0, 0.5, 0.25, 0.5, 0.25]
+        );
+    }
+
+    #[test]
+    fn index_family_guards_bad_bounds_without_gpu_addressing() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let backend = dispatch::backend(METAL);
+        let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &METAL).unwrap();
+        for index in [-1i64, 3] {
+            let indices = Tensor::from_vec(vec![index], [1], &METAL).unwrap();
+            let before = INSTRUMENTATION.transfer_out.load(Ordering::Relaxed);
+            let output = backend.index_select(x.view(), 0, indices.view()).unwrap();
+            let layout = Layout::contiguous([1]).unwrap();
+            let values = backend.transfer_out(View::new(&output, &layout)).unwrap();
+            assert_eq!(
+                INSTRUMENTATION.transfer_out.load(Ordering::Relaxed),
+                before + 1,
+                "bounds checking must stay on the device"
+            );
+            let crate::storage::CpuStorage::F32(values) = values else {
+                panic!("index_select changed dtype")
+            };
+            assert!(
+                values[0] == 0.0,
+                "invalid index {index} must not address storage"
+            );
+        }
+
+        let matrix = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &METAL).unwrap();
+        let bad = Tensor::from_vec(vec![0i64, 2], [1, 2], &METAL).unwrap();
+        let output = backend.gather(matrix.view(), 1, bad.view()).unwrap();
+        let layout = Layout::contiguous([2]).unwrap();
+        let values = backend.transfer_out(View::new(&output, &layout)).unwrap();
+        let crate::storage::CpuStorage::F32(values) = values else {
+            panic!("gather changed dtype")
+        };
+        assert_eq!(values.as_slice(), &[1.0, 0.0]);
+    }
+
+    #[test]
+    fn f16_accumulators_remain_wide_on_hardware() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let ones = Tensor::ones([4096], DType::F16, &METAL).unwrap();
+        assert_eq!(ones.sum_all().unwrap().item().unwrap(), 4096.0);
+
+        let indices = Tensor::zeros([4096], DType::I64, &METAL).unwrap();
+        let base = Param::new(Tensor::zeros([1], DType::F16, &METAL).unwrap());
+        let selected = base
+            .get(Mode::TRAIN)
+            .index_select(0, &indices)
+            .unwrap()
+            .sum_all()
+            .unwrap();
+        let grads = selected.backward().unwrap();
+        assert_eq!(grads.wrt(&base).unwrap().item().unwrap(), 4096.0);
+    }
+
+    #[test]
+    fn finite_differences_and_training_step_stay_device_resident() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let input = Tensor::from_vec(vec![0.25f32, -0.5, 1.0, 0.75], [2, 2], &METAL).unwrap();
+        crate::testing::check_grad(
+            |xs| xs[0].matmul(&xs[0].transpose(0, 1)?)?.gelu()?.sum_all(),
+            &[input],
+            1e-3,
+            3e-3,
+        )
+        .unwrap();
+
+        #[derive(rstorch::Module)]
+        struct Tiny {
+            linear: Linear,
+        }
+        impl Forward for Tiny {
+            fn forward(&mut self, x: &Tensor, mode: Mode) -> crate::Result<Tensor> {
+                self.linear.forward(x, mode)
+            }
+        }
+        let mut model = Tiny {
+            linear: Linear::new(2, 2, &METAL, &mut Rng::seed(3)).unwrap(),
+        };
+        let x = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], [2, 2], &METAL).unwrap();
+        let labels = Tensor::from_vec(vec![0i64, 1], [2], &METAL).unwrap();
+        let transfer_in = INSTRUMENTATION.transfer_in.load(Ordering::Relaxed);
+        let transfer_out = INSTRUMENTATION.transfer_out.load(Ordering::Relaxed);
+        let loss = model
+            .forward(&x, Mode::TRAIN)
+            .unwrap()
+            .cross_entropy(&labels)
+            .unwrap();
+        AdamW::new(0.01, 0.0)
+            .step(&mut model, loss.backward().unwrap())
+            .unwrap();
+        // The first Adam step allocates its initial moment state on-device.
+        // This constructor-side write is not a device-to-host fallback.
+        assert_eq!(
+            INSTRUMENTATION.transfer_in.load(Ordering::Relaxed),
+            transfer_in + 1
+        );
+        assert_eq!(
+            INSTRUMENTATION.transfer_out.load(Ordering::Relaxed),
+            transfer_out
+        );
+    }
+
+    #[test]
+    fn multithreaded_streams_remain_ordered() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let threads: Vec<_> = (0..4)
+            .map(|thread| {
+                std::thread::spawn(move || {
+                    let mut value = Tensor::full([32], thread as f64, DType::F32, &METAL).unwrap();
+                    for _ in 0..16 {
+                        value = value.add_scalar(1.0).unwrap();
+                    }
+                    value.to_vec::<f32>().unwrap()
+                })
+            })
+            .collect();
+        for (thread, handle) in threads.into_iter().enumerate() {
+            assert_eq!(handle.join().unwrap(), vec![thread as f32 + 16.0; 32]);
+        }
     }
 }
