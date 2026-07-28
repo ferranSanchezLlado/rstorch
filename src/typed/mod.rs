@@ -117,8 +117,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 pub(crate) mod const_check;
-mod dim;
 mod device;
+mod dim;
 #[doc(hidden)]
 pub mod ops;
 

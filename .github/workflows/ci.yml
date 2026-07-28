@@ -112,6 +112,19 @@ jobs:
       - name: Test derive diagnostics
         run: cargo +1.88 test -p rstorch-derive --test ui
 
+  ui-stable:
+    name: Typed UI semantic fragments (stable)
+    runs-on: ubuntu-latest
+    env:
+      RSTORCH_UI: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Test typed diagnostic semantics
+        run: cargo test --test typed_ui --features typed
+
   public-api:
     name: Public API diff
     runs-on: ubuntu-latest

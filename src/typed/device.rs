@@ -34,28 +34,22 @@ impl<P: Placement> DeviceCtx<P> {
     /// before the binding is committed.
     pub fn bind(device: Device) -> Result<Self> {
         let marker = TypeId::of::<P>();
-        let mut bindings = lock_registry();
-
-        if let Some(binding) = bindings.get(&marker) {
-            if binding.device != device {
-                return Err(Error::InvalidArg {
-                    op: "DeviceCtx::bind",
-                    msg: format!(
-                        "placement marker {} is already bound to {}, not {device}",
-                        std::any::type_name::<P>(),
-                        binding.device
-                    ),
-                });
+        {
+            let bindings = lock_registry();
+            if let Some(binding) = bindings.get(&marker) {
+                return context_for_existing::<P>(binding, device);
             }
-
-            return Ok(Self {
-                binding: Arc::clone(binding),
-                marker: PhantomData,
-            });
         }
 
+        // Placement policies are downstream code. Never invoke one while the
+        // registry lock is held: a policy may bind another marker.
         P::validate_device(device)?;
         let _probe = Tensor::zeros((), DType::F32, &device)?;
+
+        let mut bindings = lock_registry();
+        if let Some(binding) = bindings.get(&marker) {
+            return context_for_existing::<P>(binding, device);
+        }
 
         let binding = Arc::new(DeviceBinding { device });
         bindings.insert(marker, Arc::clone(&binding));
@@ -73,6 +67,27 @@ impl<P: Placement> DeviceCtx<P> {
     pub(crate) fn binding(&self) -> &Arc<DeviceBinding> {
         &self.binding
     }
+}
+
+fn context_for_existing<P: Placement>(
+    binding: &Arc<DeviceBinding>,
+    device: Device,
+) -> Result<DeviceCtx<P>> {
+    if binding.device != device {
+        return Err(Error::InvalidArg {
+            op: "DeviceCtx::bind",
+            msg: format!(
+                "placement marker {} is already bound to {}, not {device}",
+                std::any::type_name::<P>(),
+                binding.device
+            ),
+        });
+    }
+
+    Ok(DeviceCtx {
+        binding: Arc::clone(binding),
+        marker: PhantomData,
+    })
 }
 
 impl DeviceCtx<super::Cpu> {
@@ -173,6 +188,23 @@ mod tests {
 
         ACCEPT_FAILED_BIND.store(true, Ordering::SeqCst);
         assert!(DeviceCtx::<FailedFirstBind>::bind(Device::Cpu).is_ok());
+    }
+
+    struct NestedBind;
+    impl Placement for NestedBind {}
+
+    struct RecursivePolicy;
+    impl Placement for RecursivePolicy {
+        fn validate_device(device: Device) -> Result<()> {
+            DeviceCtx::<NestedBind>::bind(device).map(|_| ())
+        }
+    }
+
+    #[test]
+    fn placement_policy_can_bind_another_marker_without_deadlock() {
+        let outer = DeviceCtx::<RecursivePolicy>::bind(Device::Cpu).unwrap();
+        let nested = DeviceCtx::<NestedBind>::bind(Device::Cpu).unwrap();
+        assert_eq!(outer.device(), nested.device());
     }
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
