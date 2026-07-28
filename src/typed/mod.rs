@@ -118,6 +118,7 @@ use std::sync::Arc;
 
 pub(crate) mod const_check;
 mod dim;
+mod device;
 #[doc(hidden)]
 pub mod ops;
 
@@ -224,13 +225,13 @@ impl<const N: usize> Placement for Metal<N> {
 
 #[derive(Debug)]
 pub(crate) struct DeviceBinding {
-    device: Device,
+    pub(in crate::typed) device: Device,
 }
 
 /// A canonical process-lifetime binding from `P` to one runtime device.
 pub struct DeviceCtx<P: Placement> {
-    binding: Arc<DeviceBinding>,
-    marker: PhantomData<P>,
+    pub(in crate::typed) binding: Arc<DeviceBinding>,
+    pub(in crate::typed) marker: PhantomData<P>,
 }
 
 impl<P: Placement> Clone for DeviceCtx<P> {
