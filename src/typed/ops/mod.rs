@@ -156,6 +156,8 @@ use super::{
 };
 use crate::Element;
 
+mod shape;
+
 mod sealed {
     pub trait OutputContract {}
 }
