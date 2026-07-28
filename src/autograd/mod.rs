@@ -347,8 +347,9 @@ impl Accumulated {
     }
 
     fn ensure_wide(&mut self) -> Result<()> {
-        if matches!(self.dtype, DType::F16 | DType::BF16) && self.value.dtype() != DType::F32 {
-            self.value = self.value.to_dtype(DType::F32)?;
+        let accumulation_dtype = self.dtype.accumulation_dtype();
+        if self.value.dtype() != accumulation_dtype {
+            self.value = self.value.to_dtype(accumulation_dtype)?;
         }
         Ok(())
     }
@@ -399,11 +400,12 @@ impl Accumulated {
     }
 
     fn wide(&self) -> Result<Tensor> {
-        if matches!(self.dtype, DType::F16 | DType::BF16) && self.value.dtype() != DType::F32 {
-            self.value.to_dtype(DType::F32)
-        } else {
-            Ok(self.value.clone())
-        }
+        let mut accumulated = Accumulated {
+            value: self.value.clone(),
+            dtype: self.dtype,
+        };
+        accumulated.ensure_wide()?;
+        Ok(accumulated.value)
     }
 
     fn finish(self) -> Result<Tensor> {

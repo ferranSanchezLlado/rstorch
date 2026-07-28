@@ -252,7 +252,7 @@ impl Sgd {
         engine::apply("step", model, grads, |path, param, grad| {
             let hyper = groups.resolve(path);
             let dtype = param.value().dtype();
-            let acc = engine::accum_dtype(dtype);
+            let acc = dtype.accumulation_dtype();
             let weights = param.value().to_dtype(acc)?;
             let grad = grad.to_dtype(acc)?;
             let previous = state.get(&param.grad_key());

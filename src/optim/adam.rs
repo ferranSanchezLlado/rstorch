@@ -307,7 +307,7 @@ impl Adam {
             let dtype = param.value().dtype();
             // Wide moments: an f16/bf16 parameter accumulates in f32 and is
             // narrowed back exactly once, at the end.
-            let acc = engine::accum_dtype(dtype);
+            let acc = dtype.accumulation_dtype();
             let weights = param.value().to_dtype(acc)?;
             let grad = grad.to_dtype(acc)?;
 

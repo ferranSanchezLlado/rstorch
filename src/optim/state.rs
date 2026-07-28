@@ -313,7 +313,7 @@ pub(crate) fn unknown_buffer(kind: &str, path: &str, name: &str) -> Error {
 /// belongs to, checking it against that parameter.
 ///
 /// A moment buffer must have the parameter's dims and its accumulation dtype
-/// (see `engine::accum_dtype`) — a mismatch means the checkpoint belongs to a
+/// (see `DType::accumulation_dtype`) — a mismatch means the checkpoint belongs to a
 /// different model and is rejected before any of the optimizer's state is
 /// replaced.
 pub(crate) fn restore_buffer(
@@ -322,7 +322,7 @@ pub(crate) fn restore_buffer(
     path: &str,
     name: &str,
 ) -> Result<Tensor> {
-    let expected = super::engine::accum_dtype(param.dtype());
+    let expected = param.dtype().accumulation_dtype();
     if host.dtype() != expected {
         return Err(Error::Persistence {
             msg: format!(

@@ -615,11 +615,12 @@ impl Tensor {
         }
 
         let dtype = self.dtype();
+        let accumulation_dtype = dtype.accumulation_dtype();
         // Highest axis first: dropping axis `k` leaves every axis below `k`
         // at its original index.
         let mut cur = self.detach_shallow();
-        if matches!(dtype, DType::F16 | DType::BF16) {
-            cur = cur.to_dtype(DType::F32)?;
+        if accumulation_dtype != dtype {
+            cur = cur.to_dtype(accumulation_dtype)?;
         }
         let backend = dispatch::backend(self.device());
         for &axis in reduce_axes.iter().rev() {

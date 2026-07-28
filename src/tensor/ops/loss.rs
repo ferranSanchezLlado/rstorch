@@ -184,9 +184,10 @@ impl CrossEntropyBackward {
 /// target's is its negation). `scale` is `2/n`.
 fn mse_grad(diff: &Tensor, scale: f64, g: &Tensor) -> Result<Tensor> {
     let dtype = diff.dtype();
-    if matches!(dtype, DType::F16 | DType::BF16) {
-        let diff = diff.to_dtype(DType::F32)?;
-        let g = g.to_dtype(DType::F32)?;
+    let accumulation_dtype = dtype.accumulation_dtype();
+    if accumulation_dtype != dtype {
+        let diff = diff.to_dtype(accumulation_dtype)?;
+        let g = g.to_dtype(accumulation_dtype)?;
         diff.mul_scalar(scale)?.mul(&g)?.to_dtype(dtype)
     } else {
         diff.mul_scalar(scale)?.mul(g)
@@ -227,8 +228,8 @@ fn cross_entropy_impl(
     };
 
     let nll = logp.gather(1, &safe).map_err(|e| relabel(op, e))?.neg()?;
-    let reduced = matches!(dtype, DType::F16 | DType::BF16);
-    let accumulation_dtype = if reduced { DType::F32 } else { dtype };
+    let accumulation_dtype = dtype.accumulation_dtype();
+    let reduced = accumulation_dtype != dtype;
     let nll = if reduced {
         nll.to_dtype(accumulation_dtype)?
     } else {

@@ -9,7 +9,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::autograd::{GradKey, Grads};
-use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::nn::visit::{Leaf, LeafMut, visit_all, visit_all_mut};
 use crate::nn::{Module, Param};
@@ -72,16 +71,6 @@ impl<H: Clone> Groups<H> {
             }
         }
         self.base.clone()
-    }
-}
-
-/// The dtype an update accumulates in: `f16`/`bf16` parameters keep **wide
-/// (f32) moments** (exploration §4.4), every other float accumulates as
-/// itself. The result is narrowed back to the parameter's dtype exactly once.
-pub(crate) fn accum_dtype(dtype: DType) -> DType {
-    match dtype {
-        DType::F16 | DType::BF16 => DType::F32,
-        other => other,
     }
 }
 
@@ -316,17 +305,6 @@ mod tests {
                 .map(|(p, g)| (p.grad_key(), g))
                 .collect::<HashMap<_, _>>(),
         )
-    }
-
-    #[test]
-    fn accumulation_widens_only_the_narrow_floats() {
-        assert_eq!(accum_dtype(DType::F16), DType::F32);
-        assert_eq!(accum_dtype(DType::BF16), DType::F32);
-        // Everything else accumulates as itself; in particular F32 -> F32 keeps
-        // the whole wide-moment path a free identity cast.
-        assert_eq!(accum_dtype(DType::F32), DType::F32);
-        assert_eq!(accum_dtype(DType::F64), DType::F64);
-        assert_eq!(accum_dtype(DType::I64), DType::I64);
     }
 
     #[test]

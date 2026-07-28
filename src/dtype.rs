@@ -36,6 +36,14 @@ pub enum DType {
 }
 
 impl DType {
+    /// Runtime dtype used while accumulating values of this dtype.
+    pub(crate) fn accumulation_dtype(self) -> DType {
+        match self {
+            DType::F16 | DType::BF16 => DType::F32,
+            other => other,
+        }
+    }
+
     /// Size of one element in bytes.
     pub fn size_in_bytes(self) -> usize {
         match self {
@@ -207,6 +215,16 @@ mod tests {
         let acc = x.to_acc() + 1.0f32;
         assert_eq!(acc, 2049.0f32);
         assert_eq!(<half::f16 as Element>::DTYPE.size_in_bytes(), 2);
+    }
+
+    #[test]
+    fn accumulation_dtype_mapping() {
+        assert_eq!(DType::F16.accumulation_dtype(), DType::F32);
+        assert_eq!(DType::BF16.accumulation_dtype(), DType::F32);
+        assert_eq!(DType::F32.accumulation_dtype(), DType::F32);
+        assert_eq!(DType::F64.accumulation_dtype(), DType::F64);
+        assert_eq!(DType::I64.accumulation_dtype(), DType::I64);
+        assert_eq!(DType::Bool.accumulation_dtype(), DType::Bool);
     }
 
     #[test]

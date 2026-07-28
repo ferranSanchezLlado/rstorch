@@ -296,8 +296,9 @@ fn fold_all_wide(op: &'static str, kind: ReduceOp, x: &Tensor) -> Result<Tensor>
     if !matches!(kind, ReduceOp::Sum) {
         require_non_empty_all(op, x)?;
     }
-    let mut cur = if matches!(x.dtype(), DType::F16 | DType::BF16) {
-        x.to_dtype(DType::F32)?
+    let accumulation_dtype = x.dtype().accumulation_dtype();
+    let mut cur = if accumulation_dtype != x.dtype() {
+        x.to_dtype(accumulation_dtype)?
     } else {
         x.clone()
     };
