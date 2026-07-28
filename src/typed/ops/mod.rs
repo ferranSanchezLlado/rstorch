@@ -156,6 +156,12 @@ use super::{
 };
 use crate::Element;
 
+mod conv;
+mod elementwise;
+mod index;
+mod loss;
+mod matmul;
+mod reduce;
 mod shape;
 
 mod sealed {
