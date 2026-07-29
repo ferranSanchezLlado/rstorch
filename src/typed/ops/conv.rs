@@ -222,7 +222,7 @@ mod tests {
                     .into_dynamic()
                     .conv2d(&pool_readout, (1, 1), (0, 0), (1, 1))
             },
-            &[x.clone()],
+            std::slice::from_ref(&x),
             1e-3,
             1e-3,
         )

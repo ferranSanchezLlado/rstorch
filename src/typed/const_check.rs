@@ -88,6 +88,9 @@ pub(crate) const fn assert_broadcast(source: &[usize], target: &[usize]) {
     }
 }
 
+// Reserved for the rank/axis-generated concat surface; kept item-local so the
+// rest of typed internals remain warning checked.
+#[allow(dead_code)]
 pub(crate) const fn assert_concat_sum(left: usize, right: usize, output: usize) {
     if left == DYN || right == DYN || output == DYN {
         return;
@@ -102,6 +105,8 @@ pub(crate) const fn assert_concat_sum(left: usize, right: usize, output: usize) 
     );
 }
 
+// CT40 consumes this relationship when typed attention is introduced.
+#[allow(dead_code)]
 pub(crate) const fn assert_attention_heads(embed: usize, heads: usize, head_dim: usize) {
     assert!(
         embed == DYN || embed > 0,

@@ -113,8 +113,6 @@
 //! where that type is available. Doc-hidden output helpers are never prelude
 //! exports.
 
-#![allow(dead_code)]
-
 use crate::{Device, Element, Error, Result, Tensor};
 use std::fmt;
 use std::marker::PhantomData;

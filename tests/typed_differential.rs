@@ -113,6 +113,26 @@ fn assert_grad_parity(typed: &Tensor, dynamic: &Tensor) {
     }
 }
 
+macro_rules! assert_reduced_grad_parity {
+    ($element:ty, $typed:expr, $dynamic:expr, $to_f64:expr, $tolerance:expr) => {{
+        let typed = $typed.to_vec::<$element>()?;
+        let dynamic = $dynamic.to_vec::<$element>()?;
+        assert_eq!(typed.len(), dynamic.len());
+        assert!(
+            typed.iter().any(|value| $to_f64(*value).abs() > $tolerance),
+            "reduced-precision gradient evidence must be non-vacuous"
+        );
+        for (typed, dynamic) in typed.into_iter().zip(dynamic) {
+            let typed = $to_f64(typed);
+            let dynamic = $to_f64(dynamic);
+            assert!(
+                (typed - dynamic).abs() <= $tolerance,
+                "gradient mismatch: {typed} vs {dynamic}"
+            );
+        }
+    }};
+}
+
 #[test]
 fn operation_family_table_executes_all_differential_cases() {
     for case in FAMILY_CASES {
@@ -165,10 +185,19 @@ fn elementwise_family() -> Result<()> {
     assert_f32_parity(actual.as_dynamic(), &expected);
 
     let ints = Tensor1::<3, i64>::from_vec(vec![1, 2, 3], [3], &ctx)?;
-    assert_eq!(ints.add(&ints)?.to_vec()?, vec![2, 4, 6]);
-    assert_eq!(ints.eq(&ints)?.to_vec()?, vec![true; 3]);
+    assert_typed_dynamic_parity::<i64>(
+        ints.add(&ints)?.as_dynamic(),
+        &ints.as_dynamic().add(ints.as_dynamic())?,
+    );
+    assert_typed_dynamic_parity::<bool>(
+        ints.eq(&ints)?.as_dynamic(),
+        &ints.as_dynamic().eq(ints.as_dynamic())?,
+    );
     let empty = Tensor1::<0, i64>::from_vec(Vec::new(), [0], &ctx)?;
-    assert_eq!(empty.add(&empty)?.to_vec()?, Vec::<i64>::new());
+    assert_typed_dynamic_parity::<i64>(
+        empty.add(&empty)?.as_dynamic(),
+        &empty.as_dynamic().add(empty.as_dynamic())?,
+    );
 
     let short = Tensor2::<DYN, DYN>::from_vec(vec![1.0; 2], [1, 2], &ctx)?;
     let long = Tensor2::<DYN, DYN>::from_vec(vec![1.0; 4], [2, 2], &ctx)?;
@@ -194,11 +223,14 @@ fn reduction_family() -> Result<()> {
         [1, 1, 1, 1, 1, 1, 2, 3],
         &ctx,
     )?;
-    assert_eq!(rank8.sum::<7>()?.to_vec()?, vec![7, 8]);
-    assert_eq!(rank8.argmax::<6>()?.as_dynamic().dtype(), DType::I64);
+    assert_typed_dynamic_parity::<i64>(rank8.sum::<7>()?.as_dynamic(), &rank8.as_dynamic().sum(7)?);
+    assert_typed_dynamic_parity::<i64>(
+        rank8.argmax::<6>()?.as_dynamic(),
+        &rank8.as_dynamic().argmax(6)?,
+    );
 
     let empty = Tensor2::<2, 0>::from_vec(Vec::<f32>::new(), [2, 0], &ctx)?;
-    assert_eq!(empty.sum::<1>()?.to_vec()?, vec![0.0, 0.0]);
+    assert_f32_parity(empty.sum::<1>()?.as_dynamic(), &empty.as_dynamic().sum(1)?);
     assert_error_parity(
         empty.mean::<1>().unwrap_err(),
         empty.as_dynamic().mean(1).unwrap_err(),
@@ -258,7 +290,10 @@ fn matmul_family() -> Result<()> {
 
     let empty_lhs = Tensor2::<2, 0>::from_vec(Vec::<f32>::new(), [2, 0], &ctx)?;
     let empty_rhs = Tensor2::<0, 3>::from_vec(Vec::<f32>::new(), [0, 3], &ctx)?;
-    assert_eq!(empty_lhs.matmul(&empty_rhs)?.to_vec()?, vec![0.0; 6]);
+    assert_f32_parity(
+        empty_lhs.matmul(&empty_rhs)?.as_dynamic(),
+        &empty_lhs.as_dynamic().matmul(empty_rhs.as_dynamic())?,
+    );
 
     let bad_lhs = Tensor2::<2, DYN>::from_vec(vec![0.0; 6], [2, 3], &ctx)?;
     let bad_rhs = Tensor2::<DYN, 2>::from_vec(vec![0.0; 8], [4, 2], &ctx)?;
@@ -292,7 +327,10 @@ fn indexing_family() -> Result<()> {
     assert_f32_parity(actual.as_dynamic(), &expected);
 
     let no_ids = Tensor1::<0, i64>::from_indices(Vec::new(), &ctx)?;
-    assert_eq!(source.index_select::<1, 0>(&no_ids)?.dims(), [2, 0]);
+    assert_f32_parity(
+        source.index_select::<1, 0>(&no_ids)?.as_dynamic(),
+        &source.as_dynamic().index_select(1, no_ids.as_dynamic())?,
+    );
     let bad = Tensor1::<1, i64>::from_indices(vec![2], &ctx)?;
     assert_error_parity(
         source.index_select::<1, 1>(&bad).unwrap_err(),
@@ -320,12 +358,15 @@ fn conv_pool_family() -> Result<()> {
             .conv2d(weight.as_dynamic(), (1, 1), (0, 0), (1, 1))?,
     );
     let ints = Tensor4::<1, 1, 2, 2, i64>::from_vec(vec![1, 2, 3, 4], [1, 1, 2, 2], &ctx)?;
-    assert_eq!(ints.max_pool2d((2, 2), (1, 1), (0, 0))?.to_vec()?, vec![4]);
+    assert_typed_dynamic_parity::<i64>(
+        ints.max_pool2d((2, 2), (1, 1), (0, 0))?.as_dynamic(),
+        &ints.as_dynamic().max_pool2d((2, 2), (1, 1), (0, 0))?,
+    );
 
     let empty = Tensor4::<0, 1, 3, 3>::from_vec(Vec::<f32>::new(), [0, 1, 3, 3], &ctx)?;
-    assert_eq!(
-        empty.avg_pool2d((2, 2), (1, 1), (0, 0))?.dims(),
-        [0, 1, 2, 2]
+    assert_f32_parity(
+        empty.avg_pool2d((2, 2), (1, 1), (0, 0))?.as_dynamic(),
+        &empty.as_dynamic().avg_pool2d((2, 2), (1, 1), (0, 0))?,
     );
     let dyn_input = Tensor4::<1, DYN, 3, 3>::from_vec(vec![0.0; 9], [1, 1, 3, 3], &ctx)?;
     let dyn_weight = Tensor4::<1, DYN, 2, 2>::from_vec(vec![0.0; 8], [1, 2, 2, 2], &ctx)?;
@@ -367,7 +408,12 @@ fn loss_family() -> Result<()> {
 
     let empty_logits = Tensor2::<0, 3>::from_vec(Vec::<f32>::new(), [0, 3], &ctx)?;
     let empty_labels = Tensor1::<0, i64>::from_indices(Vec::new(), &ctx)?;
-    assert_eq!(empty_logits.cross_entropy(&empty_labels)?.item()?, 0.0);
+    assert_f32_parity(
+        empty_logits.cross_entropy(&empty_labels)?.as_dynamic(),
+        &empty_logits
+            .as_dynamic()
+            .cross_entropy(empty_labels.as_dynamic())?,
+    );
     let logits = Tensor2::<DYN, 3>::from_vec(vec![0.0; 6], [2, 3], &ctx)?;
     let labels = Tensor1::<DYN, i64>::from_indices(vec![0], &ctx)?;
     assert_error_parity(
@@ -393,8 +439,7 @@ fn core_autograd_family() -> Result<()> {
     let erased = refined.erase_shape()?;
     let roundtrip = Tensor2::<DYN, DYN>::try_from_dynamic(erased.into_dynamic(), &ctx)?;
     let cast: Tensor2<DYN, DYN, i64> = roundtrip.to_dtype()?;
-    assert_eq!(cast.as_dynamic().dtype(), DType::I64);
-    assert_eq!(cast.as_dynamic().device(), Device::Cpu);
+    assert_typed_dynamic_parity::<i64>(cast.as_dynamic(), &leaf.to_dtype(DType::I64)?);
 
     let view = roundtrip.transpose::<0, 1>()?;
     assert!(!view.as_dynamic().is_contiguous());
@@ -421,8 +466,8 @@ fn core_autograd_family() -> Result<()> {
 
 fn f64_capabilities() -> Result<()> {
     let ctx = cpu();
-    let lhs = Tensor2::<2, 2, f64>::from_vec(vec![1.0, -2.0, 3.0, 4.0], [2, 2], &ctx)?;
-    let rhs = Tensor2::<2, 2, f64>::from_vec(vec![0.5, 1.0, -1.0, 2.0], [2, 2], &ctx)?;
+    let lhs = Tensor2::<DYN, 2, f64>::from_vec(vec![1.0, -2.0, 3.0, 4.0], [2, 2], &ctx)?;
+    let rhs = Tensor2::<DYN, 2, f64>::from_vec(vec![0.5, 1.0, -1.0, 2.0], [2, 2], &ctx)?;
     let typed_numeric = lhs.add(&rhs)?.tanh()?.mean::<1>()?;
     let dynamic_numeric = lhs.as_dynamic().add(rhs.as_dynamic())?.tanh()?.mean(1)?;
     assert_typed_dynamic_parity::<f64>(typed_numeric.as_dynamic(), &dynamic_numeric);
@@ -434,6 +479,12 @@ fn f64_capabilities() -> Result<()> {
     let typed_loss = lhs.mse_loss(&rhs)?;
     let dynamic_loss = lhs.as_dynamic().mse_loss(rhs.as_dynamic())?;
     assert_typed_dynamic_parity::<f64>(typed_loss.as_dynamic(), &dynamic_loss);
+
+    let leaf = Tensor::from_vec(vec![1.0f64, -2.0, 3.0, 4.0], [2, 2], &Device::Cpu)?.traced()?;
+    let typed = Tensor2::<DYN, 2, f64>::try_from_dynamic(leaf.clone(), &ctx)?;
+    let typed_grad = typed.square()?.sum_all()?.backward()?.wrt_input(&leaf)?;
+    let dynamic_grad = leaf.mul(&leaf)?.sum_all()?.backward()?.wrt_input(&leaf)?;
+    assert_reduced_grad_parity!(f64, typed_grad, dynamic_grad, |value: f64| value, 1e-12);
     Ok(())
 }
 
@@ -441,7 +492,7 @@ fn f16_capabilities() -> Result<()> {
     let ctx = cpu();
     let one = half::f16::from_f32(1.0);
     let two = half::f16::from_f32(2.0);
-    let value = Tensor2::<2, 2, half::f16>::from_vec(vec![one, two, two, one], [2, 2], &ctx)?;
+    let value = Tensor2::<DYN, 2, half::f16>::from_vec(vec![one, two, two, one], [2, 2], &ctx)?;
     let typed_add = value.add(&value)?;
     let dynamic_add = value.as_dynamic().add(value.as_dynamic())?;
     assert_typed_dynamic_parity::<half::f16>(typed_add.as_dynamic(), &dynamic_add);
@@ -453,6 +504,18 @@ fn f16_capabilities() -> Result<()> {
     let typed_matmul = value.matmul(&value)?;
     let dynamic_matmul = value.as_dynamic().matmul(value.as_dynamic())?;
     assert_typed_dynamic_parity::<half::f16>(typed_matmul.as_dynamic(), &dynamic_matmul);
+
+    let leaf = Tensor::from_vec(vec![one, two, two, one], [2, 2], &Device::Cpu)?.traced()?;
+    let typed = Tensor2::<DYN, 2, half::f16>::try_from_dynamic(leaf.clone(), &ctx)?;
+    let typed_grad = typed.square()?.sum_all()?.backward()?.wrt_input(&leaf)?;
+    let dynamic_grad = leaf.mul(&leaf)?.sum_all()?.backward()?.wrt_input(&leaf)?;
+    assert_reduced_grad_parity!(
+        half::f16,
+        typed_grad,
+        dynamic_grad,
+        |value: half::f16| value.to_f64(),
+        1e-3
+    );
     Ok(())
 }
 
@@ -460,7 +523,7 @@ fn bf16_capabilities() -> Result<()> {
     let ctx = cpu();
     let one = half::bf16::from_f32(1.0);
     let two = half::bf16::from_f32(2.0);
-    let value = Tensor2::<2, 2, half::bf16>::from_vec(vec![one, two, two, one], [2, 2], &ctx)?;
+    let value = Tensor2::<DYN, 2, half::bf16>::from_vec(vec![one, two, two, one], [2, 2], &ctx)?;
     let typed_scaled = value.mul_scalar(2.0)?;
     let dynamic_scaled = value.as_dynamic().mul_scalar(2.0)?;
     assert_typed_dynamic_parity::<half::bf16>(typed_scaled.as_dynamic(), &dynamic_scaled);
@@ -472,12 +535,24 @@ fn bf16_capabilities() -> Result<()> {
     let typed_loss = value.mse_loss(&value)?;
     let dynamic_loss = value.as_dynamic().mse_loss(value.as_dynamic())?;
     assert_typed_dynamic_parity::<half::bf16>(typed_loss.as_dynamic(), &dynamic_loss);
+
+    let leaf = Tensor::from_vec(vec![one, two, two, one], [2, 2], &Device::Cpu)?.traced()?;
+    let typed = Tensor2::<DYN, 2, half::bf16>::try_from_dynamic(leaf.clone(), &ctx)?;
+    let typed_grad = typed.square()?.sum_all()?.backward()?.wrt_input(&leaf)?;
+    let dynamic_grad = leaf.mul(&leaf)?.sum_all()?.backward()?.wrt_input(&leaf)?;
+    assert_reduced_grad_parity!(
+        half::bf16,
+        typed_grad,
+        dynamic_grad,
+        |value: half::bf16| value.to_f64(),
+        1e-2
+    );
     Ok(())
 }
 
 fn i64_capabilities() -> Result<()> {
     let ctx = cpu();
-    let matrix = Tensor2::<2, 2, i64>::from_vec(vec![1, 2, 3, 4], [2, 2], &ctx)?;
+    let matrix = Tensor2::<DYN, 2, i64>::from_vec(vec![1, 2, 3, 4], [2, 2], &ctx)?;
     let ids = Tensor1::<2, i64>::from_indices(vec![1, 0], &ctx)?;
     let typed_matmul = matrix.matmul(&matrix)?;
     let dynamic_matmul = matrix.as_dynamic().matmul(matrix.as_dynamic())?;
@@ -504,9 +579,9 @@ fn i64_capabilities() -> Result<()> {
 
 fn bool_capabilities() -> Result<()> {
     let ctx = cpu();
-    let mask = Tensor2::<2, 2, bool>::from_vec(vec![true, false, false, true], [2, 2], &ctx)?;
-    let on_true = Tensor2::<2, 2, f64>::from_vec(vec![1.0; 4], [2, 2], &ctx)?;
-    let on_false = Tensor2::<2, 2, f64>::from_vec(vec![-1.0; 4], [2, 2], &ctx)?;
+    let mask = Tensor2::<DYN, 2, bool>::from_vec(vec![true, false, false, true], [2, 2], &ctx)?;
+    let on_true = Tensor2::<DYN, 2, f64>::from_vec(vec![1.0; 4], [2, 2], &ctx)?;
+    let on_false = Tensor2::<DYN, 2, f64>::from_vec(vec![-1.0; 4], [2, 2], &ctx)?;
     let typed_selected = mask.where_cond(&on_true, &on_false)?;
     let dynamic_selected = mask
         .as_dynamic()
@@ -591,6 +666,11 @@ fn typed_sources_do_not_import_private_execution_layers() {
         "use crate::backend;",
         "use rstorch::storage as execution;",
         "use rstorch::{layout as execution};",
+        "macro_rules! leak { () => { crate::backend::CpuKernel } }",
+        "macro_rules! leak { () => { crate::{layout::Layout} } }",
+        "macro_rules! leak { ($root:path) => { $root::storage::Storage } }",
+        "macro_rules! leak { () => { super::super::autograd::Node } }",
+        "macro_rules! leak { () => { crate::tensor::PrivateTensor } }",
     ] {
         assert!(
             has_private_execution_path(rejected),
@@ -613,48 +693,40 @@ fn typed_sources_do_not_import_private_execution_layers() {
 }
 
 fn has_private_execution_path(source: &str) -> bool {
-    const PRIVATE_MODULES: [&str; 4] = ["backend", "layout", "storage", "autograd"];
     let code = strip_comments_and_strings(source);
     let compact = code
         .chars()
         .filter(|ch| !ch.is_whitespace())
         .collect::<String>();
-    let normalized = compact
-        .replace("crate::typed::tensor::", "crate::typed::__typed_tensor::")
-        .replace("crate::typed::{tensor::", "crate::typed::{__typed_tensor::")
-        .replace("super::tensor::", "super::__typed_tensor::")
-        .replace("super::{tensor::", "super::{__typed_tensor::");
-
-    for module in PRIVATE_MODULES {
-        if normalized.contains(&format!("::{module}::")) {
-            return true;
-        }
-    }
-    if normalized.contains("::tensor::") {
+    let code_tokens = lexical_words(&code);
+    if ["backend", "layout", "storage"]
+        .iter()
+        .any(|module| code_tokens.iter().any(|word| *word == *module))
+    {
         return true;
     }
+    let normalized = compact
+        .replace("modautograd;", "mod__typed_internal;")
+        .replace(
+            "pubuseautograd::TypedGradsExt;",
+            "pubuse__typed_internal::TypedGradsExt;",
+        )
+        .replace(
+            "pub(incrate::typed)modtensor;",
+            "pub(incrate::typed)mod__typed_internal;",
+        )
+        .replace("crate::typed::tensor::", "crate::typed::__typed_internal::")
+        .replace(
+            "crate::typed::{tensor::",
+            "crate::typed::{__typed_internal::",
+        )
+        .replace("super::super::tensor::", "super::super::__typed_internal::")
+        .replace("super::tensor::", "super::__typed_internal::")
+        .replace("super::{tensor::", "super::{__typed_internal::");
 
-    for statement in code.split(';') {
-        let words = lexical_words(statement);
-        if !words.contains(&"use") {
-            continue;
-        }
-        let statement = statement
-            .chars()
-            .filter(|ch| !ch.is_whitespace())
-            .collect::<String>()
-            .replace("crate::typed::tensor::", "crate::typed::__typed_tensor::")
-            .replace("crate::typed::{tensor::", "crate::typed::{__typed_tensor::")
-            .replace("super::tensor::", "super::__typed_tensor::")
-            .replace("super::{tensor::", "super::{__typed_tensor::");
-        let typed_autograd_reexport = statement == "pubuseautograd::TypedGradsExt";
-        if (!typed_autograd_reexport && PRIVATE_MODULES.iter().any(|module| words.contains(module)))
-            || (words.contains(&"tensor")
-                && !words.contains(&"typed")
-                && !statement.contains("super::__typed_tensor::"))
-        {
-            return true;
-        }
+    let words = lexical_words(&normalized);
+    if words.contains(&"autograd") || normalized.contains("tensor::") {
+        return true;
     }
     false
 }

@@ -148,8 +148,6 @@
 //! The logits row marker and `TARGET_ROWS` are independent. All losses require
 //! `FloatElement`.
 
-#![allow(dead_code)]
-
 use super::{
     DYN, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4, Tensor5, Tensor6, Tensor7,
     Tensor8, TypedTensor,
@@ -426,6 +424,8 @@ where
     type Output = Target;
 }
 
+// Called by external CT01 build probes; ordinary library builds do not invoke it.
+#[allow(dead_code)]
 pub(crate) fn probe_relational_check<const LEFT: usize, const RIGHT: usize>() {
     const {
         assert!(

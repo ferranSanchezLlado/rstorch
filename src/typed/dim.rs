@@ -1,5 +1,7 @@
 //! Dimension metadata and stable-Rust associated output mappings.
 
+#[cfg(test)]
+use super::Cpu;
 use super::ops::{
     ArgKeepDimOutput, ArgOutput, BroadcastOutput, ConcatOutput, Conv2dOutput, GatherOutput,
     IndexSelectOutput, InsertAxisOutput, KeepDimOutput, LossOutput, MatmulOutput, Pool2dOutput,
@@ -17,24 +19,6 @@ use crate::Element;
 /// zero is a valid static dimension. Rust cannot distinguish another spelling
 /// of the literal `usize::MAX` from [`DYN`].
 pub const DYN: usize = usize::MAX;
-
-pub(crate) trait RankMetadata: TypedTensor {
-    const MARKERS: &'static [usize];
-}
-
-macro_rules! impl_rank_metadata {
-    ($(($name:ident, $rank:literal, [$($dim:ident),*])),+ $(,)?) => {
-        $(
-            impl<$(const $dim: usize,)* E: Element, P: Placement> RankMetadata
-                for $name<$($dim,)* E, P>
-            {
-                const MARKERS: &'static [usize] = &[$($dim),*];
-            }
-        )+
-    };
-}
-
-typed_rank_table!(impl_rank_metadata);
 
 macro_rules! impl_common_relations {
     ($(($name:ident, $rank:literal, [$($dim:ident),*])),+ $(,)?) => {
@@ -66,6 +50,16 @@ macro_rules! impl_axis_outputs {
     };
     (@dim @, $value:expr) => { $value };
     (@dim $dim:ident, $value:expr) => { $dim };
+    (@test_dim D0) => { 10 };
+    (@test_dim D1) => { 11 };
+    (@test_dim D2) => { 12 };
+    (@test_dim D3) => { 13 };
+    (@test_dim D4) => { 14 };
+    (@test_dim D5) => { 15 };
+    (@test_dim D6) => { 16 };
+    (@test_dim D7) => { 17 };
+    (@test_out @, $value:expr) => { $value };
+    (@test_out $dim:ident, $value:expr) => { impl_axis_outputs!(@test_dim $dim) };
 }
 
 macro_rules! impl_axis_output_one {
@@ -113,6 +107,36 @@ macro_rules! impl_axis_output_one {
         {
             type Output = $name<$({ impl_axis_outputs!(@dim $replaced, DYN) },)+ E, P>;
         }
+
+        // This assertion is emitted by the same declaration that emits each
+        // implementation, so adding a rank/axis cannot omit compile coverage.
+        #[cfg(test)]
+        const _: () = {
+            type Input = $name<$({ impl_axis_outputs!(@test_dim $all) },)+ f32, Cpu>;
+            type Removed = $removed_name<$({ impl_axis_outputs!(@test_dim $removed) },)* f32, Cpu>;
+            type Replaced = $name<$({ impl_axis_outputs!(@test_out $replaced, 99) },)+ f32, Cpu>;
+            type Kept = $name<$({ impl_axis_outputs!(@test_out $replaced, 1) },)+ f32, Cpu>;
+            type Arg = $removed_name<$({ impl_axis_outputs!(@test_dim $removed) },)* i64, Cpu>;
+            type Selected = $name<$({ impl_axis_outputs!(@test_out $replaced, 23) },)+ f32, Cpu>;
+            type Concatenated = $name<$({ impl_axis_outputs!(@test_out $replaced, DYN) },)+ f32, Cpu>;
+
+            fn check<T, R, P, K, A, S, C, const AXIS: usize>()
+            where
+                T: RemoveAxisOutput<AXIS, Output = R>
+                    + ReplaceAxisOutput<AXIS, 99, Output = P>
+                    + KeepDimOutput<AXIS, Output = K>
+                    + ArgOutput<AXIS, Output = A>
+                    + IndexSelectOutput<AXIS, Tensor1<23, i64, Cpu>, Output = S>
+                    + ConcatOutput<AXIS, Output = C>,
+                R: TypedTensor,
+                P: TypedTensor,
+                K: TypedTensor,
+                A: TypedTensor<Elem = i64>,
+                S: TypedTensor,
+                C: TypedTensor,
+            {}
+            let _ = check::<Input, Removed, Replaced, Kept, Arg, Selected, Concatenated, $axis>;
+        };
     };
 }
 
@@ -192,6 +216,20 @@ macro_rules! impl_insert_output_one {
         {
             type Output = $target<$({ impl_axis_outputs!(@dim $output, DYN) },)+ E, P>;
         }
+
+        #[cfg(test)]
+        const _: () = {
+            type Input = $source<$({ impl_axis_outputs!(@test_dim $input) },)* f32, Cpu>;
+            type Inserted = $target<$({ impl_axis_outputs!(@test_out $output, 99) },)+ f32, Cpu>;
+            type Stacked = $target<$({ impl_axis_outputs!(@test_out $output, DYN) },)+ f32, Cpu>;
+            fn check<T, I, S, const AXIS: usize>()
+            where
+                T: InsertAxisOutput<AXIS, 99, Output = I> + StackOutput<AXIS, Output = S>,
+                I: TypedTensor,
+                S: TypedTensor,
+            {}
+            let _ = check::<Input, Inserted, Stacked, $axis>;
+        };
     };
 }
 
@@ -244,6 +282,18 @@ macro_rules! impl_transpose_output_one {
         {
             type Output = $name<$($out,)+ E, P>;
         }
+
+        #[cfg(test)]
+        const _: () = {
+            type Input = $name<$({ impl_axis_outputs!(@test_dim $dim) },)+ f32, Cpu>;
+            type Output = $name<$({ impl_axis_outputs!(@test_dim $out) },)+ f32, Cpu>;
+            fn check<T, O, const A: usize, const B: usize>()
+            where
+                T: TransposeOutput<A, B, Output = O>,
+                O: TypedTensor,
+            {}
+            let _ = check::<Input, Output, $a, $b>;
+        };
     };
 }
 
@@ -441,13 +491,16 @@ mod tests {
 
     #[test]
     fn rank_table_preserves_every_marker_occurrence() {
-        assert_eq!(<Tensor0 as RankMetadata>::MARKERS, &[] as &[usize]);
         assert_eq!(
-            <Tensor4<DYN, DYN, 0, 7> as RankMetadata>::MARKERS,
+            <Tensor0 as super::super::sealed::TypedTensor>::MARKERS,
+            &[] as &[usize]
+        );
+        assert_eq!(
+            <Tensor4<DYN, DYN, 0, 7> as super::super::sealed::TypedTensor>::MARKERS,
             &[DYN, DYN, 0, 7]
         );
         assert_eq!(
-            <Tensor8<0, 1, 2, 3, 4, 5, 6, DYN> as RankMetadata>::MARKERS.len(),
+            <Tensor8<0, 1, 2, 3, 4, 5, 6, DYN> as super::super::sealed::TypedTensor>::MARKERS.len(),
             8
         );
     }

@@ -78,13 +78,6 @@ fn typed_compile_fail_ui() {
         assert!(*count > 0, "typed UI suite discovered no {name} cases");
     }
 
-    let pinned = rustc_version().starts_with("rustc 1.88.");
-    let overwrite = std::env::var_os("TRYBUILD").is_some_and(|value| value == "overwrite");
-    assert!(
-        !overwrite || pinned,
-        "typed UI fixtures may only be overwritten with Rust 1.88"
-    );
-
     let run_root = workspace
         .join("target/typed-ui")
         .join(std::process::id().to_string());
@@ -92,6 +85,17 @@ fn typed_compile_fail_ui() {
         fs::remove_dir_all(&run_root).expect("stale typed UI run directory must be removable");
     }
     fs::create_dir_all(&run_root).expect("typed UI run directory must be creatable");
+
+    // Probe through nested Cargo itself: this is the compiler that builds every
+    // generated fixture, including when rustup selects it via RUSTUP_TOOLCHAIN.
+    let nested_rustc = nested_rustc_version(&run_root);
+    let pinned = nested_rustc.starts_with("rustc 1.88.");
+    let overwrite = std::env::var_os("TRYBUILD").is_some_and(|value| value == "overwrite");
+    assert!(
+        !overwrite || pinned,
+        "typed UI fixtures may only be overwritten with Rust 1.88; nested cargo uses {nested_rustc}"
+    );
+    eprintln!("typed UI nested compiler: {nested_rustc}");
 
     let mut failures = Vec::new();
     for case in &cases {
@@ -246,13 +250,33 @@ fn assert_semantic_fragments(case: &Path, stderr: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn rustc_version() -> String {
-    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    let output = Command::new(rustc)
+fn nested_rustc_version(run_root: &Path) -> String {
+    let probe = run_root.join("compiler-probe");
+    fs::create_dir_all(probe.join("src")).expect("compiler probe directory must be creatable");
+    fs::write(probe.join("src/lib.rs"), "").expect("compiler probe source must be writable");
+    fs::write(
+        probe.join("Cargo.toml"),
+        "[package]\nname = \"rstorch-ui-compiler-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    )
+    .expect("compiler probe manifest must be writable");
+    let output = Command::new("cargo")
+        .arg("rustc")
+        .arg("--quiet")
+        .arg("--")
         .arg("--version")
+        .current_dir(probe)
+        .env("CARGO_TARGET_DIR", run_root.join("target"))
         .output()
-        .expect("rustc version must be available to the typed UI harness");
-    String::from_utf8(output.stdout).expect("rustc version must be UTF-8")
+        .expect("nested cargo compiler probe must execute");
+    assert!(
+        output.status.success(),
+        "nested cargo compiler probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("nested rustc version must be UTF-8")
+        .trim()
+        .to_owned()
 }
 
 fn relative_case<'a>(case: &'a Path, workspace: &Path) -> &'a Path {
