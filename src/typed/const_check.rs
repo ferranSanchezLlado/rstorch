@@ -41,6 +41,17 @@ pub(crate) const fn assert_squeezable(dimension: usize) {
     );
 }
 
+pub(crate) const fn assert_refinement(source: &[usize], target: &[usize]) {
+    let mut axis = 0;
+    while axis < source.len() {
+        assert!(
+            source[axis] == DYN || source[axis] == target[axis],
+            "typed refinement cannot change or erase a static dimension"
+        );
+        axis += 1;
+    }
+}
+
 pub(crate) const fn assert_reshape_numel(source: &[usize], target: &[usize]) {
     let source = match reshape_numel(source) {
         Ok(value) => value,

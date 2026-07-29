@@ -1,6 +1,6 @@
 use super::{
     BroadcastOutput, ConcatOutput, DynamicOutput, InsertAxisOutput, RemoveAxisOutput,
-    ReplaceAxisOutput, ReshapeOutput, StackOutput, TransposeOutput,
+    ReplaceAxisOutput, ReshapeOutput, StackOutput, TransposeOutput, relabel_error_op,
 };
 use crate::typed::const_check::{assert_broadcast, assert_reshape_numel, assert_squeezable};
 use crate::typed::device::validate_binding;
@@ -123,7 +123,9 @@ macro_rules! impl_existing_axis_ops {
                     a: isize,
                     b: isize,
                 ) -> Result<<Self as DynamicOutput>::Output> {
-                    let tensor = dynamic(self, "transpose_dyn")?.transpose(a, b)?;
+                    let tensor = dynamic(self, "transpose_dyn")?
+                        .transpose(a, b)
+                        .map_err(|error| relabel_error_op("transpose_dyn", error))?;
                     checked_wrap::<<Self as DynamicOutput>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -151,7 +153,9 @@ macro_rules! impl_existing_axis_ops {
 
                 /// Removes a runtime axis and returns the dynamic tensor escape.
                 pub fn squeeze_dyn(&self, axis: isize) -> Result<Tensor> {
-                    dynamic(self, "squeeze_dyn")?.squeeze(axis)
+                    dynamic(self, "squeeze_dyn")?
+                        .squeeze(axis)
+                        .map_err(|error| relabel_error_op("squeeze_dyn", error))
                 }
 
                 /// Narrows a compile-time axis and erases that axis marker.
@@ -178,7 +182,9 @@ macro_rules! impl_existing_axis_ops {
                     start: usize,
                     len: usize,
                 ) -> Result<<Self as DynamicOutput>::Output> {
-                    let tensor = dynamic(self, "narrow_dyn")?.narrow(axis, start, len)?;
+                    let tensor = dynamic(self, "narrow_dyn")?
+                        .narrow(axis, start, len)
+                        .map_err(|error| relabel_error_op("narrow_dyn", error))?;
                     checked_wrap::<<Self as DynamicOutput>::Output>(
                         tensor,
                         self.binding().clone(),
@@ -240,7 +246,9 @@ macro_rules! impl_rank_increasing_ops {
 
                 /// Inserts a runtime axis and returns the dynamic tensor escape.
                 pub fn unsqueeze_dyn(&self, axis: isize) -> Result<Tensor> {
-                    dynamic(self, "unsqueeze_dyn")?.unsqueeze(axis)
+                    dynamic(self, "unsqueeze_dyn")?
+                        .unsqueeze(axis)
+                        .map_err(|error| relabel_error_op("unsqueeze_dyn", error))
                 }
 
                 /// Stacks homogeneous typed tensors at a compile-time axis.
@@ -415,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_axis_escapes_delegate_errors_and_erase_as_documented() {
+    fn runtime_axis_escapes_relabel_errors_and_erase_as_documented() {
         let ctx = ctx();
         let source =
             Tensor2::<2, 3>::from_vec((0..6).map(|x| x as f32).collect(), [2, 3], &ctx).unwrap();
@@ -426,12 +434,29 @@ mod tests {
         assert_eq!(source.unsqueeze_dyn(-1).unwrap().dims(), &[2, 3, 1]);
         assert!(matches!(
             source.squeeze_dyn(0),
-            Err(Error::InvalidArg { op: "squeeze", .. })
+            Err(Error::InvalidArg {
+                op: "squeeze_dyn",
+                ..
+            })
         ));
         assert!(matches!(
             source.transpose_dyn(0, 2),
             Err(Error::InvalidAxis {
-                op: "transpose",
+                op: "transpose_dyn",
+                ..
+            })
+        ));
+        assert!(matches!(
+            source.narrow_dyn(2, 0, 1),
+            Err(Error::InvalidAxis {
+                op: "narrow_dyn",
+                ..
+            })
+        ));
+        assert!(matches!(
+            source.unsqueeze_dyn(3),
+            Err(Error::InvalidAxis {
+                op: "unsqueeze_dyn",
                 ..
             })
         ));

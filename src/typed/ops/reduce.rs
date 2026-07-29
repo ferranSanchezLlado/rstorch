@@ -1,4 +1,6 @@
-use super::{ArgKeepDimOutput, ArgOutput, KeepDimOutput, RemoveAxisOutput, ScalarOutput};
+use super::{
+    ArgKeepDimOutput, ArgOutput, KeepDimOutput, RemoveAxisOutput, ScalarOutput, relabel_error_op,
+};
 use crate::typed::device::validate_binding;
 use crate::typed::tensor::checked_wrap;
 use crate::typed::{
@@ -15,6 +17,14 @@ fn wrap<T: TypedTensor, O: TypedTensor>(input: &T, output: Tensor, op: &'static 
 fn dynamic<'a, T: TypedTensor>(input: &'a T, op: &'static str) -> Result<&'a Tensor> {
     validate_binding::<T::Placement>(input.binding(), op)?;
     Ok(input.dynamic())
+}
+
+fn dynamic_reduction<T: TypedTensor>(
+    input: &T,
+    op: &'static str,
+    reduction: impl FnOnce(&Tensor) -> Result<Tensor>,
+) -> Result<Tensor> {
+    reduction(dynamic(input, op)?).map_err(|error| relabel_error_op(op, error))
 }
 
 macro_rules! numeric_reductions {
@@ -171,51 +181,51 @@ macro_rules! numeric_reductions {
             }
 
             pub fn sum_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic(self, "sum_dyn")?.sum(axis)?, "sum_dyn")
+                wrap(self, dynamic_reduction(self, "sum_dyn", |x| x.sum(axis))?, "sum_dyn")
             }
 
             pub fn sum_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic(self, "sum_keepdim_dyn")?.sum_keepdim(axis)?, "sum_keepdim_dyn")
+                wrap(self, dynamic_reduction(self, "sum_keepdim_dyn", |x| x.sum_keepdim(axis))?, "sum_keepdim_dyn")
             }
 
             pub fn mean_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic(self, "mean_dyn")?.mean(axis)?, "mean_dyn")
+                wrap(self, dynamic_reduction(self, "mean_dyn", |x| x.mean(axis))?, "mean_dyn")
             }
 
             pub fn mean_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic(self, "mean_keepdim_dyn")?.mean_keepdim(axis)?, "mean_keepdim_dyn")
+                wrap(self, dynamic_reduction(self, "mean_keepdim_dyn", |x| x.mean_keepdim(axis))?, "mean_keepdim_dyn")
             }
 
             pub fn max_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic(self, "max_dyn")?.max(axis)?, "max_dyn")
+                wrap(self, dynamic_reduction(self, "max_dyn", |x| x.max(axis))?, "max_dyn")
             }
 
             pub fn max_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic(self, "max_keepdim_dyn")?.max_keepdim(axis)?, "max_keepdim_dyn")
+                wrap(self, dynamic_reduction(self, "max_keepdim_dyn", |x| x.max_keepdim(axis))?, "max_keepdim_dyn")
             }
 
             pub fn min_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic(self, "min_dyn")?.min(axis)?, "min_dyn")
+                wrap(self, dynamic_reduction(self, "min_dyn", |x| x.min(axis))?, "min_dyn")
             }
 
             pub fn min_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic(self, "min_keepdim_dyn")?.min_keepdim(axis)?, "min_keepdim_dyn")
+                wrap(self, dynamic_reduction(self, "min_keepdim_dyn", |x| x.min_keepdim(axis))?, "min_keepdim_dyn")
             }
 
             pub fn argmax_dyn(&self, axis: isize) -> Result<$arg_removed> {
-                wrap(self, dynamic(self, "argmax_dyn")?.argmax(axis)?, "argmax_dyn")
+                wrap(self, dynamic_reduction(self, "argmax_dyn", |x| x.argmax(axis))?, "argmax_dyn")
             }
 
             pub fn argmax_keepdim_dyn(&self, axis: isize) -> Result<$arg_dynamic> {
-                wrap(self, dynamic(self, "argmax_keepdim_dyn")?.argmax_keepdim(axis)?, "argmax_keepdim_dyn")
+                wrap(self, dynamic_reduction(self, "argmax_keepdim_dyn", |x| x.argmax_keepdim(axis))?, "argmax_keepdim_dyn")
             }
 
             pub fn argmin_dyn(&self, axis: isize) -> Result<$arg_removed> {
-                wrap(self, dynamic(self, "argmin_dyn")?.argmin(axis)?, "argmin_dyn")
+                wrap(self, dynamic_reduction(self, "argmin_dyn", |x| x.argmin(axis))?, "argmin_dyn")
             }
 
             pub fn argmin_keepdim_dyn(&self, axis: isize) -> Result<$arg_dynamic> {
-                wrap(self, dynamic(self, "argmin_keepdim_dyn")?.argmin_keepdim(axis)?, "argmin_keepdim_dyn")
+                wrap(self, dynamic_reduction(self, "argmin_keepdim_dyn", |x| x.argmin_keepdim(axis))?, "argmin_keepdim_dyn")
             }
         }
     };
@@ -297,27 +307,27 @@ macro_rules! float_reductions {
             }
 
             pub fn var_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic(self, "var_dyn")?.var(axis)?, "var_dyn")
+                wrap(self, dynamic_reduction(self, "var_dyn", |x| x.var(axis))?, "var_dyn")
             }
 
             pub fn var_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic(self, "var_keepdim_dyn")?.var_keepdim(axis)?, "var_keepdim_dyn")
+                wrap(self, dynamic_reduction(self, "var_keepdim_dyn", |x| x.var_keepdim(axis))?, "var_keepdim_dyn")
             }
 
             pub fn std_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic(self, "std_dyn")?.std(axis)?, "std_dyn")
+                wrap(self, dynamic_reduction(self, "std_dyn", |x| x.std(axis))?, "std_dyn")
             }
 
             pub fn std_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic(self, "std_keepdim_dyn")?.std_keepdim(axis)?, "std_keepdim_dyn")
+                wrap(self, dynamic_reduction(self, "std_keepdim_dyn", |x| x.std_keepdim(axis))?, "std_keepdim_dyn")
             }
 
             pub fn softmax_dyn(&self, axis: isize) -> Result<Self> {
-                wrap(self, dynamic(self, "softmax_dyn")?.softmax(axis)?, "softmax_dyn")
+                wrap(self, dynamic_reduction(self, "softmax_dyn", |x| x.softmax(axis))?, "softmax_dyn")
             }
 
             pub fn log_softmax_dyn(&self, axis: isize) -> Result<Self> {
-                wrap(self, dynamic(self, "log_softmax_dyn")?.log_softmax(axis)?, "log_softmax_dyn")
+                wrap(self, dynamic_reduction(self, "log_softmax_dyn", |x| x.log_softmax(axis))?, "log_softmax_dyn")
             }
         }
     };
@@ -426,7 +436,32 @@ mod tests {
     fn runtime_errors_and_empty_policies_are_preserved() {
         let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
         let x = Tensor2::<2, 3>::from_vec(vec![0.0f32; 6], [2, 3], &ctx).unwrap();
-        assert!(matches!(x.sum_dyn(2), Err(Error::InvalidAxis { .. })));
+        macro_rules! assert_invalid_axis_op {
+            ($expression:expr, $op:literal) => {
+                assert!(matches!(
+                    $expression,
+                    Err(Error::InvalidAxis { op: $op, .. })
+                ));
+            };
+        }
+        assert_invalid_axis_op!(x.sum_dyn(2), "sum_dyn");
+        assert_invalid_axis_op!(x.sum_keepdim_dyn(2), "sum_keepdim_dyn");
+        assert_invalid_axis_op!(x.mean_dyn(2), "mean_dyn");
+        assert_invalid_axis_op!(x.mean_keepdim_dyn(2), "mean_keepdim_dyn");
+        assert_invalid_axis_op!(x.max_dyn(2), "max_dyn");
+        assert_invalid_axis_op!(x.max_keepdim_dyn(2), "max_keepdim_dyn");
+        assert_invalid_axis_op!(x.min_dyn(2), "min_dyn");
+        assert_invalid_axis_op!(x.min_keepdim_dyn(2), "min_keepdim_dyn");
+        assert_invalid_axis_op!(x.argmax_dyn(2), "argmax_dyn");
+        assert_invalid_axis_op!(x.argmax_keepdim_dyn(2), "argmax_keepdim_dyn");
+        assert_invalid_axis_op!(x.argmin_dyn(2), "argmin_dyn");
+        assert_invalid_axis_op!(x.argmin_keepdim_dyn(2), "argmin_keepdim_dyn");
+        assert_invalid_axis_op!(x.var_dyn(2), "var_dyn");
+        assert_invalid_axis_op!(x.var_keepdim_dyn(2), "var_keepdim_dyn");
+        assert_invalid_axis_op!(x.std_dyn(2), "std_dyn");
+        assert_invalid_axis_op!(x.std_keepdim_dyn(2), "std_keepdim_dyn");
+        assert_invalid_axis_op!(x.softmax_dyn(2), "softmax_dyn");
+        assert_invalid_axis_op!(x.log_softmax_dyn(2), "log_softmax_dyn");
 
         let empty = Tensor2::<2, 0>::from_vec(Vec::<f32>::new(), [2, 0], &ctx).unwrap();
         assert_eq!(

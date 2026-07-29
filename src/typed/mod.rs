@@ -66,10 +66,14 @@
 //! tensor.into_dynamic(self) -> Tensor
 //! tensor.dims(&self) -> Dims
 //! tensor.refine<Target>(self) -> Result<Target>
+//! tensor.relabel<Q: Placement>(self, target: &DeviceCtx<Q>)
+//!     -> Result<TensorSameShape<E, Q>>
 //! tensor.erase_shape(self) -> Result<DynamicOutput<Self>>
 //! ```
 //!
-//! Erasure, re-entry, and refinement preserve storage and autograd identity.
+//! `TensorSameShape<E, Q>` above denotes the concrete wrapper of the same rank
+//! and const markers, with only its placement changed to `Q`. Erasure, re-entry,
+//! refinement, and relabeling preserve storage and autograd identity.
 //! There is no `Deref<Target = Tensor>` and no unchecked public constructor.
 //!
 //! # Core and autograd (CT28)

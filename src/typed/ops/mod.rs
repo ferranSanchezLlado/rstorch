@@ -154,7 +154,7 @@ use super::{
     DYN, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4, Tensor5, Tensor6, Tensor7,
     Tensor8, TypedTensor,
 };
-use crate::Element;
+use crate::{Element, Error};
 
 mod conv;
 mod elementwise;
@@ -166,6 +166,30 @@ mod shape;
 
 mod sealed {
     pub trait OutputContract {}
+}
+
+fn relabel_error_op(op: &'static str, error: Error) -> Error {
+    match error {
+        Error::ShapeMismatch { lhs, rhs, .. } => Error::ShapeMismatch { op, lhs, rhs },
+        Error::RankMismatch { expected, got, .. } => Error::RankMismatch { op, expected, got },
+        Error::InvalidAxis { axis, rank, .. } => Error::InvalidAxis { op, axis, rank },
+        Error::DTypeMismatch { expected, got, .. } => Error::DTypeMismatch { op, expected, got },
+        Error::DeviceMismatch { expected, got, .. } => Error::DeviceMismatch { op, expected, got },
+        Error::ReshapeMismatch { from, to, .. } => Error::ReshapeMismatch { op, from, to },
+        Error::IndexOutOfBounds {
+            index, axis, size, ..
+        } => Error::IndexOutOfBounds {
+            op,
+            index,
+            axis,
+            size,
+        },
+        Error::Unsupported { device, dtype, .. } => Error::Unsupported { op, device, dtype },
+        Error::NotTraced { .. } => Error::NotTraced { op },
+        Error::InvalidArg { msg, .. } => Error::InvalidArg { op, msg },
+        Error::Backend { msg, .. } => Error::Backend { op, msg },
+        other => other,
+    }
 }
 
 /// Changes only element type.

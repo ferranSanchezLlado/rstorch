@@ -214,10 +214,22 @@ fn reduction_family() -> Result<()> {
         .mul(weights.as_dynamic())?
         .sum(0)?;
     assert_f32_parity(typed_out.as_dynamic(), &dynamic_out);
-    assert_error_parity(
-        typed.sum_dyn(2).unwrap_err(),
-        typed.as_dynamic().sum(2).unwrap_err(),
-    );
+    assert!(matches!(
+        typed.sum_dyn(2),
+        Err(Error::InvalidAxis {
+            op: "sum_dyn",
+            axis: 2,
+            rank: 2,
+        })
+    ));
+    assert!(matches!(
+        typed.as_dynamic().sum(2),
+        Err(Error::InvalidAxis {
+            op: "sum",
+            axis: 2,
+            rank: 2,
+        })
+    ));
     let typed_grad = typed_out.sum_all()?.backward()?.wrt_input(&leaf)?;
     let dynamic_grad = dynamic_out.sum_all()?.backward()?.wrt_input(&leaf)?;
     assert!(

@@ -1,0 +1,31 @@
+error[E0080]: evaluation of `typed::const_check::assert_refinement` failed
+   --> $WORKSPACE/src/typed/tensor.rs:175:1
+    |
+175 | typed_rank_table!(impl_tensor_boundary);
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation panicked: typed refinement cannot change or erase a static dimension
+    |
+note: inside `typed::const_check::assert_refinement`
+   --> $WORKSPACE/src/typed/const_check.rs:47:9
+    |
+47  | /         assert!(
+48  | |             source[axis] == DYN || source[axis] == target[axis],
+49  | |             "typed refinement cannot change or erase a static dimension"
+50  | |         );
+    | |_________^ the failure occurred here
+
+note: erroneous constant encountered
+   --> $WORKSPACE/src/typed/tensor.rs:175:1
+    |
+175 | typed_rank_table!(impl_tensor_boundary);
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this note originates in the macro `impl_tensor_boundary` which comes from the expansion of the macro `typed_rank_table` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: the above error was encountered while instantiating `fn rstorch::typed::tensor::<impl rstorch::typed::Tensor2<2, 3>>::refine::<rstorch::typed::Tensor2<usize::MAX, 3>>`
+ --> src/main.rs:8:13
+  |
+8 |     let _ = tensor.refine::<Tensor2<DYN, 3>>();
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `rstorch-typed-ui-refine-static-erasure` (bin "rstorch-typed-ui-refine-static-erasure") due to 1 previous error

@@ -254,6 +254,40 @@ mod tests {
         assert!(Arc::ptr_eq(&relabeled, b.binding()));
     }
 
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn relabel_rejects_distinct_physical_devices() {
+        struct Source;
+        struct Target;
+        impl Placement for Source {}
+        impl Placement for Target {}
+
+        let source = Arc::new(DeviceBinding {
+            device: Device::Cpu,
+        });
+        let target = Arc::new(DeviceBinding {
+            device: Device::Metal(0),
+        });
+        {
+            let mut bindings = lock_registry();
+            bindings.insert(TypeId::of::<Source>(), Arc::clone(&source));
+            bindings.insert(TypeId::of::<Target>(), Arc::clone(&target));
+        }
+        let target = DeviceCtx::<Target> {
+            binding: target,
+            marker: PhantomData,
+        };
+
+        assert!(matches!(
+            checked_relabel_binding::<Source, Target>(source, &target),
+            Err(Error::DeviceMismatch {
+                op: "relabel",
+                expected: Device::Cpu,
+                got: Device::Metal(0),
+            })
+        ));
+    }
+
     #[test]
     fn canonical_identity_corruption_is_rejected() {
         struct CanonicalIdentity;

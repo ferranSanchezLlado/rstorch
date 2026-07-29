@@ -147,6 +147,65 @@ fn public_refine_and_erase_work_for_every_rank() {
 }
 
 #[test]
+fn public_relabel_is_zero_copy_for_every_rank() {
+    struct AlternateCpu;
+    impl Placement for AlternateCpu {}
+
+    macro_rules! assert_relabel {
+        ($source:ty => $target:ty, $dims:expr) => {{
+            let source_ctx = cpu();
+            let target_ctx = DeviceCtx::<AlternateCpu>::bind(Device::Cpu).unwrap();
+            let runtime = Tensor::from_vec(vec![1.0f32], $dims, &Device::Cpu)
+                .unwrap()
+                .traced()
+                .unwrap();
+            let identity = runtime.clone();
+            let source = <$source>::try_from_dynamic(runtime, &source_ctx).unwrap();
+            let relabeled: $target = source.relabel(&target_ctx).unwrap();
+            assert_eq!(relabeled.dims(), $dims);
+            let loss = relabeled.as_dynamic().sum_all().unwrap();
+            let gradients = loss.backward().unwrap();
+            assert_eq!(
+                gradients
+                    .wrt_input(&identity)
+                    .unwrap()
+                    .to_vec::<f32>()
+                    .unwrap(),
+                vec![1.0]
+            );
+        }};
+    }
+
+    assert_relabel!(Tensor0<f32, Cpu> => Tensor0<f32, AlternateCpu>, [] as [usize; 0]);
+    assert_relabel!(Tensor1<1> => Tensor1<1, f32, AlternateCpu>, [1]);
+    assert_relabel!(Tensor2<1, 1> => Tensor2<1, 1, f32, AlternateCpu>, [1, 1]);
+    assert_relabel!(Tensor3<1, 1, 1> => Tensor3<1, 1, 1, f32, AlternateCpu>, [1, 1, 1]);
+    assert_relabel!(Tensor4<1, 1, 1, 1> => Tensor4<1, 1, 1, 1, f32, AlternateCpu>, [1, 1, 1, 1]);
+    assert_relabel!(Tensor5<1, 1, 1, 1, 1> => Tensor5<1, 1, 1, 1, 1, f32, AlternateCpu>, [1, 1, 1, 1, 1]);
+    assert_relabel!(Tensor6<1, 1, 1, 1, 1, 1> => Tensor6<1, 1, 1, 1, 1, 1, f32, AlternateCpu>, [1, 1, 1, 1, 1, 1]);
+    assert_relabel!(Tensor7<1, 1, 1, 1, 1, 1, 1> => Tensor7<1, 1, 1, 1, 1, 1, 1, f32, AlternateCpu>, [1, 1, 1, 1, 1, 1, 1]);
+    assert_relabel!(Tensor8<1, 1, 1, 1, 1, 1, 1, 1> => Tensor8<1, 1, 1, 1, 1, 1, 1, 1, f32, AlternateCpu>, [1, 1, 1, 1, 1, 1, 1, 1]);
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn public_relabel_rejects_a_different_physical_device() {
+    use rstorch::typed::Metal;
+
+    let cpu = cpu();
+    let metal = DeviceCtx::<Metal<0>>::bind(Device::Metal(0)).unwrap();
+    let tensor = Tensor1::<1>::from_vec(vec![1.0], [1], &cpu).unwrap();
+    assert!(matches!(
+        tensor.relabel(&metal),
+        Err(Error::DeviceMismatch {
+            op: "relabel",
+            expected: Device::Cpu,
+            got: Device::Metal(0),
+        })
+    ));
+}
+
+#[test]
 fn refinement_rejects_an_incorrect_static_target() {
     let ctx = cpu();
     let typed = Tensor2::<DYN, DYN>::from_vec(vec![0.0f32; 6], [2, 3], &ctx).unwrap();

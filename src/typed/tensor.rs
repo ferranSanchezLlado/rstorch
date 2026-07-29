@@ -1,4 +1,5 @@
-use super::device::validate_binding;
+use super::const_check::assert_refinement;
+use super::device::{checked_relabel_binding, validate_binding};
 use super::ops::{DynamicOutput, RefinementOf};
 use super::sealed::TypedTensor as SealedTypedTensor;
 use super::{DYN, DeviceBinding, DeviceCtx, Placement, TypedTensor, typed_rank_table};
@@ -131,7 +132,30 @@ macro_rules! impl_tensor_boundary {
                 where
                     Target: RefinementOf<Self>,
                 {
+                    const {
+                        assert_refinement(
+                            <Self as SealedTypedTensor>::MARKERS,
+                            <Target as SealedTypedTensor>::MARKERS,
+                        )
+                    };
                     checked_wrap::<Target>(self.inner, self.binding, "refine")
+                }
+
+                /// Changes only the logical placement marker without moving or copying data.
+                ///
+                /// Both placement bindings must be canonical and identify the same physical
+                /// device. The runtime tensor, storage, layout, and autograd identity are
+                /// unchanged.
+                pub fn relabel<Q: Placement>(
+                    self,
+                    target: &DeviceCtx<Q>,
+                ) -> Result<super::$name<$($dim,)* E, Q>> {
+                    let binding = checked_relabel_binding::<P, Q>(self.binding, target)?;
+                    checked_wrap::<super::$name<$($dim,)* E, Q>>(
+                        self.inner,
+                        binding,
+                        "relabel",
+                    )
                 }
 
                 /// Replaces every static dimension marker with [`DYN`].
