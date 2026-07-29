@@ -4,9 +4,9 @@ error[E0599]: the method `sum` exists for struct `Tensor1<2, bool>`, but its tra
 6   |     let _ = value.sum::<0>();
     |                   ^^^ method cannot be called on `Tensor1<2, bool>` due to unsatisfied trait bounds
     |
-   ::: $WORKSPACE/src/typed/mod.rs:380:1
+   ::: $WORKSPACE/src/typed/mod.rs:384:1
     |
-380 | typed_rank_table!(define_typed_tensors);
+384 | typed_rank_table!(define_typed_tensors);
     | --------------------------------------- doesn't satisfy `Tensor1<2, bool>: Iterator`
     |
     = note: the following trait bounds were not satisfied:
