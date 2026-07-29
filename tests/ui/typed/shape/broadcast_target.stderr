@@ -1,0 +1,43 @@
+error[E0080]: evaluation of `typed::const_check::assert_broadcast` failed
+  --> $WORKSPACE/src/typed/ops/shape.rs:89:1
+   |
+89 | / impl_shape_ops! {
+90 | |     (Tensor0, []),
+91 | |     (Tensor1, [D0]),
+92 | |     (Tensor2, [D0, D1]),
+...  |
+98 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+99 | | }
+   | |_^ evaluation panicked: typed broadcast dimensions are incompatible
+   |
+note: inside `typed::const_check::assert_broadcast`
+  --> $WORKSPACE/src/typed/const_check.rs:72:9
+   |
+72 | /         assert!(
+73 | |             from == DYN || to == DYN || from == 1 || from == to,
+74 | |             "typed broadcast dimensions are incompatible"
+75 | |         );
+   | |_________^ the failure occurred here
+
+note: erroneous constant encountered
+  --> $WORKSPACE/src/typed/ops/shape.rs:89:1
+   |
+89 | / impl_shape_ops! {
+90 | |     (Tensor0, []),
+91 | |     (Tensor1, [D0]),
+92 | |     (Tensor2, [D0, D1]),
+...  |
+98 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+99 | | }
+   | |_^
+   |
+   = note: this note originates in the macro `impl_shape_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: the above error was encountered while instantiating `fn rstorch::typed::ops::shape::<impl rstorch::typed::Tensor2<1, 3>>::broadcast_to::<rstorch::typed::Tensor2<2, 4>>`
+ --> src/main.rs:8:13
+  |
+8 |     let _ = row.broadcast_to::<Tensor2<2, 4>>([2, 4]);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `rstorch-typed-ui-broadcast-target` (bin "rstorch-typed-ui-broadcast-target") due to 1 previous error

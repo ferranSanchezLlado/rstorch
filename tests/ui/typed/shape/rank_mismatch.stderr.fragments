@@ -1,0 +1,2 @@
+error[E0308]
+expected `Tensor1<3>`, found `Tensor2<1, 3>`

@@ -1,10 +1,10 @@
-//! Compile-fail harness for the opt-in typed API.
+//! Compile-time and runtime guarantee harness for the opt-in typed API.
 //!
 //! Cases below `tests/ui/typed/` are ordinary `cargo check` failures unless
-//! they contain `// rstorch-ui: build`. Build cases are compiled with
-//! `cargo build` so body-level const assertions are monomorphized. Rust 1.88
-//! output is matched exactly; other toolchains assert the adjacent semantic
-//! fragments instead.
+//! marked otherwise. `// rstorch-ui: build` monomorphizes body-level const
+//! assertions, `// rstorch-ui: pass` requires check/build success, and
+//! `// rstorch-ui: run` executes a runtime-deferred guarantee. Rust 1.88
+//! failures match exactly; other toolchains assert adjacent semantic fragments.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -12,6 +12,41 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const BUILD_MARKER: &str = "// rstorch-ui: build";
+const PASS_MARKER: &str = "// rstorch-ui: pass";
+const RUN_MARKER: &str = "// rstorch-ui: run";
+
+#[derive(Clone, Copy)]
+enum Mode {
+    FailCheck,
+    FailBuild,
+    PassCheck,
+    PassBuild,
+    Run,
+}
+
+impl Mode {
+    fn command(self) -> &'static str {
+        match self {
+            Self::FailCheck | Self::PassCheck => "check",
+            Self::FailBuild | Self::PassBuild => "build",
+            Self::Run => "run",
+        }
+    }
+
+    fn expects_success(self) -> bool {
+        matches!(self, Self::PassCheck | Self::PassBuild | Self::Run)
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::FailCheck => 0,
+            Self::FailBuild => 1,
+            Self::PassCheck => 2,
+            Self::PassBuild => 3,
+            Self::Run => 4,
+        }
+    }
+}
 
 #[test]
 fn typed_compile_fail_ui() {
@@ -26,19 +61,22 @@ fn typed_compile_fail_ui() {
     discover_cases(&cases_root, &mut cases);
     cases.sort();
 
-    let modes = cases.iter().fold([0, 0], |mut modes, case| {
+    let modes = cases.iter().fold([0; 5], |mut modes, case| {
         let source = fs::read_to_string(case).expect("typed UI case must be readable");
-        modes[usize::from(source.contains(BUILD_MARKER))] += 1;
+        modes[case_mode(&source)
+            .expect("typed UI case markers must be valid")
+            .index()] += 1;
         modes
     });
-    assert!(
-        modes[0] > 0,
-        "typed UI suite discovered no cargo-check cases"
-    );
-    assert!(
-        modes[1] > 0,
-        "typed UI suite discovered no cargo-build cases"
-    );
+    for (count, name) in modes.iter().zip([
+        "failing check",
+        "failing build",
+        "passing check",
+        "passing build",
+        "passing run",
+    ]) {
+        assert!(*count > 0, "typed UI suite discovered no {name} cases");
+    }
 
     let pinned = rustc_version().starts_with("rustc 1.88.");
     let overwrite = std::env::var_os("TRYBUILD").is_some_and(|value| value == "overwrite");
@@ -69,9 +107,25 @@ fn typed_compile_fail_ui() {
         failures.join("\n\n")
     );
     eprintln!(
-        "typed UI executed {} cargo-check and {} cargo-build case(s)",
-        modes[0], modes[1]
+        "typed UI executed {} failing checks, {} failing builds, {} passing checks, {} passing builds, and {} runtime cases",
+        modes[0], modes[1], modes[2], modes[3], modes[4]
     );
+}
+
+fn case_mode(source: &str) -> Result<Mode, String> {
+    let build = source.contains(BUILD_MARKER);
+    let pass = source.contains(PASS_MARKER);
+    let run = source.contains(RUN_MARKER);
+    if run && (build || pass) {
+        return Err("`rstorch-ui: run` cannot be combined with another mode marker".into());
+    }
+    Ok(match (build, pass, run) {
+        (_, _, true) => Mode::Run,
+        (true, true, false) => Mode::PassBuild,
+        (false, true, false) => Mode::PassCheck,
+        (true, false, false) => Mode::FailBuild,
+        (false, false, false) => Mode::FailCheck,
+    })
 }
 
 fn discover_cases(directory: &Path, cases: &mut Vec<PathBuf>) {
@@ -97,7 +151,7 @@ fn run_case(
     overwrite: bool,
 ) -> Result<(), String> {
     let source = fs::read_to_string(case).map_err(|error| error.to_string())?;
-    let build = source.contains(BUILD_MARKER);
+    let mode = case_mode(&source)?;
     let case_name = case
         .file_stem()
         .and_then(OsStr::to_str)
@@ -115,18 +169,29 @@ fn run_case(
     .map_err(|error| error.to_string())?;
 
     let output = Command::new("cargo")
-        .arg(if build { "build" } else { "check" })
+        .arg(mode.command())
         .arg("--quiet")
         .current_dir(&case_root)
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_TARGET_DIR", run_root.join("target"))
         .output()
         .map_err(|error| format!("failed to run cargo for {}: {error}", case.display()))?;
+    if mode.expects_success() {
+        if output.status.success() {
+            return Ok(());
+        }
+        return Err(format!(
+            "{} unexpectedly failed under cargo {}\n{}",
+            relative_case(case, workspace).display(),
+            mode.command(),
+            normalized_stderr(&output, workspace, &case_root)
+        ));
+    }
     if output.status.success() {
         return Err(format!(
             "{} unexpectedly passed under cargo {}",
             relative_case(case, workspace).display(),
-            if build { "build" } else { "check" }
+            mode.command()
         ));
     }
 
