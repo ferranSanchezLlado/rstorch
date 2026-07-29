@@ -671,6 +671,8 @@ fn typed_sources_do_not_import_private_execution_layers() {
         "macro_rules! leak { ($root:path) => { $root::storage::Storage } }",
         "macro_rules! leak { () => { super::super::autograd::Node } }",
         "macro_rules! leak { () => { crate::tensor::PrivateTensor } }",
+        "macro_rules! private_path { ($module:ident) => { crate::$module::PrivateTensor } } private_path!(tensor);",
+        "use crate::Tensor as tensor;",
     ] {
         assert!(
             has_private_execution_path(rejected),
@@ -678,6 +680,8 @@ fn typed_sources_do_not_import_private_execution_layers() {
         );
     }
     for accepted in [
+        "mod tensor;",
+        "pub(in crate::typed) mod tensor;",
         "use crate::typed::tensor::checked_wrap;",
         "use super::tensor::checked_wrap;",
         "fn wrap() { super::super::tensor::checked_wrap(); }",
@@ -701,7 +705,7 @@ fn has_private_execution_path(source: &str) -> bool {
     let code_tokens = lexical_words(&code);
     if ["backend", "layout", "storage"]
         .iter()
-        .any(|module| code_tokens.iter().any(|word| *word == *module))
+        .any(|module| code_tokens.contains(module))
     {
         return true;
     }
@@ -715,6 +719,7 @@ fn has_private_execution_path(source: &str) -> bool {
             "pub(incrate::typed)modtensor;",
             "pub(incrate::typed)mod__typed_internal;",
         )
+        .replace("modtensor;", "mod__typed_internal;")
         .replace("crate::typed::tensor::", "crate::typed::__typed_internal::")
         .replace(
             "crate::typed::{tensor::",
@@ -725,8 +730,49 @@ fn has_private_execution_path(source: &str) -> bool {
         .replace("super::{tensor::", "super::{__typed_internal::");
 
     let words = lexical_words(&normalized);
-    if words.contains(&"autograd") || normalized.contains("tensor::") {
+    if words.contains(&"autograd")
+        || normalized.contains("tensor::")
+        || normalized
+            .split(';')
+            .any(|statement| statement.starts_with("use") && statement.contains("tensor"))
+        || macro_invocation_contains_token(&normalized, "tensor")
+    {
         return true;
+    }
+    false
+}
+
+fn macro_invocation_contains_token(source: &str, rejected: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        if bytes[index] != b'!' || !matches!(bytes[index + 1], b'(' | b'[' | b'{') {
+            index += 1;
+            continue;
+        }
+
+        let open = bytes[index + 1];
+        let close = match open {
+            b'(' => b')',
+            b'[' => b']',
+            b'{' => b'}',
+            _ => unreachable!(),
+        };
+        let start = index + 2;
+        let mut cursor = start;
+        let mut depth = 1usize;
+        while cursor < bytes.len() && depth > 0 {
+            if bytes[cursor] == open {
+                depth += 1;
+            } else if bytes[cursor] == close {
+                depth -= 1;
+            }
+            cursor += 1;
+        }
+        if depth == 0 && lexical_words(&source[start..cursor - 1]).contains(&rejected) {
+            return true;
+        }
+        index = cursor;
     }
     false
 }
