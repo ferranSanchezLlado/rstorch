@@ -122,13 +122,20 @@
 //! mismatches; malformed or disagreeing walks; and noncanonical or different
 //! binding identities before mutating any leaf. Two logical placements bound
 //! to the same physical device still have different identities and do not load
-//! into one another. Values are detached during staging. Only after every
-//! entry validates does one commit walk replace all leaves.
+//! into one another. Values are detached during staging. A complete mutable
+//! pre-commit walk captures detached originals, and the commit walk rechecks
+//! each path, leaf identity, kind, dimensions, full contract, duplicates, and
+//! final length. A late malformed commit walk never receives a value at the
+//! mismatching leaf and triggers a checked rollback of earlier replacements.
 //!
 //! These stable-walk rules are semantic obligations of a safe [`Module`]
 //! implementation, not Rust safety invariants. `Module` remains a safe trait;
 //! violating the obligations is never undefined behavior. Detectable malformed
-//! walks return [`crate::Error`].
+//! walks return [`crate::Error`]. Because safe callback borrows cannot be held
+//! across walks, a stateful implementation can keep changing during rollback;
+//! rollback is strongest when its subsequent walks are stable. Even if it is
+//! not, assignments occur only to leaves that still exactly match the validated
+//! identity and contract, so malformed behavior cannot stale typed metadata.
 //!
 //! The private runtime adapter does not add rollback to dynamic optimizers or
 //! other runtime operations. It preserves their existing failure semantics.
@@ -152,6 +159,11 @@ use std::sync::Arc;
 
 pub use crate::nn::Mode;
 
+mod param;
+mod visit;
+
+pub use visit::{load_state_dict, state_dict};
+
 /// A typed module that maps `Input` to an associated typed output.
 ///
 /// The mutable receiver is intentional: dropout RNG and running-statistic
@@ -169,7 +181,8 @@ pub trait Forward<Input> {
 /// The two walks must emit the same leaves in the same order with byte-for-byte
 /// identical dotted paths. A parameter or buffer has one owning location and
 /// is emitted once; using a parameter more than once during `forward` does not
-/// visit or update it more than once.
+/// visit or update it more than once. Repeated walks must remain stable and the
+/// walk methods must not mutate leaf ownership or contracts as a side effect.
 ///
 /// This trait deliberately has no relationship to [`crate::nn::Module`].
 pub trait Module {
@@ -218,7 +231,9 @@ pub struct TypedBuffer<T: TypedTensor> {
 /// the erased sink remain crate-private so safe public code cannot obtain a
 /// runtime parameter or mutable runtime tensor from a typed leaf.
 pub struct TypedVisitor<'a> {
-    _state: PhantomData<&'a mut ()>,
+    path: String,
+    sink: &'a mut dyn FnMut(&str, TypedLeaf<'_>),
+    error: Option<crate::Error>,
 }
 
 /// The mutable counterpart of [`TypedVisitor`].
@@ -226,7 +241,9 @@ pub struct TypedVisitor<'a> {
 /// Mutable erased leaves are private and are only valid for the duration of one
 /// walk. State loading reaches this visitor only after complete staging.
 pub struct TypedVisitorMut<'a> {
-    _state: PhantomData<&'a mut ()>,
+    path: String,
+    sink: &'a mut dyn FnMut(&str, TypedLeafMut<'_>),
+    error: Option<crate::Error>,
 }
 
 /// An opaque, ordered snapshot of typed module state.
