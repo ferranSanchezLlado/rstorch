@@ -383,6 +383,7 @@ macro_rules! typed_rank_table {
 pub(crate) use typed_rank_table;
 typed_rank_table!(define_typed_tensors);
 
+pub mod data;
 pub mod nn;
 
 #[cfg(test)]
