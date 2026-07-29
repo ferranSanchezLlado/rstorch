@@ -122,6 +122,7 @@ mod autograd;
 pub(crate) mod const_check;
 mod device;
 mod dim;
+pub mod nn;
 #[doc(hidden)]
 pub mod ops;
 pub mod prelude;
