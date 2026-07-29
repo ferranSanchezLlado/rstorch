@@ -122,7 +122,6 @@ mod autograd;
 pub(crate) mod const_check;
 mod device;
 mod dim;
-pub mod nn;
 #[doc(hidden)]
 pub mod ops;
 pub mod prelude;
@@ -383,6 +382,8 @@ macro_rules! typed_rank_table {
 
 pub(crate) use typed_rank_table;
 typed_rank_table!(define_typed_tensors);
+
+pub mod nn;
 
 #[cfg(test)]
 mod tests {
