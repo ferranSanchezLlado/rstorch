@@ -16,3 +16,7 @@ publish = false
 
 [dependencies]
 rstorch = { path = ".." }
+
+[features]
+default = []
+typed = ["rstorch/typed"]

@@ -122,6 +122,7 @@ mod device;
 mod dim;
 #[doc(hidden)]
 pub mod ops;
+pub mod prelude;
 pub(in crate::typed) mod tensor;
 
 pub use autograd::TypedGradsExt;
