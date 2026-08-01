@@ -161,6 +161,7 @@ pub use crate::nn::Mode;
 
 mod activation;
 mod attention;
+mod composition;
 mod dropout;
 mod embedding;
 mod linear;
@@ -171,6 +172,10 @@ mod visit;
 pub use activation::{Gelu, Relu};
 pub use attention::{
     AttentionContext, AttentionInput, MultiHeadAttention, scaled_dot_product_attention,
+};
+pub use composition::{
+    IntoSequential, Sequential, Sequential1, Sequential2, Sequential3, Sequential4, SequentialCons,
+    SequentialInputDType, SequentialLayer, sequential,
 };
 pub use dropout::Dropout;
 pub use embedding::{Embedding, EmbeddingInput};
