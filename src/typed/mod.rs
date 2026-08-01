@@ -385,6 +385,8 @@ typed_rank_table!(define_typed_tensors);
 
 pub mod data;
 pub mod nn;
+pub mod optim;
+pub mod persist;
 
 #[cfg(test)]
 mod tests {

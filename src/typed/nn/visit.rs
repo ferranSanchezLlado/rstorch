@@ -416,6 +416,15 @@ pub fn state_dict<M: Module + ?Sized>(module: &M) -> Result<TypedStateDict> {
     Ok(TypedStateDict { entries })
 }
 
+impl TypedStateDict {
+    /// CT47's read-only leaf-kind query; it exposes no runtime leaf or value.
+    pub(crate) fn is_param_path(&self, path: &str) -> bool {
+        self.entries
+            .get(path)
+            .is_some_and(|entry| entry.contract.kind == LeafKind::Param)
+    }
+}
+
 /// Checks and stages the entire state before replacing any target leaf.
 pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDict) -> Result<()> {
     const OP: &str = "typed::nn::load_state_dict";
