@@ -160,14 +160,20 @@ use std::sync::Arc;
 pub use crate::nn::Mode;
 
 mod activation;
+mod attention;
 mod dropout;
+mod embedding;
 mod linear;
 mod norm;
 mod param;
 mod visit;
 
 pub use activation::{Gelu, Relu};
+pub use attention::{
+    AttentionContext, AttentionInput, MultiHeadAttention, scaled_dot_product_attention,
+};
 pub use dropout::Dropout;
+pub use embedding::{Embedding, EmbeddingInput};
 pub use linear::Linear;
 pub use norm::{BatchNorm2d, LayerNorm, RMSNorm};
 pub use visit::{load_state_dict, state_dict};
