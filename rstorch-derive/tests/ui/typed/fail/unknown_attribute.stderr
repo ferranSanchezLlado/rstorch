@@ -1,0 +1,7 @@
+error: unknown #[typed_module(...)] option; the only supported option is `skip`
+ --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/unknown_attribute.rs:5:20
+  |
+5 |     #[typed_module(rename = "other")]
+  |                    ^^^^^^
+
+error: could not compile `rstorch-typed-derive-ui-unknown-attribute` (bin "case") due to 1 previous error

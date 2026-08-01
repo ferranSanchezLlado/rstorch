@@ -1,0 +1,9 @@
+error: #[derive(TypedModule)] supports structs only, not enums (a module's field set must be statically known so every typed parameter is visited)
+ --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/derive_on_enum.rs:4:1
+  |
+4 | / enum Net {
+5 | |     Empty,
+6 | | }
+  | |_^
+
+error: could not compile `rstorch-typed-derive-ui-derive-on-enum` (bin "case") due to 1 previous error

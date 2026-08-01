@@ -43,6 +43,7 @@
 //! the loud rule exists to prevent.
 
 mod module;
+mod typed_module;
 
 use proc_macro::TokenStream;
 
@@ -60,6 +61,24 @@ use proc_macro::TokenStream;
 pub fn derive_module(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
     module::expand(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derive the `rstorch::typed::nn::Module` trait for a `struct`.
+///
+/// `TypedParam<T>` and `TypedBuffer<T>` fields are emitted as typed leaves;
+/// `Option` and `Vec` containers are walked, and every other field is treated
+/// as a typed child module. Use `#[typed_module(skip)]` to explicitly exclude
+/// an opaque direct configuration field that is not part of the module tree.
+/// The attribute is rejected on typed leaves and on `Option` or `Vec` fields,
+/// because those containers may hold module state. A proc macro cannot tell an
+/// opaque configuration type from a concrete child module, so applying `skip`
+/// to such a child is an explicit contract violation by the caller.
+#[proc_macro_derive(TypedModule, attributes(typed_module))]
+pub fn derive_typed_module(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    typed_module::expand(input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
