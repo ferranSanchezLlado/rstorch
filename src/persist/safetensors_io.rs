@@ -240,11 +240,71 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
 /// Detect duplicates before serde_json's HashMap representation can collapse
 /// them. Scanning every object also rejects duplicate tensor-info fields.
 fn reject_duplicate_json_keys(header: &[u8]) -> Result<()> {
+    check_json_nesting(header)?;
     JsonScanner {
         input: header,
         at: 0,
     }
     .scan()
+}
+
+// Ordinary safetensors headers use only a few levels. Bounding nesting before
+// the decoded-key scan keeps its recursive descent away from the call-stack
+// limits even when the header itself is close to the byte limit.
+const MAX_JSON_NESTING: usize = 32;
+
+fn check_json_nesting(header: &[u8]) -> Result<()> {
+    let mut stack = Vec::with_capacity(MAX_JSON_NESTING);
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (at, &ch) in header.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == b'\\' {
+                escaped = true;
+            } else if ch == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                if stack.len() == MAX_JSON_NESTING {
+                    return Err(Error::Persistence {
+                        msg: format!(
+                            "safetensors JSON nesting exceeds limit {MAX_JSON_NESTING} at byte {at}"
+                        ),
+                    });
+                }
+                stack.push(ch);
+            }
+            b'}' | b']' => {
+                let expected = if ch == b'}' { b'{' } else { b'[' };
+                if stack.pop() != Some(expected) {
+                    return Err(Error::Persistence {
+                        msg: format!("mismatched safetensors JSON bracket at byte {at}"),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if in_string {
+        return Err(Error::Persistence {
+            msg: "unterminated string in safetensors JSON header".to_string(),
+        });
+    }
+    if !stack.is_empty() {
+        return Err(Error::Persistence {
+            msg: "unclosed bracket in safetensors JSON header".to_string(),
+        });
+    }
+    Ok(())
 }
 
 struct JsonScanner<'a> {
@@ -602,6 +662,68 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn deeply_nested_near_limit_headers_reject_on_small_stacks() {
+        let max = Limits::defaults().max_metadata_bytes as usize;
+        let depth = 100_000;
+        let mut arrays = "[".repeat(depth);
+        arrays.push('0');
+        arrays.push_str(&"]".repeat(depth));
+        arrays.push_str(&" ".repeat(max - arrays.len()));
+
+        let mut objects = "{\"a\":".repeat(depth);
+        objects.push('0');
+        objects.push_str(&"}".repeat(depth));
+        objects.push_str(&" ".repeat(max - objects.len()));
+
+        for (name, header) in [("arrays", arrays), ("objects", objects)] {
+            std::thread::Builder::new()
+                .name(format!("nested-{name}"))
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    let error = reject_duplicate_json_keys(header.as_bytes()).unwrap_err();
+                    assert!(
+                        error.to_string().contains("nesting exceeds limit"),
+                        "{error}"
+                    );
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn reasonable_json_nesting_is_accepted() {
+        let depth = MAX_JSON_NESTING / 2;
+        let mut header = "[".repeat(depth);
+        header.push_str(r#"{"decoded\u002dkey":{"inner":true}}"#);
+        header.push_str(&"]".repeat(depth));
+        reject_duplicate_json_keys(header.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn malformed_json_brackets_and_escapes_are_structured_errors() {
+        let malformed = [
+            r#"{"a":[}"#,
+            r#"{"a":[]]"#,
+            r#"{"a":{"b":0}"#,
+            r#"{"a":"unterminated}"#,
+            r#"{"a":"\q"}"#,
+            r#"{"a":"\u12xz"}"#,
+            r#"{"a":"\ud800x"}"#,
+        ];
+        for header in malformed {
+            assert!(
+                matches!(
+                    reject_duplicate_json_keys(header.as_bytes()),
+                    Err(Error::Persistence { .. })
+                ),
+                "accepted malformed header {header:?}"
+            );
+        }
     }
 
     #[test]
