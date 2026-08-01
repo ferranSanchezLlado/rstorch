@@ -88,6 +88,8 @@ pub trait SequentialLayer<Input>: Forward<Input> + sealed::SequentialLayer<Input
     const ADJACENCY: () = ();
 }
 
+fn enforce_adjacency(_: ()) {}
+
 macro_rules! impl_shape_preserving_sequential_layer {
     ($($layer:ty),+ $(,)?) => {
         $(
@@ -465,7 +467,7 @@ impl<Input, Layers> Sequential<Input, Layers> {
         Self: Forward<Input>,
         Layer: SequentialLayer<<Self as Forward<Input>>::Output> + Module,
     {
-        let _ = <Layer as SequentialLayer<<Self as Forward<Input>>::Output>>::ADJACENCY;
+        enforce_adjacency(<Layer as SequentialLayer<<Self as Forward<Input>>::Output>>::ADJACENCY);
         let len = self.len + 1;
         let index = self.len;
         Sequential {
