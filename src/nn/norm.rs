@@ -105,13 +105,18 @@ fn scale_from_var(var: &Tensor, eps: f64) -> Result<Tensor> {
 /// The [`LayerNorm`] formula over plain tensors: normalize the last
 /// `weight.rank()` axes of `x` with `correction = 0` statistics, then apply
 /// `weight`/`bias` (which broadcast from the right).
-fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Result<Tensor> {
+fn composed_layer_norm(
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    eps: f64,
+) -> Result<Tensor> {
     let axes = weight.rank();
     let mu = mean_last(x, axes)?;
     let centered = x.sub(&mu)?;
     let var = mean_last(&centered.mul(&centered)?, axes)?;
     let xhat = centered.div(&scale_from_var(&var, eps)?)?;
-    affine(&xhat, weight, Some(bias))
+    affine(&xhat, weight, bias)
 }
 
 /// The detached values needed by the single-node fused LayerNorm backward.
@@ -232,12 +237,39 @@ fn fused_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Res
     Ok(autograd::record(OP, out, &[x, weight, bias], backward))
 }
 
+/// LayerNorm over caller-owned parameter tensors.
+pub(crate) fn layer_norm_forward(
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    eps: f64,
+) -> Result<Tensor> {
+    check_suffix("LayerNorm::forward", x, weight.shape())?;
+    let Some(bias) = bias else {
+        return composed_layer_norm(x, weight, None, eps);
+    };
+    if weight.rank() != 1 || !x.dtype().is_float() {
+        return composed_layer_norm(x, weight, Some(bias), eps);
+    }
+    match fused_layer_norm(x, weight, bias, eps) {
+        Ok(out) => Ok(out),
+        Err(Error::Unsupported { .. }) => composed_layer_norm(x, weight, Some(bias), eps),
+        Err(err) => Err(err),
+    }
+}
+
 /// The [`RMSNorm`] formula over plain tensors: divide by the root mean square
 /// of the last `weight.rank()` axes — no mean subtraction, no bias.
 fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let ms = mean_last(&x.mul(x)?, weight.rank())?;
     let xhat = x.div(&scale_from_var(&ms, eps)?)?;
     affine(&xhat, weight, None)
+}
+
+/// RMSNorm over a caller-owned parameter tensor.
+pub(crate) fn rms_norm_forward(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+    check_suffix("RMSNorm::forward", x, weight.shape())?;
+    rms_norm(x, weight, eps)
 }
 
 /// The [`BatchNorm2d`] formula over plain tensors. `mu` and `var` are
@@ -269,6 +301,75 @@ fn batch_stats(x: &Tensor) -> Result<(Tensor, Tensor)> {
     let centered = x.sub(&mu)?;
     let var = mean_nchw(&centered.mul(&centered)?)?;
     Ok((mu, var))
+}
+
+/// BatchNorm2d over caller-owned parameters and running buffers.
+///
+/// Training returns detached replacement buffers; eval returns none. Both
+/// replacements are computed before returning so the caller can update them
+/// atomically.
+#[allow(clippy::too_many_arguments)] // The arguments are the external state contract.
+pub(crate) fn batch_norm2d_forward(
+    x: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    running_mean: &Tensor,
+    running_var: &Tensor,
+    eps: f64,
+    momentum: f64,
+    mode: Mode,
+) -> Result<(Tensor, Option<(Tensor, Tensor)>)> {
+    const OP: &str = "BatchNorm2d::forward";
+    let (n, c, h, w) = x.dims4()?;
+    let channels = running_mean.dims1()?;
+    if c != channels {
+        return Err(Error::ShapeMismatch {
+            op: OP,
+            lhs: x.shape().clone(),
+            rhs: Shape::from(vec![channels]),
+        });
+    }
+    let count = n * h * w;
+    let (mu, var) = if mode.is_training() {
+        if count < 2 {
+            return Err(Error::InvalidArg {
+                op: OP,
+                msg: format!(
+                    "a training forward needs at least 2 elements per channel to \
+                     estimate a variance, got N*H*W = {count} (input {})",
+                    x.shape()
+                ),
+            });
+        }
+        batch_stats(x)?
+    } else {
+        let stat_shape = [1, c, 1, 1];
+        (
+            running_mean.reshape(stat_shape)?,
+            running_var.reshape(stat_shape)?,
+        )
+    };
+
+    // Build the output first: a rejected affine must not age the buffers.
+    let out = batch_norm(x, &mu, &var, weight, bias, eps)?;
+    if !mode.is_training() {
+        return Ok((out, None));
+    }
+
+    let shape = [channels];
+    let keep = 1.0 - momentum;
+    let unbiased = count as f64 / (count - 1) as f64;
+    let batch_mean = mu.detach().reshape(shape)?;
+    let batch_var = var.detach().reshape(shape)?.mul_scalar(unbiased)?;
+    let mean = running_mean
+        .mul_scalar(keep)?
+        .add(&batch_mean.mul_scalar(momentum)?)?
+        .detach();
+    let variance = running_var
+        .mul_scalar(keep)?
+        .add(&batch_var.mul_scalar(momentum)?)?
+        .detach();
+    Ok((out, Some((mean, variance))))
 }
 
 /// Validate a `weight`-shaped normalization spec at construction time.
@@ -443,17 +544,9 @@ impl Forward for LayerNorm {
     /// [`Error::DTypeMismatch`]/[`Error::DeviceMismatch`] if `x` disagrees with
     /// the parameters — convert one side explicitly.
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
-        check_suffix("LayerNorm::forward", x, self.normalized_shape())?;
         let weight = self.weight.get(mode);
         let bias = self.bias.get(mode);
-        if weight.rank() != 1 || !x.dtype().is_float() {
-            return layer_norm(x, &weight, &bias, self.eps);
-        }
-        match fused_layer_norm(x, &weight, &bias, self.eps) {
-            Ok(out) => Ok(out),
-            Err(Error::Unsupported { .. }) => layer_norm(x, &weight, &bias, self.eps),
-            Err(err) => Err(err),
-        }
+        layer_norm_forward(x, &weight, Some(&bias), self.eps)
     }
 }
 
@@ -564,8 +657,7 @@ impl Forward for RMSNorm {
     /// shape that is not [`normalized_shape`](RMSNorm::normalized_shape)
     /// (`op: "RMSNorm::forward"`), or a dtype/device mismatch with `weight`.
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
-        check_suffix("RMSNorm::forward", x, self.normalized_shape())?;
-        rms_norm(x, &self.weight.get(mode), self.eps)
+        rms_norm_forward(x, &self.weight.get(mode), self.eps)
     }
 }
 
@@ -739,36 +831,6 @@ impl BatchNorm2d {
     pub fn running_var(&self) -> &Tensor {
         &self.running_var
     }
-
-    /// Fold one batch's detached statistics into the buffers (see the type
-    /// docs for the arithmetic). `count` is `N·H·W`, the number of elements
-    /// each channel statistic averaged.
-    ///
-    /// Both new values are computed before either is stored, so a failure
-    /// leaves the pair as it was rather than advancing the mean past the
-    /// variance.
-    fn update_running(&mut self, mu: &Tensor, var_biased: &Tensor, count: usize) -> Result<()> {
-        let channels = [self.channels()];
-        let keep = 1.0 - self.momentum;
-        // Bessel's correction for the *stored estimate* only.
-        let unbiased = count as f64 / (count - 1) as f64;
-        let batch_mean = mu.detach().reshape(channels)?;
-        let batch_var = var_biased
-            .detach()
-            .reshape(channels)?
-            .mul_scalar(unbiased)?;
-        let mean = self
-            .running_mean
-            .mul_scalar(keep)?
-            .add(&batch_mean.mul_scalar(self.momentum)?)?;
-        let var = self
-            .running_var
-            .mul_scalar(keep)?
-            .add(&batch_var.mul_scalar(self.momentum)?)?;
-        self.running_mean = mean;
-        self.running_var = var;
-        Ok(())
-    }
 }
 
 impl Forward for BatchNorm2d {
@@ -783,48 +845,21 @@ impl Forward for BatchNorm2d {
     /// [`Error::DTypeMismatch`]/[`Error::DeviceMismatch`] if `x` disagrees with
     /// the parameters and buffers.
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
-        const OP: &str = "BatchNorm2d::forward";
-        let (n, c, h, w) = x.dims4()?;
-        if c != self.channels() {
-            return Err(Error::ShapeMismatch {
-                op: OP,
-                lhs: x.shape().clone(),
-                rhs: Shape::from(vec![self.channels()]),
-            });
-        }
-        let count = n * h * w;
-        let (mu, var) = if mode.is_training() {
-            if count < 2 {
-                return Err(Error::InvalidArg {
-                    op: OP,
-                    msg: format!(
-                        "a training forward needs at least 2 elements per channel to \
-                         estimate a variance, got N*H*W = {count} (input {})",
-                        x.shape()
-                    ),
-                });
-            }
-            batch_stats(x)?
-        } else {
-            let stat_shape = [1, c, 1, 1];
-            (
-                self.running_mean.reshape(stat_shape)?,
-                self.running_var.reshape(stat_shape)?,
-            )
-        };
-        // The output is built before the buffers move, so a forward that fails
-        // (a dtype or device disagreement with `weight`) leaves the running
-        // statistics untouched — a rejected step must not age them.
-        let out = batch_norm(
+        let weight = self.weight.get(mode);
+        let bias = self.bias.get(mode);
+        let (out, replacements) = batch_norm2d_forward(
             x,
-            &mu,
-            &var,
-            &self.weight.get(mode),
-            &self.bias.get(mode),
+            &weight,
+            &bias,
+            &self.running_mean,
+            &self.running_var,
             self.eps,
+            self.momentum,
+            mode,
         )?;
-        if mode.is_training() {
-            self.update_running(&mu, &var, count)?;
+        if let Some((mean, variance)) = replacements {
+            self.running_mean = mean;
+            self.running_var = variance;
         }
         Ok(out)
     }
@@ -1082,6 +1117,138 @@ mod tests {
         );
     }
 
+    #[test]
+    fn external_state_helpers_are_exactly_the_dynamic_paths() {
+        let x = t(&[0.5, -1.5, 2.0, 0.25, -0.75, 1.25], [2, 3]);
+        let weight = t(&[1.5, -0.5, 2.0], [3]);
+        let bias = t(&[0.25, -0.5, 0.75], [3]);
+
+        let mut ln = LayerNorm::new([3], &CPU).unwrap();
+        load(
+            &mut ln,
+            &[("weight", weight.clone()), ("bias", bias.clone())],
+        );
+        let external =
+            crate::nn::layer_norm_forward(&x, &weight, Some(&bias), LayerNorm::DEFAULT_EPS)
+                .unwrap();
+        assert_eq!(v(&ln.forward(&x, Mode::EVAL).unwrap()), v(&external));
+
+        let mut rms = RMSNorm::new([3], &CPU).unwrap();
+        load(&mut rms, &[("weight", weight.clone())]);
+        let external = crate::nn::rms_norm_forward(&x, &weight, RMSNorm::DEFAULT_EPS).unwrap();
+        assert_eq!(v(&rms.forward(&x, Mode::EVAL).unwrap()), v(&external));
+
+        let bn_x = bn_input();
+        let bn_weight = t(&[1.5, -0.5], [2]);
+        let bn_bias = t(&[0.25, 0.75], [2]);
+        let mean = t(&[0.25, -0.5], [2]);
+        let variance = t(&[1.5, 0.75], [2]);
+        let mut bn = BatchNorm2d::new(2, &CPU).unwrap();
+        load(
+            &mut bn,
+            &[
+                ("weight", bn_weight.clone()),
+                ("bias", bn_bias.clone()),
+                ("running_mean", mean.clone()),
+                ("running_var", variance.clone()),
+            ],
+        );
+        let (external, replacements) = crate::nn::batch_norm2d_forward(
+            &bn_x,
+            &bn_weight,
+            &bn_bias,
+            &mean,
+            &variance,
+            bn.eps(),
+            bn.momentum(),
+            Mode::TRAIN.frozen(),
+        )
+        .unwrap();
+        let dynamic = bn.forward(&bn_x, Mode::TRAIN.frozen()).unwrap();
+        assert_eq!(v(&dynamic), v(&external));
+        let (next_mean, next_variance) = replacements.unwrap();
+        assert_eq!(v(bn.running_mean()), v(&next_mean));
+        assert_eq!(v(bn.running_var()), v(&next_variance));
+        for replacement in [&next_mean, &next_variance] {
+            assert!(matches!(
+                replacement.backward(),
+                Err(Error::NotTraced { .. })
+            ));
+        }
+
+        let before_mean = v(bn.running_mean());
+        let before_variance = v(bn.running_var());
+        let (external, replacements) = crate::nn::batch_norm2d_forward(
+            &bn_x,
+            &bn_weight,
+            &bn_bias,
+            bn.running_mean(),
+            bn.running_var(),
+            bn.eps(),
+            bn.momentum(),
+            Mode::EVAL,
+        )
+        .unwrap();
+        assert!(replacements.is_none());
+        assert_eq!(v(&bn.forward(&bn_x, Mode::EVAL).unwrap()), v(&external));
+        assert_eq!(v(bn.running_mean()), before_mean);
+        assert_eq!(v(bn.running_var()), before_variance);
+    }
+
+    #[test]
+    fn external_state_helpers_preserve_caller_gradient_identities() {
+        let x = t(&[0.5, -1.5, 2.0, 0.25, -0.75, 1.25], [2, 3]);
+        let weight = t(&[1.5, -0.5, 2.0], [3]).traced().unwrap();
+        let bias = t(&[0.25, -0.5, 0.75], [3]).traced().unwrap();
+        let grads = crate::nn::layer_norm_forward(&x, &weight, Some(&bias), LayerNorm::DEFAULT_EPS)
+            .unwrap()
+            .mul(&coef(&[2, 3]))
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(grads.wrt_input(&weight).unwrap().dims(), &[3]);
+        assert_eq!(grads.wrt_input(&bias).unwrap().dims(), &[3]);
+
+        let rms_weight = t(&[1.5, -0.5, 2.0], [3]).traced().unwrap();
+        let grads = crate::nn::rms_norm_forward(&x, &rms_weight, RMSNorm::DEFAULT_EPS)
+            .unwrap()
+            .mul(&coef(&[2, 3]))
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(grads.wrt_input(&rms_weight).unwrap().dims(), &[3]);
+
+        let bn_weight = t(&[1.5, -0.5], [2]).traced().unwrap();
+        let bn_bias = t(&[0.25, 0.75], [2]).traced().unwrap();
+        let (out, replacements) = crate::nn::batch_norm2d_forward(
+            &bn_input(),
+            &bn_weight,
+            &bn_bias,
+            &t(&[0.0, 0.0], [2]),
+            &t(&[1.0, 1.0], [2]),
+            BatchNorm2d::DEFAULT_EPS,
+            BatchNorm2d::DEFAULT_MOMENTUM,
+            Mode::TRAIN,
+        )
+        .unwrap();
+        let grads = out
+            .mul(&coef(&[2, 2, 1, 3]))
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(grads.wrt_input(&bn_weight).unwrap().dims(), &[2]);
+        assert_eq!(grads.wrt_input(&bn_bias).unwrap().dims(), &[2]);
+        let (next_mean, next_variance) = replacements.unwrap();
+        assert!(next_mean.node().is_none());
+        assert!(next_variance.node().is_none());
+    }
+
     // -- an independent reference implementation ---------------------------
     //
     // The tests above pick inputs whose statistics are exact in decimal, which
@@ -1152,10 +1319,10 @@ mod tests {
         norm.bias.set(t64(&[0.25, -0.75, 1.0], [3])).unwrap();
         let x = t64(&[2.0, 2.0, 2.0, 0.5, -1.5, 2.0], [2, 3]);
         let got = norm.forward(&x, Mode::EVAL).unwrap();
-        let want = layer_norm(
+        let want = composed_layer_norm(
             &x,
             &t64(&[1.5, -0.5, 2.0], [3]),
-            &t64(&[0.25, -0.75, 1.0], [3]),
+            Some(&t64(&[0.25, -0.75, 1.0], [3])),
             1e-4,
         )
         .unwrap();
@@ -1178,7 +1345,7 @@ mod tests {
             &[("weight", weight.clone()), ("bias", bias.clone())],
         );
         let got = norm.forward(&x, Mode::EVAL).unwrap();
-        let composed = layer_norm(&x, &weight, &bias, 1e-4).unwrap();
+        let composed = composed_layer_norm(&x, &weight, Some(&bias), 1e-4).unwrap();
         assert_eq!(v(&got), v(&composed));
     }
 
@@ -1803,7 +1970,7 @@ mod tests {
         let c = coef(&[2, 3]);
         check_grad(
             |xs| {
-                layer_norm(&xs[0], &xs[1], &xs[2], LayerNorm::DEFAULT_EPS)?
+                composed_layer_norm(&xs[0], &xs[1], Some(&xs[2]), LayerNorm::DEFAULT_EPS)?
                     .mul(&c)?
                     .sum_all()
             },
@@ -1877,7 +2044,7 @@ mod tests {
         let c = coef(&[2, 2, 2]);
         check_grad(
             |xs| {
-                layer_norm(&xs[0], &xs[1], &xs[2], LayerNorm::DEFAULT_EPS)?
+                composed_layer_norm(&xs[0], &xs[1], Some(&xs[2]), LayerNorm::DEFAULT_EPS)?
                     .mul(&c)?
                     .sum_all()
             },
