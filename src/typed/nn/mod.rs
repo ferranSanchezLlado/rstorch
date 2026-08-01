@@ -162,12 +162,14 @@ pub use crate::nn::Mode;
 mod activation;
 mod dropout;
 mod linear;
+mod norm;
 mod param;
 mod visit;
 
 pub use activation::{Gelu, Relu};
 pub use dropout::Dropout;
 pub use linear::Linear;
+pub use norm::{BatchNorm2d, LayerNorm, RMSNorm};
 pub use visit::{load_state_dict, state_dict};
 
 /// A typed module that maps `Input` to an associated typed output.
