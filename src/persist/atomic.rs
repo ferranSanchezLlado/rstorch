@@ -41,16 +41,42 @@ pub(crate) fn write_atomic_with<F>(path: &Path, fill: F) -> Result<()>
 where
     F: FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 {
+    write_atomic_with_candidates(path, fill, || unique_temp_path(path))
+}
+
+fn write_atomic_with_candidates<F, N>(path: &Path, fill: F, mut next: N) -> Result<()>
+where
+    F: FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    N: FnMut() -> PathBuf,
+{
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = parent.unwrap_or_else(|| Path::new("."));
 
-    let temp = unique_temp_path(path);
+    let (temp, mut file) = (0..128)
+        .find_map(|_| {
+            let temp = next();
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(file) => Some(Ok((temp, file))),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "could not exclusively create an atomic-save temp file after 128 attempts",
+            )
+        })?;
     // A guard that removes the temp file unless we explicitly disarm it after
     // a successful rename. This covers every early-return below.
     let mut guard = TempGuard::new(temp.clone());
 
     let result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&temp)?;
         fill(&mut file)?;
         file.flush()?;
         file.sync_all()?;
@@ -196,6 +222,39 @@ mod tests {
         let b = unique_temp_path(&path);
         assert_ne!(a, b);
         assert_eq!(a.parent(), Some(dir.as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_temp_symlink_is_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tmpdir("symlink");
+        let path = dir.join("out.bin");
+        let victim = dir.join("victim.bin");
+        let collision = dir.join("predictable.tmp");
+        let safe = dir.join("exclusive.tmp");
+        std::fs::write(&victim, b"do not touch").unwrap();
+        symlink(&victim, &collision).unwrap();
+        let mut candidates = vec![safe.clone(), collision.clone()].into_iter().rev();
+
+        write_atomic_with_candidates(
+            &path,
+            |file| file.write_all(b"checkpoint"),
+            || candidates.next().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not touch");
+        assert_eq!(std::fs::read(&path).unwrap(), b"checkpoint");
+        assert!(
+            std::fs::symlink_metadata(&collision)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!safe.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

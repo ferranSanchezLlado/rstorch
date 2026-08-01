@@ -240,6 +240,42 @@ mod tests {
     }
 
     #[test]
+    fn independently_built_equal_envelopes_have_identical_file_bytes() {
+        let dir = tmpdir("deterministic");
+        let first = dir.join("first.rstorch");
+        let second = dir.join("second.rstorch");
+        let a = envelope();
+        let b = envelope();
+        assert_eq!(a, b);
+
+        a.save(&first, &Limits::defaults()).unwrap();
+        b.save(&second, &Limits::defaults()).unwrap();
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            std::fs::read(&second).unwrap()
+        );
+        assert_eq!(Envelope::load(&first, &Limits::defaults()).unwrap(), a);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn section_values_and_total_header_obey_writer_limits() {
+        let dir = tmpdir("section-limits");
+        let path = dir.join("run.rstorch");
+        let e = envelope();
+
+        let mut limits = Limits::defaults();
+        limits.max_string_bytes = e.section("optimizer").unwrap().len() as u64 - 1;
+        assert!(e.save(&path, &limits).is_err());
+
+        limits = Limits::defaults();
+        limits.max_metadata_bytes = 1;
+        assert!(e.save(&path, &limits).is_err());
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn plain_safetensors_is_not_a_checkpoint() {
         let dir = tmpdir("plain");
         let path = dir.join("m.safetensors");

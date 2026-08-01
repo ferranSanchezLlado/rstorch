@@ -33,6 +33,9 @@ pub(crate) fn serialize_tensors(
     limits: &Limits,
 ) -> Result<Vec<u8>> {
     check_writer(tensors, limits)?;
+    if let Some(metadata) = &metadata {
+        check_metadata(metadata, limits)?;
+    }
 
     let views: Vec<(&str, TensorView<'_>)> = tensors
         .iter()
@@ -43,7 +46,96 @@ pub(crate) fn serialize_tensors(
         })
         .collect::<Result<_>>()?;
 
-    safetensors::tensor::serialize(views, metadata).map_err(|e| st_err("serialize", e))
+    // safetensors sorts tensors, but serializes free-form metadata directly
+    // from a randomized HashMap. Add that object ourselves in key order so
+    // equal checkpoints have identical bytes without changing the format.
+    let mut bytes =
+        safetensors::tensor::serialize(views, None).map_err(|e| st_err("serialize", e))?;
+    if let Some(metadata) = metadata {
+        bytes = add_canonical_metadata(bytes, metadata)?;
+    }
+    let header_len = u64::from_le_bytes(bytes[..8].try_into().expect("serialized header"));
+    Limits::check("metadata bytes", header_len, limits.max_metadata_bytes)?;
+    Ok(bytes)
+}
+
+fn check_metadata(metadata: &HashMap<String, String>, limits: &Limits) -> Result<()> {
+    for (key, value) in metadata {
+        Limits::check(
+            "metadata key length",
+            key.len() as u64,
+            limits.max_string_bytes,
+        )?;
+        Limits::check(
+            "metadata value length",
+            value.len() as u64,
+            limits.max_string_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn add_canonical_metadata(bytes: Vec<u8>, metadata: HashMap<String, String>) -> Result<Vec<u8>> {
+    let old_header_len =
+        u64::from_le_bytes(bytes[..8].try_into().expect("serialized header")) as usize;
+    let old_data_start = 8 + old_header_len;
+    let mut header = bytes[8..old_data_start].to_vec();
+    while header.last() == Some(&b' ') {
+        header.pop();
+    }
+    if header.pop() != Some(b'}') {
+        return Err(Error::Persistence {
+            msg: "serialized safetensors header is not a JSON object".to_string(),
+        });
+    }
+    if header.len() > 1 {
+        header.push(b',');
+    }
+    header.extend_from_slice(b"\"__metadata__\":{");
+    for (index, (key, value)) in metadata
+        .into_iter()
+        .collect::<BTreeMap<_, _>>()
+        .iter()
+        .enumerate()
+    {
+        if index != 0 {
+            header.push(b',');
+        }
+        push_json_string(&mut header, key);
+        header.push(b':');
+        push_json_string(&mut header, value);
+    }
+    header.extend_from_slice(b"}}");
+    header.resize(header.len().next_multiple_of(8), b' ');
+
+    let mut out = Vec::with_capacity(8 + header.len() + bytes.len() - old_data_start);
+    out.extend_from_slice(&(header.len() as u64).to_le_bytes());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&bytes[old_data_start..]);
+    Ok(out)
+}
+
+fn push_json_string(out: &mut Vec<u8>, value: &str) {
+    out.push(b'"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.extend_from_slice(br#"\""#),
+            '\\' => out.extend_from_slice(br#"\\"#),
+            '\u{08}' => out.extend_from_slice(br#"\b"#),
+            '\u{0c}' => out.extend_from_slice(br#"\f"#),
+            '\n' => out.extend_from_slice(br#"\n"#),
+            '\r' => out.extend_from_slice(br#"\r"#),
+            '\t' => out.extend_from_slice(br#"\t"#),
+            ch if ch <= '\u{1f}' => {
+                out.extend_from_slice(format!("\\u{:04x}", ch as u32).as_bytes())
+            }
+            ch => {
+                let mut encoded = [0; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+            }
+        }
+    }
+    out.push(b'"');
 }
 
 /// Atomically write a tensor map (with optional metadata) to `path`.
@@ -104,6 +196,20 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
     let header_len = u64::from_le_bytes(buffer[..8].try_into().expect("8-byte slice"));
     Limits::check("metadata bytes", header_len, limits.max_metadata_bytes)?;
 
+    let header_end = 8usize
+        .checked_add(header_len.try_into().map_err(|_| Error::Persistence {
+            msg: "metadata byte length does not fit this platform".to_string(),
+        })?)
+        .ok_or_else(|| Error::Persistence {
+            msg: "metadata byte length overflow".to_string(),
+        })?;
+    let raw_header = buffer
+        .get(8..header_end)
+        .ok_or_else(|| Error::Persistence {
+            msg: "declared metadata extends past end of file".to_string(),
+        })?;
+    reject_duplicate_json_keys(raw_header)?;
+
     // 3. Parse the header only (no tensor allocation) and validate structure.
     let (_n, metadata) =
         SafeTensors::read_metadata(&buffer).map_err(|e| st_err("read metadata", e))?;
@@ -124,8 +230,223 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
         })?;
     }
     Limits::check("total bytes", total, limits.max_total_bytes)?;
+    if let Some(values) = metadata.metadata() {
+        check_metadata(values, limits)?;
+    }
 
     Ok((metadata, buffer))
+}
+
+/// Detect duplicates before serde_json's HashMap representation can collapse
+/// them. Scanning every object also rejects duplicate tensor-info fields.
+fn reject_duplicate_json_keys(header: &[u8]) -> Result<()> {
+    JsonScanner {
+        input: header,
+        at: 0,
+    }
+    .scan()
+}
+
+struct JsonScanner<'a> {
+    input: &'a [u8],
+    at: usize,
+}
+
+impl JsonScanner<'_> {
+    fn scan(mut self) -> Result<()> {
+        self.value()?;
+        self.ws();
+        if self.at != self.input.len() {
+            return self.invalid("trailing JSON data");
+        }
+        Ok(())
+    }
+
+    fn value(&mut self) -> Result<()> {
+        self.ws();
+        match self.peek() {
+            Some(b'{') => self.object(),
+            Some(b'[') => self.array(),
+            Some(b'"') => self.string().map(|_| ()),
+            Some(_) => {
+                let start = self.at;
+                while let Some(ch) = self.peek() {
+                    if ch.is_ascii_whitespace() || matches!(ch, b',' | b']' | b'}') {
+                        break;
+                    }
+                    self.at += 1;
+                }
+                if self.at == start {
+                    self.invalid("expected JSON value")
+                } else {
+                    Ok(())
+                }
+            }
+            None => self.invalid("expected JSON value"),
+        }
+    }
+
+    fn object(&mut self) -> Result<()> {
+        self.at += 1;
+        let mut keys = std::collections::BTreeSet::new();
+        self.ws();
+        if self.take(b'}') {
+            return Ok(());
+        }
+        loop {
+            self.ws();
+            let key = self.string()?;
+            if !keys.insert(key.clone()) {
+                return Err(Error::Persistence {
+                    msg: format!("duplicate safetensors header field {key:?}"),
+                });
+            }
+            self.ws();
+            if !self.take(b':') {
+                return self.invalid("expected `:` after object key");
+            }
+            self.value()?;
+            self.ws();
+            if self.take(b'}') {
+                return Ok(());
+            }
+            if !self.take(b',') {
+                return self.invalid("expected `,` or `}` in object");
+            }
+        }
+    }
+
+    fn array(&mut self) -> Result<()> {
+        self.at += 1;
+        self.ws();
+        if self.take(b']') {
+            return Ok(());
+        }
+        loop {
+            self.value()?;
+            self.ws();
+            if self.take(b']') {
+                return Ok(());
+            }
+            if !self.take(b',') {
+                return self.invalid("expected `,` or `]` in array");
+            }
+        }
+    }
+
+    fn string(&mut self) -> Result<String> {
+        if !self.take(b'"') {
+            return self.invalid("expected JSON string");
+        }
+        let mut out = String::new();
+        loop {
+            let start = self.at;
+            while let Some(ch) = self.peek() {
+                if ch == b'"' || ch == b'\\' || ch < 0x20 {
+                    break;
+                }
+                self.at += 1;
+            }
+            let raw = std::str::from_utf8(&self.input[start..self.at]).map_err(|_| {
+                Error::Persistence {
+                    msg: "safetensors header contains invalid UTF-8".to_string(),
+                }
+            })?;
+            out.push_str(raw);
+            match self.peek() {
+                Some(b'"') => {
+                    self.at += 1;
+                    return Ok(out);
+                }
+                Some(b'\\') => {
+                    self.at += 1;
+                    let escape = self.next().ok_or_else(|| Error::Persistence {
+                        msg: "unterminated JSON escape".to_string(),
+                    })?;
+                    match escape {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{08}'),
+                        b'f' => out.push('\u{0c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => out.push(self.unicode_escape()?),
+                        _ => return self.invalid("invalid JSON escape"),
+                    }
+                }
+                _ => return self.invalid("unterminated JSON string"),
+            }
+        }
+    }
+
+    fn unicode_escape(&mut self) -> Result<char> {
+        let first = self.hex4()?;
+        let scalar = if (0xd800..=0xdbff).contains(&first) {
+            if self.next() != Some(b'\\') || self.next() != Some(b'u') {
+                return self.invalid("unpaired JSON surrogate");
+            }
+            let second = self.hex4()?;
+            if !(0xdc00..=0xdfff).contains(&second) {
+                return self.invalid("unpaired JSON surrogate");
+            }
+            0x10000 + ((first as u32 - 0xd800) << 10) + (second as u32 - 0xdc00)
+        } else {
+            first as u32
+        };
+        char::from_u32(scalar).ok_or_else(|| Error::Persistence {
+            msg: "invalid JSON Unicode escape".to_string(),
+        })
+    }
+
+    fn hex4(&mut self) -> Result<u16> {
+        let mut value = 0u16;
+        for _ in 0..4 {
+            let digit = self.next().and_then(|ch| (ch as char).to_digit(16));
+            value = value
+                .checked_mul(16)
+                .and_then(|v| digit.and_then(|d| v.checked_add(d as u16)))
+                .ok_or_else(|| Error::Persistence {
+                    msg: "invalid JSON Unicode escape".to_string(),
+                })?;
+        }
+        Ok(value)
+    }
+
+    fn ws(&mut self) {
+        while self.peek().is_some_and(|ch| ch.is_ascii_whitespace()) {
+            self.at += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.input.get(self.at).copied()
+    }
+
+    fn next(&mut self) -> Option<u8> {
+        let value = self.peek()?;
+        self.at += 1;
+        Some(value)
+    }
+
+    fn take(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.at += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn invalid<T>(&self, message: &str) -> Result<T> {
+        Err(Error::Persistence {
+            msg: format!(
+                "invalid safetensors JSON header at byte {}: {message}",
+                self.at
+            ),
+        })
+    }
 }
 
 /// Load a name → [`HostTensor`] map plus the file's string metadata map,
@@ -193,6 +514,14 @@ mod tests {
         m
     }
 
+    fn raw_file(header: &str) -> Vec<u8> {
+        let mut header = header.as_bytes().to_vec();
+        header.resize(header.len().next_multiple_of(8), b' ');
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(header);
+        bytes
+    }
+
     #[test]
     fn round_trip_tensors_and_metadata() {
         let dir = tmpdir("rt");
@@ -205,6 +534,73 @@ mod tests {
         let (back, back_meta) = load_tensors(&path, &Limits::defaults()).unwrap();
         assert_eq!(back, tensors);
         assert_eq!(back_meta.get("k").map(String::as_str), Some("v"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn metadata_serialization_is_canonical_and_ecosystem_compatible() {
+        let tensors = sample();
+        let mut first = HashMap::new();
+        first.insert("z".to_string(), "last".to_string());
+        first.insert("a".to_string(), "first".to_string());
+        let mut second = HashMap::new();
+        second.insert("a".to_string(), "first".to_string());
+        second.insert("z".to_string(), "last".to_string());
+
+        let a = serialize_tensors(&tensors, Some(first), &Limits::defaults()).unwrap();
+        let b = serialize_tensors(&tensors, Some(second), &Limits::defaults()).unwrap();
+        assert_eq!(a, b);
+
+        let compatible = SafeTensors::deserialize(&a).unwrap();
+        assert_eq!(compatible.len(), tensors.len());
+        let (_, parsed) = SafeTensors::read_metadata(&a).unwrap();
+        assert_eq!(parsed.metadata().as_ref().unwrap()["a"], "first");
+    }
+
+    #[test]
+    fn writer_and_reader_apply_the_same_metadata_limits() {
+        let dir = tmpdir("metadata-limits");
+        let path = dir.join("m.safetensors");
+        let tensors = sample();
+        let mut metadata = HashMap::new();
+        metadata.insert("section".to_string(), "value".to_string());
+
+        let bytes =
+            serialize_tensors(&tensors, Some(metadata.clone()), &Limits::defaults()).unwrap();
+        let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let mut exact = Limits::defaults();
+        exact.max_metadata_bytes = header_len;
+        exact.max_string_bytes = "section".len() as u64;
+        save_tensors(&path, &tensors, Some(metadata.clone()), &exact).unwrap();
+        load_tensors(&path, &exact).unwrap();
+
+        exact.max_metadata_bytes = header_len - 1;
+        assert!(save_tensors(&path, &tensors, Some(metadata.clone()), &exact).is_err());
+        exact.max_metadata_bytes = header_len;
+        exact.max_string_bytes = "value".len() as u64 - 1;
+        assert!(save_tensors(&path, &tensors, Some(metadata), &exact).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn raw_duplicate_metadata_and_tensor_names_are_rejected() {
+        let dir = tmpdir("duplicates");
+        let cases = [
+            r#"{"__metadata__":{"rstorch.magic":"bad","rstorch.magic":"good"}}"#,
+            r#"{"__metadata__":{"rstorch.magic":"bad","rstorch.\u006dagic":"good"}}"#,
+            r#"{"w":{"dtype":"F32","shape":[0],"data_offsets":[0,0]},"w":{"dtype":"F32","shape":[0],"data_offsets":[0,0]}}"#,
+        ];
+        for (index, header) in cases.iter().enumerate() {
+            let path = dir.join(format!("duplicate-{index}.safetensors"));
+            std::fs::write(&path, raw_file(header)).unwrap();
+            let message = load_tensors(&path, &Limits::defaults())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains("duplicate safetensors header field"),
+                "{message}"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

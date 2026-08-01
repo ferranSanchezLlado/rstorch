@@ -89,10 +89,22 @@ pub(crate) fn save(
     text.push_str(&format!("version={ENCODING_VERSION}\n"));
     text.push_str(&format!("kind={kind}\n"));
     text.push_str(&format!("steps={steps}\n"));
+    let mut section_keys = std::collections::BTreeSet::from([
+        "version".to_string(),
+        "kind".to_string(),
+        "steps".to_string(),
+    ]);
     for (name, value) in hypers {
+        let key = format!("hyper.{name}");
+        if !section_keys.insert(key.clone()) {
+            return Err(Error::Persistence {
+                msg: format!("duplicate optimizer state key `{key}`"),
+            });
+        }
         text.push_str(&format!("hyper.{name}={value:?}\n"));
     }
     let mut staged: Vec<(String, HostTensor)> = Vec::new();
+    let mut buffer_keys = std::collections::BTreeSet::new();
     for param in params {
         // Paths become part of a `key=value` line and of a tensor key, so the
         // two characters that would make the encoding ambiguous are refused
@@ -106,12 +118,21 @@ pub(crate) fn save(
                 ),
             });
         }
+        let clock_key = format!("clock.{}", param.path);
+        if !section_keys.insert(clock_key.clone()) {
+            return Err(Error::Persistence {
+                msg: format!("duplicate optimizer state key `{clock_key}`"),
+            });
+        }
         text.push_str(&format!("clock.{}={}\n", param.path, param.clock));
         for (name, tensor) in &param.buffers {
-            staged.push((
-                format!("{TENSOR_PREFIX}{}.{name}", param.path),
-                to_host_tensor(tensor)?,
-            ));
+            let key = format!("{TENSOR_PREFIX}{}.{name}", param.path);
+            if !buffer_keys.insert(key.clone()) {
+                return Err(Error::Persistence {
+                    msg: format!("duplicate optimizer buffer `{key}`"),
+                });
+            }
+            staged.push((key, to_host_tensor(tensor)?));
         }
     }
 
@@ -190,11 +211,17 @@ pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
     let mut steps = None;
     let mut hypers = BTreeMap::new();
     let mut clocks: BTreeMap<String, u64> = BTreeMap::new();
+    let mut keys = std::collections::BTreeSet::new();
 
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let (key, value) = line.split_once('=').ok_or_else(|| Error::Persistence {
             msg: format!("malformed optimizer state line {line:?} (expected key=value)"),
         })?;
+        if !keys.insert(key) {
+            return Err(Error::Persistence {
+                msg: format!("duplicate optimizer state key `{key}`"),
+            });
+        }
         if key == "version" {
             version = Some(number::<u32>(key, value)?);
         } else if key == "kind" {
@@ -535,6 +562,24 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_optimizer_fields_are_rejected_instead_of_last_wins() {
+        let cases = [
+            "version=1\nversion=1\nkind=sgd\nsteps=1\n",
+            "version=1\nkind=sgd\nkind=adam\nsteps=1\n",
+            "version=1\nkind=sgd\nsteps=1\nsteps=2\n",
+            "version=1\nkind=sgd\nsteps=1\nhyper.lr=0.1\nhyper.lr=0.2\n",
+            "version=1\nkind=sgd\nsteps=1\nclock.w=1\nclock.w=2\n",
+        ];
+        for text in cases {
+            let message = load(&with_section(text), "sgd").unwrap_err().to_string();
+            assert!(
+                message.contains("duplicate optimizer state key"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
     fn near_max_loaded_clocks_preserve_their_exact_values() {
         let near_max = u64::MAX - 1;
         let text = format!(
@@ -661,6 +706,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load(&envelope, "sgd").unwrap().params().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_outgoing_fields_and_buffers_are_refused() {
+        let velocity = t(&[1.0]);
+        let mut envelope = Envelope::new();
+        let duplicate_hyper =
+            save(&mut envelope, "sgd", &[("lr", 0.1), ("lr", 0.2)], 1, &[]).unwrap_err();
+        assert!(
+            duplicate_hyper
+                .to_string()
+                .contains("duplicate optimizer state key")
+        );
+
+        let duplicate_buffer = save(
+            &mut envelope,
+            "sgd",
+            &[],
+            1,
+            &[OutgoingParam {
+                path: "w",
+                clock: 1,
+                buffers: vec![("velocity", &velocity), ("velocity", &velocity)],
+            }],
+        )
+        .unwrap_err();
+        assert!(
+            duplicate_buffer
+                .to_string()
+                .contains("duplicate optimizer buffer")
+        );
+        assert!(envelope.tensors().is_empty());
+        assert!(envelope.section(SECTION).is_none());
     }
 
     #[test]
