@@ -1,0 +1,3 @@
+error[E0080]
+typed attention input width is incompatible with EMBED
+project::<rstorch::typed::Tensor3<usize::MAX, usize::MAX, 5>>

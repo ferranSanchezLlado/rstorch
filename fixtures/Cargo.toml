@@ -16,6 +16,13 @@ publish = false
 
 [dependencies]
 rstorch = { path = ".." }
+# `half::f16`/`half::bf16` are public rstorch contract surface: a downstream
+# crate must depend on `half` itself in order to name a reduced-precision typed
+# tensor at all, so depending on it here reproduces the real first-hour user
+# experience. `half` is already an unconditional, non-optional rstorch
+# dependency under the same `2` requirement, so resolution unifies both on one
+# version and there is no skew between the fixture's `f16` and rstorch's.
+half = "2"
 
 [features]
 default = []
