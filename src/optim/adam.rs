@@ -299,6 +299,31 @@ impl Adam {
             state,
             steps,
         } = self;
+        let next_steps = steps.checked_add(1).ok_or_else(|| Error::InvalidArg {
+            op: "step",
+            msg: "Adam global step clock cannot be advanced past u64::MAX".to_string(),
+        })?;
+        let mut exhausted = None;
+        crate::nn::visit::visit_all(model, &mut |path, leaf| {
+            let crate::nn::visit::Leaf::Param(param) = leaf else {
+                return;
+            };
+            if !param.is_frozen()
+                && state
+                    .get(&param.grad_key())
+                    .is_some_and(|entry| entry.clock.checked_add(1).is_none())
+            {
+                exhausted.get_or_insert_with(|| path.to_string());
+            }
+        });
+        if let Some(path) = exhausted {
+            return Err(Error::InvalidArg {
+                op: "step",
+                msg: format!(
+                    "Adam step clock for parameter `{path}` cannot be advanced past u64::MAX"
+                ),
+            });
+        }
         let base_lr = *lr;
         let decoupled = *decoupled;
         engine::apply("step", model, grads, |path, param, grad| {
@@ -312,7 +337,15 @@ impl Adam {
             let grad = grad.to_dtype(acc)?;
 
             let previous = state.get(&param.grad_key());
-            let next_clock = previous.map_or(1, |entry| entry.clock + 1);
+            let next_clock = match previous {
+                Some(entry) => entry.clock.checked_add(1).ok_or_else(|| Error::InvalidArg {
+                    op: "step",
+                    msg: format!(
+                        "Adam step clock for parameter `{path}` cannot be advanced past u64::MAX"
+                    ),
+                })?,
+                None => 1,
+            };
             let (previous_m, previous_v) = match previous {
                 Some(entry) => (entry.m.clone(), entry.v.clone()),
                 None => {
@@ -384,7 +417,7 @@ impl Adam {
             );
             Ok(())
         })?;
-        *steps += 1;
+        *steps = next_steps;
         Ok(())
     }
 
@@ -564,6 +597,33 @@ mod tests {
     fn step(opt: &mut Adam, model: &mut Net) {
         let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
         opt.step(model, loss.backward().unwrap()).unwrap();
+    }
+
+    fn with_clocks(envelope: &Envelope, steps: u64, clocks: u64) -> Envelope {
+        let mut rewritten = Envelope::new();
+        let section = envelope
+            .section("optimizer")
+            .unwrap()
+            .lines()
+            .map(|line| {
+                if line.starts_with("steps=") {
+                    format!("steps={steps}")
+                } else if let Some((key, _)) = line.split_once('=')
+                    && key.starts_with("clock.")
+                {
+                    format!("{key}={clocks}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        rewritten.set_section("optimizer", section).unwrap();
+        for (key, tensor) in envelope.tensors() {
+            rewritten.insert_tensor(key.clone(), tensor.clone());
+        }
+        rewritten
     }
 
     #[test]
@@ -881,6 +941,63 @@ mod tests {
 
         assert_eq!(model.snapshot(), reference_model.snapshot());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn near_max_adam_clocks_preserve_moment_bytes_and_reject_atomically() {
+        let mut model = Net::ones();
+        let mut seeded = Adam::new(0.1);
+        step(&mut seeded, &mut model);
+        let mut saved = Envelope::new();
+        seeded.save_state(&model, &mut saved).unwrap();
+        let near_max = with_clocks(&saved, 0, u64::MAX - 1);
+
+        let mut opt = Adam::new(9.0);
+        opt.load_state(&model, &near_max).unwrap();
+        let mut restored = Envelope::new();
+        opt.save_state(&model, &mut restored).unwrap();
+        assert_eq!(restored, near_max);
+        step(&mut opt, &mut model);
+        assert_eq!(opt.param_steps(&model.trunk.weight), u64::MAX);
+
+        let model_before_rejection = model.snapshot();
+        let mut state_before_rejection = Envelope::new();
+        opt.save_state(&model, &mut state_before_rejection).unwrap();
+        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
+        assert!(matches!(err, Error::InvalidArg { op: "step", .. }), "{err}");
+        assert!(err.to_string().contains("parameter `"), "{err}");
+        assert_eq!(model.snapshot(), model_before_rejection);
+        let mut state_after_rejection = Envelope::new();
+        opt.save_state(&model, &mut state_after_rejection).unwrap();
+        assert_eq!(state_after_rejection, state_before_rejection);
+    }
+
+    #[test]
+    fn exhausted_adam_parameter_clock_names_its_path_before_mutation() {
+        let mut model = Net::ones();
+        let mut opt = Adam::new(0.1);
+        step(&mut opt, &mut model);
+        opt.state
+            .get_mut(&model.trunk.weight.grad_key())
+            .unwrap()
+            .clock = u64::MAX;
+        model.trunk.weight.freeze();
+        step(&mut opt, &mut model);
+        assert_eq!(opt.param_steps(&model.trunk.weight), u64::MAX);
+        model.trunk.weight.unfreeze();
+        let model_before = model.snapshot();
+        let mut state_before = Envelope::new();
+        opt.save_state(&model, &mut state_before).unwrap();
+
+        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
+        assert!(matches!(err, Error::InvalidArg { op: "step", .. }), "{err}");
+        assert!(err.to_string().contains("`trunk.weight`"), "{err}");
+        assert_eq!(model.snapshot(), model_before);
+        let mut state_after = Envelope::new();
+        opt.save_state(&model, &mut state_after).unwrap();
+        assert_eq!(state_after, state_before);
     }
 
     #[test]

@@ -248,6 +248,31 @@ impl Sgd {
             state,
             steps,
         } = self;
+        let next_steps = steps.checked_add(1).ok_or_else(|| Error::InvalidArg {
+            op: "step",
+            msg: "SGD global step clock cannot be advanced past u64::MAX".to_string(),
+        })?;
+        let mut exhausted = None;
+        crate::nn::visit::visit_all(model, &mut |path, leaf| {
+            let crate::nn::visit::Leaf::Param(param) = leaf else {
+                return;
+            };
+            if !param.is_frozen()
+                && state
+                    .get(&param.grad_key())
+                    .is_some_and(|entry| entry.clock.checked_add(1).is_none())
+            {
+                exhausted.get_or_insert_with(|| path.to_string());
+            }
+        });
+        if let Some(path) = exhausted {
+            return Err(Error::InvalidArg {
+                op: "step",
+                msg: format!(
+                    "SGD step clock for parameter `{path}` cannot be advanced past u64::MAX"
+                ),
+            });
+        }
         let base_lr = *lr;
         engine::apply("step", model, grads, |path, param, grad| {
             let hyper = groups.resolve(path);
@@ -256,7 +281,18 @@ impl Sgd {
             let weights = param.value().to_dtype(acc)?;
             let grad = grad.to_dtype(acc)?;
             let previous = state.get(&param.grad_key());
-            let next_clock = previous.map_or(1, |entry| entry.clock + 1);
+            let next_clock = match previous {
+                Some(entry) => entry
+                    .clock
+                    .checked_add(1)
+                    .ok_or_else(|| Error::InvalidArg {
+                        op: "step",
+                        msg: format!(
+                            "SGD step clock for parameter `{path}` cannot be advanced past u64::MAX"
+                        ),
+                    })?,
+                None => 1,
+            };
             let previous_velocity = previous.and_then(|entry| entry.velocity.clone());
             let scalars = [base_lr * hyper.lr_scale, hyper.momentum, hyper.weight_decay];
             let mut inputs = vec![weights.view(), grad.view()];
@@ -321,7 +357,7 @@ impl Sgd {
             );
             Ok(())
         })?;
-        *steps += 1;
+        *steps = next_steps;
         Ok(())
     }
 
@@ -454,6 +490,33 @@ mod tests {
     fn step(opt: &mut Sgd, model: &mut Net) {
         let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
         opt.step(model, loss.backward().unwrap()).unwrap();
+    }
+
+    fn with_clocks(envelope: &Envelope, steps: u64, clocks: u64) -> Envelope {
+        let mut rewritten = Envelope::new();
+        let section = envelope
+            .section("optimizer")
+            .unwrap()
+            .lines()
+            .map(|line| {
+                if line.starts_with("steps=") {
+                    format!("steps={steps}")
+                } else if let Some((key, _)) = line.split_once('=')
+                    && key.starts_with("clock.")
+                {
+                    format!("{key}={clocks}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        rewritten.set_section("optimizer", section).unwrap();
+        for (key, tensor) in envelope.tensors() {
+            rewritten.insert_tensor(key.clone(), tensor.clone());
+        }
+        rewritten
     }
 
     #[test]
@@ -697,6 +760,74 @@ mod tests {
 
         assert_eq!(model.snapshot(), reference_model.snapshot());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn max_loaded_clock_rejection_does_not_replace_sgd_state() {
+        let mut model = Net::ones();
+        let mut opt = Sgd::new(0.1).momentum(0.9);
+        step(&mut opt, &mut model);
+        let mut before = Envelope::new();
+        opt.save_state(&model, &mut before).unwrap();
+        let hostile = with_clocks(&before, u64::MAX, 1);
+        let model_before = model.snapshot();
+
+        let err = opt.load_state(&model, &hostile).unwrap_err();
+        assert!(matches!(err, Error::Persistence { .. }), "{err}");
+        assert!(err.to_string().contains("`steps`"), "{err}");
+
+        let mut after = Envelope::new();
+        opt.save_state(&model, &mut after).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(model.snapshot(), model_before);
+    }
+
+    #[test]
+    fn near_max_sgd_clocks_advance_once_then_reject_without_mutation() {
+        let mut model = Net::ones();
+        let mut seeded = Sgd::new(0.1).momentum(0.9);
+        step(&mut seeded, &mut model);
+        let mut saved = Envelope::new();
+        seeded.save_state(&model, &mut saved).unwrap();
+        let near_max = with_clocks(&saved, 0, u64::MAX - 1);
+
+        let mut opt = Sgd::new(9.0);
+        opt.load_state(&model, &near_max).unwrap();
+        assert_eq!(opt.param_steps(&model.trunk.weight), u64::MAX - 1);
+        step(&mut opt, &mut model);
+        assert_eq!(opt.param_steps(&model.trunk.weight), u64::MAX);
+
+        let model_before_rejection = model.snapshot();
+        let mut state_before_rejection = Envelope::new();
+        opt.save_state(&model, &mut state_before_rejection).unwrap();
+        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
+        assert!(matches!(err, Error::InvalidArg { op: "step", .. }), "{err}");
+        assert!(err.to_string().contains("parameter `"), "{err}");
+        assert_eq!(model.snapshot(), model_before_rejection);
+        let mut state_after_rejection = Envelope::new();
+        opt.save_state(&model, &mut state_after_rejection).unwrap();
+        assert_eq!(state_after_rejection, state_before_rejection);
+    }
+
+    #[test]
+    fn exhausted_sgd_global_clock_is_a_structured_error_before_mutation() {
+        let mut model = Net::ones();
+        let mut opt = Sgd::new(0.1).momentum(0.9);
+        step(&mut opt, &mut model);
+        opt.steps = u64::MAX;
+        let model_before = model.snapshot();
+        let mut state_before = Envelope::new();
+        opt.save_state(&model, &mut state_before).unwrap();
+
+        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
+        assert!(matches!(err, Error::InvalidArg { op: "step", .. }), "{err}");
+        assert!(err.to_string().contains("SGD global step clock"), "{err}");
+        assert_eq!(model.snapshot(), model_before);
+        let mut state_after = Envelope::new();
+        opt.save_state(&model, &mut state_after).unwrap();
+        assert_eq!(state_after, state_before);
     }
 
     #[test]

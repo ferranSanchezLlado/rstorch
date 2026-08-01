@@ -200,11 +200,27 @@ pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
         } else if key == "kind" {
             found_kind = Some(value.to_string());
         } else if key == "steps" {
-            steps = Some(number::<u64>(key, value)?);
+            let value = number::<u64>(key, value)?;
+            if value == u64::MAX {
+                return Err(Error::Persistence {
+                    msg: format!(
+                        "optimizer state `steps` is {value}, which cannot be advanced safely"
+                    ),
+                });
+            }
+            steps = Some(value);
         } else if let Some(name) = key.strip_prefix("hyper.") {
             hypers.insert(name.to_string(), number::<f64>(key, value)?);
         } else if let Some(path) = key.strip_prefix("clock.") {
-            clocks.insert(path.to_string(), number::<u64>(key, value)?);
+            let value = number::<u64>(key, value)?;
+            if value == u64::MAX {
+                return Err(Error::Persistence {
+                    msg: format!(
+                        "optimizer state `clock.{path}` is {value}, which cannot be advanced safely"
+                    ),
+                });
+            }
+            clocks.insert(path.to_string(), value);
         } else {
             return Err(Error::Persistence {
                 msg: format!("unknown optimizer state key `{key}`"),
@@ -493,6 +509,40 @@ mod tests {
             let msg = load(&with_section(text), "sgd").unwrap_err().to_string();
             assert!(msg.contains(expected), "{label}: {msg}");
         }
+    }
+
+    #[test]
+    fn exhausted_loaded_clocks_are_rejected_by_field_name() {
+        let max = u64::MAX;
+        for (label, text, expected) in [
+            (
+                "global clock",
+                format!("version=1\nkind=sgd\nsteps={max}\n"),
+                "`steps`",
+            ),
+            (
+                "parameter clock",
+                format!("version=1\nkind=sgd\nsteps=1\nclock.fc.weight={max}\n"),
+                "`clock.fc.weight`",
+            ),
+        ] {
+            let err = load(&with_section(&text), "sgd").unwrap_err();
+            assert!(matches!(err, Error::Persistence { .. }), "{label}: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains(expected), "{label}: {msg}");
+            assert!(msg.contains("cannot be advanced safely"), "{label}: {msg}");
+        }
+    }
+
+    #[test]
+    fn near_max_loaded_clocks_preserve_their_exact_values() {
+        let near_max = u64::MAX - 1;
+        let text = format!(
+            "version=1\nkind=sgd\nsteps={near_max}\nhyper.lr=0.1\nclock.fc.weight={near_max}\n"
+        );
+        let incoming = load(&with_section(&text), "sgd").unwrap();
+        assert_eq!(incoming.steps(), near_max);
+        assert_eq!(incoming.params()["fc.weight"].clock, near_max);
     }
 
     #[test]
