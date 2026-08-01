@@ -4,7 +4,16 @@ error[E0277]: the trait bound `TypedParam<Tensor1<2>>: rstorch::typed::nn::Modul
 7  | #[derive(TypedModule)]
    |          ^^^^^^^^^^^ the trait `rstorch::typed::nn::Module` is not implemented for `TypedParam<Tensor1<2>>`
    |
-   = help: the trait `rstorch::typed::nn::Module` is implemented for `Net`
+   = help: the following other types implement trait `rstorch::typed::nn::Module`:
+             Net
+             rstorch::typed::nn::BatchNorm2d<C, E, P>
+             rstorch::typed::nn::Dropout
+             rstorch::typed::nn::Embedding<VOCAB, WIDTH, E, P>
+             rstorch::typed::nn::Gelu
+             rstorch::typed::nn::LayerNorm<S>
+             rstorch::typed::nn::Linear<IN, OUT, E, P>
+             rstorch::typed::nn::MultiHeadAttention<EMBED, HEADS, E, P>
+           and 2 others
 note: required by a bound in `rstorch::typed::nn::visit::<impl TypedVisitor<'a>>::module`
   --> $WORKSPACE/src/typed/nn/visit.rs:58:22
    |
@@ -18,7 +27,16 @@ error[E0277]: the trait bound `TypedParam<Tensor1<2>>: rstorch::typed::nn::Modul
 7   | #[derive(TypedModule)]
     |          ^^^^^^^^^^^ the trait `rstorch::typed::nn::Module` is not implemented for `TypedParam<Tensor1<2>>`
     |
-    = help: the trait `rstorch::typed::nn::Module` is implemented for `Net`
+    = help: the following other types implement trait `rstorch::typed::nn::Module`:
+              Net
+              rstorch::typed::nn::BatchNorm2d<C, E, P>
+              rstorch::typed::nn::Dropout
+              rstorch::typed::nn::Embedding<VOCAB, WIDTH, E, P>
+              rstorch::typed::nn::Gelu
+              rstorch::typed::nn::LayerNorm<S>
+              rstorch::typed::nn::Linear<IN, OUT, E, P>
+              rstorch::typed::nn::MultiHeadAttention<EMBED, HEADS, E, P>
+            and 2 others
 note: required by a bound in `rstorch::typed::nn::visit::<impl TypedVisitorMut<'a>>::module`
    --> $WORKSPACE/src/typed/nn/visit.rs:111:22
     |
