@@ -149,9 +149,9 @@ jobs:
           cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features hub,rayon > /tmp/dynamic-portable.txt
           diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-portable.txt /tmp/dynamic-portable.txt
           cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features typed > /tmp/typed.txt
-          diff -u docs/restart-v3/m3-baselines/public-api-typed.txt /tmp/typed.txt
+          diff -u docs/restart-v3/m4-baselines/public-api-typed.txt /tmp/typed.txt
           cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features typed,hub,rayon > /tmp/typed-portable.txt
-          diff -u docs/restart-v3/m3-baselines/public-api-typed-portable.txt /tmp/typed-portable.txt
+          diff -u docs/restart-v3/m4-baselines/public-api-typed-portable.txt /tmp/typed-portable.txt
 
   metal-training-macos:
     name: Metal training execution (macOS runner)
@@ -185,7 +185,7 @@ jobs:
           cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features hub,rayon,metal > /tmp/dynamic-macos.txt
           diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-macos-all-runtime.txt /tmp/dynamic-macos.txt
           cargo +nightly-2026-06-15 public-api -p rstorch --simplified --all-features > /tmp/typed-macos.txt
-          diff -u docs/restart-v3/m3-baselines/public-api-typed-macos-all-features.txt /tmp/typed-macos.txt
+          diff -u docs/restart-v3/m4-baselines/public-api-typed-macos-all-features.txt /tmp/typed-macos.txt
 
   ct20-macos-boundary:
     name: CT20 wrong-device boundary (macOS)

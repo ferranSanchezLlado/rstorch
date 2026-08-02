@@ -149,6 +149,11 @@
 //! Typed neural-network items are namespace-only under `rstorch::typed::nn`
 //! until CT53 decides the final default/import policy. CT40 and CT41 add
 //! nothing to [`crate::typed::prelude`].
+//!
+//! The [`TypedModule`] derive is re-exported here for the same reason, so a
+//! crate depending only on `rstorch` reaches it as
+//! `rstorch::typed::nn::TypedModule` and never needs a second direct
+//! dependency on `rstorch_derive`.
 
 use super::{DeviceBinding, DeviceCtx, FloatElement, Placement, TypedTensor};
 use crate::{DType, Element, Result, Tensor};
@@ -158,6 +163,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 pub use crate::nn::Mode;
+
+/// Derive an implementation of [`Module`] — see the [`rstorch_derive`] crate
+/// docs for the typed field-classification rule and `#[typed_module(skip)]`.
+pub use rstorch_derive::TypedModule;
 
 mod activation;
 mod attention;
