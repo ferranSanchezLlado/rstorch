@@ -41,6 +41,43 @@
 //! `Tensor`) — do not alias them. This is intentional: a silent
 //! misclassification of a parameter as a non-visited field is precisely what
 //! the loud rule exists to prevent.
+//!
+//! # `#[derive(TypedModule)]`
+//!
+//! Generates both walks of the `rstorch::typed::nn::Module` trait for a
+//! `struct`. Classification is again a syntactic token match, but the table
+//! differs from the dynamic derive in one way that bites immediately:
+//! **there is no primitive whitelist.**
+//!
+//! | field type (as written) | emitted call |
+//! |---|---|
+//! | `TypedParam<T>` | `v.param("name", &self.name)` |
+//! | `Option<TypedParam<T>>` | `if let Some(p) = … { v.param("name", p) }` |
+//! | `TypedBuffer<T>` | `v.buffer("name", &self.name)` |
+//! | `Option<TypedBuffer<T>>` | `if let Some(b) = … { v.buffer("name", b) }` |
+//! | `Vec<M>` | `v.module("name.0", …)`, `…("name.1", …)`, … (indexed) |
+//! | `Option<M>` | `if let Some(m) = … { v.module("name", m) }` |
+//! | `#[typed_module(skip)]` on an opaque direct field | skipped |
+//! | **anything else** | `v.module("name", &self.name)` — child module |
+//!
+//! ## Differences from `#[derive(Module)]`
+//!
+//! - **No primitive whitelist.** `hidden: usize` is skipped by the dynamic
+//!   derive but is a child module to this one, so it fails with
+//!   `usize: Module is not satisfied`. Configuration fields need an explicit
+//!   `#[typed_module(skip)]`.
+//! - **`skip` is classified first, then rejected.** It cannot exclude a
+//!   `TypedParam`, a `TypedBuffer`, or an `Option`/`Vec` container, because a
+//!   container may hold module state. A plain configuration value therefore
+//!   has no directly skippable spelling when it is written as `Vec<T>` or
+//!   `Option<T>`: wrap it in a newtype (`struct Config(Vec<usize>)`) and skip
+//!   that, or hand-write `impl Module`.
+//! - **The helper attribute is field-only.** A struct-level
+//!   `#[typed_module(...)]` is a compile error rather than being silently
+//!   ignored.
+//!
+//! Type aliases defeat classification here too, and for the same reason: an
+//! alias for `TypedParam<T>` is treated as a child module.
 
 mod module;
 mod typed_module;
@@ -52,7 +89,7 @@ use proc_macro::TokenStream;
 /// See the [crate docs](crate) for the full field-classification table and
 /// the loud-by-default rule. Named-field, tuple, and unit `struct`s are all
 /// supported — a unit struct derives an empty walk, which is what a stateless
-/// layer such as [`rstorch::nn::Relu`] wants. `enum`s and `union`s are a
+/// layer such as `rstorch::nn::Relu` wants. `enum`s and `union`s are a
 /// compile error, because a module's field set must be statically known for
 /// every parameter to be visited.
 ///

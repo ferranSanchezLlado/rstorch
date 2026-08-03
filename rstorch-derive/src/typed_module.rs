@@ -140,13 +140,21 @@ fn classify(field: &syn::Field) -> Result<FieldKind> {
             field,
             "#[typed_module(skip)] cannot exclude a TypedBuffer field; every typed buffer must be visited",
         )),
+        // A proc macro sees only tokens, so it cannot tell `Option<Config>`
+        // from `Option<Linear<2, 2>>`; refusing to skip either is what keeps a
+        // child module from going unvisited. Name the escape hatch, because
+        // otherwise a plain configuration field such as `Option<String>` has
+        // no spelling that compiles: skipping is this error, and not skipping
+        // is a `Module` bound error on the inner type.
         FieldKind::OptionModule => Err(Error::new_spanned(
             field,
-            "#[typed_module(skip)] cannot exclude an Option field because it may contain a typed child module",
+            "#[typed_module(skip)] cannot exclude an Option field because it may contain a typed child module; \
+             wrap the value in a skippable newtype (`struct Config(Option<T>)`) or hand-write `impl Module`",
         )),
         FieldKind::VecModule => Err(Error::new_spanned(
             field,
-            "#[typed_module(skip)] cannot exclude a Vec field because it may contain typed child modules",
+            "#[typed_module(skip)] cannot exclude a Vec field because it may contain typed child modules; \
+             wrap the value in a skippable newtype (`struct Config(Vec<T>)`) or hand-write `impl Module`",
         )),
         // The proc macro cannot ask rustc whether an opaque type implements
         // Module. This is the explicit configuration escape hatch; applying it

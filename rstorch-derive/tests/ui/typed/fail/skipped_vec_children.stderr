@@ -1,4 +1,4 @@
-error: #[typed_module(skip)] cannot exclude a Vec field because it may contain typed child modules
+error: #[typed_module(skip)] cannot exclude a Vec field because it may contain typed child modules; wrap the value in a skippable newtype (`struct Config(Vec<T>)`) or hand-write `impl Module`
  --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/skipped_vec_children.rs:7:5
   |
 7 | /     #[typed_module(skip)]

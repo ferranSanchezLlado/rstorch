@@ -164,8 +164,13 @@ use std::sync::Arc;
 
 pub use crate::nn::Mode;
 
-/// Derive an implementation of [`Module`] — see the [`rstorch_derive`] crate
-/// docs for the typed field-classification rule and `#[typed_module(skip)]`.
+/// Derive an implementation of [`Module`].
+///
+/// See the `#[derive(TypedModule)]` section of the [`rstorch_derive`] crate
+/// docs for the field-classification table, `#[typed_module(skip)]`, and the
+/// three ways this derive deliberately differs from `#[derive(Module)]` — most
+/// importantly that it has no primitive whitelist, so a configuration field
+/// needs an explicit skip.
 pub use rstorch_derive::TypedModule;
 
 mod activation;
