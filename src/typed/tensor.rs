@@ -6,6 +6,24 @@ use super::{DYN, DeviceBinding, DeviceCtx, Placement, TypedTensor, typed_rank_ta
 use crate::{Element, Error, Result, Shape, Tensor};
 use std::sync::Arc;
 
+/// Builds the shape a typed target actually requires, for a `ShapeMismatch`
+/// payload.
+///
+/// Every static marker is substituted and every `DYN` marker keeps the observed
+/// dimension, so the reported shape is one the target would accept. Reporting
+/// only the *first* contradicting axis — leaving the others at their observed
+/// values — names a shape the target also rejects, which sends a reader looking
+/// in the wrong place when two or more axes disagree.
+fn required_shape(markers: &[usize], actual: &[usize]) -> Shape {
+    Shape::from(
+        markers
+            .iter()
+            .zip(actual)
+            .map(|(&marker, &observed)| if marker == DYN { observed } else { marker })
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn validate<T: TypedTensor>(
     tensor: &Tensor,
     binding: &Arc<DeviceBinding>,
@@ -19,18 +37,12 @@ fn validate<T: TypedTensor>(
         });
     }
 
-    for (axis, (&marker, &actual)) in <T as SealedTypedTensor>::MARKERS
-        .iter()
-        .zip(tensor.dims())
-        .enumerate()
-    {
+    for (&marker, &actual) in <T as SealedTypedTensor>::MARKERS.iter().zip(tensor.dims()) {
         if marker != DYN && marker != actual {
-            let mut expected = tensor.dims().to_vec();
-            expected[axis] = marker;
             return Err(Error::ShapeMismatch {
                 op,
                 lhs: tensor.shape().clone(),
-                rhs: Shape::from(expected),
+                rhs: required_shape(<T as SealedTypedTensor>::MARKERS, tensor.dims()),
             });
         }
     }
@@ -76,6 +88,9 @@ macro_rules! impl_tensor_boundary {
                     ctx: &DeviceCtx<P>,
                 ) -> Result<Self> {
                     validate_binding::<P>(ctx.binding(), "from_vec")?;
+                    // Deliberately checked before `Tensor::from_vec` allocates,
+                    // and reported against the requested `dims` — the runtime's
+                    // own error would describe `lhs` as the flat data length.
                     for (&marker, &actual) in
                         <Self as SealedTypedTensor>::MARKERS.iter().zip(&dims)
                     {
@@ -83,12 +98,9 @@ macro_rules! impl_tensor_boundary {
                             return Err(Error::ShapeMismatch {
                                 op: "from_vec",
                                 lhs: Shape::from(dims.to_vec()),
-                                rhs: Shape::from(
-                                    <Self as SealedTypedTensor>::MARKERS
-                                        .iter()
-                                        .zip(&dims)
-                                        .map(|(&m, &d)| if m == DYN { d } else { m })
-                                        .collect::<Vec<_>>(),
+                                rhs: required_shape(
+                                    <Self as SealedTypedTensor>::MARKERS,
+                                    &dims,
                                 ),
                             });
                         }

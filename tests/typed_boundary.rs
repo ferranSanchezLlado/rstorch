@@ -71,6 +71,47 @@ fn zero_is_a_static_dimension_and_empty_data_is_valid() {
     ));
 }
 
+/// Both entry points must report the shape the target actually requires, and
+/// must agree with each other for the identical failure. The payload is pinned
+/// exactly: reporting only the first contradicting axis names a shape the
+/// target also rejects, which is a misleading diagnostic rather than a wrong
+/// result, and no `..` matcher can catch it.
+#[test]
+fn shape_mismatch_reports_the_required_shape_on_every_axis() {
+    let ctx = cpu();
+
+    // Two axes contradict their markers at once.
+    let both_wrong = Tensor::zeros([2, 5], DType::F32, &Device::Cpu).unwrap();
+    match Tensor2::<4, 3>::try_from_dynamic(both_wrong, &ctx) {
+        Err(Error::ShapeMismatch { op, lhs, rhs }) => {
+            assert_eq!(op, "try_from_dynamic");
+            assert_eq!(lhs.dims(), [2, 5], "lhs is the observed shape");
+            assert_eq!(rhs.dims(), [4, 3], "rhs must be a shape the target accepts");
+        }
+        other => panic!("expected ShapeMismatch, got {other:?}"),
+    }
+
+    // `from_vec` reports the same required shape for the same contradiction,
+    // and describes `lhs` as the requested dims rather than the data length.
+    match Tensor2::<4, 3>::from_vec(vec![0.0f32; 10], [2, 5], &ctx) {
+        Err(Error::ShapeMismatch { op, lhs, rhs }) => {
+            assert_eq!(op, "from_vec");
+            assert_eq!(lhs.dims(), [2, 5], "lhs is the requested dims");
+            assert_eq!(rhs.dims(), [4, 3]);
+        }
+        other => panic!("expected ShapeMismatch, got {other:?}"),
+    }
+
+    // A `DYN` marker keeps the observed dimension in the required shape.
+    let one_wrong = Tensor::zeros([2, 5], DType::F32, &Device::Cpu).unwrap();
+    match Tensor2::<DYN, 3>::try_from_dynamic(one_wrong, &ctx) {
+        Err(Error::ShapeMismatch { rhs, .. }) => {
+            assert_eq!(rhs.dims(), [2, 3], "DYN axis keeps the observed 2");
+        }
+        other => panic!("expected ShapeMismatch, got {other:?}"),
+    }
+}
+
 #[test]
 fn dynamic_reentry_rejects_rank_static_dimension_and_dtype() {
     let ctx = cpu();
