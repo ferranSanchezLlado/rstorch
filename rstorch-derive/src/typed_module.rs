@@ -16,6 +16,10 @@ enum FieldKind {
     Module,
 }
 
+/// The helper attribute's name, shared by the struct-level rejection and the
+/// per-field parser so the two cannot drift apart.
+const ATTR: &str = "typed_module";
+
 pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
     let fields = match &input.data {
         Data::Struct(data) => &data.fields,
@@ -32,6 +36,18 @@ pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
             ));
         }
     };
+
+    // The helper attribute is only meaningful on a field. Registering it puts
+    // `#[typed_module(...)]` in scope on the struct too, where rustc accepts it
+    // silently — so a misplaced or misspelled attribute would otherwise be
+    // ignored rather than reported, exactly the silence this derive exists to
+    // avoid.
+    if let Some(attr) = input.attrs.iter().find(|a| a.path().is_ident(ATTR)) {
+        return Err(Error::new_spanned(
+            attr,
+            "#[typed_module(...)] applies to a field, not to the struct; remove it or move it onto the field it should govern",
+        ));
+    }
 
     let mut visit_calls = Vec::new();
     let mut visit_mut_calls = Vec::new();
@@ -194,7 +210,7 @@ fn inner_of_angle(segment: &syn::PathSegment) -> Option<&Type> {
 fn has_skip_attr(field: &syn::Field) -> Result<bool> {
     let mut skip = false;
     for attr in &field.attrs {
-        if !attr.path().is_ident("typed_module") {
+        if !attr.path().is_ident(ATTR) {
             continue;
         }
         attr.parse_nested_meta(|meta| {

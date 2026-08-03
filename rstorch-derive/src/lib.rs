@@ -50,8 +50,11 @@ use proc_macro::TokenStream;
 /// Derive the `rstorch::nn::Module` trait for a `struct`.
 ///
 /// See the [crate docs](crate) for the full field-classification table and
-/// the loud-by-default rule. Only named-field and tuple `struct`s are
-/// supported; unit structs, `enum`s, and `union`s are a compile error.
+/// the loud-by-default rule. Named-field, tuple, and unit `struct`s are all
+/// supported — a unit struct derives an empty walk, which is what a stateless
+/// layer such as [`rstorch::nn::Relu`] wants. `enum`s and `union`s are a
+/// compile error, because a module's field set must be statically known for
+/// every parameter to be visited.
 ///
 /// # Attributes
 ///

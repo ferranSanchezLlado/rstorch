@@ -1,0 +1,7 @@
+error: #[typed_module(...)] applies to a field, not to the struct; remove it or move it onto the field it should govern
+ --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/struct_level_attribute.rs:8:1
+  |
+8 | #[typed_module(skip)]
+  | ^^^^^^^^^^^^^^^^^^^^^
+
+error: could not compile `rstorch-typed-derive-ui-struct-level-attribute` (bin "case") due to 1 previous error
