@@ -129,6 +129,31 @@ mod tests {
     }
 
     #[test]
+    fn reported_probability_and_debug_come_from_the_owned_runtime_layer() {
+        let (typed, runtime) = pair(3);
+        assert_eq!(typed.p(), 0.5);
+        assert_eq!(typed.p(), runtime.p());
+        assert_eq!(format!("{typed:?}"), format!("{runtime:?}"));
+
+        // The probability survives the identity-preserving conversions, which
+        // must move the runtime layer rather than rebuild it.
+        let typed = Dropout::new(0.25, &mut Rng::seed(3)).unwrap();
+        let moved = ToDevice::to_device(typed, &DeviceCtx::cpu().unwrap()).unwrap();
+        let cast = <Dropout as ToDType<half::f16>>::to_dtype(moved).unwrap();
+        assert_eq!(cast.p(), 0.25);
+
+        // Rejections are the runtime layer's, verbatim.
+        for p in [1.0, -0.1, f64::NAN] {
+            let typed = Dropout::new(p, &mut Rng::seed(3));
+            let runtime = crate::nn::Dropout::new(p, &mut Rng::seed(3));
+            assert_eq!(
+                typed.err().map(|error| error.to_string()),
+                runtime.err().map(|error| error.to_string())
+            );
+        }
+    }
+
+    #[test]
     fn traced_input_keeps_runtime_mask_gradients() {
         let ctx = DeviceCtx::cpu().unwrap();
         let input = Tensor2::<1, 16>::from_vec(vec![1.0f32; 16], [1, 16], &ctx)

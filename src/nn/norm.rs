@@ -373,7 +373,7 @@ pub(crate) fn batch_norm2d_forward(
 }
 
 /// Validate a `weight`-shaped normalization spec at construction time.
-fn check_normalized_shape(op: &'static str, shape: &Shape) -> Result<()> {
+pub(crate) fn check_normalized_shape(op: &'static str, shape: &Shape) -> Result<()> {
     if shape.rank() == 0 || shape.dims().contains(&0) {
         return Err(Error::InvalidArg {
             op,
@@ -386,7 +386,7 @@ fn check_normalized_shape(op: &'static str, shape: &Shape) -> Result<()> {
 }
 
 /// Validate `eps`, which is added to a variance and square-rooted.
-fn check_eps(op: &'static str, eps: f64) -> Result<()> {
+pub(crate) fn check_eps(op: &'static str, eps: f64) -> Result<()> {
     if !(eps.is_finite() && eps > 0.0) {
         return Err(Error::InvalidArg {
             op,
@@ -397,7 +397,7 @@ fn check_eps(op: &'static str, eps: f64) -> Result<()> {
 }
 
 /// The trailing-axes rule shared by [`LayerNorm`] and [`RMSNorm`].
-fn check_suffix(op: &'static str, x: &Tensor, normalized: &Shape) -> Result<()> {
+pub(crate) fn check_suffix(op: &'static str, x: &Tensor, normalized: &Shape) -> Result<()> {
     let (xd, nd) = (x.dims(), normalized.dims());
     if xd.len() < nd.len() || &xd[xd.len() - nd.len()..] != nd {
         return Err(Error::ShapeMismatch {

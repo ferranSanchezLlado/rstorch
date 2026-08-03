@@ -9,6 +9,7 @@ use super::{
     Forward, Mode, Module, ToDType, ToDevice, TypedBuffer, TypedParam, TypedVisitor,
     TypedVisitorMut,
 };
+use crate::nn::{check_eps, check_normalized_shape, check_suffix};
 use crate::typed::device::validate_binding;
 use crate::typed::ops::{WithElement, WithPlacement};
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
@@ -42,31 +43,6 @@ const fn assert_channels(input: usize, channels: usize) {
     );
 }
 
-fn check_eps(op: &'static str, eps: f64) -> Result<()> {
-    if eps.is_finite() && eps > 0.0 {
-        Ok(())
-    } else {
-        Err(Error::InvalidArg {
-            op,
-            msg: format!("eps must be finite and positive, got {eps}"),
-        })
-    }
-}
-
-fn check_suffix(op: &'static str, input: &Tensor, suffix: &Tensor) -> Result<()> {
-    let (input_dims, suffix_dims) = (input.dims(), suffix.dims());
-    if input_dims.len() < suffix_dims.len()
-        || &input_dims[input_dims.len() - suffix_dims.len()..] != suffix_dims
-    {
-        return Err(Error::ShapeMismatch {
-            op,
-            lhs: input.shape().clone(),
-            rhs: suffix.shape().clone(),
-        });
-    }
-    Ok(())
-}
-
 fn check_channels(op: &'static str, input: &Tensor, channels: usize, leaf: &Tensor) -> Result<()> {
     if leaf.dims1()? != channels {
         return Err(Error::ShapeMismatch {
@@ -90,14 +66,7 @@ where
 {
     validate_binding::<S::Placement>(ctx.binding(), op)?;
     let shape = shape.into();
-    if shape.rank() == 0 || shape.dims().contains(&0) {
-        return Err(Error::InvalidArg {
-            op,
-            msg: format!(
-                "normalized_shape must have rank >= 1 with every axis non-empty, got {shape}"
-            ),
-        });
-    }
+    check_normalized_shape(op, &shape)?;
     let tensor = Tensor::full(shape, value, S::Elem::DTYPE, &ctx.device())?;
     checked_wrap(tensor, Arc::clone(ctx.binding()), op)
 }
@@ -197,8 +166,14 @@ where
         validate_binding::<I::Placement>(input.binding(), "LayerNorm::forward")?;
         let weight = self.weight.get(mode)?;
         let bias = self.bias.get(mode)?;
-        check_suffix("LayerNorm::forward", input.dynamic(), weight.dynamic())?;
-        check_suffix("LayerNorm::forward", input.dynamic(), bias.dynamic())?;
+        // `layer_norm_forward` checks the weight's suffix itself with this
+        // exact op and payload; the bias's is the one relation it does not
+        // check, and without this the rejection would name `fused_layer_norm`.
+        check_suffix(
+            "LayerNorm::forward",
+            input.dynamic(),
+            bias.dynamic().shape(),
+        )?;
         checked_wrap(
             crate::nn::layer_norm_forward(
                 input.dynamic(),
@@ -341,7 +316,7 @@ where
         };
         validate_binding::<I::Placement>(input.binding(), "RMSNorm::forward")?;
         let weight = self.weight.get(mode)?;
-        check_suffix("RMSNorm::forward", input.dynamic(), weight.dynamic())?;
+        // `rms_norm_forward` checks the suffix itself, with this op and payload.
         checked_wrap(
             crate::nn::rms_norm_forward(input.dynamic(), weight.dynamic(), self.eps)?,
             Arc::clone(input.binding()),
@@ -617,6 +592,17 @@ mod tests {
     impl<T> Same<T> for T {}
     fn exact<T: Same<U>, U>(_: &T) {}
 
+    /// The rendered message of an expected rejection. The typed layers are
+    /// deliberately not `Debug` (their parameter values are reached through
+    /// `state_dict`), so `unwrap_err` is unavailable on their constructors.
+    #[track_caller]
+    fn rejection<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected a rejection"),
+            Err(error) => error.to_string(),
+        }
+    }
+
     #[test]
     fn layer_and_rms_are_shape_preserving_and_match_runtime_values() {
         let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
@@ -634,6 +620,122 @@ mod tests {
         let mut runtime = crate::nn::RMSNorm::new([4], &ctx.device()).unwrap();
         let expected = RuntimeForward::forward(&mut runtime, input.dynamic(), Mode::EVAL).unwrap();
         assert_eq!(output.to_vec().unwrap(), expected.to_vec::<f32>().unwrap());
+    }
+
+    /// Every constructor rejection, with the exact message — the typed layers
+    /// route these through the runtime's own validators, so a reworded runtime
+    /// message cannot drift away from the typed layer's silently.
+    #[test]
+    fn constructor_rejections_and_reported_configuration_match_the_runtime_rules() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+
+        for eps in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let expected = format!("invalid argument: eps must be finite and positive, got {eps}");
+            assert_eq!(
+                rejection(LayerNorm::<Tensor1<4>>::with_eps([4], eps, &ctx)),
+                format!("LayerNorm::new: {expected}")
+            );
+            assert_eq!(
+                rejection(RMSNorm::<Tensor1<4>>::with_eps([4], eps, &ctx)),
+                format!("RMSNorm::new: {expected}")
+            );
+            assert_eq!(
+                rejection(BatchNorm2d::<2>::with_params(2, eps, 0.1, &ctx)),
+                format!("BatchNorm2d::new: {expected}")
+            );
+            // The same rule as spelled by the runtime layer, verbatim.
+            assert_eq!(
+                rejection(crate::nn::LayerNorm::with_eps([4], eps, &ctx.device())),
+                format!("LayerNorm::new: {expected}")
+            );
+        }
+
+        for momentum in [1.5, -0.1, f64::NAN] {
+            assert_eq!(
+                rejection(BatchNorm2d::<2>::with_params(2, 1e-5, momentum, &ctx)),
+                format!(
+                    "BatchNorm2d::new: invalid argument: momentum must lie in [0, 1], \
+                     got {momentum}"
+                )
+            );
+        }
+        assert!(BatchNorm2d::<2>::with_params(2, 1e-5, 0.0, &ctx).is_ok());
+        assert!(BatchNorm2d::<2>::with_params(2, 1e-5, 1.0, &ctx).is_ok());
+        for channels in [0, 3] {
+            assert_eq!(
+                rejection(BatchNorm2d::<2>::new(channels, &ctx)),
+                format!(
+                    "BatchNorm2d::new: invalid argument: channels must be non-zero and \
+                     satisfy marker 2, got {channels}"
+                )
+            );
+        }
+
+        // A `normalized_shape` contradicting a static marker is a wrap failure;
+        // a degenerate one is the runtime's `check_normalized_shape` rule, so it
+        // must be reported exactly as the runtime layer reports it.
+        assert_eq!(
+            rejection(LayerNorm::<Tensor1<4>>::new([5], &ctx)),
+            "LayerNorm::new: shape mismatch: lhs [5] vs rhs [4]"
+        );
+        for shape in [vec![], vec![0], vec![2, 0]] {
+            let message = rejection(LayerNorm::<Tensor1<DYN>>::new(shape.clone(), &ctx));
+            assert_eq!(
+                message,
+                rejection(crate::nn::LayerNorm::new(shape.clone(), &ctx.device())),
+                "typed and runtime disagree for {shape:?}"
+            );
+            assert!(
+                message.starts_with(
+                    "LayerNorm::new: invalid argument: normalized_shape must have rank >= 1"
+                ),
+                "{message}"
+            );
+        }
+
+        // The accessors report the configuration actually installed, and the
+        // typed defaults are the runtime defaults.
+        assert_eq!(
+            LayerNorm::<Tensor1<4>>::with_eps([4], 1e-3, &ctx)
+                .unwrap()
+                .eps(),
+            1e-3
+        );
+        assert_eq!(LayerNorm::<Tensor1<4>>::new([4], &ctx).unwrap().eps(), 1e-5);
+        assert_eq!(
+            LayerNorm::<Tensor1<4>>::DEFAULT_EPS,
+            crate::nn::LayerNorm::DEFAULT_EPS
+        );
+
+        assert_eq!(
+            RMSNorm::<Tensor1<4>>::with_eps([4], 1e-2, &ctx)
+                .unwrap()
+                .eps(),
+            1e-2
+        );
+        assert_eq!(RMSNorm::<Tensor1<4>>::new([4], &ctx).unwrap().eps(), 1e-6);
+        assert_eq!(
+            RMSNorm::<Tensor1<4>>::DEFAULT_EPS,
+            crate::nn::RMSNorm::DEFAULT_EPS
+        );
+
+        let dynamic = BatchNorm2d::<DYN>::with_params(3, 1e-4, 0.25, &ctx).unwrap();
+        assert_eq!(
+            (dynamic.channels(), dynamic.eps(), dynamic.momentum()),
+            (3, 1e-4, 0.25)
+        );
+        let bn = BatchNorm2d::<2>::new(2, &ctx).unwrap();
+        assert_eq!((bn.channels(), bn.eps(), bn.momentum()), (2, 1e-5, 0.1));
+        assert_eq!(
+            (
+                BatchNorm2d::<2>::DEFAULT_EPS,
+                BatchNorm2d::<2>::DEFAULT_MOMENTUM
+            ),
+            (
+                crate::nn::BatchNorm2d::DEFAULT_EPS,
+                crate::nn::BatchNorm2d::DEFAULT_MOMENTUM
+            )
+        );
     }
 
     #[test]
@@ -668,18 +770,23 @@ mod tests {
         let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
         let row = Tensor2::<1, DYN>::from_vec(vec![1.0, 2.0], [1, 2], &ctx).unwrap();
 
+        // Both rejections must name `LayerNorm::forward` rather than a fused or
+        // composed internal: the message is the whole payload, and a bare
+        // `ShapeMismatch { .. }` match would pass either way — including with
+        // the bias guard deleted, since the delegate then reports
+        // `fused_layer_norm`.
         let mut layer = LayerNorm::<Tensor1<DYN>>::new([2], &ctx).unwrap();
         layer.weight = TypedParam::new(dyn_vector(&[1.0, 1.0, 1.0], &ctx)).unwrap();
-        assert!(matches!(
-            layer.forward(&row, Mode::TRAIN),
-            Err(Error::ShapeMismatch { .. })
-        ));
+        assert_eq!(
+            layer.forward(&row, Mode::TRAIN).unwrap_err().to_string(),
+            "LayerNorm::forward: shape mismatch: lhs [1, 2] vs rhs [3]"
+        );
         let mut layer = LayerNorm::<Tensor1<DYN>>::new([2], &ctx).unwrap();
         layer.bias = TypedParam::new(dyn_vector(&[0.0, 0.0, 0.0], &ctx)).unwrap();
-        assert!(matches!(
-            layer.forward(&row, Mode::TRAIN),
-            Err(Error::ShapeMismatch { .. })
-        ));
+        assert_eq!(
+            layer.forward(&row, Mode::TRAIN).unwrap_err().to_string(),
+            "LayerNorm::forward: shape mismatch: lhs [1, 2] vs rhs [3]"
+        );
 
         let image = Tensor4::<1, DYN, 1, 2>::from_vec(vec![1.0, 3.0, 2.0, 6.0], [1, 2, 1, 2], &ctx)
             .unwrap();

@@ -75,7 +75,10 @@ pub use linear::Linear;
 pub use mode::Mode;
 pub use norm::{BatchNorm2d, LayerNorm, RMSNorm};
 #[allow(unused_imports)] // Consumed by typed normalization wrappers in CT44.
-pub(crate) use norm::{batch_norm2d_forward, layer_norm_forward, rms_norm_forward};
+pub(crate) use norm::{
+    batch_norm2d_forward, check_eps, check_normalized_shape, check_suffix, layer_norm_forward,
+    rms_norm_forward,
+};
 pub use param::Param;
 pub use sequential::Sequential;
 // Model-level utilities exposed flat (exploration §4.4: `nn::to_device`).

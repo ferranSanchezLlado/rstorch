@@ -394,6 +394,93 @@ mod tests {
     }
 
     #[test]
+    fn without_bias_sheds_the_bias_leaf_and_leaves_the_weight_intact() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let biased = Linear::<3, 2>::new(3, 2, &ctx, &mut Rng::seed(4)).unwrap();
+        let weight = biased.weight.value().unwrap().to_vec().unwrap();
+        let input =
+            Tensor2::<2, 3>::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3], &ctx).unwrap();
+
+        let mut bare = biased.without_bias();
+        assert!(bare.bias().is_none());
+        assert_eq!(bare.weight.value().unwrap().to_vec().unwrap(), weight);
+        let output = bare.forward(&input, Mode::EVAL).unwrap();
+        assert_eq!(output.dims(), [2, 2]);
+        assert_eq!(
+            super::super::state_dict(&bare)
+                .unwrap()
+                .paths()
+                .collect::<Vec<_>>(),
+            vec!["weight"]
+        );
+
+        // The runtime sibling agrees on the values and on the shed path, and
+        // dropping a zero-initialized bias consumes no randomness either side.
+        let mut runtime = crate::nn::Linear::new(3, 2, &ctx.device(), &mut Rng::seed(4))
+            .unwrap()
+            .without_bias();
+        assert_eq!(
+            output.to_vec().unwrap(),
+            runtime
+                .forward(input.as_dynamic(), Mode::EVAL)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()
+        );
+        assert_eq!(
+            crate::nn::state_dict(&runtime).keys().collect::<Vec<_>>(),
+            vec!["weight"]
+        );
+    }
+
+    #[test]
+    fn reported_geometry_and_debug_describe_the_actual_runtime_widths() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let layer = Linear::<3, 2>::new(3, 2, &ctx, &mut Rng::seed(6)).unwrap();
+        assert_eq!((layer.in_features(), layer.out_features()), (3, 2));
+        assert_eq!(format!("{layer:?}"), "Linear(3 -> 2, bias)");
+        assert_eq!(
+            format!("{:?}", layer.without_bias()),
+            "Linear(3 -> 2, no bias)"
+        );
+
+        // `DYN` markers report the widths the constructor was given, not the
+        // markers themselves.
+        let dynamic = Linear::<DYN, DYN>::new(5, 7, &ctx, &mut Rng::seed(6)).unwrap();
+        assert_eq!((dynamic.in_features(), dynamic.out_features()), (5, 7));
+        assert_eq!(format!("{dynamic:?}"), "Linear(5 -> 7, bias)");
+    }
+
+    #[test]
+    fn construction_rejects_widths_that_contradict_a_static_marker() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        assert_eq!(
+            Linear::<4, 2>::new(3, 2, &ctx, &mut Rng::seed(0))
+                .unwrap_err()
+                .to_string(),
+            "typed::nn::Linear::new: invalid argument: \
+             in_features 3 does not match static marker 4"
+        );
+        assert_eq!(
+            Linear::<3, 5>::new(3, 2, &ctx, &mut Rng::seed(0))
+                .unwrap_err()
+                .to_string(),
+            "typed::nn::Linear::new: invalid argument: \
+             out_features 2 does not match static marker 5"
+        );
+        // A `DYN` marker defers to the runtime layer's own non-zero rule, so the
+        // message must be the runtime's verbatim.
+        assert_eq!(
+            Linear::<DYN, DYN>::new(0, 2, &ctx, &mut Rng::seed(0))
+                .unwrap_err()
+                .to_string(),
+            crate::nn::Linear::new(0, 2, &ctx.device(), &mut Rng::seed(0))
+                .unwrap_err()
+                .to_string()
+        );
+    }
+
+    #[test]
     fn mode_and_consuming_retyping_preserve_parameter_behavior() {
         let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
         let mut layer = Linear::<2, 1>::new(2, 1, &ctx, &mut Rng::seed(8)).unwrap();
