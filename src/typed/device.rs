@@ -1,6 +1,7 @@
 use super::{DeviceBinding, DeviceCtx, Placement};
 use crate::{DType, Device, Error, Result, Tensor};
 use std::any::TypeId;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -16,6 +17,57 @@ fn lock_registry() -> MutexGuard<'static, Registry> {
     registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+thread_local! {
+    /// Per-thread memo of `TypeId::of::<P>()` -> canonical binding address.
+    ///
+    /// [`validate_binding`] runs three times per typed binary operation, so
+    /// taking the process-wide registry lock there serialized *all* typed work
+    /// across threads (measured: 0.8x throughput at eight threads instead of
+    /// the dynamic core's 4.6x). A registry entry is inserted at most once per
+    /// process and is never removed or replaced, so the canonical `Arc` is
+    /// kept alive by the registry forever and its address is a stable identity
+    /// that needs no invalidation. Memoizing it per thread keeps the hot path
+    /// free of shared-memory writes without weakening the check: any address
+    /// that does not match the memo still falls through to the registry, which
+    /// remains the only authority on what is canonical.
+    ///
+    /// Markers are few, so a linear scan beats hashing a 128-bit `TypeId`.
+    static CANONICAL_ADDRESSES: RefCell<Vec<(TypeId, usize)>> = const {
+        RefCell::new(Vec::new())
+    };
+}
+
+fn memoized_address(marker: TypeId) -> Option<usize> {
+    // Never holds the borrow across the registry lock or any downstream call;
+    // `try_with` also keeps this working during thread-local destruction.
+    CANONICAL_ADDRESSES
+        .try_with(|memo| {
+            memo.borrow()
+                .iter()
+                .find(|(id, _)| *id == marker)
+                .map(|&(_, address)| address)
+        })
+        .ok()
+        .flatten()
+}
+
+fn memoize_address(marker: TypeId, address: usize) {
+    let _ = CANONICAL_ADDRESSES.try_with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if !memo.iter().any(|(id, _)| *id == marker) {
+            memo.push((marker, address));
+        }
+    });
+}
+
+fn canonical_address(marker: TypeId) -> Option<usize> {
+    let bindings = lock_registry();
+    let address = Arc::as_ptr(bindings.get(&marker)?) as usize;
+    drop(bindings);
+    memoize_address(marker, address);
+    Some(address)
 }
 
 fn invalid_binding(op: &'static str, marker: &'static str) -> Error {
@@ -101,12 +153,15 @@ pub(crate) fn validate_binding<P: Placement>(
     binding: &Arc<DeviceBinding>,
     op: &'static str,
 ) -> Result<()> {
-    let bindings = lock_registry();
-    let canonical = bindings
-        .get(&TypeId::of::<P>())
-        .ok_or_else(|| invalid_binding(op, std::any::type_name::<P>()))?;
+    let marker = TypeId::of::<P>();
+    let address = Arc::as_ptr(binding) as usize;
+    if memoized_address(marker) == Some(address) {
+        return Ok(());
+    }
 
-    if !Arc::ptr_eq(canonical, binding) {
+    let canonical =
+        canonical_address(marker).ok_or_else(|| invalid_binding(op, std::any::type_name::<P>()))?;
+    if canonical != address {
         return Err(invalid_binding(op, std::any::type_name::<P>()));
     }
     Ok(())
@@ -303,6 +358,57 @@ mod tests {
             validate_binding::<CanonicalIdentity>(&forged, "test"),
             Err(Error::InvalidArg { op: "test", .. })
         ));
+    }
+
+    #[test]
+    fn memoized_canonical_address_still_rejects_a_forged_binding() {
+        struct MemoizedIdentity;
+        impl Placement for MemoizedIdentity {}
+
+        // Warm this thread's memo with the canonical address first: the memo is
+        // only allowed to accept an operand whose address it already proved
+        // canonical, never to vouch for a marker in general.
+        let ctx = DeviceCtx::<MemoizedIdentity>::bind(Device::Cpu).unwrap();
+        validate_binding::<MemoizedIdentity>(ctx.binding(), "warm").unwrap();
+
+        let forged = Arc::new(DeviceBinding {
+            device: ctx.device(),
+        });
+        assert!(matches!(
+            validate_binding::<MemoizedIdentity>(&forged, "test"),
+            Err(Error::InvalidArg { op: "test", .. })
+        ));
+        validate_binding::<MemoizedIdentity>(ctx.binding(), "after").unwrap();
+    }
+
+    #[test]
+    fn an_unbound_marker_is_not_negatively_memoized() {
+        struct LateBind;
+        impl Placement for LateBind {}
+
+        let forged = Arc::new(DeviceBinding {
+            device: Device::Cpu,
+        });
+        assert!(validate_binding::<LateBind>(&forged, "before").is_err());
+
+        let ctx = DeviceCtx::<LateBind>::bind(Device::Cpu).unwrap();
+        validate_binding::<LateBind>(ctx.binding(), "after").unwrap();
+        assert!(validate_binding::<LateBind>(&forged, "after").is_err());
+    }
+
+    #[test]
+    fn canonical_binding_validates_on_a_thread_that_did_not_bind_it() {
+        struct CrossThread;
+        impl Placement for CrossThread {}
+
+        let ctx = DeviceCtx::<CrossThread>::bind(Device::Cpu).unwrap();
+        let binding = Arc::clone(ctx.binding());
+        thread::spawn(move || {
+            validate_binding::<CrossThread>(&binding, "other thread").unwrap();
+            validate_binding::<CrossThread>(&binding, "other thread").unwrap();
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
