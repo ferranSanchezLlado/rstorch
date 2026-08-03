@@ -11,12 +11,12 @@ error[E0080]: evaluation of `typed::const_check::assert_squeezable` failed
     | |_^ evaluation panicked: typed squeeze axis must have dimension one
     |
 note: inside `typed::const_check::assert_squeezable`
-   --> $WORKSPACE/src/typed/const_check.rs:38:5
+   --> $WORKSPACE/src/typed/const_check.rs:48:5
     |
-38  | /     assert!(
-39  | |         dimension == DYN || dimension == 1,
-40  | |         "typed squeeze axis must have dimension one"
-41  | |     );
+48  | /     assert!(
+49  | |         dimension == DYN || dimension == 1,
+50  | |         "typed squeeze axis must have dimension one"
+51  | |     );
     | |_____^ the failure occurred here
 
 note: erroneous constant encountered

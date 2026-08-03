@@ -11,12 +11,12 @@ error[E0080]: evaluation of `typed::const_check::assert_broadcast` failed
    | |_^ evaluation panicked: typed broadcast dimensions are incompatible
    |
 note: inside `typed::const_check::assert_broadcast`
-  --> $WORKSPACE/src/typed/const_check.rs:83:9
+  --> $WORKSPACE/src/typed/const_check.rs:93:9
    |
-83 | /         assert!(
-84 | |             from == DYN || to == DYN || from == 1 || from == to,
-85 | |             "typed broadcast dimensions are incompatible"
-86 | |         );
+93 | /         assert!(
+94 | |             from == DYN || to == DYN || from == 1 || from == to,
+95 | |             "typed broadcast dimensions are incompatible"
+96 | |         );
    | |_________^ the failure occurred here
 
 note: erroneous constant encountered

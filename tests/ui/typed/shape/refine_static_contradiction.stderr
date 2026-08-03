@@ -5,12 +5,12 @@ error[E0080]: evaluation of `typed::const_check::assert_refinement` failed
     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation panicked: typed refinement cannot change or erase a static dimension
     |
 note: inside `typed::const_check::assert_refinement`
-   --> $WORKSPACE/src/typed/const_check.rs:47:9
+   --> $WORKSPACE/src/typed/const_check.rs:57:9
     |
-47  | /         assert!(
-48  | |             source[axis] == DYN || source[axis] == target[axis],
-49  | |             "typed refinement cannot change or erase a static dimension"
-50  | |         );
+57  | /         assert!(
+58  | |             source[axis] == DYN || source[axis] == target[axis],
+59  | |             "typed refinement cannot change or erase a static dimension"
+60  | |         );
     | |_________^ the failure occurred here
 
 note: erroneous constant encountered

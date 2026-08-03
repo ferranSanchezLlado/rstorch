@@ -11,12 +11,12 @@ error[E0080]: evaluation of `typed::const_check::assert_reshape_numel` failed
    | |_^ evaluation panicked: typed reshape element counts are incompatible
    |
 note: inside `typed::const_check::assert_reshape_numel`
-  --> $WORKSPACE/src/typed/const_check.rs:65:9
+  --> $WORKSPACE/src/typed/const_check.rs:75:9
    |
-65 | /         assert!(
-66 | |             source == target,
-67 | |             "typed reshape element counts are incompatible"
-68 | |         );
+75 | /         assert!(
+76 | |             source == target,
+77 | |             "typed reshape element counts are incompatible"
+78 | |         );
    | |_________^ the failure occurred here
 
 note: erroneous constant encountered

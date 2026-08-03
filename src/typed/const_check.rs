@@ -27,10 +27,20 @@ pub(crate) const fn assert_loss_rows(logits: usize, targets: usize) {
     );
 }
 
+/// Checks a non-selected `gather` dimension against the runtime's rule.
+///
+/// The runtime permits an index grid that is *smaller* than the source on every
+/// axis other than the gathered one and rejects only a larger one
+/// (`src/tensor/ops/index.rs`: `if a != axis && i > s`). Requiring equality
+/// here would make a legal partial gather a hard compile error whenever the
+/// markers happen to be static, so static markers would change *acceptance*
+/// rather than merely checking it — and the same call would compile under
+/// `DYN`. Mirror the runtime instead, and stay silent unless both dimensions
+/// are known.
 pub(crate) const fn assert_gather_dimension(source: usize, indices: usize) {
     assert!(
-        dimensions_compatible(source, indices),
-        "typed gather non-selected dimensions are incompatible"
+        source == DYN || indices == DYN || indices <= source,
+        "typed gather index grid exceeds the source on a non-selected dimension"
     );
 }
 

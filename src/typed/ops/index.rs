@@ -245,6 +245,40 @@ mod tests {
         );
     }
 
+    /// A partial gather — an index grid smaller than the source on a
+    /// non-selected axis — is legal at runtime, so fully static markers must
+    /// accept it too. Requiring equality here would mean the same call
+    /// compiles under `DYN` and fails to compile under static markers, i.e.
+    /// typing would change acceptance rather than only checking it.
+    #[test]
+    fn static_markers_accept_a_partial_gather_like_the_runtime() {
+        let ctx = cpu();
+        let source = Tensor2::<2, 3>::from_vec(vec![1., 2., 3., 4., 5., 6.], [2, 3], &ctx).unwrap();
+
+        // Grid [1, 1] is smaller than the source's [2, 3] on axis 0.
+        let ids = Tensor2::<1, 1, i64>::from_vec(vec![0], [1, 1], &ctx).unwrap();
+        let gathered: Tensor2<1, 1> = source.gather::<1, _>(&ids).unwrap();
+        let expected = source.as_dynamic().gather(1, ids.as_dynamic()).unwrap();
+
+        assert_eq!(gathered.dims(), [1, 1]);
+        assert_eq!(gathered.dims(), expected.dims());
+        assert_eq!(
+            gathered.as_dynamic().to_vec::<f32>().unwrap(),
+            expected.to_vec::<f32>().unwrap()
+        );
+
+        // The same computation through `DYN` markers agrees, which is the
+        // property the old equality check silently broke.
+        let dynamic_source: Tensor2<DYN, DYN> = source.clone().erase_shape().unwrap();
+        let dynamic_ids: Tensor2<DYN, DYN, i64> = ids.clone().erase_shape().unwrap();
+        let via_dyn = dynamic_source.gather::<1, _>(&dynamic_ids).unwrap();
+        assert_eq!(via_dyn.dims(), gathered.dims());
+        assert_eq!(
+            via_dyn.as_dynamic().to_vec::<f32>().unwrap(),
+            gathered.as_dynamic().to_vec::<f32>().unwrap()
+        );
+    }
+
     #[test]
     fn arange_preserves_i64_values_above_f64_integer_precision() {
         let ctx = cpu();
