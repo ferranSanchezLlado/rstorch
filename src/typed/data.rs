@@ -1127,6 +1127,99 @@ mod tests {
         ));
     }
 
+    /// The [`VecDataset`] half of the check above. Its per-item wrap and the
+    /// input wrap inside [`VecDataset::transform`] are *jointly* the only
+    /// barrier between a stored runtime item and the `&F` a user closure
+    /// receives: with both removed, a `VecDataset<Tensor1<3>, _>` built over
+    /// `[2]`-shaped items constructs successfully and hands the closure a
+    /// `Tensor1<3>` whose runtime dims are `[2]`. This pins the reachable half
+    /// by rendered message, so neither guard can be dropped silently.
+    #[test]
+    fn vec_dataset_conversion_rejects_wrong_item_shape_element_and_rank() {
+        let ctx = cpu();
+        let runtime = || {
+            crate::data::VecDataset::new(vec![(
+                Tensor::from_vec(vec![1.0f32, 2.0], [2], &Device::Cpu).unwrap(),
+                Tensor::from_vec(vec![7i64], [], &Device::Cpu).unwrap(),
+            )])
+            .unwrap()
+        };
+
+        assert_eq!(
+            VecDataset::<Tensor1<3>, Tensor0<i64>>::try_from_dynamic(runtime(), &ctx)
+                .unwrap_err()
+                .to_string(),
+            "typed::data::VecDataset::try_from_dynamic: shape mismatch: lhs [2] vs rhs [3]"
+        );
+        assert_eq!(
+            VecDataset::<Tensor1<2, f64>, Tensor0<i64>>::try_from_dynamic(runtime(), &ctx)
+                .unwrap_err()
+                .to_string(),
+            "typed::data::VecDataset::try_from_dynamic: dtype mismatch: expected f64, got f32 \
+             (no implicit promotion; cast explicitly with to_dtype)"
+        );
+        assert_eq!(
+            VecDataset::<Tensor1<2>, Tensor1<1, i64>>::try_from_dynamic(runtime(), &ctx)
+                .unwrap_err()
+                .to_string(),
+            "typed::data::VecDataset::try_from_dynamic: rank mismatch: expected rank 1, got rank 0"
+        );
+
+        // The matching contract is accepted and batches to leading `DYN`.
+        let accepted =
+            VecDataset::<Tensor1<2>, Tensor0<i64>>::try_from_dynamic(runtime(), &ctx).unwrap();
+        assert_eq!(accepted.batch(&[0]).unwrap().0.dims(), [1, 2]);
+    }
+
+    /// The positive half of the barrier described above: a stage observes an
+    /// `&F` whose runtime metadata matches `F` exactly, and a chained stage
+    /// observes its predecessor's declared output type.
+    ///
+    /// The stage's own `checked_wrap::<F>` has no *reachable* rejection while
+    /// the construction-time item wrap stands — every route to a `VecDataset`
+    /// (`new` takes already-typed items, `try_from_dynamic` checks each one)
+    /// guarantees the stored item matches `F`. So this test pins what the stage
+    /// is contracted to hand the user rather than pretending to exercise a
+    /// rejection that cannot be reached from safe code.
+    #[test]
+    fn a_transform_stage_observes_exactly_its_declared_item_contract() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let ctx = cpu();
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let first_calls = Arc::clone(&first);
+        let second_calls = Arc::clone(&second);
+
+        let dataset = VecDataset::<Tensor1<2>, Tensor0<i64>>::try_from_dynamic(
+            crate::data::VecDataset::new(vec![(
+                Tensor::from_vec(vec![1.0f32, 2.0], [2], &Device::Cpu).unwrap(),
+                Tensor::from_vec(vec![7i64], [], &Device::Cpu).unwrap(),
+            )])
+            .unwrap(),
+            &ctx,
+        )
+        .unwrap()
+        .transform::<Tensor2<1, 2>>(move |feature| {
+            first_calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(feature.dims(), [2]);
+            assert_eq!(feature.as_dynamic().dtype(), DType::F32);
+            feature.reshape([1, 2])
+        })
+        .transform::<Tensor2<1, 2, bool>>(move |feature| {
+            second_calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(feature.dims(), [1, 2]);
+            feature.eq(feature)
+        });
+
+        let (features, labels) = dataset.batch(&[0]).unwrap();
+        assert_eq!(features.dims(), [1, 1, 2]);
+        assert_eq!(features.to_vec().unwrap(), vec![true, true]);
+        assert_eq!(labels.to_vec().unwrap(), vec![7]);
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(second.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn construction_rejects_noncanonical_binding_identity() {
         let ctx = cpu();

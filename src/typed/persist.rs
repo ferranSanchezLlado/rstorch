@@ -8,8 +8,19 @@
 //!
 //! File parsing, writer limits, metadata decoding, and temp-file replacement are
 //! delegated to [`crate::persist`]. This adapter adds no claims about duplicate
-//! raw JSON/metadata keys, writer-limit symmetry, symlink handling, or metadata
-//! byte ordering beyond that runtime persistence contract.
+//! raw JSON/metadata keys, writer-limit symmetry, symlink handling, metadata
+//! byte ordering, or **tensor payload integrity** beyond that runtime
+//! persistence contract.
+//!
+//! Payload integrity is worth stating explicitly, because "transactionally
+//! loads" and "versioned checkpoint" invite the opposite reading: the container
+//! carries no checksum, so a corrupted data region loads as valid values. This
+//! was verified by flipping one bit in the last byte of a checkpoint written by
+//! [`crate::typed::optim::save_sgd_checkpoint`] and observing `Ok(())` from
+//! [`crate::typed::optim::load_sgd_checkpoint`] with a silently different model.
+//! *Structural* damage is caught: truncation, a wrong dtype on a model tensor or
+//! on an `optim.*` buffer, a duplicated optimizer key, and a missing `optimizer`
+//! section all fail the load and leave both halves untouched.
 
 use super::nn::{self, Module, RuntimeModuleAdapter, TypedStateDict};
 use crate::persist::{Envelope, Expected, Limits, LoadOptions};
@@ -319,14 +330,81 @@ mod tests {
     #[test]
     fn optimizer_namespace_is_reserved_at_typed_state_and_save_boundaries() {
         let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
-        for dotted in [false, true] {
-            let mut model = Reserved {
-                value: TypedParam::new(Tensor1::from_vec(vec![1.0], [1], &ctx).unwrap()).unwrap(),
-                dotted,
-            };
-            assert!(state_dict(&model).is_err());
-            assert!(save_model_state(&mut model, &mut Envelope::new()).is_err());
+        let reserved = |dotted| Reserved {
+            value: TypedParam::new(Tensor1::from_vec(vec![1.0], [1], &ctx).unwrap()).unwrap(),
+            dotted,
+        };
+        let expect = |op: &str, path: &str| {
+            format!(
+                "{op}: invalid argument: model path {path:?} conflicts with the reserved \
+                 optimizer checkpoint namespace `optim.*`"
+            )
+        };
+
+        for (dotted, path) in [(false, "optim"), (true, "optim.weight")] {
+            let mut offender = reserved(dotted);
+            // `TypedStateDict` is deliberately opaque (no `Debug`), so the error
+            // is taken through `err()` rather than `unwrap_err()`.
+            assert_eq!(
+                state_dict(&offender).err().unwrap().to_string(),
+                expect("typed::persist::state_dict", path)
+            );
+            assert_eq!(
+                save_model_state(&mut offender, &mut Envelope::new())
+                    .unwrap_err()
+                    .to_string(),
+                expect("typed::persist::save_model_state", path)
+            );
+            // The load side rejects the reserved namespace on the *target* as
+            // well; the state here is a well-formed unrelated model's, so the
+            // target check is the only guard that can be doing the rejecting.
+            let mut target = reserved(dotted);
+            let unrelated = state_dict(&model(1.0, &ctx)).unwrap();
+            assert_eq!(
+                load_state_dict(&mut target, &unrelated)
+                    .unwrap_err()
+                    .to_string(),
+                expect("typed::persist::load_state_dict", path)
+            );
+            assert_eq!(
+                load_model_state(&mut target, &Envelope::new(), &LoadOptions::strict())
+                    .unwrap_err()
+                    .to_string(),
+                expect("typed::persist::load_model_state", path)
+            );
         }
+
+        // ...and on the incoming *state*, reachable because the public
+        // `typed::nn::state_dict` does not itself reject reserved paths. The
+        // target is clean here, so only the state-side check can reject.
+        let mut clean = model(1.0, &ctx);
+        let smuggled = nn::state_dict(&reserved(true)).unwrap();
+        assert_eq!(
+            load_state_dict(&mut clean, &smuggled)
+                .unwrap_err()
+                .to_string(),
+            expect("typed::persist::load_state_dict", "optim.weight")
+        );
+    }
+
+    /// A combined checkpoint is the only route that may carry `optim.*`, so the
+    /// combined loader must refuse a model-only file rather than load the model
+    /// half and rely on the caller's optimizer failing afterwards.
+    #[test]
+    fn combined_load_rejects_a_model_only_checkpoint_and_leaves_the_model_untouched() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let mut envelope = Envelope::new();
+        save_model_state(&mut model(9.0, &ctx), &mut envelope).unwrap();
+
+        let mut target = model(1.0, &ctx);
+        let before = values(&target);
+        assert_eq!(
+            load_combined_model_state(&mut target, &envelope, &LoadOptions::strict())
+                .unwrap_err()
+                .to_string(),
+            "persistence: combined checkpoint has no `optimizer` section"
+        );
+        assert_eq!(values(&target), before);
     }
 
     #[test]

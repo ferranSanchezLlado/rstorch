@@ -655,17 +655,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn malformed_optimizer_rolls_back_a_valid_combined_model_load() {
+    /// One optimizer's combined-checkpoint rollback contract, exercised through
+    /// the public typed entry points so both `load_*_checkpoint` bodies are
+    /// covered rather than only Adam's.
+    fn combined_rollback_case<O>(
+        source_optimizer: O,
+        target_optimizer: O,
+        step: fn(&mut O, &mut Pair, Grads) -> Result<()>,
+        save: fn(&O, &mut Pair, &mut Envelope) -> Result<()>,
+        load: impl Fn(&mut O, &mut Pair, &Path, &LoadOptions) -> Result<()>,
+    ) {
+        let mut source_optimizer = source_optimizer;
         let mut source = pair();
-        let mut source_optimizer = Adam::new(0.03);
         for _ in 0..2 {
             let grads = loss(&source, true).backward().unwrap();
-            adam_step(&mut source_optimizer, &mut source, grads).unwrap();
+            step(&mut source_optimizer, &mut source, grads).unwrap();
         }
         let mut checkpoint = Envelope::new();
         crate::typed::persist::save_model_state(&mut source, &mut checkpoint).unwrap();
-        save_adam_state(&source_optimizer, &mut source, &mut checkpoint).unwrap();
+        save(&source_optimizer, &mut source, &mut checkpoint).unwrap();
         let malformed = format!(
             "{}unknown.field=1\n",
             checkpoint.section("optimizer").unwrap()
@@ -681,29 +689,74 @@ mod tests {
         ));
         checkpoint.save(&path, &Limits::defaults()).unwrap();
 
+        let mut target_optimizer = target_optimizer;
         let mut target = pair();
         let mut unrelated = pair();
-        let mut target_optimizer = Adam::new(0.07);
         let grads = loss(&unrelated, true).backward().unwrap();
-        adam_step(&mut target_optimizer, &mut unrelated, grads).unwrap();
+        step(&mut target_optimizer, &mut unrelated, grads).unwrap();
         let model_before = values(&target);
         let mut optimizer_before = Envelope::new();
-        save_adam_state(&target_optimizer, &mut unrelated, &mut optimizer_before).unwrap();
+        save(&target_optimizer, &mut unrelated, &mut optimizer_before).unwrap();
+        // The checkpoint's model half differs from the target, so a rollback
+        // that silently did nothing would leave `values(&target)` changed.
+        assert_ne!(model_before, values(&source));
 
-        assert!(
-            load_adam_checkpoint(
-                &mut target_optimizer,
-                &mut target,
-                &path,
-                &LoadOptions::strict()
-            )
-            .is_err()
+        let error = load(
+            &mut target_optimizer,
+            &mut target,
+            &path,
+            &LoadOptions::strict(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "persistence: unknown optimizer state key `unknown.field`"
         );
         assert_eq!(values(&target), model_before);
         let mut optimizer_after = Envelope::new();
-        save_adam_state(&target_optimizer, &mut unrelated, &mut optimizer_after).unwrap();
+        save(&target_optimizer, &mut unrelated, &mut optimizer_after).unwrap();
         assert_eq!(optimizer_after, optimizer_before);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn malformed_optimizer_rolls_back_a_valid_combined_model_load() {
+        combined_rollback_case(
+            Adam::new(0.03),
+            Adam::new(0.07),
+            adam_step,
+            save_adam_state,
+            |optimizer, model, path, options| load_adam_checkpoint(optimizer, model, path, options),
+        );
+        combined_rollback_case(
+            Sgd::new(0.03).momentum(0.8),
+            Sgd::new(0.07).momentum(0.8),
+            sgd_step,
+            save_sgd_state,
+            |optimizer, model, path, options| load_sgd_checkpoint(optimizer, model, path, options),
+        );
+    }
+
+    /// `rollback_error` is only rendered when a rollback *also* fails, which no
+    /// reachable input produces today, so its wording is pinned directly rather
+    /// than left as the one message in this module that nothing ever formats.
+    #[test]
+    fn a_failed_rollback_reports_both_causes() {
+        let rendered = rollback_error(
+            Error::Persistence {
+                msg: "optimizer half broke".into(),
+            },
+            Error::Persistence {
+                msg: "model half broke".into(),
+            },
+        )
+        .to_string();
+        assert_eq!(
+            rendered,
+            "persistence: combined checkpoint optimizer load failed \
+             (persistence: optimizer half broke); model rollback failed \
+             (persistence: model half broke)"
+        );
     }
 
     #[test]
@@ -729,6 +782,36 @@ mod tests {
         };
         assert!(sgd_param_steps(&Sgd::new(0.1), &mut model, "running").is_err());
         assert!(adam_param_steps(&Adam::new(0.1), &mut model, "running").is_err());
+    }
+
+    /// Both `*_param_steps` document that "an unseen parameter reports zero".
+    /// A parameter frozen before the first step is the reachable case: the
+    /// optimizer never creates state for it, so no `clock.<path>` line is
+    /// written and the lookup must fall back to zero — while its updated sibling
+    /// reports one, so a fallback that returned any other value would show up.
+    #[test]
+    fn a_parameter_the_optimizer_never_updated_reports_a_zero_clock() {
+        let mut sgd_model = pair();
+        sgd_model.second.freeze();
+        let mut sgd = Sgd::new(0.1);
+        let grads = loss(&sgd_model, false).backward().unwrap();
+        sgd_step(&mut sgd, &mut sgd_model, grads).unwrap();
+        assert_eq!(sgd_param_steps(&sgd, &mut sgd_model, "first").unwrap(), 1);
+        assert_eq!(sgd_param_steps(&sgd, &mut sgd_model, "second").unwrap(), 0);
+
+        let mut adam_model = pair();
+        adam_model.second.freeze();
+        let mut adam = Adam::new(0.1);
+        let grads = loss(&adam_model, false).backward().unwrap();
+        adam_step(&mut adam, &mut adam_model, grads).unwrap();
+        assert_eq!(
+            adam_param_steps(&adam, &mut adam_model, "first").unwrap(),
+            1
+        );
+        assert_eq!(
+            adam_param_steps(&adam, &mut adam_model, "second").unwrap(),
+            0
+        );
     }
 
     fn save_dynamic_model(model: &mut Pair, envelope: &mut Envelope) {

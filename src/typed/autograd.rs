@@ -209,6 +209,37 @@ mod tests {
             forged.backward(),
             Err(Error::InvalidArg { op: "backward", .. })
         ));
+
+        // `to_device` wraps its result with the *target's* canonical binding, so
+        // the trailing `checked_wrap` would happily accept it: this check on the
+        // source is the only thing stopping a noncanonical binding from being
+        // laundered into a validly bound typed tensor.
+        let other = DeviceCtx::<OtherCpu>::bind(Device::Cpu).unwrap();
+        assert_eq!(
+            forged
+                .to_device::<OtherCpu>(&other)
+                .unwrap_err()
+                .to_string(),
+            "to_device: invalid argument: placement marker rstorch::typed::Cpu does not carry \
+             its canonical device binding"
+        );
+
+        // Same for the typed gradient lookup, which must reject the forged
+        // input before delegating to `Grads::wrt_input`.
+        let ctx = cpu();
+        let traced = Tensor1::<1>::from_vec(vec![2.0], [1], &ctx)
+            .unwrap()
+            .traced()
+            .unwrap();
+        let grads = Tensor0::<f32>::try_from_dynamic(traced.as_dynamic().sum_all().unwrap(), &ctx)
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(
+            grads.wrt_typed_input(&forged).unwrap_err().to_string(),
+            "wrt_typed_input: invalid argument: placement marker rstorch::typed::Cpu does not \
+             carry its canonical device binding"
+        );
     }
 
     #[test]
@@ -265,5 +296,41 @@ mod tests {
             grads.wrt_typed_input(&plain),
             Err(Error::NotTraced { op: "wrt_input" })
         ));
+    }
+
+    /// The typed lookup's own contract is the *returned* metadata. Comparing it
+    /// to [`Grads::wrt_input`] cannot establish that: `wrt_typed_input` **is**
+    /// `wrt_input` plus a wrapper, so parity holds by delegation alone.
+    ///
+    /// A broadcast leaf is the sharpest case reachable from safe code: the leaf
+    /// is `[1, 3]` but participates as `[2, 3]`, so a runtime that stopped
+    /// reducing the gradient back to the leaf's shape would hand `checked_wrap`
+    /// a `[2, 3]` tensor and this test would fail — either on the rejection or
+    /// on the dimensions — instead of yielding a `Tensor2<1, 3>` that lies about
+    /// its own shape.
+    #[test]
+    fn typed_gradient_lookup_returns_the_leafs_own_typed_metadata() {
+        let ctx = cpu();
+        let leaf = Tensor2::<1, 3>::from_vec(vec![1.0, 2.0, 3.0], [1, 3], &ctx)
+            .unwrap()
+            .traced()
+            .unwrap();
+        let wide = Tensor2::<2, 3>::from_vec(vec![1.0; 6], [2, 3], &ctx).unwrap();
+        let output = leaf
+            .as_dynamic()
+            .add(wide.as_dynamic())
+            .unwrap()
+            .sum_all()
+            .unwrap();
+        let grads = Tensor0::<f32>::try_from_dynamic(output, &ctx)
+            .unwrap()
+            .backward()
+            .unwrap();
+
+        let grad: Tensor2<1, 3> = grads.wrt_typed_input(&leaf).unwrap();
+        assert_eq!(grad.dims(), [1, 3]);
+        assert_eq!(grad.to_vec().unwrap(), vec![2.0, 2.0, 2.0]);
+        assert_eq!(grad.as_dynamic().dtype(), DType::F32);
+        assert_eq!(grad.as_dynamic().device(), Device::Cpu);
     }
 }
