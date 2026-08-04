@@ -962,4 +962,62 @@ mod tests {
         let one: Sequential1<Tensor2<1, 2>, super::super::Relu> = sequential((super::super::Relu,));
         assert_eq!(one.len(), 1);
     }
+
+    /// The 1-, 2-, 3- and 4-arity `IntoSequential` impls are hand-written rather
+    /// than macro-generated, and 3 was the one arity with no test at all.
+    ///
+    /// This is coverage that the 3-arity path works, NOT a guard against a
+    /// mis-indexed push: the generic bounds already make that impossible.
+    /// `push(self.1)` twice is a use-after-move, and reordering to
+    /// `push(self.1).push(self.0)` fails to compile because `L2: SequentialLayer
+    /// <L1::Output>` no longer holds (verified: `E0277` on that bound plus
+    /// `E0308`). Two same-typed `Linear<2, 2>` layers with different seeds are
+    /// used anyway so the asserted value depends on which layer ran first,
+    /// leaving the check meaningful if those bounds are ever relaxed.
+    #[test]
+    fn the_three_tuple_helper_pushes_its_layers_in_order() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let mut first = Linear::<2, 2>::new(2, 2, &ctx, &mut Rng::seed(80)).unwrap();
+        let mut second = Linear::<2, 2>::new(2, 2, &ctx, &mut Rng::seed(81)).unwrap();
+
+        // The same two layers applied by hand, in the intended order.
+        let input = Tensor2::<1, 2>::from_vec(vec![1.0f32, -1.0], [1, 2], &ctx).unwrap();
+        let expected = second
+            .forward(&first.forward(&input, Mode::EVAL).unwrap(), Mode::EVAL)
+            .unwrap()
+            .relu()
+            .unwrap();
+
+        let mut model: Sequential3<Tensor2<1, 2>, Linear<2, 2>, Linear<2, 2>, super::super::Relu> =
+            sequential((first, second, super::super::Relu));
+
+        assert_eq!(model.len(), 3);
+        let output: Tensor2<1, 2> = model.forward(&input, Mode::EVAL).unwrap();
+        assert_eq!(
+            output.as_dynamic().to_vec::<f32>().unwrap(),
+            expected.as_dynamic().to_vec::<f32>().unwrap(),
+            "a swapped or repeated tuple index would change this value"
+        );
+        assert_eq!(
+            super::super::state_dict(&model)
+                .unwrap()
+                .paths()
+                .collect::<Vec<_>>(),
+            ["0.bias", "0.weight", "1.bias", "1.weight"]
+        );
+    }
+
+    /// `Default` is part of the public surface and had no test.
+    #[test]
+    fn default_sequential_is_empty() {
+        let model: Sequential<Tensor2<1, 2>> = Sequential::default();
+        assert_eq!(model.len(), 0);
+        assert!(
+            super::super::state_dict(&model)
+                .unwrap()
+                .paths()
+                .next()
+                .is_none()
+        );
+    }
 }
