@@ -100,7 +100,21 @@
 //! `get`, `value`, and `grad_from` validate the retained canonical binding
 //! before wrapping a runtime tensor. `set` accepts only the same exact `T`,
 //! detaches it, and preserves the parameter's runtime gradient identity and
-//! freeze state. Buffer `new` and `set` likewise detach their values. A
+//! freeze state. Buffer `new` and `set` likewise detach their values.
+//!
+//! The two `set` methods deliberately disagree about reshaping a leaf whose
+//! type carries [`crate::typed::DYN`], because only one of them has a runtime
+//! authority to defer to. `TypedParam::set` delegates to
+//! [`crate::nn::Param::set`], whose fixed-shape rule the optimizer's moment
+//! buffers depend on, so `TypedParam<Tensor1<DYN>>::set` rejects a value of a
+//! different length with [`crate::Error::ShapeMismatch`] (`op: "Param::set"`)
+//! even though `T` admits it. `TypedBuffer::set` owns a bare runtime tensor
+//! with no such rule and therefore accepts the new length. Neither can install
+//! a value contradicting `T`. Consequently a `DYN` buffer, unlike a `DYN`
+//! parameter, has no runtime shape backstop during a state load, which is why
+//! `load_state_dict` checks staged dimensions against the target walk itself.
+//!
+//! A
 //! consuming parameter conversion first computes and validates the replacement
 //! runtime tensor, then uses [`crate::nn::Param::set`] on the moved runtime
 //! parameter before sealing the output type. Thus conversion preserves the
@@ -156,7 +170,7 @@
 //! dependency on `rstorch_derive`.
 
 use super::{DeviceBinding, DeviceCtx, FloatElement, Placement, TypedTensor};
-use crate::{DType, Element, Result, Tensor};
+use crate::{DType, Result, Tensor};
 use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -235,7 +249,6 @@ pub trait Module {
 ///
 /// CT41 supplies the value-preserving constructors and accessors. Those
 /// accessors return `T`, never a mutable runtime parameter or tensor.
-#[allow(dead_code)]
 pub struct TypedParam<T>
 where
     T: TypedTensor,
@@ -251,7 +264,6 @@ where
 /// A dedicated owner, rather than a bare runtime tensor, lets the private
 /// mutable adapter revalidate a replacement before the typed model is used
 /// again. Public access remains typed and cannot mutate the runtime tensor.
-#[allow(dead_code)]
 pub struct TypedBuffer<T: TypedTensor> {
     runtime: Tensor,
     binding: Arc<DeviceBinding>,
@@ -338,7 +350,6 @@ pub trait ToDType<F: FloatElement>: Module + Sized {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 enum LeafKind {
     Param,
     Buffer,
@@ -348,9 +359,17 @@ enum LeafKind {
 /// typed leaf. `binding` identity, not only its physical device, is part of the
 /// contract.
 #[derive(Clone)]
-#[allow(dead_code)]
 struct LeafContract {
     kind: LeafKind,
+    /// Cross-check only, never an independent authority: `markers.len()` is
+    /// always this value, because [`crate::typed::sealed::TypedTensor::MARKERS`]
+    /// and [`TypedTensor::RANK`] are emitted by one macro from one dimension
+    /// list and `TypedTensor` is sealed. Comparing it as well as `markers`
+    /// therefore cannot reject anything `markers` does not already reject; it
+    /// exists so a hand-built [`StateEntry`] cannot claim a rank its marker
+    /// list contradicts. Do not read its survival of a mutation as evidence
+    /// that `markers` is unchecked — see
+    /// `every_erased_contract_field_and_binding_identity_is_checked`.
     rank: usize,
     markers: &'static [usize],
     dtype: DType,
@@ -358,19 +377,16 @@ struct LeafContract {
     binding: Arc<DeviceBinding>,
 }
 
-#[allow(dead_code)]
 enum TypedLeaf<'a> {
     Param(&'a crate::nn::Param, LeafContract),
     Buffer(&'a Tensor, LeafContract),
 }
 
-#[allow(dead_code)]
 enum TypedLeafMut<'a> {
     Param(&'a mut crate::nn::Param, LeafContract),
     Buffer(&'a mut Tensor, LeafContract),
 }
 
-#[allow(dead_code)]
 struct StateEntry {
     value: Tensor,
     contract: LeafContract,
@@ -383,16 +399,8 @@ struct StateEntry {
 /// module mutably for its entire lifetime and must not escape the dedicated
 /// typed wrapper that created it. It does not alter the runtime operation's
 /// failure or rollback semantics.
-#[allow(dead_code)]
 pub(crate) struct RuntimeModuleAdapter<'a, M: Module + ?Sized> {
     module: &'a mut M,
-}
-
-// Keep future CT41 implementations tied to the six canonical typed element
-// types rather than accepting a second, marker-only dtype authority.
-#[allow(dead_code)]
-fn element_contract<E: Element>() -> DType {
-    E::DTYPE
 }
 
 #[cfg(test)]

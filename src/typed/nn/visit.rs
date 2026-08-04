@@ -135,6 +135,17 @@ fn malformed(op: &'static str, msg: impl Into<String>) -> Error {
     }
 }
 
+/// Whether two erased contracts describe the same typed leaf.
+///
+/// `dtype` is the sole guard against a load between two models that are
+/// structurally identical and differ only in their element type: shape,
+/// markers, rank, kind and binding all agree, so nothing downstream would
+/// reject it and `crate::nn::Param::set` checks only shape. Dropping it leaves
+/// a parameter whose runtime tensor contradicts its own element marker — see
+/// `a_different_precision_model_cannot_load_into_this_one`.
+///
+/// `rank` is a cross-check on `markers`, not an independent authority; see
+/// [`LeafContract::rank`].
 fn same_contract(a: &LeafContract, b: &LeafContract) -> bool {
     a.kind == b.kind
         && a.rank == b.rank
@@ -269,6 +280,22 @@ fn collect_mut<M: Module + ?Sized>(
     Ok((leaves, values))
 }
 
+/// Whether two walks describe the same leaves in the same order.
+///
+/// Every comparison is value or pointer equality, so this is an equivalence
+/// relation: `a ≡ b` and `b ≡ c` give `a ≡ c`, which is what lets
+/// [`load_state_dict`] chain read/mutable/pre-commit checks pairwise.
+///
+/// The length comparison is not a convenience for `zip`: without it a module
+/// whose `visit` emits more leaves than `visit_mut` would truncate to the
+/// shorter walk, agree on the shared prefix, and load only that prefix while
+/// returning `Ok(())` — the one route in this file to silent state loss. See
+/// `a_read_walk_longer_than_the_mutable_walk_loads_nothing`.
+///
+/// `kind` and `contract` are redundant here rather than load-bearing: equal
+/// `identity` means the two walks emitted the same live leaf, which necessarily
+/// has one kind and one `T`. They are kept so this predicate stays a complete
+/// statement of "same leaf" and can be reused where identity is not yet known.
 fn walks_agree(read: &[WalkLeaf], mutable: &[WalkLeaf]) -> bool {
     read.len() == mutable.len()
         && read.iter().zip(mutable).all(|(a, b)| {
@@ -299,6 +326,16 @@ fn apply_checked<M: Module + ?Sized>(
     let mut error = None;
     let visitor_error = {
         let mut sink = |path: &str, leaf: TypedLeafMut<'_>| {
+            // Stop at the *first* malformation. `index` does not advance past a
+            // rejected leaf, so without this a later leaf would be compared
+            // against the schema slot the rejected one was meant to fill, and
+            // the reported error would become the last malformation rather than
+            // the first. It cannot cause a misplaced assignment — a leaf is
+            // only written when it matches `expected[index]` exactly, so
+            // `changed` always names the leaf that was actually changed and
+            // `rollback` restores exactly that set — but the diagnostic and the
+            // "never inspected after the failure" property are worth keeping.
+            // See `an_early_commit_malformation_stops_the_rest_of_the_walk`.
             if error.is_some() {
                 return;
             }
@@ -457,6 +494,23 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
                 format!("typed contract mismatch at {:?}", leaf.path),
             ));
         }
+        // Exactly one of these conditions is reachable through a public route:
+        // `entry.value.dims() != leaf.dims`, which is the *only* guard when a
+        // `DYN` leaf's source and target geometries differ. A `DYN` buffer has
+        // no runtime backstop behind it — `apply_checked` assigns a buffer's
+        // tensor directly, where a parameter would go through
+        // `crate::nn::Param::set`'s fixed-shape rule — so removing it silently
+        // resizes model state; see
+        // `a_dynamic_buffer_is_not_silently_resized_by_a_load`.
+        //
+        // The rest are assertions against a *forged* `StateEntry`, not live
+        // validation: a `TypedStateDict` can only be built by `state_dict` from
+        // a leaf that `TypedVisitor` already revalidated, and `same_contract`
+        // above has already tied `entry.contract` to the target's, so a
+        // surviving mutation of any of them means only that the private type is
+        // well encapsulated. Do not read that survival as evidence the
+        // corresponding *reachable* check is missing — that inference is what
+        // hid the `same_contract` dtype and `DYN` dimension gaps.
         if entry.contract.markers.len() != entry.contract.rank
             || entry.value.rank() != entry.contract.rank
             || entry.value.dims() != leaf.dims
@@ -468,6 +522,10 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
                 format!("invalid staged value at {:?}", leaf.path),
             ));
         }
+        // Likewise unreachable while `entry.value.dims() == leaf.dims` holds and
+        // `leaf.dims` came from a revalidated leaf: kept as a forged-entry
+        // assertion, since it is the last line between a staged value and a
+        // typed wrapper that would claim the wrong markers for it.
         for (&marker, &actual) in entry.contract.markers.iter().zip(entry.value.dims()) {
             if marker != crate::typed::DYN && marker != actual {
                 return Err(malformed(
@@ -506,6 +564,27 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
     }
 }
 
+/// The runtime visitor traits cannot carry an error, so a typed leaf that fails
+/// revalidation mid-walk would otherwise truncate the walk *silently*: the
+/// runtime visitor receives a prefix it cannot distinguish from a complete
+/// model, turning one stale contract into a short `crate::nn::state_dict` or a
+/// partial optimizer step over the leaves that came before it.
+///
+/// Every caller reaches this adapter through a typed wrapper that first
+/// completes a validating typed walk — [`crate::typed::optim`]'s `preflight` and
+/// [`crate::typed::persist`]'s `stable_state` — so reaching this point means
+/// that guarantee has already been broken. Assert rather than leave the two
+/// outcomes indistinguishable; the release build keeps the runtime operation's
+/// existing failure semantics untouched.
+fn debug_assert_walk_completed(error: &Option<crate::Error>) {
+    debug_assert!(
+        error.is_none(),
+        "RuntimeModuleAdapter reached a typed leaf that failed revalidation, so \
+         the runtime walk it reports is silently truncated; the caller's \
+         preflight walk should have rejected this model first: {error:?}"
+    );
+}
+
 impl<M: Module + ?Sized> crate::nn::Module for RuntimeModuleAdapter<'_, M> {
     fn visit(&self, visitor: &mut crate::nn::Visitor<'_>) {
         let mut sink = |path: &str, leaf: TypedLeaf<'_>| match leaf {
@@ -514,6 +593,7 @@ impl<M: Module + ?Sized> crate::nn::Module for RuntimeModuleAdapter<'_, M> {
         };
         let mut typed = TypedVisitor::new(&mut sink);
         self.module.visit(&mut typed);
+        debug_assert_walk_completed(&typed.error);
     }
 
     fn visit_mut(&mut self, visitor: &mut crate::nn::VisitorMut<'_>) {
@@ -523,11 +603,11 @@ impl<M: Module + ?Sized> crate::nn::Module for RuntimeModuleAdapter<'_, M> {
         };
         let mut typed = TypedVisitorMut::new(&mut sink);
         self.module.visit_mut(&mut typed);
+        debug_assert_walk_completed(&typed.error);
     }
 }
 
 impl<'a, M: Module + ?Sized> RuntimeModuleAdapter<'a, M> {
-    #[allow(dead_code)]
     pub(crate) fn new(module: &'a mut M) -> Self {
         Self { module }
     }
@@ -1022,5 +1102,236 @@ mod tests {
             .step(&mut adapter, grads)
             .unwrap();
         assert_eq!(model.value.value().unwrap().to_vec().unwrap(), vec![1.6]);
+    }
+
+    /// One leaf, generic over its element type, so two instantiations differ in
+    /// nothing a walk compares except `dtype`.
+    struct Precision<E: crate::typed::FloatElement> {
+        w: TypedParam<Tensor1<2, E, Cpu>>,
+    }
+
+    impl<E: crate::typed::FloatElement> Module for Precision<E> {
+        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
+            visitor.param("w", &self.w);
+        }
+
+        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
+            visitor.param("w", &mut self.w);
+        }
+    }
+
+    /// `same_contract`'s `dtype` comparison is the *only* thing rejecting a load
+    /// between two models that are structurally identical and differ solely in
+    /// their element type: path, kind, markers, rank, dims and the binding `Arc`
+    /// all agree, and `crate::nn::Param::set` checks shape alone. Without it the
+    /// load reports `Ok(())` and installs an F32 tensor into an F64 leaf, so
+    /// every later access fails and the typed tensor contradicts its own element
+    /// marker.
+    #[test]
+    fn a_different_precision_model_cannot_load_into_this_one() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let source = Precision::<f32> {
+            w: TypedParam::new(
+                Tensor1::<2, f32, Cpu>::from_vec(vec![1.0, 2.0], [2], &ctx).unwrap(),
+            )
+            .unwrap(),
+        };
+        let mut target = Precision::<f64> {
+            w: TypedParam::new(
+                Tensor1::<2, f64, Cpu>::from_vec(vec![9.0, 9.5], [2], &ctx).unwrap(),
+            )
+            .unwrap(),
+        };
+
+        let state = state_dict(&source).unwrap();
+        // Only the element type differs, so the paths line up exactly.
+        assert_eq!(state.paths().collect::<Vec<_>>(), vec!["w"]);
+
+        let error = load_state_dict(&mut target, &state).expect_err("precisions must not mix");
+        assert!(
+            matches!(error, Error::InvalidArg { op, .. } if op == "typed::nn::load_state_dict"),
+            "expected a typed load rejection, got {error:?}"
+        );
+        // The target keeps its own values and stays readable, which is what
+        // fails if the guard is removed: the leaf would hold F32 data and
+        // `value()` would start returning DTypeMismatch.
+        assert_eq!(
+            target.w.value().unwrap().to_vec().unwrap(),
+            vec![9.0f64, 9.5]
+        );
+    }
+
+    /// A module whose read walk emits a leaf its mutable walk does not.
+    struct HalfMutable {
+        a: TypedParam<Tensor1<1, f32, Cpu>>,
+        b: TypedParam<Tensor1<1, f32, Cpu>>,
+    }
+
+    impl Module for HalfMutable {
+        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
+            visitor.param("a", &self.a);
+            visitor.param("b", &self.b);
+        }
+
+        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
+            // Deliberately omits `b`.
+            visitor.param("a", &mut self.a);
+        }
+    }
+
+    /// `walks_agree`'s length comparison is not a convenience for `zip`. Without
+    /// it the two walks agree on their shared prefix, the load returns `Ok(())`,
+    /// and `b` keeps its old value — the one route in this file to silent state
+    /// loss rather than a loud rejection.
+    #[test]
+    fn a_read_walk_longer_than_the_mutable_walk_loads_nothing() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let source = HalfMutable {
+            a: TypedParam::new(tensor(10.0, &ctx)).unwrap(),
+            b: TypedParam::new(tensor(20.0, &ctx)).unwrap(),
+        };
+        let mut target = HalfMutable {
+            a: TypedParam::new(tensor(1.0, &ctx)).unwrap(),
+            b: TypedParam::new(tensor(2.0, &ctx)).unwrap(),
+        };
+
+        let state = state_dict(&source).unwrap();
+        let error = load_state_dict(&mut target, &state)
+            .expect_err("a read walk longer than the mutable walk must be rejected");
+        assert!(
+            matches!(&error, Error::InvalidArg { op, msg }
+                if *op == "typed::nn::load_state_dict"
+                    && msg.contains("read-only and mutable module walks disagree")),
+            "expected a walk-disagreement rejection, got {error:?}"
+        );
+        // Neither leaf moved. Without the length guard `a` would be 10.0 and
+        // `b` would silently remain 2.0 with the call reporting success.
+        assert_eq!(target.a.value().unwrap().to_vec().unwrap(), vec![1.0]);
+        assert_eq!(target.b.value().unwrap().to_vec().unwrap(), vec![2.0]);
+    }
+
+    /// A `DYN` buffer, which unlike a `DYN` parameter has no runtime shape rule
+    /// to fall back on.
+    struct DynBuffer {
+        r: TypedBuffer<Tensor1<DYN, f32, Cpu>>,
+    }
+
+    impl Module for DynBuffer {
+        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
+            visitor.buffer("r", &self.r);
+        }
+
+        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
+            visitor.buffer("r", &mut self.r);
+        }
+    }
+
+    /// The staging dimension check is the only backstop here. `TypedBuffer::set`
+    /// owns a bare runtime tensor and accepts a new length, and the marker loop
+    /// skips a `DYN` axis, so without staging the load would resize the target
+    /// buffer and report `Ok(())`. The `DYN`-*parameter* case cannot show this:
+    /// `crate::nn::Param::set` rejects during the commit walk and rollback
+    /// restores, so that test passes either way.
+    #[test]
+    fn a_dynamic_buffer_is_not_silently_resized_by_a_load() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let source = DynBuffer {
+            r: TypedBuffer::new(
+                Tensor1::<DYN, f32, Cpu>::from_vec(vec![9.0, 9.5], [2], &ctx).unwrap(),
+            )
+            .unwrap(),
+        };
+        let mut target = DynBuffer {
+            r: TypedBuffer::new(Tensor1::<DYN, f32, Cpu>::from_vec(vec![1.0], [1], &ctx).unwrap())
+                .unwrap(),
+        };
+
+        let error = load_state_dict(&mut target, &state_dict(&source).unwrap())
+            .expect_err("a DYN buffer must not be resized by a load");
+        assert!(
+            matches!(&error, Error::InvalidArg { op, msg }
+                if *op == "typed::nn::load_state_dict" && msg.contains("invalid staged value")),
+            "expected a staging rejection, got {error:?}"
+        );
+        assert_eq!(target.r.value().unwrap().dims(), [1]);
+        assert_eq!(target.r.value().unwrap().to_vec().unwrap(), vec![1.0]);
+    }
+
+    /// Three leaves whose mutable walk changes its second path after the first
+    /// commit walk, so the malformation lands mid-walk with a leaf still behind
+    /// it.
+    struct LateDrift {
+        calls: std::cell::Cell<usize>,
+        a: TypedParam<Tensor1<1, f32, Cpu>>,
+        b: TypedParam<Tensor1<1, f32, Cpu>>,
+        c: TypedParam<Tensor1<1, f32, Cpu>>,
+    }
+
+    impl Module for LateDrift {
+        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
+            visitor.param("a", &self.a);
+            visitor.param("b", &self.b);
+            visitor.param("c", &self.c);
+        }
+
+        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            visitor.param("a", &mut self.a);
+            // The commit walk is the third; rename the middle leaf only then, so
+            // `c` is still pending when the mismatch is detected.
+            if call == 2 {
+                visitor.param("renamed", &mut self.b);
+            } else {
+                visitor.param("b", &mut self.b);
+            }
+            visitor.param("c", &mut self.c);
+        }
+    }
+
+    /// `apply_checked`'s `error.is_some()` short-circuit. Every pre-existing
+    /// fixture malformed the *last* leaf, so nothing exercised the case where a
+    /// leaf remains behind the mismatching one. The leaves written before the
+    /// failure must be rolled back and the trailing leaf must never be
+    /// inspected.
+    #[test]
+    fn an_early_commit_malformation_stops_the_rest_of_the_walk() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let source = LateDrift {
+            calls: std::cell::Cell::new(0),
+            a: TypedParam::new(tensor(10.0, &ctx)).unwrap(),
+            b: TypedParam::new(tensor(20.0, &ctx)).unwrap(),
+            c: TypedParam::new(tensor(30.0, &ctx)).unwrap(),
+        };
+        let state = state_dict(&source).unwrap();
+        assert_eq!(state.paths().collect::<Vec<_>>(), vec!["a", "b", "c"]);
+
+        let mut target = LateDrift {
+            calls: std::cell::Cell::new(0),
+            a: TypedParam::new(tensor(1.0, &ctx)).unwrap(),
+            b: TypedParam::new(tensor(2.0, &ctx)).unwrap(),
+            c: TypedParam::new(tensor(3.0, &ctx)).unwrap(),
+        };
+        let error = load_state_dict(&mut target, &state)
+            .expect_err("a drifting commit walk must be rejected");
+        // The reported leaf is the *first* malformation. This is what pins the
+        // short-circuit: without it `index` does not advance past the rejected
+        // leaf, so the trailing `c` is compared against the slot `b` was meant
+        // to fill and the error names `"c"` instead. State is correct either way
+        // — a leaf is only written when it matches its schema slot exactly — so
+        // the diagnostic is the only observable difference.
+        assert!(
+            matches!(&error, Error::InvalidArg { op, msg }
+                if *op == "typed::nn::load_state_dict"
+                    && msg.contains("mutable commit leaf differs from validated schema")
+                    && msg.contains("renamed")),
+            "expected the first malformation to be reported, got {error:?}"
+        );
+
+        // Every leaf is restored, including `a`, which the commit walk had
+        // already replaced before the mismatch was seen.
+        assert_eq!(target.a.value().unwrap().to_vec().unwrap(), vec![1.0]);
+        assert_eq!(target.b.value().unwrap().to_vec().unwrap(), vec![2.0]);
+        assert_eq!(target.c.value().unwrap().to_vec().unwrap(), vec![3.0]);
     }
 }
