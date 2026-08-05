@@ -48,6 +48,22 @@ impl Mode {
     }
 }
 
+/// Compares each failing case's two diagnostic fixtures against each other.
+///
+/// Deliberately NOT gated behind `RSTORCH_UI`: it compiles nothing, so it costs
+/// a few milliseconds and runs in the default `cargo test` lane. That is what
+/// makes it able to catch drift the compiling lanes structurally cannot — see
+/// [`assert_fixture_pairs_agree`].
+#[test]
+fn typed_ui_fixture_pairs_agree() {
+    let cases_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/ui/typed");
+    let mut cases = Vec::new();
+    discover_cases(&cases_root, &mut cases);
+    cases.sort();
+    assert!(!cases.is_empty(), "typed UI suite discovered no cases");
+    assert_fixture_pairs_agree(&cases);
+}
+
 #[test]
 fn typed_compile_fail_ui() {
     if std::env::var_os("RSTORCH_UI").is_none() {
@@ -229,6 +245,63 @@ fn normalized_stderr(output: &Output, workspace: &Path, case_root: &Path) -> Str
     stderr
         .replace(&case_root, "$CASE")
         .replace(&workspace, "$WORKSPACE")
+}
+
+/// Checks every failing case's two fixtures against each other, without
+/// compiling anything.
+///
+/// The pinned-`.stderr` and semantic-`.stderr.fragments` branches are mutually
+/// exclusive per toolchain, so neither lane can see the other's rot, and
+/// `TRYBUILD=overwrite` rewrites only `.stderr`. That is how the `gather`
+/// message change regenerated six `.stderr` fixtures and left a fragments file
+/// asserting the old wording — green on 1.88, red on stable, invisible to
+/// whoever made the change. Comparing the pair here is toolchain-independent, so
+/// the drift is caught on whichever lane runs first.
+fn assert_fixture_pairs_agree(cases: &[PathBuf]) {
+    let mut problems = Vec::new();
+    for case in cases {
+        let source = fs::read_to_string(case).expect("typed UI case must be readable");
+        let mode = case_mode(&source).expect("typed UI case markers must be valid");
+        if mode.index() > 1 {
+            continue; // Passing cases have no diagnostic fixtures.
+        }
+
+        let stderr_path = case.with_extension("stderr");
+        let fragments_path = case.with_extension("stderr.fragments");
+        let (Ok(stderr), Ok(fragments)) = (
+            fs::read_to_string(&stderr_path),
+            fs::read_to_string(&fragments_path),
+        ) else {
+            problems.push(format!(
+                "{}: a failing case needs both {} and {}",
+                case.display(),
+                stderr_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                fragments_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ));
+            continue;
+        };
+
+        for fragment in fragments.lines().filter(|line| !line.is_empty()) {
+            if !stderr.contains(fragment) {
+                problems.push(format!(
+                    "{}: fragment `{fragment}` is absent from the pinned stderr, so the two \
+                     fixtures disagree and one lane is asserting a stale diagnostic",
+                    case.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "typed UI fixture pairs disagree:\n\n{}",
+        problems.join("\n")
+    );
 }
 
 fn assert_semantic_fragments(case: &Path, stderr: &str) -> Result<(), String> {

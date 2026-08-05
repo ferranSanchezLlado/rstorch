@@ -1,2 +1,2 @@
 error[E0080]
-typed gather non-selected dimensions are incompatible
+typed gather index grid exceeds the source on a non-selected dimension
