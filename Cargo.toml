@@ -62,6 +62,13 @@ harness = false
 name = "data_pipeline"
 harness = false
 
+# Typed-vs-dynamic wrapper overhead. Gated on the feature it measures, so the
+# default bench build is unchanged.
+[[bench]]
+name = "typed_overhead"
+harness = false
+required-features = ["typed"]
+
 [features]
 default = []
 typed = []

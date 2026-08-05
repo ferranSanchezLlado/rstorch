@@ -170,10 +170,10 @@ where
     let adapter = RuntimeModuleAdapter::new(model);
     let mut found = 0;
     crate::nn::visit::visit_all(&adapter, &mut |leaf_path, leaf| {
-        if leaf_path == path {
-            if let crate::nn::visit::Leaf::Param(param) = leaf {
-                found = clock(param);
-            }
+        if leaf_path == path
+            && let crate::nn::visit::Leaf::Param(param) = leaf
+        {
+            found = clock(param);
         }
     });
     found
