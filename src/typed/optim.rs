@@ -58,21 +58,6 @@ fn validate_advancing_clocks(envelope: &Envelope) -> Result<()> {
     Ok(())
 }
 
-fn saved_clock(section: &str, path: &str) -> Result<u64> {
-    let key = format!("clock.{path}");
-    for line in section.lines() {
-        let Some((found, value)) = line.split_once('=') else {
-            continue;
-        };
-        if found == key {
-            return value.parse::<u64>().map_err(|_| Error::Persistence {
-                msg: format!("optimizer state `{key}` is not a u64 clock: {value:?}"),
-            });
-        }
-    }
-    Ok(0)
-}
-
 /// Applies one SGD update to a typed model, consuming `grads` by move.
 ///
 /// Validation performed by SGD before its update and any backend failure keep
@@ -163,6 +148,37 @@ pub fn load_adam_state<M: Module + ?Sized>(
     optimizer.load_state(&RuntimeModuleAdapter::new(model), envelope)
 }
 
+/// Reads one parameter's clock by locating its runtime `Param` and asking the
+/// optimizer directly.
+///
+/// The obvious implementation — serialise the optimizer state and scan for the
+/// `clock.<path>=` line — costs a full device-to-host copy of every moment
+/// buffer (1x model bytes for SGD with momentum, 2x for Adam) to return a single
+/// `u64`, and makes a read-only inspector fail for unrelated reasons: a
+/// parameter path containing `=` or a newline is a `Persistence` error, as is
+/// any backend transfer failure. Both runtime optimizers already answer in O(1)
+/// from a `grad_key` lookup, so walk to the `Param` and delegate.
+///
+/// An unseen parameter reports zero, matching the runtime accessors, so a
+/// parameter frozen before the first step reports 0 while its stepped sibling
+/// reports 1.
+fn param_clock<M, F>(model: &mut M, path: &str, clock: F) -> u64
+where
+    M: Module + ?Sized,
+    F: Fn(&crate::nn::Param) -> u64,
+{
+    let adapter = RuntimeModuleAdapter::new(model);
+    let mut found = 0;
+    crate::nn::visit::visit_all(&adapter, &mut |leaf_path, leaf| {
+        if leaf_path == path {
+            if let crate::nn::visit::Leaf::Param(param) = leaf {
+                found = clock(param);
+            }
+        }
+    });
+    found
+}
+
 /// Returns SGD's saved update clock for the typed parameter at `path`.
 ///
 /// As with runtime `Sgd::param_steps`, an unseen parameter reports zero. Typed
@@ -180,9 +196,9 @@ pub fn sgd_param_steps<M: Module + ?Sized>(
             msg: format!("typed model has no parameter path {path:?}"),
         });
     }
-    let mut envelope = Envelope::new();
-    optimizer.save_state(&RuntimeModuleAdapter::new(model), &mut envelope)?;
-    saved_clock(envelope.section("optimizer").unwrap_or(""), path)
+    Ok(param_clock(model, path, |param| {
+        optimizer.param_steps(param)
+    }))
 }
 
 /// Returns Adam or AdamW's saved bias-correction clock at `path`.
@@ -198,9 +214,9 @@ pub fn adam_param_steps<M: Module + ?Sized>(
             msg: format!("typed model has no parameter path {path:?}"),
         });
     }
-    let mut envelope = Envelope::new();
-    optimizer.save_state(&RuntimeModuleAdapter::new(model), &mut envelope)?;
-    saved_clock(envelope.section("optimizer").unwrap_or(""), path)
+    Ok(param_clock(model, path, |param| {
+        optimizer.param_steps(param)
+    }))
 }
 
 fn rollback_error(load: Error, model: Error) -> Error {

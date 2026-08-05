@@ -457,7 +457,10 @@ mod tests {
                 assert_eq!(
                     typed.dims().as_slice(),
                     runtime.dims(),
-                    concat!($name, ": wrong output shape, so the axis did not reach the runtime")
+                    concat!(
+                        $name,
+                        ": wrong output shape, so the axis did not reach the runtime"
+                    )
                 );
                 assert_eq!(
                     typed.as_dynamic().to_vec::<$element>().unwrap(),
