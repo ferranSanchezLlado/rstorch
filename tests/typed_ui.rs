@@ -94,6 +94,19 @@ fn typed_compile_fail_ui() {
         assert!(*count > 0, "typed UI suite discovered no {name} cases");
     }
 
+    // Exact counts, not just "at least one per mode". Discovery walks the tree,
+    // so deleting or moving a case out silently shrinks the suite and still
+    // reports ok — verified by moving one case aside, which took the failing
+    // checks from 17 to 16 with a green run. Bump these deliberately when
+    // adding a case; a diff here is the point.
+    assert_eq!(
+        modes,
+        [17, 11, 1, 3, 4],
+        "typed UI case census changed: [failing check, failing build, passing check, \
+         passing build, passing run]. If you added or removed a case, update this \
+         expectation in the same commit; otherwise a case has gone missing."
+    );
+
     let run_root = workspace
         .join("target/typed-ui")
         .join(std::process::id().to_string());

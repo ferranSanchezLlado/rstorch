@@ -197,3 +197,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test hardware-independent wrong-device rejection
         run: cargo +1.88 test --features typed,metal --lib wrong_runtime_device_is_rejected_without_metal_storage
+      # The typed boundary suite carries macOS+metal-gated cases — notably
+      # public_relabel_rejects_a_different_physical_device — that no other lane
+      # can reach: every `cargo test` job is ubuntu, and the two macOS jobs run
+      # only `--test metal_training` and the filtered `--lib` case above. These
+      # are placement-identity rejections, not hardware tests, so they belong on
+      # this hardware-independent lane.
+      - name: Test typed boundary placement rejections
+        run: cargo +1.88 test --features typed,metal --test typed_boundary

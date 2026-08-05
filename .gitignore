@@ -1,4 +1,9 @@
 /target
+# The UI harnesses build nested fixture crates under the crate they run from, so
+# rstorch-derive/target appears whenever the derive suite runs. Its cleanup is
+# skipped when the pinned-toolchain assertion panics first, which left an
+# untracked directory that root-anchored /target does not cover.
+target/
 Cargo.lock
 !tools/compile-cost/**/Cargo.lock
 /.test_cache

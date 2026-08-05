@@ -432,6 +432,119 @@ mod tests {
         assert_eq!(args.as_dynamic().to_vec::<i64>().unwrap(), vec![0, 1]);
     }
 
+    /// Every reduction's const `AXIS` must actually reach the runtime call.
+    ///
+    /// Axis 1 is used deliberately. The failure being guarded against is a
+    /// method that ignores `AXIS` and passes a hardcoded `0`, so a test written
+    /// with `AXIS = 0` would be satisfied by the very bug it exists to catch.
+    /// The shape is non-square so a wrong axis changes the output length as well
+    /// as its values — on a square tensor the two can coincide — and the data is
+    /// asymmetric so no two axes agree by accident. `log_softmax` keeps its
+    /// input shape, so only the values distinguish its axis.
+    ///
+    /// The twelve methods asserted here were each verified to survive replacing
+    /// `AXIS as isize` with `0` before this test existed.
+    #[test]
+    fn every_reduction_passes_its_const_axis_to_the_runtime() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let x =
+            Tensor2::<2, 3>::from_vec(vec![1.0f32, 5.0, 3.0, 4.0, 2.0, 6.0], [2, 3], &ctx).unwrap();
+
+        macro_rules! agrees_with_runtime {
+            ($name:literal, $element:ty, $typed:expr, $runtime:expr) => {{
+                let typed = ($typed).unwrap();
+                let runtime = ($runtime).unwrap();
+                assert_eq!(
+                    typed.dims().as_slice(),
+                    runtime.dims(),
+                    concat!($name, ": wrong output shape, so the axis did not reach the runtime")
+                );
+                assert_eq!(
+                    typed.as_dynamic().to_vec::<$element>().unwrap(),
+                    runtime.to_vec::<$element>().unwrap(),
+                    concat!($name, ": values disagree with the runtime on the same axis")
+                );
+            }};
+        }
+
+        agrees_with_runtime!(
+            "sum_keepdim",
+            f32,
+            x.sum_keepdim::<1>(),
+            x.as_dynamic().sum_keepdim(1)
+        );
+        agrees_with_runtime!(
+            "mean_keepdim",
+            f32,
+            x.mean_keepdim::<1>(),
+            x.as_dynamic().mean_keepdim(1)
+        );
+        agrees_with_runtime!(
+            "max_keepdim",
+            f32,
+            x.max_keepdim::<1>(),
+            x.as_dynamic().max_keepdim(1)
+        );
+        agrees_with_runtime!("min", f32, x.min::<1>(), x.as_dynamic().min(1));
+        agrees_with_runtime!(
+            "min_keepdim",
+            f32,
+            x.min_keepdim::<1>(),
+            x.as_dynamic().min_keepdim(1)
+        );
+        agrees_with_runtime!(
+            "argmax_keepdim",
+            i64,
+            x.argmax_keepdim::<1>(),
+            x.as_dynamic().argmax_keepdim(1)
+        );
+        agrees_with_runtime!("argmin", i64, x.argmin::<1>(), x.as_dynamic().argmin(1));
+        agrees_with_runtime!(
+            "argmin_keepdim",
+            i64,
+            x.argmin_keepdim::<1>(),
+            x.as_dynamic().argmin_keepdim(1)
+        );
+        agrees_with_runtime!(
+            "var_keepdim",
+            f32,
+            x.var_keepdim::<1>(),
+            x.as_dynamic().var_keepdim(1)
+        );
+        agrees_with_runtime!("std", f32, x.std::<1>(), x.as_dynamic().std(1));
+        agrees_with_runtime!(
+            "std_keepdim",
+            f32,
+            x.std_keepdim::<1>(),
+            x.as_dynamic().std_keepdim(1)
+        );
+        agrees_with_runtime!(
+            "log_softmax",
+            f32,
+            x.log_softmax::<1>(),
+            x.as_dynamic().log_softmax(1)
+        );
+
+        // Guard the guard: axis 0 and axis 1 must genuinely differ for this data,
+        // otherwise every assertion above would hold under a hardcoded 0.
+        assert_ne!(
+            x.as_dynamic().min(1).unwrap().to_vec::<f32>().unwrap(),
+            x.as_dynamic().min(0).unwrap().to_vec::<f32>().unwrap()
+        );
+        assert_ne!(
+            x.as_dynamic()
+                .log_softmax(1)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap(),
+            x.as_dynamic()
+                .log_softmax(0)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()
+        );
+    }
+
     #[test]
     fn runtime_errors_and_empty_policies_are_preserved() {
         let ctx = DeviceCtx::<Cpu>::cpu().unwrap();

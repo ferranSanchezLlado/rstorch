@@ -360,6 +360,35 @@ mod tests {
         );
     }
 
+    /// Each binary method must report its OWN name. `binary_numeric!` derives the
+    /// op from `stringify!($method)`, and only `add` was asserted anywhere — so
+    /// replacing that with the literal `"add"`, making every method report
+    /// `op: "add"`, passed the whole suite. One rejection per method fixes that.
+    #[test]
+    fn every_binary_method_reports_its_own_op_name() {
+        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let matrix = Tensor2::<DYN, DYN>::from_vec(vec![1.0f32; 6], [2, 3], &ctx).unwrap();
+        let row = Tensor2::<DYN, DYN>::from_vec(vec![2.0f32; 3], [1, 3], &ctx).unwrap();
+
+        // A DYN-marked shape disagreement defers to the runtime, so each call
+        // rejects and the error carries the method's own op string.
+        let cases: [(&str, Result<Tensor2<DYN, DYN>>); 6] = [
+            ("add", Tensor2::add(&matrix, &row)),
+            ("sub", Tensor2::sub(&matrix, &row)),
+            ("mul", Tensor2::mul(&matrix, &row)),
+            ("div", Tensor2::div(&matrix, &row)),
+            ("maximum", Tensor2::maximum(&matrix, &row)),
+            ("minimum", Tensor2::minimum(&matrix, &row)),
+        ];
+        for (expected, result) in cases {
+            let error = result.expect_err("a strict shape disagreement must reject");
+            assert!(
+                matches!(&error, Error::ShapeMismatch { op, .. } if *op == expected),
+                "expected op {expected:?}, got {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn operator_sugar_is_strict_and_matches_named_methods() {
         let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
