@@ -6,10 +6,6 @@
 //! cheap. Tensors are immutable values, so shared buffers are never
 //! written after construction.
 
-// Consumed by W2/W3 kernel and tensor tasks; the integrator removes this
-// allow at v3-m1 once consumers exist.
-#![allow(dead_code)]
-
 use crate::device::Device;
 use crate::dtype::DType;
 use std::sync::Arc;

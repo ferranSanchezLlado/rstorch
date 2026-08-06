@@ -47,7 +47,6 @@ use crate::backend::View;
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
-use crate::shape::Shape;
 use crate::storage::{CpuStorage, Storage};
 
 /// Wide-accumulator arithmetic for matmul inner products. Implemented for the
@@ -187,14 +186,6 @@ fn plan(lhs: &Layout, rhs: &Layout) -> Result<Plan> {
         rhs_k_stride: rs[rr - 2],
         rhs_n_stride: rs[rr - 1],
     })
-}
-
-/// The output shape for a plan: broadcast batch dims followed by `[m, n]`.
-fn output_shape(plan: &Plan) -> Shape {
-    let mut dims = plan.batch.clone();
-    dims.push(plan.m);
-    dims.push(plan.n);
-    Shape::from(dims)
 }
 
 /// How many output columns the strided-`rhs` order accumulates at once, so the
@@ -525,6 +516,7 @@ mod tests {
     use super::*;
     use crate::backend::View;
     use crate::layout::Layout;
+    use crate::shape::Shape;
     use std::sync::Arc;
 
     fn f32_storage(data: Vec<f32>) -> Storage {
@@ -545,9 +537,14 @@ mod tests {
         }
     }
 
-    /// Expose the resolved output shape for shape-contract tests.
+    /// The resolved output shape of a matmul: broadcast batch dims followed
+    /// by `[m, n]`.
     fn matmul_shape(lhs: &Layout, rhs: &Layout) -> Shape {
-        output_shape(&plan(lhs, rhs).unwrap())
+        let p = plan(lhs, rhs).unwrap();
+        let mut dims = p.batch.clone();
+        dims.push(p.m);
+        dims.push(p.n);
+        Shape::from(dims)
     }
 
     /// xorshift64: reproducible inputs without pulling in a dependency.

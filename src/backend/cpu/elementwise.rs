@@ -148,9 +148,15 @@ const DENSE_CHUNK: usize = 16 * 1024;
 ///
 /// Returning a slice of length exactly `n` is what makes the drivers below
 /// fast: every iterator in the zip then has the same length, so the bounds
-/// checks fold away. The `get` is also belt-and-braces against a short
-/// storage — `View` construction already validates the layout against it, and
-/// this keeps the helper panic-free regardless.
+/// checks fold away.
+///
+/// The `get` is this helper's *own* guard against a storage shorter than the
+/// layout claims, and it is the only one on this path: [`View::new`] stores two
+/// references without checking them against each other, so nothing upstream has
+/// proved the layout fits the storage. Note that the fallback `dense` selects —
+/// the `Cursor`/`Walk` element paths — index directly and *would* panic on such
+/// a view; only `fused::validate_view` performs that check, and the
+/// elementwise/reduce/matmul/conv kernels do not call it.
 #[inline]
 fn dense<'a, E>(layout: &Layout, data: &'a [E], n: usize) -> Option<&'a [E]> {
     if layout.is_contiguous() {
@@ -536,6 +542,48 @@ fn binary_op_name(op: BinaryOp) -> &'static str {
 // `op` as a `const` (see `dispatch_binary_op!`), so after inlining the match
 // folds to the one reachable arm and the enclosing loop vectorizes.
 
+// `f32::max`/`f64::max` implement IEEE `maxNum`, which *ignores* a NaN operand
+// and returns the other one. `torch.maximum`/`torch.minimum` propagate instead,
+// and so does every other extremum in this crate (`reduce.rs`'s `Acc::order`,
+// `conv.rs`'s `ConvAcc::beats`). Propagating here keeps a NaN visible instead of
+// letting `maximum` quietly launder it out of the graph, which is exactly what
+// makes a diverging model diagnosable.
+#[inline(always)]
+fn f32_maximum(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+#[inline(always)]
+fn f32_minimum(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else {
+        a.min(b)
+    }
+}
+
+#[inline(always)]
+fn f64_maximum(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+#[inline(always)]
+fn f64_minimum(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.min(b)
+    }
+}
+
 #[inline(always)]
 fn binary_f32(op: BinaryOp, a: f32, b: f32) -> f32 {
     match op {
@@ -543,8 +591,8 @@ fn binary_f32(op: BinaryOp, a: f32, b: f32) -> f32 {
         BinaryOp::Sub => a - b,
         BinaryOp::Mul => a * b,
         BinaryOp::Div => a / b,
-        BinaryOp::Maximum => a.max(b),
-        BinaryOp::Minimum => a.min(b),
+        BinaryOp::Maximum => f32_maximum(a, b),
+        BinaryOp::Minimum => f32_minimum(a, b),
     }
 }
 
@@ -555,8 +603,8 @@ fn binary_f64(op: BinaryOp, a: f64, b: f64) -> f64 {
         BinaryOp::Sub => a - b,
         BinaryOp::Mul => a * b,
         BinaryOp::Div => a / b,
-        BinaryOp::Maximum => a.max(b),
-        BinaryOp::Minimum => a.min(b),
+        BinaryOp::Maximum => f64_maximum(a, b),
+        BinaryOp::Minimum => f64_minimum(a, b),
     }
 }
 
@@ -569,7 +617,17 @@ fn binary_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         BinaryOp::Add => a.wrapping_add(b),
         BinaryOp::Sub => a.wrapping_sub(b),
         BinaryOp::Mul => a.wrapping_mul(b),
-        BinaryOp::Div => a.checked_div(b).unwrap_or(0),
+        // Only a zero divisor yields 0. `checked_div` would also return `None`
+        // for `i64::MIN / -1`, whose wrapping result is `i64::MIN` — collapsing
+        // that to 0 would break the stated wrapping contract for a division
+        // that is perfectly legal.
+        BinaryOp::Div => {
+            if b == 0 {
+                0
+            } else {
+                a.wrapping_div(b)
+            }
+        }
         BinaryOp::Maximum => a.max(b),
         BinaryOp::Minimum => a.min(b),
     }
@@ -664,7 +722,16 @@ fn unary_op_name(op: UnaryOp) -> &'static str {
 #[inline(always)]
 fn unary_f64(op: UnaryOp, x: f64) -> f64 {
     match op {
-        UnaryOp::Relu => x.max(0.0),
+        // `f64::max` ignores NaN, so `x.max(0.0)` would turn `relu(NaN)` into
+        // `0.0` and hide a diverged activation behind finite-looking output.
+        // PyTorch's `relu` propagates, as do `abs`/`exp`/`tanh` right below.
+        UnaryOp::Relu => {
+            if x.is_nan() {
+                x
+            } else {
+                x.max(0.0)
+            }
+        }
         UnaryOp::Gelu => 0.5 * x * (1.0 + erf(x * std::f64::consts::FRAC_1_SQRT_2)),
         UnaryOp::Exp => x.exp(),
         UnaryOp::Ln => x.ln(),

@@ -9,10 +9,10 @@
 //! the network. Matmul throughput is reported in multiply-accumulate operations
 //! so sizes can be compared directly.
 //!
-//! Two v2 groups are intentionally absent until their owning tasks land:
-//! `layernorm` (needs `nn::LayerNorm`, T42) and the `cross_entropy` case of the
-//! softmax family (needs the loss ops, T27). T47 re-adds them alongside the
-//! training/data-pipeline bench ports.
+//! The two v2 groups that waited on their owning tasks are now present:
+//! `layernorm` (`nn::LayerNorm`, T42) and the `cross_entropy` case of the
+//! softmax family (the loss ops, T27). End-to-end training cost for the same
+//! layers lives in `benches/training.rs`; the cases here isolate them.
 
 use std::hint::black_box;
 use std::time::Duration;
@@ -135,6 +135,52 @@ fn bench_softmax_family(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("sum_all_f32", label(&dims)), |b| {
             b.iter(|| black_box(black_box(&logits).sum_all().unwrap()));
         });
+
+        // The fused loss over the same logits: one row per batch element, with
+        // labels cycling through the classes so no row is degenerate.
+        let targets = Tensor::from_vec(
+            (0..dims[0]).map(|row| (row % dims[1]) as i64).collect(),
+            [dims[0]],
+            &Device::Cpu,
+        )
+        .expect("bench targets");
+        group.bench_function(BenchmarkId::new("cross_entropy_f32", label(&dims)), |b| {
+            b.iter(|| {
+                black_box(
+                    black_box(&logits)
+                        .cross_entropy(black_box(&targets))
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// `nn::LayerNorm` in isolation: the normalization statistics dominate, so this
+/// separates their cost from the matmuls that surround them in `training.rs`.
+fn bench_layernorm(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layernorm");
+
+    for dims in [[32usize, 128], [128, 512]] {
+        let x = randn(19, &dims, DType::F32);
+        let mut norm = LayerNorm::new([dims[1]], &Device::Cpu).expect("layer norm");
+        group.throughput(Throughput::Elements((dims[0] * dims[1]) as u64));
+        group.bench_function(BenchmarkId::new("forward_f32", label(&dims)), |b| {
+            b.iter(|| black_box(norm.forward(black_box(&x), Mode::EVAL).unwrap()));
+        });
+
+        let traced = x.traced().expect("traced input");
+        group.bench_function(
+            BenchmarkId::new("forward_backward_f32", label(&dims)),
+            |b| {
+                b.iter(|| {
+                    let out = norm.forward(black_box(&traced), Mode::TRAIN).unwrap();
+                    let _ = black_box(out.sum_all().unwrap().backward().unwrap());
+                });
+            },
+        );
     }
 
     group.finish();
@@ -201,6 +247,7 @@ criterion_group!(
     bench_elementwise,
     bench_matmul,
     bench_softmax_family,
+    bench_layernorm,
     bench_bmm,
     bench_dtype_spread,
 );

@@ -241,7 +241,17 @@ impl Tensor {
     /// ```
     pub fn reshape(&self, shape: impl Into<Shape>) -> Result<Tensor> {
         let target = shape.into();
-        if target.num_elements() != self.num_elements() {
+        // Checked, because `target` is caller-supplied: the plain product panics
+        // on overflow in debug and wraps in release, and a wrapped count could
+        // *match* this tensor's real element count and pass the guard below.
+        let Some(target_elements) = target.checked_num_elements() else {
+            return Err(Error::ReshapeMismatch {
+                op: "reshape",
+                from: self.shape().clone(),
+                to: target,
+            });
+        };
+        if target_elements != self.num_elements() {
             return Err(Error::ReshapeMismatch {
                 op: "reshape",
                 from: self.shape().clone(),
@@ -1437,5 +1447,29 @@ mod tests {
             TOL,
         )
         .unwrap();
+    }
+    /// A caller-supplied shape whose element count overflows `usize` must be a
+    /// structured error, not a debug panic or a release-mode wrap. `reshape`
+    /// measured the target with the wrapping product, and `broadcast_to`
+    /// produced a layout whose dims disagreed with its own `num_elements`.
+    #[test]
+    fn overflowing_target_shapes_are_structured_errors() {
+        let x = iota([2, 3]);
+        let huge = [usize::MAX, usize::MAX];
+
+        let err = x.reshape(huge).unwrap_err();
+        assert!(matches!(err, Error::ReshapeMismatch { .. }), "{err:?}");
+
+        let one = iota([1, 1]);
+        let err = one.broadcast_to(huge).unwrap_err();
+        assert!(matches!(err, Error::InvalidArg { .. }), "{err:?}");
+
+        // The ordinary cases still work and stay self-consistent.
+        let reshaped = x.reshape([3, 2]).unwrap();
+        assert_eq!(reshaped.dims(), &[3, 2]);
+        assert_eq!(reshaped.num_elements(), 6);
+        let broadcast = one.broadcast_to([4, 3]).unwrap();
+        assert_eq!(broadcast.dims(), &[4, 3]);
+        assert_eq!(broadcast.num_elements(), 12);
     }
 }

@@ -134,3 +134,154 @@ fn seeded_cnn_loss_decreases_on_metal() -> Result<()> {
     assert!(last < first, "CNN loss did not decrease: {first} -> {last}");
     Ok(())
 }
+
+/// Metal-vs-CPU parity for `LayerNorm` gradients at every rank the fused
+/// backward kernel handles.
+///
+/// The fused ops are deliberately absent from the `conformance` op × dtype
+/// table, so this is the only thing standing between a wrong fused
+/// LayerNorm backward and a silently mistrained model: a rank-3
+/// `[batch, seq, embed]` input is what every transformer block normalizes, and
+/// a "loss decreased" assertion cannot see a gradient that is merely wrong.
+#[test]
+fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
+    // Deterministic, non-symmetric coefficients so an error cannot cancel.
+    fn coefficients(n: usize) -> Vec<f32> {
+        (0..n).map(|i| 0.25 + (i as f32) * 0.5).collect()
+    }
+
+    for dims in [
+        vec![5usize],
+        vec![6, 4],
+        vec![2, 3, 4],
+        vec![2, 2, 3, 4],
+        vec![3, 1, 4],
+    ] {
+        let width = *dims.last().unwrap();
+        let count: usize = dims.iter().product();
+        let values = coefficients(count);
+        let coef = coefficients(count).into_iter().rev().collect::<Vec<_>>();
+
+        // Run the identical computation on both devices and compare gradients.
+        let mut grads = Vec::new();
+        for dev in [Device::Cpu, METAL] {
+            let mut rng = Rng::seed(9);
+            let mut norm = LayerNorm::new([width], &dev)?;
+            let x = Tensor::from_vec(values.clone(), dims.clone(), &dev)?.traced()?;
+            let c = Tensor::from_vec(coef.clone(), dims.clone(), &dev)?;
+            let out = norm.forward(&x, Mode::TRAIN)?;
+            let g = out.mul(&c)?.sum_all()?.backward()?;
+            let dx = g.wrt_input(&x)?.to_device(&Device::Cpu)?.to_vec::<f32>()?;
+            let _ = &mut rng;
+            grads.push(dx);
+        }
+
+        let (cpu, metal) = (&grads[0], &grads[1]);
+        assert_eq!(cpu.len(), metal.len(), "dims {dims:?}: length mismatch");
+        let worst = cpu
+            .iter()
+            .zip(metal)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-4,
+            "dims {dims:?}: LayerNorm input gradient differs by {worst}\n cpu={cpu:?}\n metal={metal:?}"
+        );
+    }
+    Ok(())
+}
+
+/// CPU/Metal parity for NaN handling in the extremum family.
+///
+/// The `conformance` op × dtype table carries no NaN in its fixture data, so
+/// nothing else compares the two backends on the one input class where
+/// `maximum`/`minimum`/`relu`/`argmax` have a real choice to make. All four
+/// must *propagate* NaN (as PyTorch does), and `argmax`/`argmin` must select
+/// the NaN so they agree with what `max`/`min` report.
+#[test]
+fn nan_semantics_match_between_cpu_and_metal() -> Result<()> {
+    let a = vec![f32::NAN, 1.0, 2.0, -3.0];
+    let b = vec![5.0f32, f32::NAN, 3.0, -4.0];
+
+    for dev in [Device::Cpu, METAL] {
+        let x = Tensor::from_vec(a.clone(), [4], &dev)?;
+        let y = Tensor::from_vec(b.clone(), [4], &dev)?;
+        let host = |t: Tensor| -> Result<Vec<f32>> { t.to_device(&Device::Cpu)?.to_vec::<f32>() };
+
+        let mx = host(x.maximum(&y)?)?;
+        let mn = host(x.minimum(&y)?)?;
+        let rl = host(x.relu()?)?;
+        assert!(
+            mx[0].is_nan() && mx[1].is_nan(),
+            "{dev}: maximum dropped NaN: {mx:?}"
+        );
+        assert!(
+            mn[0].is_nan() && mn[1].is_nan(),
+            "{dev}: minimum dropped NaN: {mn:?}"
+        );
+        assert_eq!(&mx[2..], &[3.0, -3.0], "{dev}: clean lanes wrong");
+        assert_eq!(&mn[2..], &[2.0, -4.0], "{dev}: clean lanes wrong");
+        assert!(rl[0].is_nan(), "{dev}: relu laundered NaN: {rl:?}");
+        assert_eq!(&rl[1..], &[1.0, 2.0, 0.0], "{dev}: relu clean lanes wrong");
+
+        // max/min propagate, so argmax/argmin must name the NaN's index.
+        let m = Tensor::from_vec(vec![1.0f32, f32::NAN, 3.0], [3], &dev)?;
+        assert!(
+            m.max_all()?.item()?.is_nan() && m.min_all()?.item()?.is_nan(),
+            "{dev}: max_all/min_all must propagate NaN"
+        );
+        assert_eq!(
+            m.argmax(0)?.to_device(&Device::Cpu)?.to_vec::<i64>()?,
+            vec![1],
+            "{dev}: argmax must select the NaN"
+        );
+        assert_eq!(
+            m.argmin(0)?.to_device(&Device::Cpu)?.to_vec::<i64>()?,
+            vec![1],
+            "{dev}: argmin must select the NaN"
+        );
+    }
+    Ok(())
+}
+
+/// `i64::MIN / -1` overflows, which is distinct from division by zero: under
+/// the documented wrapping contract it is `i64::MIN`, not `0`. Pinned on both
+/// backends because they implement the guard separately.
+#[test]
+fn i64_division_overflow_matches_between_cpu_and_metal() -> Result<()> {
+    for dev in [Device::Cpu, METAL] {
+        let a = Tensor::from_vec(vec![i64::MIN, i64::MIN, -8, 7], [4], &dev)?;
+        let b = Tensor::from_vec(vec![-1i64, 1, 2, 0], [4], &dev)?;
+        let got = a.div(&b)?.to_device(&Device::Cpu)?.to_vec::<i64>()?;
+        assert_eq!(
+            got,
+            vec![i64::MIN, i64::MIN, -4, 0],
+            "{dev}: i64 division semantics wrong"
+        );
+    }
+    Ok(())
+}
+
+/// `sum` over an empty axis is legal and returns the identity. Metal computed
+/// its output length as `num_elements() / dims()[axis]`, which divides by zero
+/// on an empty axis — a panic where the CPU backend returns zeros.
+#[test]
+fn empty_axis_sum_matches_cpu_instead_of_panicking() -> Result<()> {
+    for dims in [vec![0usize, 3], vec![2, 0, 3], vec![3, 0]] {
+        let axis = dims.iter().position(|&d| d == 0).unwrap();
+        let mut results = Vec::new();
+        for dev in [Device::Cpu, METAL] {
+            let x = Tensor::zeros(dims.clone(), DType::F32, &dev)?;
+            let summed = x.sum(axis as isize)?;
+            results.push((
+                summed.dims().to_vec(),
+                summed.to_device(&Device::Cpu)?.to_vec::<f32>()?,
+            ));
+        }
+        assert_eq!(
+            results[0], results[1],
+            "dims {dims:?} axis {axis}: Metal and CPU disagree on an empty-axis sum"
+        );
+    }
+    Ok(())
+}

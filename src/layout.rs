@@ -1,9 +1,9 @@
 //! Strided layouts: how a tensor's logical shape maps onto its storage.
 //!
-//! **Contract file** (T01). The struct and every signature here are frozen;
-//! T02 fills the `todo!()` bodies (ported v2 layout math plus the new
-//! permute/narrow/broadcast-stride rules). Doc comments on each method are
-//! the normative semantics T02 implements and property-tests against.
+//! **Contract file** (T01/T02). The struct and every signature here are
+//! frozen; the bodies are the ported v2 layout math plus the
+//! permute/narrow/broadcast-stride rules. The doc comment on each method is
+//! its normative semantics, and is what the property tests check against.
 //!
 //! Conventions:
 //! - Row-major (C order): the last axis is the fastest-varying one in a
@@ -16,10 +16,6 @@
 //!   all-zero coordinates.
 //! - Axes arriving here are already resolved to `[0, rank)` — negative-axis
 //!   handling happens in the op layer via [`Shape::resolve_axis`].
-
-// Consumed by T02 and the W3 op tasks; the integrator removes this allow
-// at v3-m1 once consumers exist.
-#![allow(dead_code)]
 
 use crate::error::{Error, Result};
 use crate::shape::Shape;
@@ -37,9 +33,10 @@ impl Layout {
     /// The canonical contiguous (row-major, offset 0) layout for `shape`.
     ///
     /// Errors with [`crate::Error::InvalidArg`] if the element count
-    /// overflows `usize` (the crate's single overflow validation point:
-    /// every tensor construction passes through here or
-    /// [`Layout::from_parts`]).
+    /// overflows `usize`. Together with [`Layout::from_parts`] — which every
+    /// other constructor here, including `broadcast_to`, routes through — these
+    /// are the crate's overflow validation points, so no `Layout` can exist
+    /// whose dims disagree with its own element count.
     pub(crate) fn contiguous(shape: impl Into<Shape>) -> Result<Layout> {
         let shape = shape.into();
         let rank = shape.rank();
@@ -73,6 +70,18 @@ impl Layout {
                     strides.len(),
                     shape.rank()
                 ),
+            });
+        }
+        // The element count must not wrap, independently of the stride check
+        // below: a broadcast layout has stride 0 on every expanded axis, so its
+        // highest reachable index stays at `offset` no matter how large the
+        // dims are. Without this, `[usize::MAX, usize::MAX]` would produce a
+        // layout reporting those dims with a wrapped `num_elements`, which then
+        // disagrees with itself everywhere downstream.
+        if shape.checked_num_elements().is_none() {
+            return Err(Error::InvalidArg {
+                op: "layout",
+                msg: format!("element count of shape {shape} overflows usize"),
             });
         }
         let layout = Layout {
@@ -296,11 +305,10 @@ impl Layout {
                 });
             }
         }
-        Ok(Layout {
-            shape: target.clone(),
-            strides: strides.into_boxed_slice(),
-            offset: self.offset,
-        })
+        // Through `from_parts`, not a direct struct literal: the target shape is
+        // caller-supplied, so its element count still has to be validated even
+        // though every expanded axis has stride 0.
+        Layout::from_parts(target.clone(), strides.into_boxed_slice(), self.offset)
     }
 
     /// Remove a size-1 axis (pre-resolved; the axis must have size 1, else
@@ -560,6 +568,28 @@ mod tests {
         let big = usize::MAX;
         let err = Layout::contiguous([big, big]).unwrap_err();
         assert!(matches!(err, Error::InvalidArg { op: "layout", .. }));
+    }
+
+    /// A broadcast layout has stride 0 on every expanded axis, so its highest
+    /// reachable index cannot detect an overflowing element count. Without a
+    /// separate check, `broadcast_to([usize::MAX, usize::MAX])` yielded a layout
+    /// that reported those dims while `num_elements()` wrapped — self-
+    /// inconsistent in release, and a panic from a plain getter in debug.
+    #[test]
+    fn broadcast_to_an_overflowing_target_is_invalid_arg() {
+        let base = Layout::contiguous([1, 1]).unwrap();
+        let err = base
+            .broadcast_to(&Shape::from([usize::MAX, usize::MAX]))
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidArg { op: "layout", .. }),
+            "{err:?}"
+        );
+        // An ordinary broadcast still works, and stays consistent.
+        let ok = base.broadcast_to(&Shape::from([4, 3])).unwrap();
+        assert_eq!(ok.dims(), &[4, 3]);
+        assert_eq!(ok.num_elements(), 12);
+        assert_eq!(ok.strides(), &[0, 0]);
     }
 
     #[test]

@@ -39,12 +39,19 @@ trait Acc: Copy {
     /// Divide an accumulated sum by a (wide) element count for `Mean`. The
     /// count is passed as `usize` and widened inside the impl.
     fn div_count(self, count: usize) -> Self;
-    /// Order two accumulated values for `argmax`/`argmin`. Returns
-    /// [`std::cmp::Ordering`]; NaN sorts as *less than everything* so that the
-    /// first non-NaN candidate keeps winning an `argmax` and a NaN can still
-    /// be selected by `argmin` (this matches treating NaN as the extreme low,
-    /// and — like PyTorch — the first occurrence wins on ties).
+    /// Order two accumulated values for `argmax`/`argmin`, with the first
+    /// occurrence winning a tie (as in PyTorch).
+    ///
+    /// NaN never reaches here: [`arg_reduce_generic`] settles a NaN candidate
+    /// before comparing, because a NaN must win *both* directions and so
+    /// cannot be expressed as a position in any single total order.
     fn order(self, other: Self) -> std::cmp::Ordering;
+    /// Whether this value is NaN — always `false` for integer accumulators.
+    ///
+    /// Arg-reductions need this because a NaN anywhere in the line is the
+    /// selected element for both `argmax` and `argmin`, which is what keeps
+    /// them consistent with `max`/`min` (both of which propagate NaN).
+    fn is_nan(self) -> bool;
 }
 
 impl Acc for f32 {
@@ -75,11 +82,10 @@ impl Acc for f32 {
     }
     fn order(self, other: Self) -> std::cmp::Ordering {
         self.partial_cmp(&other)
-            .unwrap_or_else(|| match (self.is_nan(), other.is_nan()) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            })
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+    fn is_nan(self) -> bool {
+        f32::is_nan(self)
     }
 }
 
@@ -111,11 +117,10 @@ impl Acc for f64 {
     }
     fn order(self, other: Self) -> std::cmp::Ordering {
         self.partial_cmp(&other)
-            .unwrap_or_else(|| match (self.is_nan(), other.is_nan()) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            })
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+    fn is_nan(self) -> bool {
+        f64::is_nan(self)
     }
 }
 
@@ -138,6 +143,9 @@ impl Acc for i64 {
     }
     fn order(self, other: Self) -> std::cmp::Ordering {
         std::cmp::Ord::cmp(&self, &other)
+    }
+    fn is_nan(self) -> bool {
+        false
     }
 }
 
@@ -254,6 +262,15 @@ where
             let v = slice[idx].to_acc();
             let take = match best_val {
                 None => true,
+                // A NaN already holding the line keeps it: NaN outranks every
+                // number in both directions, and the first occurrence wins.
+                Some(cur) if cur.is_nan() => false,
+                // A NaN candidate takes the line for `argmax` *and* `argmin`,
+                // so the selected index always agrees with what `max`/`min`
+                // report for that line (both propagate NaN). PyTorch does the
+                // same; treating NaN as merely "very small" would make
+                // `x.max(axis)` and `x.argmax(axis)` name different elements.
+                Some(_) if v.is_nan() => true,
                 Some(cur) => match op {
                     // Strictly better only: first occurrence wins on ties.
                     ArgReduceOp::ArgMax => v.order(cur) == Ordering::Greater,
@@ -707,16 +724,37 @@ mod tests {
         assert_eq!(as_i64(&r), vec![1]); // first 9
     }
 
+    /// `max`/`min` propagate NaN, so `argmax`/`argmin` must select the NaN's
+    /// index — otherwise `x.max(axis)` and `x.gather(axis, x.argmax(axis))`
+    /// name different elements. Both directions, and the first NaN on ties.
     #[test]
-    fn nan_propagates_in_max_and_selects_in_argmin() {
+    fn nan_propagates_in_extrema_and_is_selected_by_both_arg_reductions() {
         let s = f32_storage(vec![1.0, f32::NAN, 3.0]);
         let l = Layout::contiguous([3]).unwrap();
-        // max propagates NaN
+
         let r = reduce(ReduceOp::Max, f32_view(&s, &l), 0).unwrap();
-        assert!(as_f32(&r)[0].is_nan());
-        // argmin selects the NaN position (NaN orders as the extreme low)
+        assert!(as_f32(&r)[0].is_nan(), "max must propagate NaN");
+        let r = reduce(ReduceOp::Min, f32_view(&s, &l), 0).unwrap();
+        assert!(as_f32(&r)[0].is_nan(), "min must propagate NaN");
+
+        let r = arg_reduce(ArgReduceOp::ArgMax, f32_view(&s, &l), 0).unwrap();
+        assert_eq!(as_i64(&r), vec![1], "argmax must select the NaN");
         let r = arg_reduce(ArgReduceOp::ArgMin, f32_view(&s, &l), 0).unwrap();
-        assert_eq!(as_i64(&r), vec![1]);
+        assert_eq!(as_i64(&r), vec![1], "argmin must select the NaN");
+
+        // NaN wins even when it is not first, and the *first* NaN wins a tie.
+        let s = f32_storage(vec![5.0, 1.0, f32::NAN, f32::NAN]);
+        let l = Layout::contiguous([4]).unwrap();
+        for op in [ArgReduceOp::ArgMax, ArgReduceOp::ArgMin] {
+            let r = arg_reduce(op, f32_view(&s, &l), 0).unwrap();
+            assert_eq!(as_i64(&r), vec![2], "{op:?} must pick the first NaN");
+        }
+
+        // A NaN in one line must not affect a clean neighbouring line.
+        let s = f32_storage(vec![1.0, f32::NAN, 3.0, 4.0, 5.0, 6.0]);
+        let l = Layout::contiguous([2, 3]).unwrap();
+        let r = arg_reduce(ArgReduceOp::ArgMax, f32_view(&s, &l), 1).unwrap();
+        assert_eq!(as_i64(&r), vec![1, 2], "clean rows keep ordinary argmax");
     }
 
     #[test]

@@ -589,6 +589,11 @@ fn validate_indices(op: &'static str, indices: View<'_>, axis: usize, bound: usi
         },
     )?;
     synchronize(&context)?;
+    // SAFETY: `result` was allocated above as exactly 2 `I64` elements in a
+    // `StorageModeShared` buffer, so `contents()` is a non-null, CPU-readable,
+    // 8-byte-aligned pointer to that many initialized `i64`s (the kernel writes
+    // both slots). `synchronize` has completed, so the GPU no longer writes it,
+    // and the slice does not outlive `result`.
     let values = unsafe { std::slice::from_raw_parts(result.buffer.contents().cast::<i64>(), 2) };
     if values[0] != 0 {
         Err(Error::IndexOutOfBounds {
@@ -604,6 +609,24 @@ fn validate_indices(op: &'static str, indices: View<'_>, axis: usize, bound: usi
 
 fn output_for(context: &Arc<Context>, dtype: DType, len: usize) -> Result<MetalStorage> {
     allocate(context, dtype, len)
+}
+
+/// The output element count of a reduction of `layout` over `axis`: the product
+/// of every *other* dimension.
+///
+/// Deliberately a product rather than `num_elements() / dims()[axis]`: an empty
+/// reduction axis makes that division by zero, which panics instead of
+/// returning the reduction's identity the way the CPU backend does. Empty axes
+/// are reachable (`narrow(axis, i, 0)`, an empty batch), and `sum` over one is
+/// legal.
+fn reduced_len(layout: &Layout, axis: usize) -> usize {
+    layout
+        .dims()
+        .iter()
+        .enumerate()
+        .filter(|&(a, _)| a != axis)
+        .map(|(_, dim)| dim)
+        .product()
 }
 
 fn encode_binary(
@@ -1065,6 +1088,12 @@ impl BackendOps for MetalBackend {
         let dtype = host.dtype();
         supported_dtype("from_vec", dtype, Device::Metal(self.ordinal))?;
         let storage = allocate(&context, dtype, host.len())?;
+        // SAFETY: `storage` holds `host.len()` elements of `dtype`, which is
+        // `host`'s own dtype, in a `StorageModeShared` (CPU-writable) buffer.
+        // Each arm below casts `contents()` to the matching element type and
+        // copies exactly `values.len() == host.len()` elements, so the write
+        // stays in bounds and correctly aligned. Source and destination are
+        // distinct allocations, so `copy_nonoverlapping` is satisfied.
         unsafe {
             match host {
                 CpuStorage::F16(values) => std::ptr::copy_nonoverlapping(
@@ -1105,6 +1134,12 @@ impl BackendOps for MetalBackend {
         let Storage::Metal(storage) = dense else {
             unreachable!()
         };
+        // SAFETY: `storage` is the dense copy produced by `copy_strided`, so it
+        // holds `storage.len` initialized elements of `storage.dtype` in a
+        // `StorageModeShared` (CPU-readable) buffer, and the matched arm casts
+        // `contents()` to that same element type. `synchronize` above has
+        // completed, so the GPU is no longer writing the buffer. Each slice is
+        // copied with `to_vec` before `storage` is dropped.
         unsafe {
             Ok(match storage.dtype {
                 DType::F16 => CpuStorage::F16(Arc::new(
@@ -1211,6 +1246,11 @@ impl BackendOps for MetalBackend {
         let context = context(self.ordinal)?;
         supported_dtype("full", dtype, Device::Metal(self.ordinal))?;
         let storage = allocate(&context, dtype, len)?;
+        // SAFETY: `storage` holds `len` elements of `dtype` in a
+        // `StorageModeShared` (CPU-writable) buffer, and each arm casts
+        // `contents()` to the element type matching the `dtype` it matched on,
+        // then fills exactly `len` of them. Nothing has been enqueued against
+        // this freshly allocated buffer, so no GPU work races the fill.
         unsafe {
             match dtype {
                 DType::F16 => std::slice::from_raw_parts_mut(
@@ -1407,7 +1447,7 @@ impl BackendOps for MetalBackend {
         let context = context(self.ordinal)?;
         check_context("reduce", &context, &[x])?;
         let input = metal_storage("reduce", x)?;
-        let len = x.layout().num_elements() / x.layout().dims()[axis];
+        let len = reduced_len(x.layout(), axis);
         let output = output_for(&context, x.dtype(), len)?;
         let pipe = pipeline(&context, &format!("reduce_{}", suffix(x.dtype())))?;
         let code = match op {
@@ -1440,7 +1480,7 @@ impl BackendOps for MetalBackend {
         let context = context(self.ordinal)?;
         check_context("arg_reduce", &context, &[x])?;
         let input = metal_storage("arg_reduce", x)?;
-        let len = x.layout().num_elements() / x.layout().dims()[axis];
+        let len = reduced_len(x.layout(), axis);
         let output = output_for(&context, DType::I64, len)?;
         let pipe = pipeline(&context, &format!("arg_reduce_{}", suffix(x.dtype())))?;
         encode(

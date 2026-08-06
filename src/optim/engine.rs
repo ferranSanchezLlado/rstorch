@@ -65,12 +65,24 @@ impl<H: Clone> Groups<H> {
     /// The hyperparameters in force for `path` — the first matching group's
     /// override applied to the base, or the base itself.
     pub(crate) fn resolve(&self, path: &str) -> H {
+        self.resolve_with_base(self.base.clone(), path)
+    }
+
+    /// [`resolve`](Self::resolve) against a caller-supplied base instead of the
+    /// stored one.
+    ///
+    /// Group predicates and overrides are *code*, so they are never persisted;
+    /// a checkpoint carries only the base hyperparameters. Restoring one
+    /// therefore needs the effective value for a path under the **saved** base
+    /// but the **current** overrides, without mutating the optimizer before its
+    /// validation has finished.
+    pub(crate) fn resolve_with_base(&self, base: H, path: &str) -> H {
         for (matches, configure) in &self.overrides {
             if matches(path) {
-                return configure(self.base.clone());
+                return configure(base);
             }
         }
-        self.base.clone()
+        base
     }
 }
 
@@ -149,11 +161,22 @@ pub(crate) fn apply(
         // error naming the path, so an untraced weight access (wrong `Mode`,
         // a forward that read `Param::value` instead of `Param::get`) is
         // caught at the very next step instead of silently freezing it.
-        let Ok(grad) = grads.wrt(param) else {
-            failure = Some(Error::MissingGrad {
-                path: path.to_string(),
-            });
-            return;
+        // Only a genuinely *absent* gradient is `MissingGrad`. `wrt` also
+        // narrows to the parameter's dtype, so a backend failure in that
+        // conversion arrives here too — reporting it as "no gradient" would send
+        // the reader hunting an untraced-weight bug that does not exist.
+        let grad = match grads.wrt(param) {
+            Ok(grad) => grad,
+            Err(Error::NotTraced { .. }) => {
+                failure = Some(Error::MissingGrad {
+                    path: path.to_string(),
+                });
+                return;
+            }
+            Err(error) => {
+                failure = Some(error);
+                return;
+            }
         };
         if grad.dims() != value.dims() {
             failure = Some(Error::ShapeMismatch {
@@ -229,8 +252,11 @@ pub(crate) fn apply(
         if param.is_frozen() {
             return;
         }
-        // Passes 1–2 proved this lookup succeeds.
-        let Some(grad) = (match grads.take(param.grad_key()) {
+        // Passes 1–2 proved this lookup succeeds. Drained *wide*: pass 1 already
+        // checked the gradient against the parameter's own dtype, and both
+        // optimizers widen to the accumulation dtype anyway, so narrowing here
+        // would only throw precision away (see `Grads::take_wide`).
+        let Some(grad) = (match grads.take_wide(param.grad_key()) {
             Ok(grad) => grad,
             Err(error) => {
                 failure = Some(error);
@@ -252,9 +278,14 @@ pub(crate) fn apply(
     }
 }
 
-/// The dotted paths of every trainable parameter of `model`, paired with its
-/// gradient identity — the path ↔ state key mapping optimizer-state
-/// persistence needs (state lives under `GradKey`, files are keyed by path).
+/// The dotted paths of every parameter of `model`, paired with its gradient
+/// identity — the path ↔ state key mapping optimizer-state persistence needs
+/// (state lives under `GradKey`, files are keyed by path).
+///
+/// Deliberately **not** filtered by [`Param::is_frozen`]: a parameter frozen for
+/// a warmup phase still owns optimizer state and a step clock, and dropping its
+/// path here would silently lose both across a checkpoint — so unfreezing it
+/// later would restart its moments from zero.
 pub(crate) fn param_paths(model: &dyn Module) -> Vec<(String, GradKey)> {
     let mut out = Vec::new();
     visit_all(model, &mut |path, leaf| {

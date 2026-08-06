@@ -167,8 +167,8 @@ pub(crate) fn validate_binding<P: Placement>(
     Ok(())
 }
 
-// Retained for the planned same-device placement relabel operation.
-#[allow(dead_code)]
+/// Re-label a binding from placement `P` to `Q`, validating both sides.
+/// Backs the typed placement transfer in [`super::tensor`].
 pub(crate) fn checked_relabel_binding<P: Placement, Q: Placement>(
     source: Arc<DeviceBinding>,
     target: &DeviceCtx<Q>,

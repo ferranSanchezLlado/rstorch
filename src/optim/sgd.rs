@@ -252,17 +252,39 @@ impl Sgd {
             op: "step",
             msg: "SGD global step clock cannot be advanced past u64::MAX".to_string(),
         })?;
+        let base_lr = *lr;
         let mut exhausted = None;
+        // Range-checked before any `Param::set`, for the reason given in
+        // `Adam::step`: the kernel's own check runs during the mutating walk, so
+        // a bad group hyperparameter would otherwise stop the step half-applied.
+        let mut invalid = None;
         crate::nn::visit::visit_all(model, &mut |path, leaf| {
             let crate::nn::visit::Leaf::Param(param) = leaf else {
                 return;
             };
-            if !param.is_frozen()
-                && state
-                    .get(&param.grad_key())
-                    .is_some_and(|entry| entry.clock.checked_add(1).is_none())
+            if param.is_frozen() {
+                return;
+            }
+            if state
+                .get(&param.grad_key())
+                .is_some_and(|entry| entry.clock.checked_add(1).is_none())
             {
                 exhausted.get_or_insert_with(|| path.to_string());
+                return;
+            }
+            if invalid.is_some() {
+                return;
+            }
+            let hyper = groups.resolve(path);
+            let acc = param.value().dtype().accumulation_dtype();
+            if let Err(error) = crate::backend::cpu::fused::validate_sgd_scalars(
+                "step",
+                base_lr * hyper.lr_scale,
+                hyper.momentum,
+                hyper.weight_decay,
+                acc,
+            ) {
+                invalid = Some(error);
             }
         });
         if let Some(path) = exhausted {
@@ -273,7 +295,9 @@ impl Sgd {
                 ),
             });
         }
-        let base_lr = *lr;
+        if let Some(error) = invalid {
+            return Err(error);
+        }
         engine::apply("step", model, grads, |path, param, grad| {
             let hyper = groups.resolve(path);
             let dtype = param.value().dtype();
@@ -436,13 +460,27 @@ impl Sgd {
                     other => return Err(state::unknown_buffer(KIND, path, other)),
                 }
             }
-            if velocity.is_none() && saved_momentum != 0.0 && saved.clock > 0 {
+            // Whether a velocity is *required* depends on the momentum in force
+            // for this parameter's group, not on the base the file recorded. A
+            // group that sets `momentum(0.0)` keeps no velocity however large
+            // the base is, and a group that sets a non-zero momentum over a
+            // zero base keeps one — checking the base alone rejects the first
+            // (a valid configuration that then cannot be resumed at all) and
+            // waves the second through (the truncated file this check exists to
+            // catch). Overrides are code and so are taken from `self`; only the
+            // base comes from the file.
+            let saved_base = SgdGroup {
+                momentum: saved_momentum,
+                ..*self.groups.base()
+            };
+            let effective = self.groups.resolve_with_base(saved_base, path);
+            if velocity.is_none() && effective.momentum != 0.0 && saved.clock > 0 {
                 return Err(Error::Persistence {
                     msg: format!(
                         "optimizer state for `{path}` has no velocity buffer, but it was \
-                         saved by a momentum run (momentum={saved_momentum}) after \
-                         {} update(s), which always writes one",
-                        saved.clock
+                         saved by a momentum run (momentum={}) after {} update(s), \
+                         which always writes one",
+                        effective.momentum, saved.clock
                     ),
                 });
             }
@@ -760,6 +798,68 @@ mod tests {
 
         assert_eq!(model.snapshot(), reference_model.snapshot());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The "a momentum run always writes a velocity" integrity check must use
+    /// the momentum in force for each parameter's *group*, not the saved base.
+    ///
+    /// Reading the base alone is wrong in both directions: a group that turns
+    /// momentum off legitimately stores no velocity, and rejecting it makes a
+    /// valid configuration impossible to checkpoint and resume; conversely a
+    /// group that turns momentum *on* over a zero base does store one, and its
+    /// absence is the truncated file the check exists to catch.
+    #[test]
+    fn the_velocity_integrity_check_follows_group_momentum() {
+        // Direction 1: momentum off for biases must round-trip cleanly.
+        let mut model = Net::ones();
+        let mut opt = Sgd::new(0.1)
+            .momentum(0.9)
+            .group(|path| path.ends_with("bias"), |g| g.momentum(0.0));
+        step(&mut opt, &mut model);
+        let mut envelope = Envelope::new();
+        opt.save_state(&model, &mut envelope).unwrap();
+
+        let mut resumed = Sgd::new(0.1)
+            .momentum(0.9)
+            .group(|path| path.ends_with("bias"), |g| g.momentum(0.0));
+        resumed
+            .load_state(&model, &envelope)
+            .expect("a group with momentum(0.0) must be resumable");
+
+        // Direction 2: momentum on for weights over a zero base — a velocity is
+        // written, so a file missing one must still be rejected.
+        let mut model = Net::ones();
+        let mut opt = Sgd::new(0.1).group(|path| path.ends_with("weight"), |g| g.momentum(0.9));
+        step(&mut opt, &mut model);
+        let mut envelope = Envelope::new();
+        opt.save_state(&model, &mut envelope).unwrap();
+
+        // Drop every velocity tensor, as a truncated file would.
+        let mut stripped = Envelope::new();
+        stripped
+            .set_section(
+                "optimizer",
+                envelope.section("optimizer").unwrap().to_string(),
+            )
+            .unwrap();
+        let mut dropped = 0;
+        for (key, tensor) in envelope.tensors() {
+            if key.ends_with("velocity") {
+                dropped += 1;
+            } else {
+                stripped.insert_tensor(key.clone(), tensor.clone());
+            }
+        }
+        assert!(dropped > 0, "the fixture must contain a velocity to drop");
+
+        let mut resumed = Sgd::new(0.1).group(|path| path.ends_with("weight"), |g| g.momentum(0.9));
+        let err = resumed
+            .load_state(&model, &stripped)
+            .expect_err("a missing velocity under group momentum must be rejected");
+        assert!(
+            err.to_string().contains("no velocity buffer"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

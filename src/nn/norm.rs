@@ -1129,13 +1129,12 @@ mod tests {
             &[("weight", weight.clone()), ("bias", bias.clone())],
         );
         let external =
-            crate::nn::layer_norm_forward(&x, &weight, Some(&bias), LayerNorm::DEFAULT_EPS)
-                .unwrap();
+            layer_norm_forward(&x, &weight, Some(&bias), LayerNorm::DEFAULT_EPS).unwrap();
         assert_eq!(v(&ln.forward(&x, Mode::EVAL).unwrap()), v(&external));
 
         let mut rms = RMSNorm::new([3], &CPU).unwrap();
         load(&mut rms, &[("weight", weight.clone())]);
-        let external = crate::nn::rms_norm_forward(&x, &weight, RMSNorm::DEFAULT_EPS).unwrap();
+        let external = rms_norm_forward(&x, &weight, RMSNorm::DEFAULT_EPS).unwrap();
         assert_eq!(v(&rms.forward(&x, Mode::EVAL).unwrap()), v(&external));
 
         let bn_x = bn_input();
@@ -1153,7 +1152,7 @@ mod tests {
                 ("running_var", variance.clone()),
             ],
         );
-        let (external, replacements) = crate::nn::batch_norm2d_forward(
+        let (external, replacements) = batch_norm2d_forward(
             &bn_x,
             &bn_weight,
             &bn_bias,
@@ -1178,7 +1177,7 @@ mod tests {
 
         let before_mean = v(bn.running_mean());
         let before_variance = v(bn.running_var());
-        let (external, replacements) = crate::nn::batch_norm2d_forward(
+        let (external, replacements) = batch_norm2d_forward(
             &bn_x,
             &bn_weight,
             &bn_bias,
@@ -1200,7 +1199,7 @@ mod tests {
         let x = t(&[0.5, -1.5, 2.0, 0.25, -0.75, 1.25], [2, 3]);
         let weight = t(&[1.5, -0.5, 2.0], [3]).traced().unwrap();
         let bias = t(&[0.25, -0.5, 0.75], [3]).traced().unwrap();
-        let grads = crate::nn::layer_norm_forward(&x, &weight, Some(&bias), LayerNorm::DEFAULT_EPS)
+        let grads = layer_norm_forward(&x, &weight, Some(&bias), LayerNorm::DEFAULT_EPS)
             .unwrap()
             .mul(&coef(&[2, 3]))
             .unwrap()
@@ -1212,7 +1211,7 @@ mod tests {
         assert_eq!(grads.wrt_input(&bias).unwrap().dims(), &[3]);
 
         let rms_weight = t(&[1.5, -0.5, 2.0], [3]).traced().unwrap();
-        let grads = crate::nn::rms_norm_forward(&x, &rms_weight, RMSNorm::DEFAULT_EPS)
+        let grads = rms_norm_forward(&x, &rms_weight, RMSNorm::DEFAULT_EPS)
             .unwrap()
             .mul(&coef(&[2, 3]))
             .unwrap()
@@ -1224,7 +1223,7 @@ mod tests {
 
         let bn_weight = t(&[1.5, -0.5], [2]).traced().unwrap();
         let bn_bias = t(&[0.25, 0.75], [2]).traced().unwrap();
-        let (out, replacements) = crate::nn::batch_norm2d_forward(
+        let (out, replacements) = batch_norm2d_forward(
             &bn_input(),
             &bn_weight,
             &bn_bias,

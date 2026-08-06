@@ -37,7 +37,11 @@ pub fn step_decay(base_lr: f64, gamma: f64, step_size: u64, step: u64) -> f64 {
     if step_size == 0 {
         return base_lr;
     }
-    base_lr * gamma.powi((step / step_size) as i32)
+    // Saturate rather than cast: `as i32` wraps at 2³¹ exponents, and a negative
+    // exponent turns `gamma < 1` decay into unbounded *growth*. Clamping is
+    // exact here — `gamma^i32::MAX` has already underflowed to 0.
+    let exponent = (step / step_size).min(i32::MAX as u64) as i32;
+    base_lr * gamma.powi(exponent)
 }
 
 /// Cosine decay from `base_lr` down to `min_lr` over `total_steps`, staying at

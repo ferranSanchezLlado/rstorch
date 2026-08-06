@@ -177,14 +177,35 @@ pub(crate) fn check_writer(tensors: &BTreeMap<String, HostTensor>, limits: &Limi
 pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadata, Vec<u8>)> {
     // 1. File length cap before we allocate a buffer for it. The whole file is
     //    header + all tensor data, so bound it by metadata + total budget.
-    let file_len = std::fs::metadata(path)?.len();
+    //
+    //    The handle is opened once and everything below is derived from it: a
+    //    cap taken from a separate `fs::metadata` call and then handed to
+    //    `fs::read` would be advisory only, because the read runs to EOF no
+    //    matter what the earlier stat said. Two ways that bites: a stat of a
+    //    non-regular file (a FIFO reports length 0) passes any cap and then
+    //    streams unboundedly, and a regular file can be grown or swapped
+    //    between the stat and the read. So: reject anything that is not a
+    //    regular file, and bound the read itself.
+    use std::io::Read as _;
+    let file = std::fs::File::open(path)?;
+    let file_meta = file.metadata()?;
+    if !file_meta.is_file() {
+        return Err(Error::Persistence {
+            msg: format!("{} is not a regular file", path.display()),
+        });
+    }
     let file_cap = limits
         .max_metadata_bytes
         .saturating_add(limits.max_total_bytes)
         .saturating_add(8);
-    Limits::check("file bytes", file_len, file_cap)?;
+    Limits::check("file bytes", file_meta.len(), file_cap)?;
 
-    let buffer = std::fs::read(path)?;
+    // Read one byte past the cap so an over-cap file is detected rather than
+    // silently truncated to a prefix that might still parse.
+    let mut buffer = Vec::new();
+    file.take(file_cap.saturating_add(1))
+        .read_to_end(&mut buffer)?;
+    Limits::check("file bytes", buffer.len() as u64, file_cap)?;
 
     // 2. Header (metadata) size cap: the first 8 bytes are the little-endian
     //    header length. Check it before trusting the rest of the header.
@@ -580,6 +601,78 @@ mod tests {
         let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
         bytes.extend(header);
         bytes
+    }
+
+    /// The size cap must bound the *read*, not merely a preceding `stat`.
+    /// A FIFO reports length 0, so a stat-only cap admits it and then reads
+    /// until the writer stops — unbounded memory from a path the caller was
+    /// told had been size-checked. A non-regular file must be refused outright.
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_files_are_refused_rather_than_streamed() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tmpdir("fifo");
+        let path = dir.join("pipe.safetensors");
+
+        // `mkfifo(2)` via libc is unavailable here, so shell out to `mkfifo(1)`.
+        let made = std::process::Command::new("mkfifo")
+            .arg(path.as_os_str())
+            .status();
+        let Ok(status) = made else {
+            return; // no `mkfifo` binary: nothing to assert on this platform
+        };
+        assert!(status.success(), "mkfifo failed");
+        assert!(
+            !path.as_os_str().as_bytes().is_empty(),
+            "fifo path must be non-empty"
+        );
+
+        // A writer that would otherwise feed the reader forever. Opening a FIFO
+        // for reading blocks until a writer appears, so spawn one that emits a
+        // little data and exits; the assertion is that we reject on file *type*,
+        // before length ever matters.
+        let mut writer = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "yes 0123456789 > {} 2>/dev/null || true",
+                path.display()
+            ))
+            .spawn()
+            .expect("spawn writer");
+
+        let err = load_tensors(&path, &Limits::defaults())
+            .expect_err("a FIFO must not be accepted as a checkpoint");
+        assert!(
+            matches!(&err, Error::Persistence { msg } if msg.contains("not a regular file")),
+            "expected a regular-file rejection, got {err:?}"
+        );
+
+        let _ = writer.kill();
+        let _ = writer.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file larger than the cap is rejected by the bounded read even when the
+    /// declared header is small, and the error names the file-length budget.
+    #[test]
+    fn over_cap_file_is_rejected_by_the_bounded_read() {
+        let dir = tmpdir("cap");
+        let path = dir.join("big.safetensors");
+        let limits = Limits {
+            max_metadata_bytes: 64,
+            max_total_bytes: 64,
+            ..Limits::defaults()
+        };
+        // Well past `64 + 64 + 8`.
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+
+        let err = load_tensors(&path, &limits).expect_err("over-cap file must be rejected");
+        assert!(
+            matches!(&err, Error::Persistence { msg } if msg.contains("file bytes")),
+            "expected a file-bytes cap error, got {err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -895,7 +895,14 @@ fn validate_optimizer_views(
     Ok(())
 }
 
-fn validate_sgd_scalars(
+/// Range-check the SGD hyperparameters.
+///
+/// Also called by [`Sgd::step`](crate::optim::Sgd::step) *before* it mutates
+/// anything: reaching this only from inside the kernel would mean an invalid
+/// group hyperparameter is diagnosed part-way through the parameter walk,
+/// leaving the step half-applied. Sharing one function keeps the up-front check
+/// and the kernel's guard from drifting apart.
+pub(crate) fn validate_sgd_scalars(
     op: &'static str,
     lr: f64,
     momentum: f64,
@@ -907,7 +914,10 @@ fn validate_sgd_scalars(
     validate_nonnegative(op, "weight_decay", weight_decay, dtype)
 }
 
-fn validate_adam_scalars(op: &'static str, scalars: &[f64], dtype: DType) -> Result<()> {
+/// Range-check the Adam hyperparameters. Shared with
+/// [`Adam::step`](crate::optim::Adam::step)'s up-front check for the reason
+/// given on [`validate_sgd_scalars`].
+pub(crate) fn validate_adam_scalars(op: &'static str, scalars: &[f64], dtype: DType) -> Result<()> {
     let [
         lr,
         beta1,

@@ -54,10 +54,6 @@
 //! [`record`] takes the already-built forward output and the closure
 //! separately so the rule is expressible. A strong-count leak test gates it.
 
-// `Node::key`/`Grads::{take, contains}` are consumed by T44 (the optimizer);
-// the integrator removes this allow once that lands.
-#![allow(dead_code)]
-
 use crate::DType;
 use crate::error::{Error, Result};
 use crate::tensor::Tensor;
@@ -465,7 +461,9 @@ pub struct Grads {
 }
 
 impl Grads {
-    /// Build from a key→gradient map (the engine's output).
+    /// Build from a key→gradient map. Test-only: the engine constructs
+    /// `Grads` directly from its already-accumulated map.
+    #[cfg(test)]
     pub(crate) fn from_pairs(grads: HashMap<GradKey, Tensor>) -> Grads {
         Grads {
             grads: grads
@@ -475,12 +473,35 @@ impl Grads {
         }
     }
 
-    /// Remove and return the gradient for `key` (optimizer drain path).
+    /// Remove and return the gradient for `key` in the parameter's own dtype.
+    #[cfg(test)]
     pub(crate) fn take(&mut self, key: GradKey) -> Result<Option<Tensor>> {
         self.grads.remove(&key).map(Accumulated::finish).transpose()
     }
 
-    /// Whether a gradient is present for `key`.
+    /// Remove and return the gradient for `key` in its **accumulation** dtype
+    /// (the optimizer drain path).
+    ///
+    /// The engine accumulates an F16/BF16 parameter's gradient in F32 and only
+    /// narrows it on the way out. The optimizer immediately widens it again, so
+    /// draining through [`take`](Self::take) would round-trip
+    /// F32 → F16 → F32 for no reason: a gradient that legitimately exceeds
+    /// F16's range becomes `inf` (and then `NaN` once Adam divides), and one
+    /// that merely exceeds F16's *spacing* is silently rounded. Handing over
+    /// the value that was already computed avoids both.
+    ///
+    /// [`wrt`](Self::wrt) deliberately keeps narrowing: a gradient a *caller*
+    /// inspects matches its parameter's dtype, as in PyTorch.
+    pub(crate) fn take_wide(&mut self, key: GradKey) -> Result<Option<Tensor>> {
+        self.grads
+            .remove(&key)
+            .map(|accumulated| accumulated.wide())
+            .transpose()
+    }
+
+    /// Whether a gradient is present for `key`. Test-only: the optimizer
+    /// drain path uses [`Grads::take`], which reports absence itself.
+    #[cfg(test)]
     pub(crate) fn contains(&self, key: GradKey) -> bool {
         self.grads.contains_key(&key)
     }

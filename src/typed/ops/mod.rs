@@ -424,17 +424,6 @@ where
     type Output = Target;
 }
 
-// Called by external CT01 build probes; ordinary library builds do not invoke it.
-#[allow(dead_code)]
-pub(crate) fn probe_relational_check<const LEFT: usize, const RIGHT: usize>() {
-    const {
-        assert!(
-            LEFT == DYN || RIGHT == DYN || LEFT == RIGHT,
-            "typed relational dimensions are incompatible"
-        )
-    };
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,13 +483,10 @@ mod tests {
         assert_insert::<One<3>, Tensor2<3, 1, f32, Cpu>>();
     }
 
-    #[test]
-    fn body_const_relations_accept_equal_or_deferred_dimensions() {
-        probe_relational_check::<7, 7>();
-        probe_relational_check::<DYN, 9>();
-    }
-
-    // The CT01 standalone probe compiles the same predicate with `<7, 8>`.
-    // CT12 migrates that case into its build-required UI harness and pins the
-    // E0080 diagnostic. A failure cannot live in a normal unit-test target.
+    // The relational dimension check is not probed here. It used to be, via a
+    // local re-declaration of the predicate, which pinned only the copy: the
+    // library's real check is `const_check::assert_matmul_contract`, whose
+    // accept side is instantiated by `const_check`'s own `matmul_probe` and
+    // whose reject side is pinned as an `E0080` by the build-mode UI harness
+    // (a const-assert failure cannot live in an ordinary unit-test target).
 }

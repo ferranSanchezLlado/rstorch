@@ -51,7 +51,11 @@ fn fused_outputs(outputs: Vec<Storage>, like: &Tensor) -> Result<[Tensor; 3]> {
             Layout::contiguous(like.shape().clone())?,
         ));
     }
-    tensors.try_into().map_err(|_| unreachable!())
+    // The length was validated as 3 above and the loop pushes exactly one
+    // tensor per output, so this conversion cannot fail.
+    Ok(tensors
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("fused Adam output count validated as 3")))
 }
 
 /// The hyperparameters of one parameter group (or of the optimizer itself).
@@ -303,17 +307,51 @@ impl Adam {
             op: "step",
             msg: "Adam global step clock cannot be advanced past u64::MAX".to_string(),
         })?;
+        let base_lr = *lr;
+        let decoupled = *decoupled;
         let mut exhausted = None;
+        // Hyperparameters are range-checked here, before a single `Param::set`.
+        // The kernel checks them too, but it runs once per parameter *during*
+        // the mutating walk, so an out-of-range value in a group that matches
+        // only some parameters would stop the step half-applied — with the
+        // already-updated parameters' clocks advanced and `steps` not, which no
+        // retry can repair. `optim`'s module docs promise the opposite.
+        let mut invalid = None;
         crate::nn::visit::visit_all(model, &mut |path, leaf| {
             let crate::nn::visit::Leaf::Param(param) = leaf else {
                 return;
             };
-            if !param.is_frozen()
-                && state
-                    .get(&param.grad_key())
-                    .is_some_and(|entry| entry.clock.checked_add(1).is_none())
-            {
+            if param.is_frozen() {
+                return;
+            }
+            let clock = state.get(&param.grad_key()).map(|entry| entry.clock);
+            if clock.is_some_and(|clock| clock.checked_add(1).is_none()) {
                 exhausted.get_or_insert_with(|| path.to_string());
+                return;
+            }
+            if invalid.is_some() {
+                return;
+            }
+            // Exactly the scalars the step will hand the kernel for this
+            // parameter, including its own bias-correction clock.
+            let hyper = groups.resolve(path);
+            let next_clock = clock.unwrap_or(0) + 1;
+            let t = i32::try_from(next_clock).unwrap_or(i32::MAX);
+            let scalars = [
+                base_lr * hyper.lr_scale,
+                hyper.beta1,
+                hyper.beta2,
+                hyper.eps,
+                hyper.weight_decay,
+                1.0 - hyper.beta1.powi(t),
+                1.0 - hyper.beta2.powi(t),
+                f64::from(u8::from(decoupled)),
+            ];
+            let acc = param.value().dtype().accumulation_dtype();
+            if let Err(error) =
+                crate::backend::cpu::fused::validate_adam_scalars("step", &scalars, acc)
+            {
+                invalid = Some(error);
             }
         });
         if let Some(path) = exhausted {
@@ -324,8 +362,9 @@ impl Adam {
                 ),
             });
         }
-        let base_lr = *lr;
-        let decoupled = *decoupled;
+        if let Some(error) = invalid {
+            return Err(error);
+        }
         engine::apply("step", model, grads, |path, param, grad| {
             let hyper = groups.resolve(path);
             let lr = base_lr * hyper.lr_scale;
@@ -355,7 +394,11 @@ impl Adam {
             };
             // This parameter's own clock, so a late joiner is bias-corrected
             // as a first update rather than as step `steps`.
-            let t = i32::try_from(next_clock).unwrap_or(i32::MAX);
+            //
+            // Saturating at `i32::MAX` is exact, not a fallback: `beta^t` for
+            // `beta < 1` has already underflowed to 0 long before `t = 2³¹`, so
+            // every larger `t` gives the same correction factor of 1.
+            let t = next_clock.min(i32::MAX as u64) as i32;
             let correction1 = 1.0 - hyper.beta1.powi(t);
             let correction2 = 1.0 - hyper.beta2.powi(t);
             let scalars = [
@@ -858,6 +901,49 @@ mod tests {
     }
 
     // ---- the gate: convergence -------------------------------------------
+
+    /// An out-of-range hyperparameter in a group that matches only *some*
+    /// parameters must reject the whole step, leaving every parameter, every
+    /// per-parameter clock, and `steps` untouched.
+    ///
+    /// The group ordering matters: `trunk.*` sorts before `head.*` in the walk,
+    /// so validating inside the mutating pass would already have moved the
+    /// trunk by the time the bad `head.*` group was reached — and no retry can
+    /// undo that, because the trunk's bias-correction clock has advanced too.
+    #[test]
+    fn an_invalid_group_hyperparameter_rejects_the_whole_step() {
+        for bad in [
+            Adam::new(0.1).group(|path| path.starts_with("head."), |g| g.eps(0.0)),
+            Adam::new(0.1).group(|path| path.starts_with("head."), |g| g.betas(1.0, 0.999)),
+            Adam::new(0.1).group(
+                |path| path.starts_with("head."),
+                |g| g.weight_decay(f64::NAN),
+            ),
+            Adam::new(0.1).group(|path| path.starts_with("head."), |g| g.lr_scale(-1.0)),
+        ] {
+            let mut opt = bad;
+            let mut model = Net::ones();
+            let before = model.snapshot();
+
+            let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+            let err = opt
+                .step(&mut model, loss.backward().unwrap())
+                .expect_err("an invalid group hyperparameter must reject the step");
+            assert!(matches!(err, Error::InvalidArg { .. }), "{err}");
+
+            assert_eq!(
+                model.snapshot(),
+                before,
+                "a rejected step must not move any parameter"
+            );
+            assert_eq!(opt.steps(), 0, "a rejected step must not advance `steps`");
+            assert_eq!(
+                opt.param_steps(&model.trunk.weight),
+                0,
+                "a rejected step must not advance a parameter's own clock"
+            );
+        }
+    }
 
     #[test]
     fn converges_on_a_tiny_regression() {

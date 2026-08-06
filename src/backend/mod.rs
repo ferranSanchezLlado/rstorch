@@ -30,13 +30,11 @@
 //! made v2's Metal path train slower than CPU. The CPU backend is trivially
 //! synchronous and satisfies the contract vacuously.
 
-// The whole backend surface (trait, enums, `View`, dispatch, and the CPU
-// kernel stubs) is scaffolding that the wave-2/3 op and kernel tasks consume;
-// the integrator removes this allow at v3-m1 once the op layer calls into it.
-#![allow(dead_code)]
-
 // T19: the table-driven op × dtype harness that validates any backend
-// against the CPU reference (`conformance::run`).
+// against the CPU reference (`conformance::run_device`). Test-only: its sole
+// caller is the Metal backend's conformance test, so it is not compiled into
+// release builds.
+#[cfg(test)]
 pub(crate) mod conformance;
 pub(crate) mod conv_geometry;
 pub(crate) mod cpu;
@@ -406,9 +404,8 @@ pub(crate) trait BackendOps: Send + Sync {
 /// The CPU reference backend: a zero-sized dispatcher that delegates each
 /// entry point to its per-family kernel module (`cpu::host`, `cpu::elementwise`,
 /// `cpu::reduce`, `cpu::matmul`, `cpu::index`, `cpu::conv`, `cpu::fused`).
-/// The delegations are frozen by T01; the kernel-module bodies are the
-/// `todo!()` stubs the wave-2/3 kernel tasks fill (implementation-plan §1.3,
-/// footnote ³).
+/// The delegations are frozen by T01; the kernel-module bodies were filled by
+/// the wave-2/3 kernel tasks (implementation-plan §1.3, footnote ³).
 pub(crate) struct CpuBackend;
 
 impl BackendOps for CpuBackend {
@@ -506,8 +503,10 @@ pub(crate) mod dispatch {
 
     /// Return the backend implementation for `device`.
     ///
-    /// The CPU arm is total. Accelerator arms are `todo!()` until their
-    /// backend task lands (T61 replaces the Metal arm).
+    /// Both arms are total: the CPU backend is always available, and the
+    /// Metal arm is compiled in only when the `metal` feature is enabled on
+    /// macOS, which is also the only configuration in which
+    /// [`Device::Metal`] can be constructed.
     pub(crate) fn backend(device: Device) -> &'static dyn BackendOps {
         match device {
             Device::Cpu => &CPU,

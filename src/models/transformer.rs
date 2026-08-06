@@ -140,16 +140,24 @@ impl Block {
         x.add(&self.feed_forward2.forward(&hidden, mode)?)
     }
 
+    /// One cached decoding step for this block.
+    ///
+    /// Reads the previous prefix but does **not** write it back: the extended
+    /// cache is returned so the caller can commit every layer at once. A
+    /// rejected step must leave the cache exactly as it was — extending some
+    /// layers and not others would silently corrupt every later step, and it is
+    /// this function's fallible tail (`cat`, attention, the output projection)
+    /// that makes that reachable.
     fn forward_cached(
         &mut self,
         x: &Tensor,
-        cache: &mut Option<LayerCache>,
+        cache: Option<&LayerCache>,
         mode: Mode,
-    ) -> Result<Tensor> {
+    ) -> Result<(Tensor, LayerCache)> {
         let normalized = self.norm1.forward(x, mode)?;
         let query = self.attention.project_query(&normalized, mode)?;
         let (new_keys, new_values) = self.attention.project_keys_values(&normalized, mode)?;
-        let (keys, values) = match cache.take() {
+        let (keys, values) = match cache {
             Some(previous) => (
                 Tensor::cat(&[&previous.keys, &new_keys], -2)?,
                 Tensor::cat(&[&previous.values, &new_values], -2)?,
@@ -158,12 +166,12 @@ impl Block {
         };
         let context = scaled_dot_product_attention(&query, &keys, &values, None)?;
         let attended = self.attention.project_output(&context, mode)?;
-        *cache = Some(LayerCache { keys, values });
 
         let x = x.add(&attended)?;
         let normalized = self.norm2.forward(&x, mode)?;
         let hidden = self.feed_forward1.forward(&normalized, mode)?.gelu()?;
-        x.add(&self.feed_forward2.forward(&hidden, mode)?)
+        let out = x.add(&self.feed_forward2.forward(&hidden, mode)?)?;
+        Ok((out, LayerCache { keys, values }))
     }
 }
 
@@ -315,12 +323,25 @@ impl DecoderTransformer {
             .token_embedding
             .lookup(token_ids, mode)?
             .add(&self.position_embedding.lookup(&position, mode)?)?;
-        for (block, layer_cache) in self.blocks.iter_mut().zip(&mut cache.layers) {
-            hidden = block.forward_cached(&hidden, layer_cache, mode)?;
+        // Stage every layer's extended cache, then commit once the whole step
+        // has succeeded. Writing each layer as it is computed would leave the
+        // cache half-advanced (and `cache.len` stale) on any error below, and
+        // the next otherwise-valid step would return wrong logits with no error
+        // to explain them.
+        let mut staged = Vec::with_capacity(self.blocks.len());
+        for (block, layer_cache) in self.blocks.iter_mut().zip(&cache.layers) {
+            let (next, extended) = block.forward_cached(&hidden, layer_cache.as_ref(), mode)?;
+            hidden = next;
+            staged.push(extended);
+        }
+        let normalized = self.final_norm.forward(&hidden, mode)?;
+        let logits = self.output.forward(&normalized, mode)?;
+
+        for (slot, extended) in cache.layers.iter_mut().zip(staged) {
+            *slot = Some(extended);
         }
         cache.len += 1;
-        let hidden = self.final_norm.forward(&hidden, mode)?;
-        self.output.forward(&hidden, mode)
+        Ok(logits)
     }
 
     /// Greedily append `max_new_tokens` tokens using a real per-layer KV cache.
@@ -511,5 +532,57 @@ mod tests {
             }
         }
         assert_eq!(cache.len(), 4);
+    }
+
+    /// A rejected cached step must leave the cache byte-for-byte usable.
+    ///
+    /// The step is rejected *after* the per-layer projections have been
+    /// computed, which is exactly the window in which a half-committed cache
+    /// used to survive: the next legitimate step then returned wrong logits
+    /// with no error to explain them.
+    #[test]
+    fn a_rejected_cached_step_does_not_corrupt_the_cache() {
+        let mut model = DecoderTransformer::new(config(), &CPU, &mut Rng::seed(4)).unwrap();
+        let ids = Tensor::from_vec(vec![4i64, 5, 6, 7], [1, 4], &CPU).unwrap();
+
+        // Reference: three clean steps.
+        let mut clean = model.empty_cache();
+        let mut expected = Vec::new();
+        for position in 0..3 {
+            let step = model
+                .logits_cached(&ids.narrow(1, position, 1).unwrap(), &mut clean, Mode::EVAL)
+                .unwrap();
+            expected.push(step.to_vec::<f32>().unwrap());
+        }
+
+        // Same run, but with a rejected step wedged in after the second.
+        let mut cache = model.empty_cache();
+        let mut actual = Vec::new();
+        for position in 0..3 {
+            if position == 2 {
+                // Batch 2, sequence 1: this passes every up-front guard, so it
+                // reaches the per-layer loop and fails inside it, when the
+                // batch-2 projection is concatenated onto the batch-1 prefix.
+                // That is the only window in which a partially updated cache
+                // can survive, so it is the case worth pinning.
+                let wide = Tensor::from_vec(vec![4i64, 5], [2, 1], &CPU).unwrap();
+                assert!(model.logits_cached(&wide, &mut cache, Mode::EVAL).is_err());
+                assert_eq!(cache.len(), 2, "a rejected step must not advance the cache");
+            }
+            let step = model
+                .logits_cached(&ids.narrow(1, position, 1).unwrap(), &mut cache, Mode::EVAL)
+                .unwrap();
+            actual.push(step.to_vec::<f32>().unwrap());
+        }
+
+        assert_eq!(cache.len(), clean.len());
+        for (position, (got, want)) in actual.iter().zip(&expected).enumerate() {
+            for (a, b) in got.iter().zip(want) {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "step {position} diverged after a rejected step: {a} vs {b}"
+                );
+            }
+        }
     }
 }

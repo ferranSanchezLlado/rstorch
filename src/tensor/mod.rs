@@ -4,17 +4,11 @@
 //! **Contract file** (T01²/T20). T01 defines [`Tensor`]/[`Inner`], the
 //! accessors, the crate-internal plumbing (`from_parts`, `view`), and the
 //! autograd delegation ([`traced`](Tensor::traced)/[`backward`](Tensor::backward)).
-//! **T20** fills the constructor and host-transfer/movement `todo!()` bodies
-//! and adds the crate-internal broadcast-gradient reducer `Tensor::sum_to`,
-//! which every binary/broadcast/reduction backward funnels through; op
-//! families (T21–T27) add methods in `tensor/ops/*` behind the frozen
+//! T20 adds the constructors and host-transfer/movement bodies, plus the
+//! crate-internal broadcast-gradient reducer `Tensor::sum_to`, which every
+//! binary/broadcast/reduction backward funnels through; the op families
+//! (T21–T27) add methods in `tensor/ops/*` behind the frozen
 //! [`record`](crate::autograd) seam. No signature here changes after T01.
-
-// The crate-internal plumbing (`from_parts*`, `view`, `storage`, `layout`,
-// `node`, `detach_shallow`) is consumed by the wave-2/3 kernel, op, and
-// autograd tasks; the integrator removes this allow at v3-m1. Public
-// constructors/accessors are unaffected (they are never dead).
-#![allow(dead_code)]
 
 mod fmt;
 pub(crate) mod ops;
@@ -99,8 +93,10 @@ impl Tensor {
         self.0.node.as_ref()
     }
 
-    /// Whether two handles name the same storage/layout/autograd body.
-    #[cfg(test)]
+    /// Whether two handles name the same storage/layout/autograd body. Used by
+    /// the typed wrappers' tests to assert that erasing/refining a marker is a
+    /// zero-copy handle reuse.
+    #[cfg(all(test, feature = "typed"))]
     pub(crate) fn ptr_eq(&self, other: &Tensor) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }

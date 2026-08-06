@@ -98,51 +98,6 @@ pub(crate) const fn assert_broadcast(source: &[usize], target: &[usize]) {
     }
 }
 
-// Reserved for the rank/axis-generated concat surface; kept item-local so the
-// rest of typed internals remain warning checked.
-#[allow(dead_code)]
-pub(crate) const fn assert_concat_sum(left: usize, right: usize, output: usize) {
-    if left == DYN || right == DYN || output == DYN {
-        return;
-    }
-    let sum = match left.checked_add(right) {
-        Some(sum) => sum,
-        None => panic!("typed concat dimension addition overflow"),
-    };
-    assert!(
-        sum == output,
-        "typed concat output dimension is incompatible"
-    );
-}
-
-// CT40 consumes this relationship when typed attention is introduced.
-#[allow(dead_code)]
-pub(crate) const fn assert_attention_heads(embed: usize, heads: usize, head_dim: usize) {
-    assert!(
-        embed == DYN || embed > 0,
-        "typed attention embedding dimension must be non-zero"
-    );
-    assert!(
-        heads == DYN || heads > 0,
-        "typed attention head count must be non-zero"
-    );
-    assert!(
-        head_dim == DYN || head_dim > 0,
-        "typed attention head dimension must be non-zero"
-    );
-    if embed == DYN || heads == DYN || head_dim == DYN {
-        return;
-    }
-    let product = match heads.checked_mul(head_dim) {
-        Some(product) => product,
-        None => panic!("typed attention head dimension multiplication overflow"),
-    };
-    assert!(
-        product == embed,
-        "typed attention head dimensions are incompatible"
-    );
-}
-
 const fn reshape_numel(dimensions: &[usize]) -> Result<Option<usize>, ()> {
     let mut axis = 0;
     while axis < dimensions.len() {
@@ -215,20 +170,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "typed concat dimension addition overflow")]
-    fn concat_uses_checked_addition() {
-        assert_concat_sum(usize::MAX - 1, 2, 1);
-    }
-
-    #[test]
     #[should_panic(expected = "typed broadcast dimensions are incompatible")]
     fn known_broadcast_mismatch_is_rejected() {
         assert_broadcast(&[2, 3], &[4, 3]);
-    }
-
-    #[test]
-    #[should_panic(expected = "typed attention head count must be non-zero")]
-    fn zero_static_can_still_be_invalid_for_a_specific_operation() {
-        assert_attention_heads(DYN, 0, DYN);
     }
 }

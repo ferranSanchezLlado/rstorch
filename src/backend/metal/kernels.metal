@@ -118,8 +118,8 @@ kernel void binary_##NAME( \
     TYPE b = rhs[view_offset(gid, rd, rs, rr, ro)]; \
     switch (op) { case 0: out[gid]=ADD(a,b); break; case 1: out[gid]=SUB(a,b); break; \
       case 2: out[gid]=MUL(a,b); break; case 3: out[gid]=DIV(a,b); break; \
-      case 4: out[gid]=value_nan(a)?b:(value_nan(b)?a:(a>=b?a:b)); break; \
-      default: out[gid]=value_nan(a)?b:(value_nan(b)?a:(a<=b?a:b)); } \
+      case 4: out[gid]=value_nan(a)?a:(value_nan(b)?b:(a>=b?a:b)); break; \
+      default: out[gid]=value_nan(a)?a:(value_nan(b)?b:(a<=b?a:b)); } \
 } \
 kernel void scalar_##NAME( \
     device const TYPE* x [[buffer(0)]], device TYPE* out [[buffer(1)]], \
@@ -129,7 +129,7 @@ kernel void scalar_##NAME( \
     constant uint& op [[buffer(8)]], uint gid [[thread_position_in_grid]]) { \
     if (gid >= len) return; ACC a=TO_ACC(x[view_offset(gid,d,s,r,off)]), b=scalar, v; \
     switch(op){case 0:v=ADD(a,b);break;case 1:v=SUB(a,b);break;case 2:v=MUL(a,b);break; \
-      case 3:v=DIV(a,b);break;case 4:v=value_nan(a)?b:(value_nan(b)?a:(a>=b?a:b));break;default:v=value_nan(a)?b:(value_nan(b)?a:(a<=b?a:b));} \
+      case 3:v=DIV(a,b);break;case 4:v=value_nan(a)?a:(value_nan(b)?b:(a>=b?a:b));break;default:v=value_nan(a)?a:(value_nan(b)?b:(a<=b?a:b));} \
     out[gid]=FROM_ACC(v); \
 } \
 kernel void compare_##NAME( \
@@ -163,8 +163,10 @@ kernel void arg_reduce_##NAME( \
     constant uint& op [[buffer(8)]], uint gid [[thread_position_in_grid]]) { \
     if(gid>=out_len)return; ulong base=reduced_offset(gid,d,s,r,axis,off),n=d[axis],best=0; \
     TYPE bv=x[base]; for(ulong i=1;i<n;i++){TYPE v=x[base+i*s[axis]]; \
-      bool better=op==0?(value_nan(bv)&&!value_nan(v)):(value_nan(v)&&!value_nan(bv)); \
-      if(!value_nan(v)&&!value_nan(bv))better=op==0?v>bv:v<bv;if(better){bv=v;best=i;}} out[gid]=long(best); \
+      /* A NaN outranks every number for argmax AND argmin, so the selected \
+         index always agrees with what max/min report; the first NaN wins. */ \
+      bool better=value_nan(bv)?false:(value_nan(v)?true:(op==0?v>bv:v<bv)); \
+      if(better){bv=v;best=i;}} out[gid]=long(best); \
 } \
 kernel void matmul_##NAME( \
     device const TYPE* lhs [[buffer(0)]], device const TYPE* rhs [[buffer(1)]], device TYPE* out [[buffer(2)]], \
@@ -244,7 +246,9 @@ static float erf_accurate(float x) {
 kernel void unary_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[buffer(1)]], \
  constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]], \
  constant ulong& off [[buffer(5)]],constant ulong& len [[buffer(6)]],constant uint& op [[buffer(7)]],uint gid [[thread_position_in_grid]]){ \
- if(gid>=len)return;float v=float(x[view_offset(gid,d,s,r,off)]),z;switch(op){case 0:z=max(v,0.0f);break; \
+ /* relu propagates NaN: max() would return the non-NaN operand and quietly \
+    turn a diverged activation back into 0. */ \
+ if(gid>=len)return;float v=float(x[view_offset(gid,d,s,r,off)]),z;switch(op){case 0:z=isnan(v)?v:max(v,0.0f);break; \
  case 1:z=0.5f*v*(1.0f+erf_accurate(v*0.7071067811865475f));break;case 2:z=exp(v);break;case 3:z=log(v);break; \
  case 4:z=sqrt(v);break;case 5:z=tanh(v);break;case 6:z=1.0f/(1.0f+exp(-v));break;case 7:z=-v;break;default:z=fabs(v);}out[gid]=FROM(z);}
 FLOAT_UNARY(half,f16,FROM_F16)
@@ -352,7 +356,7 @@ CONV_KERNELS(long,long,i64,IDENTITY_I64,FROM_I64)
 #define FUSED_FLOAT(TYPE, NAME, FROM) \
 kernel void softmax_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[buffer(1)]],constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]],constant ulong& off [[buffer(5)]],constant ulong& rows [[buffer(6)]],constant ulong& width [[buffer(7)]],uint row [[thread_position_in_grid]]){if(row>=rows)return;ulong base=reduced_offset(row,d,s,r,r-1,off);float peak=-INFINITY;bool nan=false;for(ulong c=0;c<width;c++){float v=float(x[base+c*s[r-1]]);nan|=isnan(v);peak=max(peak,v);}if(nan){for(ulong c=0;c<width;c++)out[row*width+c]=FROM(NAN);return;}if(peak==-INFINITY){for(ulong c=0;c<width;c++)out[row*width+c]=FROM(0);return;}float sum=0;for(ulong c=0;c<width;c++)sum+=exp(float(x[base+c*s[r-1]])-peak);for(ulong c=0;c<width;c++)out[row*width+c]=FROM(exp(float(x[base+c*s[r-1]])-peak)/sum);} \
 kernel void layer_norm_##NAME(device const TYPE* x [[buffer(0)]],device const TYPE* w [[buffer(1)]],device const TYPE* b [[buffer(2)]],device TYPE* out [[buffer(3)]],device float* xhat [[buffer(4)]],device float* invout [[buffer(5)]],constant ulong* xd [[buffer(6)]],constant ulong* xs [[buffer(7)]],constant uint& xr [[buffer(8)]],constant ulong& xo [[buffer(9)]],constant ulong* ws [[buffer(10)]],constant ulong& woff [[buffer(11)]],constant ulong* bs [[buffer(12)]],constant ulong& boff [[buffer(13)]],constant ulong& rows [[buffer(14)]],constant ulong& width [[buffer(15)]],constant float& eps [[buffer(16)]],constant uint& save [[buffer(17)]],uint row [[thread_position_in_grid]]){if(row>=rows)return;ulong base=reduced_offset(row,xd,xs,xr,xr-1,xo);float mean=0;for(ulong c=0;c<width;c++)mean+=float(x[base+c*xs[xr-1]]);mean/=float(width);float var=0;for(ulong c=0;c<width;c++){float z=float(x[base+c*xs[xr-1]])-mean;var+=z*z;}float inv=rsqrt(var/float(width)+eps);if(save)invout[row]=inv;for(ulong c=0;c<width;c++){float z=(float(x[base+c*xs[xr-1]])-mean)*inv;if(save)xhat[row*width+c]=z;out[row*width+c]=FROM(z*float(w[woff+c*ws[0]])+float(b[boff+c*bs[0]]));}} \
-kernel void layer_norm_backward_##NAME(device const TYPE* g [[buffer(0)]],device const float* xhat [[buffer(1)]],device const float* inv [[buffer(2)]],device const TYPE* w [[buffer(3)]],device TYPE* out [[buffer(4)]],constant ulong* gd [[buffer(5)]],constant ulong* gs [[buffer(6)]],constant uint& gr [[buffer(7)]],constant ulong& go [[buffer(8)]],constant ulong* hd [[buffer(9)]],constant ulong* hs [[buffer(10)]],constant uint& hr [[buffer(11)]],constant ulong& ho [[buffer(12)]],constant ulong* is [[buffer(13)]],constant ulong& io [[buffer(14)]],constant ulong* ws [[buffer(15)]],constant ulong& wo [[buffer(16)]],constant ulong& rows [[buffer(17)]],constant ulong& width [[buffer(18)]],uint row [[thread_position_in_grid]]){if(row>=rows)return;float sum=0,sumh=0;for(ulong c=0;c<width;c++){float dy=float(g[view_offset(row*width+c,gd,gs,gr,go)])*float(w[wo+c*ws[0]]),h=xhat[view_offset(row*width+c,hd,hs,hr,ho)];sum+=dy;sumh+=dy*h;}float iv=inv[io+row*is[0]];for(ulong c=0;c<width;c++){float dy=float(g[view_offset(row*width+c,gd,gs,gr,go)])*float(w[wo+c*ws[0]]),h=xhat[view_offset(row*width+c,hd,hs,hr,ho)];out[row*width+c]=FROM(iv*(dy-(sum+h*sumh)/float(width)));}}
+kernel void layer_norm_backward_##NAME(device const TYPE* g [[buffer(0)]],device const float* xhat [[buffer(1)]],device const float* inv [[buffer(2)]],device const TYPE* w [[buffer(3)]],device TYPE* out [[buffer(4)]],constant ulong* gd [[buffer(5)]],constant ulong* gs [[buffer(6)]],constant uint& gr [[buffer(7)]],constant ulong& go [[buffer(8)]],constant ulong* hd [[buffer(9)]],constant ulong* hs [[buffer(10)]],constant uint& hr [[buffer(11)]],constant ulong& ho [[buffer(12)]],constant ulong* is [[buffer(13)]],constant ulong& io [[buffer(14)]],constant ulong* ws [[buffer(15)]],constant ulong& wo [[buffer(16)]],constant ulong& rows [[buffer(17)]],constant ulong& width [[buffer(18)]],uint row [[thread_position_in_grid]]){if(row>=rows)return;float sum=0,sumh=0;for(ulong c=0;c<width;c++){float dy=float(g[view_offset(row*width+c,gd,gs,gr,go)])*float(w[wo+c*ws[0]]),h=xhat[view_offset(row*width+c,hd,hs,hr,ho)];sum+=dy;sumh+=dy*h;}float iv=inv[io+row];for(ulong c=0;c<width;c++){float dy=float(g[view_offset(row*width+c,gd,gs,gr,go)])*float(w[wo+c*ws[0]]),h=xhat[view_offset(row*width+c,hd,hs,hr,ho)];out[row*width+c]=FROM(iv*(dy-(sum+h*sumh)/float(width)));}}
 FUSED_FLOAT(half,f16,FROM_F16)
 FUSED_FLOAT(float,f32,FROM_F32)
 

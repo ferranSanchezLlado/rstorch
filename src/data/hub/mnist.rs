@@ -199,14 +199,38 @@ impl Mnist {
     }
 }
 
+/// The largest decompressed IDX payload this module will hold in memory.
+///
+/// The biggest real MNIST member is the training image set at
+/// `60_000 * 28 * 28 + 16` = 47 040 016 bytes, so 64 MiB clears it with room to
+/// spare. The bound matters because the size caps on the resources above apply
+/// to the *compressed* archive: DEFLATE reaches ratios above 1000:1, so a
+/// 12 MB archive that passed its cap can otherwise expand to gigabytes. Small
+/// enough to keep a malicious archive from exhausting memory, large enough that
+/// no legitimate MNIST file comes close.
+#[cfg(feature = "hub")]
+const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Decompresses a gzip file into raw bytes. Requires the `hub` feature.
+///
+/// The output is bounded by [`MAX_DECOMPRESSED_BYTES`]; a larger archive is
+/// rejected rather than expanded, so a gzip bomb cannot exhaust memory. The
+/// reader takes one byte past the cap so an over-cap archive is *detected*
+/// instead of being silently truncated to a valid-looking prefix.
 #[cfg(feature = "hub")]
 fn read_gzip(path: impl AsRef<std::path::Path>) -> Result<Vec<u8>> {
     use std::io::Read as _;
     let file = std::fs::File::open(path)?;
-    let mut decoder = flate2::read::GzDecoder::new(file);
+    let decoder = flate2::read::GzDecoder::new(file);
     let mut bytes = Vec::new();
-    decoder.read_to_end(&mut bytes)?;
+    decoder
+        .take(MAX_DECOMPRESSED_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_DECOMPRESSED_BYTES {
+        return Err(data_error(&format!(
+            "decompressed archive exceeds the {MAX_DECOMPRESSED_BYTES} byte cap"
+        )));
+    }
     Ok(bytes)
 }
 
@@ -225,6 +249,14 @@ pub fn parse_idx_images(bytes: &[u8]) -> Result<RawImages> {
     let count = read_u32(bytes, 4) as usize;
     let rows = read_u32(bytes, 8) as usize;
     let cols = read_u32(bytes, 12) as usize;
+    // A zero-sized geometry makes the payload length zero regardless of
+    // `count`, so the exact-length check below would accept a 16-byte header
+    // declaring billions of (empty) images and `count` alone would drive the
+    // allocation. Rejecting it here keeps `count` bounded by the input length,
+    // which is what makes the rest of this function allocation-safe.
+    if rows == 0 || cols == 0 {
+        return parse_error("IDX image geometry must be non-zero");
+    }
     let image_len = rows
         .checked_mul(cols)
         .ok_or_else(|| data_error("IDX image dimensions overflow"))?;
@@ -238,14 +270,12 @@ pub fn parse_idx_images(bytes: &[u8]) -> Result<RawImages> {
         return parse_error("truncated IDX image data");
     }
 
-    let images = if image_len == 0 {
-        vec![Vec::new(); count]
-    } else {
-        bytes[16..]
-            .chunks_exact(image_len)
-            .map(|image| image.iter().map(|&pixel| pixel as f32 / 255.0).collect())
-            .collect()
-    };
+    // `image_len >= 1` (the geometry check above), so `chunks_exact` yields
+    // exactly `count` chunks and needs no empty-image special case.
+    let images = bytes[16..]
+        .chunks_exact(image_len)
+        .map(|image| image.iter().map(|&pixel| pixel as f32 / 255.0).collect())
+        .collect();
     Ok(RawImages { images, rows, cols })
 }
 
@@ -353,6 +383,63 @@ mod tests {
         images.push(0);
         images.push(0);
         assert!(matches!(parse_idx_images(&images), Err(Error::Data { .. })));
+    }
+
+    /// A zero-sized geometry zeroes the declared payload, so the exact-length
+    /// check alone would accept a 16-byte header claiming `u32::MAX` images and
+    /// then allocate ~96 GiB for the outer `Vec` — an abort, not a `Result`.
+    /// The geometry must be rejected before anything is allocated.
+    #[test]
+    fn zero_geometry_is_rejected_before_allocating() {
+        for (rows, cols) in [(0u32, 28u32), (28, 0), (0, 0)] {
+            let header = image_fixture(u32::MAX, rows, cols, &[]);
+            assert_eq!(header.len(), 16, "fixture must be header-only");
+            assert!(
+                matches!(parse_idx_images(&header), Err(Error::Data { .. })),
+                "rows={rows} cols={cols} must be a data error, not an allocation"
+            );
+        }
+        // A legitimately empty split (no images, real geometry) still parses.
+        let empty = parse_idx_images(&image_fixture(0, 28, 28, &[])).unwrap();
+        assert!(empty.images.is_empty());
+        assert_eq!((empty.rows, empty.cols), (28, 28));
+    }
+
+    /// The decompression cap must reject a bomb rather than expand it. Built
+    /// here with `flate2`'s encoder so no fixture file is needed: a highly
+    /// compressible run far larger than the cap.
+    #[cfg(feature = "hub")]
+    #[test]
+    fn gzip_bomb_is_rejected_by_the_decompressed_cap() {
+        use std::io::Write as _;
+
+        let dir = std::env::temp_dir().join(format!("rstorch-gzip-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bomb.gz");
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        // One byte past the cap is enough to trip it; zeros compress ~1000:1.
+        let chunk = vec![0u8; 1 << 20];
+        let mut written = 0u64;
+        while written <= MAX_DECOMPRESSED_BYTES {
+            encoder.write_all(&chunk).unwrap();
+            written += chunk.len() as u64;
+        }
+        std::fs::write(&path, encoder.finish().unwrap()).unwrap();
+
+        let err = read_gzip(&path).expect_err("over-cap archive must be rejected");
+        assert!(
+            matches!(&err, Error::Data { msg } if msg.contains("exceeds")),
+            "expected a cap error, got {err:?}"
+        );
+
+        // A small archive still round-trips through the same path.
+        let mut ok = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        ok.write_all(b"hello").unwrap();
+        std::fs::write(&path, ok.finish().unwrap()).unwrap();
+        assert_eq!(read_gzip(&path).unwrap(), b"hello");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

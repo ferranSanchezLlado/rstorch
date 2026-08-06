@@ -10,8 +10,12 @@
 //! The first-hour surface is re-exported at the crate root and, together
 //! with the `nn`/`optim`/`data` types, through [`prelude`]:
 //!
-//! ```ignore
+//! ```
 //! use rstorch::prelude::*;
+//!
+//! let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &Device::Cpu)?;
+//! assert_eq!(x.dims(), &[3]);
+//! # Ok::<(), rstorch::Error>(())
 //! ```
 
 // `#[derive(Module)]` (the `rstorch-derive` crate, T13) generates paths

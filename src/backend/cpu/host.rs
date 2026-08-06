@@ -534,9 +534,6 @@ mod tests {
     fn i64_storage(v: Vec<i64>) -> Storage {
         Storage::Cpu(CpuStorage::I64(Arc::new(v)))
     }
-    fn bool_storage(v: Vec<bool>) -> Storage {
-        Storage::Cpu(CpuStorage::Bool(Arc::new(v)))
-    }
 
     fn as_f32(s: &CpuStorage) -> Vec<f32> {
         match s {

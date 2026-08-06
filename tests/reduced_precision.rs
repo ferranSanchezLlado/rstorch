@@ -517,3 +517,96 @@ fn reduced_optimizer_disk_resume_matches_uninterrupted_trajectory() {
         );
     }
 }
+
+/// A reduced-precision parameter's accumulated gradient must reach the
+/// optimizer at full width.
+///
+/// The engine accumulates in F32 and the optimizer widens back to F32, so
+/// narrowing on the way between them is pure loss. Two ways it shows up:
+///
+/// * **Range** (F16 only — BF16 shares F32's exponent range). A fan-in whose
+///   F32 sum exceeds F16's maximum of 65504 becomes `inf` when narrowed; Adam
+///   then computes `m/√v = inf/inf = NaN` and destroys the parameter. With the
+///   wide value, Adam's first step is `±lr` whatever the gradient's magnitude.
+/// * **Spacing** (both). An exact gradient of 2049 is representable in neither
+///   F16 (spacing 2 above 2048) nor BF16 (spacing 16), so a narrowed gradient
+///   would reach the optimizer as 2048. The replacement *parameter* is narrowed
+///   by design, so this is asserted on the F32 velocity buffer, which a first
+///   momentum step stores verbatim.
+#[test]
+fn reduced_gradients_reach_the_optimizer_without_narrowing() {
+    use rstorch::nn::Param;
+    use rstorch::optim::Adam;
+
+    #[derive(rstorch::Module)]
+    struct One {
+        w: Param,
+    }
+
+    /// `dL/dw = first + second`, exactly, with everything stored in `dtype`.
+    fn unit_model_and_loss(dtype: DType, start: f32, first: f32, second: f32) -> (One, Tensor) {
+        let model = One {
+            w: Param::new(reduced(&[start], [1], dtype).unwrap()),
+        };
+        let a = reduced(&[first], [1], dtype).unwrap();
+        let b = reduced(&[second], [1], dtype).unwrap();
+        let w = model.w.get(Mode::TRAIN);
+        let loss = w
+            .mul(&a)
+            .unwrap()
+            .add(&w.mul(&b).unwrap())
+            .unwrap()
+            .sum_all()
+            .unwrap();
+        (model, loss)
+    }
+
+    fn scalar(tensor: &Tensor) -> f32 {
+        tensor
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()[0]
+    }
+
+    // --- range: an accumulated gradient beyond F16's maximum ---
+    // 40000 + 40000 = 80000 > 65504, while staying far inside F32 (and inside
+    // F32 when squared for Adam's second moment).
+    let (mut model, loss) = unit_model_and_loss(DType::F16, 1.0, 40000.0, 40000.0);
+    let mut opt = Adam::new(0.1);
+    opt.step(&mut model, loss.backward().unwrap()).unwrap();
+    let after = scalar(model.w.value());
+    assert!(
+        after.is_finite(),
+        "parameter became {after}: the gradient overflowed F16 on the way to the optimizer"
+    );
+    assert!(
+        (after - 0.9).abs() < 0.05,
+        "Adam's first step must be ~lr regardless of gradient magnitude, got {after}"
+    );
+
+    // --- spacing: an exact gradient neither dtype can represent ---
+    for dtype in [DType::F16, DType::BF16] {
+        let (mut model, loss) = unit_model_and_loss(dtype, 0.0, 2048.0, 1.0);
+        // lr = 0 so the parameter does not move; only the F32 velocity records
+        // the gradient, and a first momentum step stores it verbatim.
+        let mut opt = Sgd::new(0.0).momentum(0.5);
+        opt.step(&mut model, loss.backward().unwrap()).unwrap();
+
+        let mut envelope = Envelope::new();
+        opt.save_state(&model, &mut envelope).unwrap();
+        let velocity = envelope
+            .tensors()
+            .iter()
+            .find(|(key, _)| key.ends_with("velocity"))
+            .map(|(_, tensor)| tensor.clone())
+            .expect("a momentum run stores a velocity");
+        assert_eq!(velocity.dtype(), DType::F32);
+        let stored = f32::from_le_bytes(velocity.bytes()[..4].try_into().unwrap());
+        assert_eq!(
+            stored, 2049.0,
+            "{dtype}: the velocity holds {stored}, so the gradient was narrowed to \
+             {dtype} before the optimizer saw it (exact gradient is 2049)"
+        );
+    }
+}

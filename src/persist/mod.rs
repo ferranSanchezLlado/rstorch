@@ -26,7 +26,9 @@
 //! - [`Limits`] / [`LoadOptions`] / [`MissingPolicy`] / [`UnexpectedPolicy`]:
 //!   the safe-default reader limits and load policies for untrusted files.
 
-mod atomic;
+// Also the install step for cached hub downloads (`crate::data::hub`), so
+// every file this crate creates goes through one atomic-save path.
+pub(crate) mod atomic;
 mod envelope;
 mod host_tensor;
 mod options;

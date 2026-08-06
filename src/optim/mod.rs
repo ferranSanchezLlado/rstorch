@@ -108,9 +108,16 @@
 //!
 //! F16/BF16 parameters retain their storage dtype, while SGD momentum and
 //! Adam/AdamW moments are F32 and persist as F32. Update arithmetic widens the
-//! current parameter and gradient for the step and narrows the replacement
-//! parameter once. There are deliberately no persistent master weights: the
-//! checkpoint contains the reduced model values and wide optimizer state only.
+//! current parameter for the step and narrows the replacement parameter once.
+//! The gradient needs no widening: it is *already* wide, because the autograd
+//! engine accumulates a reduced-precision node's cotangent in F32 and the
+//! optimizer drains that value directly. Narrowing it in between would be the
+//! one avoidable precision loss in the step — a gradient past F16's range would
+//! reach the update as `inf`, and one merely past its spacing would be rounded.
+//! ([`Grads::wrt`](crate::Grads::wrt), which a *caller* uses to inspect a
+//! gradient, still reports it in the parameter's own dtype, as PyTorch does.)
+//! There are deliberately no persistent master weights: the checkpoint contains
+//! the reduced model values and wide optimizer state only.
 
 mod adam;
 mod engine;

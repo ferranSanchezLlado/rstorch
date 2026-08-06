@@ -74,7 +74,9 @@ pub use embedding::Embedding;
 pub use linear::Linear;
 pub use mode::Mode;
 pub use norm::{BatchNorm2d, LayerNorm, RMSNorm};
-#[allow(unused_imports)] // Consumed by typed normalization wrappers in CT44.
+// Shared with the typed normalization wrappers (`typed::nn::norm`), the only
+// consumers outside `nn::norm` itself.
+#[cfg(feature = "typed")]
 pub(crate) use norm::{
     batch_norm2d_forward, check_eps, check_normalized_shape, check_suffix, layer_norm_forward,
     rms_norm_forward,

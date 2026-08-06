@@ -35,6 +35,18 @@ impl Shape {
         self.0.iter().product()
     }
 
+    /// [`num_elements`](Self::num_elements) without the wrap: `None` if the
+    /// product overflows `usize`.
+    ///
+    /// Use this wherever the shape is **caller-supplied** — a `reshape` or
+    /// `broadcast_to` target — so a pathological request becomes a structured
+    /// error instead of a debug panic or a release-mode wrap.
+    pub fn checked_num_elements(&self) -> Option<usize> {
+        self.0
+            .iter()
+            .try_fold(1usize, |product, &dim| product.checked_mul(dim))
+    }
+
     /// Resolve a possibly-negative axis into `[0, rank)`.
     ///
     /// `-1` is the last axis, `-rank` the first; anything outside
