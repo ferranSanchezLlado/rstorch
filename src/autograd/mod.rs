@@ -572,10 +572,33 @@ impl Grads {
                 msg: format!("max_norm must be finite and positive, got {max_norm}"),
             });
         }
-        let mut total = 0.0f64;
+        // Accumulate the per-gradient sums of squares **on the device**, then
+        // read once. Calling `item()` per gradient made the global norm cost
+        // one full accelerator round trip per parameter — the single largest
+        // source of host synchronization left in a training step, and pure
+        // overhead, since none of the intermediate values are wanted on the
+        // host.
+        //
+        // Partials are grouped by accumulation dtype because a mixed-precision
+        // model yields both `f32` (from `f16`/`bf16`/`f32` gradients) and `f64`
+        // partials, which cannot be added to each other on the device. In
+        // practice that is one group, hence one read; a mixed model reads once
+        // per dtype, still a constant rather than a per-parameter cost.
+        let mut partials: Vec<(crate::DType, Tensor)> = Vec::new();
         for value in self.grads.values() {
             let wide = value.wide()?;
-            total += wide.mul(&wide)?.sum_all()?.item()?;
+            let squared = wide.mul(&wide)?.sum_all()?;
+            match partials
+                .iter_mut()
+                .find(|(dtype, _)| *dtype == squared.dtype())
+            {
+                Some((_, acc)) => *acc = acc.add(&squared)?,
+                None => partials.push((squared.dtype(), squared)),
+            }
+        }
+        let mut total = 0.0f64;
+        for (_, partial) in &partials {
+            total += partial.item()?;
         }
         let norm = total.sqrt();
         if !norm.is_finite() {

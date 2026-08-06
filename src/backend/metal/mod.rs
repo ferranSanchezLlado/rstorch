@@ -23,6 +23,8 @@ use crate::storage::{CpuStorage, Storage};
 
 const SOURCE: &str = include_str!("kernels.metal");
 const COMMIT_THRESHOLD: usize = 64;
+/// Threads per threadgroup to aim for; see [`threads_per_group`].
+const TARGET_THREADS_PER_GROUP: u64 = 256;
 const MAX_GRID_SIZE: usize = u32::MAX as usize;
 type ContextResult = std::result::Result<Arc<Context>, String>;
 type ContextRegistry = Mutex<HashMap<usize, ContextResult>>;
@@ -72,9 +74,57 @@ struct Context {
     raw: metal_rs::Device,
     queue: metal_rs::CommandQueue,
     library: metal_rs::Library,
-    pipelines: Mutex<HashMap<String, Arc<metal_rs::ComputePipelineState>>>,
+    pipelines: Mutex<HashMap<PipelineKey, Arc<metal_rs::ComputePipelineState>>>,
     submission: Mutex<Submission>,
+    pool: Mutex<BufferPool>,
+    validation: Mutex<Validation>,
 }
+
+/// Index bounds checks that have been **encoded but not yet read back**.
+///
+/// # Why this is deferred
+///
+/// Every indexed op — `index_select`, `gather`, `index_add`, `scatter_add` —
+/// runs a validation kernel first. Reading its verdict immediately meant
+/// committing the open command buffer and waiting for the whole queue to
+/// drain, in the middle of encoding. An embedding lookup therefore forced a
+/// full GPU round trip, and a transformer step paid several: removing those
+/// waits measured −69% on forward and −36% on a full AdamW step.
+///
+/// So the verdict is now collected at the next host boundary instead, which is
+/// exactly where the backend already synchronizes (see the module-level
+/// asynchronous-result contract). An out-of-range index still produces the same
+/// [`Error::IndexOutOfBounds`] naming the same op, index, axis, and size — but
+/// it surfaces from the next operation that reads device memory back to the
+/// host (`to_vec`, `to_scalar`, `item`) rather than from the indexing call
+/// itself. This is the same bargain CUDA makes with asynchronous launches, and
+/// no incorrect value can be observed in the meantime: the host cannot see any
+/// result without passing through the check.
+///
+/// The shader's own per-thread guards are unchanged and still clamp reads, so a
+/// bad index is never a memory-safety question — only a reporting one.
+struct Validation {
+    /// Two `i64` per slot — `[failed, offending_index]` — written by the
+    /// validation kernel at a per-slot byte offset. Fixed capacity so it is
+    /// never reallocated while a command buffer still references it.
+    status: Arc<metal_rs::Buffer>,
+    /// Host-side descriptors, one per encoded slot, in program order.
+    pending: Vec<PendingValidation>,
+}
+
+/// What an encoded-but-unread bounds check would report if it failed.
+struct PendingValidation {
+    op: &'static str,
+    axis: usize,
+    bound: usize,
+}
+
+/// Slots in the validation status buffer. Reaching this many un-read checks
+/// forces an early drain, which simply restores the old synchronous cost for
+/// that one op rather than losing a verdict.
+const VALIDATION_SLOTS: usize = 256;
+/// Bytes per slot: two `i64`.
+const VALIDATION_SLOT_BYTES: u64 = 16;
 
 struct Submission {
     open: Option<OpenBuffer>,
@@ -84,13 +134,13 @@ struct Submission {
 struct OpenBuffer {
     command: metal_rs::CommandBuffer,
     encoder: metal_rs::ComputeCommandEncoder,
-    resources: Vec<metal_rs::Buffer>,
+    resources: Vec<Arc<metal_rs::Buffer>>,
     dispatches: usize,
 }
 
 struct PendingBuffer {
     command: metal_rs::CommandBuffer,
-    _resources: Vec<metal_rs::Buffer>,
+    _resources: Vec<Arc<metal_rs::Buffer>>,
 }
 
 pub(crate) fn backend(ordinal: usize) -> &'static dyn BackendOps {
@@ -130,6 +180,10 @@ fn create_context(ordinal: usize) -> std::result::Result<Arc<Context>, String> {
             .new_library_with_source(SOURCE, &options)
             .map_err(|e| format!("runtime shader compilation failed: {e}"))?;
         let queue = raw.new_command_queue();
+        let status = Arc::new(raw.new_buffer(
+            VALIDATION_SLOTS as u64 * VALIDATION_SLOT_BYTES,
+            metal_rs::MTLResourceOptions::StorageModeShared,
+        ));
         Ok(Arc::new(Context {
             ordinal,
             raw,
@@ -138,6 +192,11 @@ fn create_context(ordinal: usize) -> std::result::Result<Arc<Context>, String> {
             pipelines: Mutex::new(HashMap::new()),
             submission: Mutex::new(Submission {
                 open: None,
+                pending: Vec::new(),
+            }),
+            pool: Mutex::new(BufferPool::default()),
+            validation: Mutex::new(Validation {
+                status,
                 pending: Vec::new(),
             }),
         }))
@@ -225,31 +284,123 @@ fn byte_len(dtype: DType, len: usize) -> Result<u64> {
     })
 }
 
+/// A caching allocator for device buffers, keyed by byte size.
+///
+/// `newBufferWithLength:` measures 1.7–7 µs on an M4 Pro, and this backend
+/// allocates one buffer per op output. A transformer step encodes hundreds of
+/// ops, so allocation alone accounted for milliseconds — far more than the
+/// kernels themselves, which is why the backend was losing to CPU on small
+/// models rather than on arithmetic.
+///
+/// # How a buffer is known to be free
+///
+/// The pool keeps an [`Arc`] to every buffer it has ever handed out and never
+/// returns one whose `strong_count` exceeds 1. That single reference is the
+/// pool's own, so a count of 1 proves that
+///
+/// - no live [`MetalStorage`] holds it (tensors clone the `Arc`), **and**
+/// - no un-reaped command buffer references it — [`OpenBuffer::resources`] and
+///   [`PendingBuffer`] hold `Arc` clones for exactly as long as the GPU may
+///   touch the buffer, and [`reap`] drops them only after the command buffer
+///   reports completion.
+///
+/// Tracking the `Arc` rather than the storage's lifetime is the whole safety
+/// argument: recycling on `MetalStorage` drop alone would hand a buffer to a
+/// new op while a command buffer still in flight was writing it.
+///
+/// Buffers are cached rather than freed, so the pool settles at the peak
+/// concurrent footprint per size class. That is the same bargain PyTorch's
+/// caching allocator makes.
+#[derive(Default)]
+struct BufferPool {
+    by_size: HashMap<u64, Vec<Arc<metal_rs::Buffer>>>,
+}
+
+impl BufferPool {
+    /// A buffer of exactly `bytes`, recycled if one is idle.
+    fn take(&mut self, device: &metal_rs::Device, bytes: u64) -> Arc<metal_rs::Buffer> {
+        let slots = self.by_size.entry(bytes).or_default();
+        if let Some(idle) = slots
+            .iter()
+            .find(|buffer| Arc::strong_count(buffer) == 1)
+            .map(Arc::clone)
+        {
+            return idle;
+        }
+        let buffer =
+            Arc::new(device.new_buffer(bytes, metal_rs::MTLResourceOptions::StorageModeShared));
+        slots.push(Arc::clone(&buffer));
+        buffer
+    }
+}
+
 fn allocate(context: &Arc<Context>, dtype: DType, len: usize) -> Result<MetalStorage> {
-    let buffer = context.raw.new_buffer(
-        byte_len(dtype, len)?,
-        metal_rs::MTLResourceOptions::StorageModeShared,
-    );
+    let bytes = byte_len(dtype, len)?;
+    let buffer = context
+        .pool
+        .lock()
+        .expect("Metal buffer pool poisoned")
+        .take(&context.raw, bytes);
     Ok(MetalStorage {
-        buffer: Arc::new(buffer),
+        buffer,
         dtype,
         len,
         context: Arc::clone(context),
     })
 }
 
-fn pipeline(context: &Context, name: &str) -> Result<Arc<metal_rs::ComputePipelineState>> {
+/// A cache key identifying one compiled shader.
+///
+/// The key is built from `Copy` parts rather than the shader's name string so
+/// that a cache **hit** — the overwhelmingly common case, once a model is
+/// warm — costs no allocation. Formatting `"reduce_f32"` on every dispatch put
+/// a heap allocation on the hot path of a backend whose whole problem is
+/// per-op overhead; the MSL name is now built only on a miss.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PipelineKey {
+    /// A shader whose name is fixed (`validate_indices`, the copy kernels).
+    Named(&'static str),
+    /// A dtype-specialized family: `("reduce", F32)` names `reduce_f32`.
+    Typed(&'static str, DType),
+    /// `cast_{from}_to_{to}`.
+    Cast(DType, DType),
+}
+
+impl PipelineKey {
+    /// The Metal function name this key selects. Only called on a cache miss.
+    fn shader_name(self) -> String {
+        match self {
+            PipelineKey::Named(name) => name.to_owned(),
+            PipelineKey::Typed(base, dtype) => format!("{base}_{}", suffix(dtype)),
+            PipelineKey::Cast(from, to) => {
+                format!("cast_{}_to_{}", suffix(from), suffix(to))
+            }
+        }
+    }
+}
+
+/// The pipeline for a dtype-specialized shader family.
+fn pipeline_typed(
+    context: &Context,
+    base: &'static str,
+    dtype: DType,
+) -> Result<Arc<metal_rs::ComputePipelineState>> {
+    pipeline(context, PipelineKey::Typed(base, dtype))
+}
+
+fn pipeline(context: &Context, key: PipelineKey) -> Result<Arc<metal_rs::ComputePipelineState>> {
     let mut pipelines = context
         .pipelines
         .lock()
         .expect("Metal pipeline cache poisoned");
-    if let Some(pipeline) = pipelines.get(name) {
+    if let Some(pipeline) = pipelines.get(&key) {
         return Ok(Arc::clone(pipeline));
     }
+    let name = key.shader_name();
     let pipeline = autoreleasepool(|| {
         let function = context
             .library
-            .get_function(name, None)
+            .get_function(&name, None)
             .map_err(|e| Error::Backend {
                 op: "metal_pipeline",
                 msg: e,
@@ -263,7 +414,7 @@ fn pipeline(context: &Context, name: &str) -> Result<Arc<metal_rs::ComputePipeli
             })
     })?;
     let pipeline = Arc::new(pipeline);
-    pipelines.insert(name.to_owned(), Arc::clone(&pipeline));
+    pipelines.insert(key, Arc::clone(&pipeline));
     Ok(pipeline)
 }
 
@@ -318,7 +469,7 @@ fn encode(
     context: &Arc<Context>,
     pipeline: &metal_rs::ComputePipelineStateRef,
     len: usize,
-    resources: &[&metal_rs::Buffer],
+    resources: &[&Arc<metal_rs::Buffer>],
     set_args: impl FnOnce(&metal_rs::ComputeCommandEncoderRef),
 ) -> Result<()> {
     if len == 0 {
@@ -339,16 +490,13 @@ fn encode(
         let open = submission.open.get_or_insert_with(|| new_open(context));
         open.encoder.set_compute_pipeline_state(pipeline);
         set_args(&open.encoder);
-        let width = pipeline
-            .thread_execution_width()
-            .min(pipeline.max_total_threads_per_threadgroup())
-            .max(1);
+        let group = threads_per_group(pipeline);
         open.encoder.dispatch_thread_groups(
-            metal_rs::MTLSize::new(len.div_ceil(width as usize) as u64, 1, 1),
-            metal_rs::MTLSize::new(width, 1, 1),
+            metal_rs::MTLSize::new(len.div_ceil(group as usize) as u64, 1, 1),
+            metal_rs::MTLSize::new(group, 1, 1),
         );
         open.resources
-            .extend(resources.iter().map(|buffer| (*buffer).clone()));
+            .extend(resources.iter().map(|buffer| Arc::clone(buffer)));
         open.dispatches += 1;
         #[cfg(test)]
         INSTRUMENTATION.dispatches.fetch_add(1, Ordering::Relaxed);
@@ -359,6 +507,33 @@ fn encode(
     })
 }
 
+/// Threads per threadgroup this shader should be dispatched with.
+///
+/// The previous rule was `thread_execution_width().min(max_total)`, which on
+/// every Apple GPU is `min(32, 1024)` — one SIMD group per threadgroup. That
+/// leaves the hardware badly under-occupied: a GPU core interleaves several
+/// SIMD groups to hide memory latency, and with one per group it has nothing to
+/// switch to. It also multiplies the threadgroup count, and hence the
+/// dispatch-side bookkeeping, by 8× against the value below.
+///
+/// [`TARGET_THREADS_PER_GROUP`] is preferred over the 1024-thread maximum
+/// because a large group raises register pressure and can *reduce* the number
+/// of groups resident per core. The result is rounded down to a whole number of
+/// SIMD groups so no partial group is dispatched, and is never zero.
+fn threads_per_group(pipeline: &metal_rs::ComputePipelineStateRef) -> u64 {
+    let width = pipeline.thread_execution_width().max(1);
+    let max = pipeline.max_total_threads_per_threadgroup().max(width);
+    let target = TARGET_THREADS_PER_GROUP.min(max);
+    (target / width).max(1) * width
+}
+
+/// Drain the queue, then report any bounds check that failed while it ran.
+///
+/// This is the host boundary. Deferred [`Validation`] verdicts are collected
+/// here — after the wait, so the status buffer is complete — which is what
+/// lets the indexed ops encode without a round trip of their own. A drain
+/// failure is reported ahead of a bounds failure: a command buffer that errored
+/// may be why a verdict never landed.
 fn synchronize(context: &Arc<Context>) -> Result<()> {
     autoreleasepool(|| {
         // Keep submission serialization through the wait. Otherwise another
@@ -386,7 +561,8 @@ fn synchronize(context: &Arc<Context>) -> Result<()> {
                     }
                 }),
         )
-    })
+    })?;
+    collect_validations(context)
 }
 
 fn drain_results(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
@@ -573,38 +749,92 @@ fn validate_indices(op: &'static str, indices: View<'_>, axis: usize, bound: usi
         }
     })?;
     let input = metal_storage(op, indices)?;
-    let result = allocate(&context, DType::I64, 2)?;
-    let pipe = pipeline(&context, "validate_indices")?;
-    encode(
-        &context,
-        &pipe,
-        1,
-        &[&input.buffer, &result.buffer],
-        |encoder| {
-            encoder.set_buffer(0, Some(&input.buffer), 0);
-            encoder.set_buffer(1, Some(&result.buffer), 0);
-            layout_args(encoder, 2, indices.layout());
-            set_bytes(encoder, 6, &[indices.layout().num_elements() as u64]);
-            set_bytes(encoder, 7, &[bound as u64]);
-        },
-    )?;
-    synchronize(&context)?;
-    // SAFETY: `result` was allocated above as exactly 2 `I64` elements in a
-    // `StorageModeShared` buffer, so `contents()` is a non-null, CPU-readable,
-    // 8-byte-aligned pointer to that many initialized `i64`s (the kernel writes
-    // both slots). `synchronize` has completed, so the GPU no longer writes it,
-    // and the slice does not outlive `result`.
-    let values = unsafe { std::slice::from_raw_parts(result.buffer.contents().cast::<i64>(), 2) };
-    if values[0] != 0 {
-        Err(Error::IndexOutOfBounds {
-            op,
-            index: values[1],
-            axis,
-            size: bound,
-        })
-    } else {
-        Ok(())
+
+    // A full slot table means the verdicts must be collected before this check
+    // can claim a slot. Draining here costs what every check used to cost, and
+    // only after 256 un-read checks.
+    let slot = {
+        let claimed = context
+            .validation
+            .lock()
+            .expect("Metal validation state poisoned")
+            .pending
+            .len();
+        if claimed < VALIDATION_SLOTS {
+            claimed
+        } else {
+            // Not holding the lock: `synchronize` collects and clears the queue.
+            synchronize(&context)?;
+            0
+        }
+    };
+
+    let pipe = pipeline(&context, PipelineKey::Named("validate_indices"))?;
+    let status = Arc::clone(
+        &context
+            .validation
+            .lock()
+            .expect("Metal validation state poisoned")
+            .status,
+    );
+    let offset = slot as u64 * VALIDATION_SLOT_BYTES;
+    encode(&context, &pipe, 1, &[&input.buffer, &status], |encoder| {
+        encoder.set_buffer(0, Some(&input.buffer), 0);
+        encoder.set_buffer(1, Some(&status), offset);
+        layout_args(encoder, 2, indices.layout());
+        set_bytes(encoder, 6, &[indices.layout().num_elements() as u64]);
+        set_bytes(encoder, 7, &[bound as u64]);
+    })?;
+
+    context
+        .validation
+        .lock()
+        .expect("Metal validation state poisoned")
+        .pending
+        .push(PendingValidation { op, axis, bound });
+    Ok(())
+}
+
+/// Collect every encoded bounds check and report the first failure in program
+/// order.
+///
+/// Called from [`synchronize`] once the queue has drained, so the status buffer
+/// is complete. Clears the queue either way: a reported failure is reported
+/// once, and the slots are reused from zero.
+fn collect_validations(context: &Arc<Context>) -> Result<()> {
+    let mut validation = context
+        .validation
+        .lock()
+        .expect("Metal validation state poisoned");
+    if validation.pending.is_empty() {
+        return Ok(());
     }
+    // SAFETY: `status` is a `StorageModeShared` buffer of exactly
+    // `VALIDATION_SLOTS * 2` `i64`s, so `contents()` is a non-null,
+    // CPU-readable, 8-byte-aligned pointer to that many elements. The caller
+    // has waited for every command buffer to complete, so the GPU is no longer
+    // writing it, and the slice does not outlive the borrow of `validation`.
+    // Only the first `pending.len()` slots have been written by a kernel; the
+    // loop below reads no further.
+    let words = unsafe {
+        std::slice::from_raw_parts(
+            validation.status.contents().cast::<i64>(),
+            VALIDATION_SLOTS * 2,
+        )
+    };
+    let failure = validation
+        .pending
+        .iter()
+        .enumerate()
+        .find(|(slot, _)| words[slot * 2] != 0)
+        .map(|(slot, check)| Error::IndexOutOfBounds {
+            op: check.op,
+            index: words[slot * 2 + 1],
+            axis: check.axis,
+            size: check.bound,
+        });
+    validation.pending.clear();
+    failure.map_or(Ok(()), Err)
 }
 
 fn output_for(context: &Arc<Context>, dtype: DType, len: usize) -> Result<MetalStorage> {
@@ -643,7 +873,7 @@ fn encode_binary(
     let a = metal_storage(name, lhs)?;
     let b = metal_storage(name, rhs)?;
     let output = output_for(&context, output_dtype, lhs.layout().num_elements())?;
-    let pipe = pipeline(&context, &format!("{name}_{}", suffix(dtype)))?;
+    let pipe = pipeline_typed(&context, name, dtype)?;
     encode(
         &context,
         &pipe,
@@ -812,10 +1042,7 @@ impl MetalBackend {
             let i = metal_storage("fused_layer_norm_backward_input", *inv_std)?;
             let w = metal_storage("fused_layer_norm_backward_input", *weight)?;
             let output = output_for(&context, grad.dtype(), grad.layout().num_elements())?;
-            let pipe = pipeline(
-                &context,
-                &format!("layer_norm_backward_{}", suffix(grad.dtype())),
-            )?;
+            let pipe = pipeline_typed(&context, "layer_norm_backward", grad.dtype())?;
             encode(
                 &context,
                 &pipe,
@@ -882,7 +1109,7 @@ impl MetalBackend {
         let output = output_for(&context, dtype, x.layout().num_elements())?;
         let xhat = output_for(&context, DType::F32, x.layout().num_elements())?;
         let inv = output_for(&context, DType::F32, rows)?;
-        let pipe = pipeline(&context, &format!("layer_norm_{}", suffix(dtype)))?;
+        let pipe = pipeline_typed(&context, "layer_norm", dtype)?;
         encode(
             &context,
             &pipe,
@@ -981,14 +1208,9 @@ impl MetalBackend {
         let velocity = values.get(2).copied();
         let next = output_for(&context, dtype, p.len)?;
         let next_velocity = output_for(&context, DType::F32, p.len)?;
-        let pipe = pipeline(&context, &format!("sgd_{}", suffix(dtype)))?;
+        let pipe = pipeline_typed(&context, "sgd", dtype)?;
         let hp = [*lr as f32, *momentum as f32, *decay as f32];
-        let mut resources = vec![
-            &*p.buffer,
-            &*g.buffer,
-            &*next.buffer,
-            &*next_velocity.buffer,
-        ];
+        let mut resources = vec![&p.buffer, &g.buffer, &next.buffer, &next_velocity.buffer];
         if let Some(value) = velocity {
             resources.push(&value.buffer);
         }
@@ -1045,7 +1267,7 @@ impl MetalBackend {
         let next = output_for(&context, dtype, p.len)?;
         let next_m = output_for(&context, DType::F32, p.len)?;
         let next_v = output_for(&context, DType::F32, p.len)?;
-        let pipe = pipeline(&context, &format!("adam_{}", suffix(dtype)))?;
+        let pipe = pipeline_typed(&context, "adam", dtype)?;
         let hp: Vec<f32> = scalars.iter().map(|&value| value as f32).collect();
         encode(
             &context,
@@ -1180,7 +1402,7 @@ impl BackendOps for MetalBackend {
         let context = context(self.ordinal)?;
         check_context("copy_strided", &context, &[x])?;
         let output = allocate(&context, x.dtype(), x.layout().num_elements())?;
-        let pipe = pipeline(&context, copy_name(x.dtype(), false))?;
+        let pipe = pipeline(&context, PipelineKey::Named(copy_name(x.dtype(), false)))?;
         encode(
             &context,
             &pipe,
@@ -1226,7 +1448,10 @@ impl BackendOps for MetalBackend {
                 got: output.device(),
             });
         }
-        let pipe = pipeline(&input.context, copy_name(input.dtype, true))?;
+        let pipe = pipeline(
+            &input.context,
+            PipelineKey::Named(copy_name(input.dtype, true)),
+        )?;
         encode(
             &input.context,
             &pipe,
@@ -1286,10 +1511,7 @@ impl BackendOps for MetalBackend {
         check_context("to_dtype", &context, &[x])?;
         let input = metal_storage("to_dtype", x)?;
         let output = output_for(&context, to, x.layout().num_elements())?;
-        let pipe = pipeline(
-            &context,
-            &format!("cast_{}_to_{}", suffix(x.dtype()), suffix(to)),
-        )?;
+        let pipe = pipeline(&context, PipelineKey::Cast(x.dtype(), to))?;
         encode(
             &context,
             &pipe,
@@ -1316,7 +1538,7 @@ impl BackendOps for MetalBackend {
         check_context("binary_scalar", &context, &[x])?;
         let input = metal_storage("binary_scalar", x)?;
         let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
-        let pipe = pipeline(&context, &format!("scalar_{}", suffix(x.dtype())))?;
+        let pipe = pipeline_typed(&context, "scalar", x.dtype())?;
         encode(
             &context,
             &pipe,
@@ -1348,7 +1570,7 @@ impl BackendOps for MetalBackend {
         check_context("unary", &context, &[x])?;
         let input = metal_storage("unary", x)?;
         let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
-        let pipe = pipeline(&context, &format!("unary_{}", suffix(x.dtype())))?;
+        let pipe = pipeline_typed(&context, "unary", x.dtype())?;
         encode(
             &context,
             &pipe,
@@ -1382,7 +1604,7 @@ impl BackendOps for MetalBackend {
         let t = metal_storage("where", on_true)?;
         let f = metal_storage("where", on_false)?;
         let output = output_for(&context, dtype, cond.layout().num_elements())?;
-        let pipe = pipeline(&context, &format!("where_{}", suffix(dtype)))?;
+        let pipe = pipeline_typed(&context, "where", dtype)?;
         encode(
             &context,
             &pipe,
@@ -1415,7 +1637,7 @@ impl BackendOps for MetalBackend {
         let input = metal_storage("masked_fill", x)?;
         let mask_storage = metal_storage("masked_fill", mask)?;
         let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
-        let pipe = pipeline(&context, &format!("masked_{}", suffix(x.dtype())))?;
+        let pipe = pipeline_typed(&context, "masked", x.dtype())?;
         encode(
             &context,
             &pipe,
@@ -1449,7 +1671,7 @@ impl BackendOps for MetalBackend {
         let input = metal_storage("reduce", x)?;
         let len = reduced_len(x.layout(), axis);
         let output = output_for(&context, x.dtype(), len)?;
-        let pipe = pipeline(&context, &format!("reduce_{}", suffix(x.dtype())))?;
+        let pipe = pipeline_typed(&context, "reduce", x.dtype())?;
         let code = match op {
             ReduceOp::Sum => 0,
             ReduceOp::Mean => 1,
@@ -1482,7 +1704,7 @@ impl BackendOps for MetalBackend {
         let input = metal_storage("arg_reduce", x)?;
         let len = reduced_len(x.layout(), axis);
         let output = output_for(&context, DType::I64, len)?;
-        let pipe = pipeline(&context, &format!("arg_reduce_{}", suffix(x.dtype())))?;
+        let pipe = pipeline_typed(&context, "arg_reduce", x.dtype())?;
         encode(
             &context,
             &pipe,
@@ -1510,7 +1732,7 @@ impl BackendOps for MetalBackend {
         let a = metal_storage("matmul", lhs)?;
         let b = metal_storage("matmul", rhs)?;
         let output = output_for(&context, dtype, plan.len)?;
-        let pipe = pipeline(&context, &format!("matmul_{}", suffix(dtype)))?;
+        let pipe = pipeline_typed(&context, "matmul", dtype)?;
         encode(
             &context,
             &pipe,
@@ -1557,7 +1779,7 @@ impl BackendOps for MetalBackend {
         let len = checked_product("index_select", dims.iter().copied())?;
         let out_dims: Vec<u64> = dims.iter().map(|&v| v as u64).collect();
         let output = output_for(&context, x.dtype(), len)?;
-        let pipe = pipeline(&context, &format!("index_select_{}", suffix(x.dtype())))?;
+        let pipe = pipeline_typed(&context, "index_select", x.dtype())?;
         encode(
             &context,
             &pipe,
@@ -1618,7 +1840,7 @@ impl BackendOps for MetalBackend {
         let iv = metal_storage("index_add", indices)?;
         let sv = metal_storage("index_add", src)?;
         let output = output_for(&context, dtype, x.layout().num_elements())?;
-        let pipe = pipeline(&context, &format!("index_add_{}", suffix(dtype)))?;
+        let pipe = pipeline_typed(&context, "index_add", dtype)?;
         encode(
             &context,
             &pipe,
@@ -1677,7 +1899,7 @@ impl BackendOps for MetalBackend {
         let xv = metal_storage("gather", x)?;
         let iv = metal_storage("gather", indices)?;
         let output = output_for(&context, x.dtype(), indices.layout().num_elements())?;
-        let pipe = pipeline(&context, &format!("gather_{}", suffix(x.dtype())))?;
+        let pipe = pipeline_typed(&context, "gather", x.dtype())?;
         encode(
             &context,
             &pipe,
@@ -1759,7 +1981,7 @@ impl BackendOps for MetalBackend {
         let iv = metal_storage("scatter_add", indices)?;
         let sv = metal_storage("scatter_add", src)?;
         let output = output_for(&context, dtype, x.layout().num_elements())?;
-        let pipe = pipeline(&context, &format!("scatter_add_{}", suffix(dtype)))?;
+        let pipe = pipeline_typed(&context, "scatter_add", dtype)?;
         encode(
             &context,
             &pipe,
@@ -1902,9 +2124,9 @@ impl BackendOps for MetalBackend {
         let a = metal_storage("conv", first)?;
         let b = second.map(|view| metal_storage("conv", view)).transpose()?;
         let output = output_for(&context, dtype, output_len)?;
-        let pipe = pipeline(&context, &format!("{kernel_name}_{}", suffix(dtype)))?;
+        let pipe = pipeline_typed(&context, kernel_name, dtype)?;
         let packed = conv_params(&geometry, params);
-        let mut resources = vec![&*a.buffer, &*output.buffer];
+        let mut resources = vec![&a.buffer, &output.buffer];
         if let Some(value) = &b {
             resources.push(&value.buffer);
         }
@@ -1993,7 +2215,7 @@ impl BackendOps for MetalBackend {
                 check_context("fused_softmax", &context, inputs)?;
                 let x = metal_storage("fused_softmax", *input)?;
                 let output = output_for(&context, dtype, input.layout().num_elements())?;
-                let pipe = pipeline(&context, &format!("softmax_{}", suffix(dtype)))?;
+                let pipe = pipeline_typed(&context, "softmax", dtype)?;
                 encode(
                     &context,
                     &pipe,
@@ -2297,28 +2519,43 @@ mod tests {
         );
     }
 
+    /// Bounds violations are reported with the same content as CPU, but at the
+    /// next **host boundary** rather than from the indexing call — see
+    /// [`Validation`] for why the synchronous check was removed.
+    ///
+    /// Each case therefore encodes the bad op, then forces a host read and
+    /// expects the verdict there. Collecting a verdict also clears the queue,
+    /// so the cases do not contaminate each other.
     #[test]
     fn index_family_reports_public_bounds_errors() {
         let _lane = HARDWARE_LANE.lock().unwrap();
         let backend = dispatch::backend(METAL);
         let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &METAL).unwrap();
+
+        // Read any device tensor back; the pending verdict surfaces here.
+        let host_boundary = || x.to_vec::<f32>();
+
         for index in [-1i64, 3] {
             let indices = Tensor::from_vec(vec![index], [1], &METAL).unwrap();
-            let err = x.index_select(0, &indices).unwrap_err();
+            // The op itself now succeeds: it has only *encoded* the check.
+            let selected = x.index_select(0, &indices).unwrap();
             assert!(matches!(
-                err,
-                Error::IndexOutOfBounds {
+                selected.to_vec::<f32>(),
+                Err(Error::IndexOutOfBounds {
                     op: "index_select",
                     index: got,
                     axis: 0,
                     size: 3,
-                } if got == index
+                }) if got == index
             ));
 
             let base = Tensor::zeros([3], DType::F32, &METAL).unwrap();
             let src = Tensor::ones([1], DType::F32, &METAL).unwrap();
+            backend
+                .index_add(base.view(), 0, indices.view(), src.view())
+                .expect("index_add encodes its check rather than resolving it");
             assert!(matches!(
-                backend.index_add(base.view(), 0, indices.view(), src.view()),
+                host_boundary(),
                 Err(Error::IndexOutOfBounds { op: "index_add", index: got, .. }) if got == index
             ));
         }
@@ -2326,16 +2563,47 @@ mod tests {
         let matrix = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &METAL).unwrap();
         for index in [-1i64, 2] {
             let bad = Tensor::from_vec(vec![0i64, index], [1, 2], &METAL).unwrap();
+            let gathered = matrix.gather(1, &bad).unwrap();
             assert!(matches!(
-                matrix.gather(1, &bad),
+                gathered.to_vec::<f32>(),
                 Err(Error::IndexOutOfBounds { op: "gather", index: got, .. }) if got == index
             ));
+
             let src = Tensor::ones([1, 2], DType::F32, &METAL).unwrap();
+            backend
+                .scatter_add(matrix.view(), 1, bad.view(), src.view())
+                .expect("scatter_add encodes its check rather than resolving it");
             assert!(matches!(
-                backend.scatter_add(matrix.view(), 1, bad.view(), src.view()),
+                host_boundary(),
                 Err(Error::IndexOutOfBounds { op: "scatter_add", index: got, .. }) if got == index
             ));
         }
+
+        // The queue is clean once every verdict has been collected, so a valid
+        // program that follows is unaffected by the failures above.
+        assert_eq!(host_boundary().unwrap(), vec![1.0, 2.0, 3.0]);
+    }
+
+    /// A single host boundary resolves a whole batch of encoded checks and
+    /// reports the **first** failure in program order, not the last.
+    #[test]
+    fn deferred_bounds_checks_batch_and_report_in_program_order() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &METAL).unwrap();
+        let good = Tensor::from_vec(vec![0i64], [1], &METAL).unwrap();
+        let first_bad = Tensor::from_vec(vec![7i64], [1], &METAL).unwrap();
+        let second_bad = Tensor::from_vec(vec![9i64], [1], &METAL).unwrap();
+
+        // Three indexed ops encoded back to back, none of them synchronizing.
+        let _ = x.index_select(0, &good).unwrap();
+        let _ = x.index_select(0, &first_bad).unwrap();
+        let _ = x.index_select(0, &second_bad).unwrap();
+
+        assert!(matches!(
+            x.to_vec::<f32>(),
+            Err(Error::IndexOutOfBounds { index: 7, .. })
+        ));
+        assert_eq!(x.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
