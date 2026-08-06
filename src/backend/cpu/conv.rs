@@ -453,6 +453,46 @@ fn expect_dims(op: &'static str, layout: &Layout, want: [usize; 4]) -> Result<()
 
 /// `out[n, oc, oh, ow] = Σ input[n, ic, ih, iw] · weight[oc, ic, kh, kw]`,
 /// accumulated in `Acc` and cast back once per output element.
+/// Drive an output-indexed conv or pool kernel over its
+/// `[batch, channels, out_h, out_w]` output, splitting whole output rows across
+/// threads.
+///
+/// Only the **forward** kernels can use this. Each output element here reads
+/// its own window and owns its own accumulator, so the split is a pure
+/// partition. The backward kernels instead scatter each cotangent into a shared
+/// input-shaped accumulator, where two output positions can land on the same
+/// slot — those stay sequential rather than take a lock or reassociate a
+/// gradient sum.
+///
+/// `fill(row, n, c, oh)` receives one output row's slice and the coordinates it
+/// belongs to.
+fn for_each_output_row<E, F>(
+    geo: &Conv2dGeometry,
+    zero: E,
+    cost_per_element: usize,
+    fill: F,
+) -> Vec<E>
+where
+    E: Clone + Send,
+    F: Fn(&mut [E], usize, usize, usize) + Send + Sync,
+{
+    let len = geo.batch * geo.out_channels * geo.out_h * geo.out_w;
+    crate::backend::parallel::build(len, zero, geo.out_w, cost_per_element, |base, window| {
+        // Reached only for a non-empty output, so `out_w`/`out_h` are non-zero
+        // and the decode below is well defined.
+        for (row, out_row) in (base / geo.out_w..).zip(window.chunks_exact_mut(geo.out_w)) {
+            let oh = row % geo.out_h;
+            let plane = row / geo.out_h;
+            fill(
+                out_row,
+                plane / geo.out_channels,
+                plane % geo.out_channels,
+                oh,
+            );
+        }
+    })
+}
+
 fn conv2d_forward_generic<E>(
     input: &[E],
     input_l: &Layout,
@@ -464,33 +504,33 @@ where
     E: Element,
     E::Acc: ConvAcc,
 {
-    let mut out = Vec::with_capacity(geo.batch * geo.out_channels * geo.out_h * geo.out_w);
-    for n in 0..geo.batch {
-        for oc in 0..geo.out_channels {
-            for oh in 0..geo.out_h {
-                for ow in 0..geo.out_w {
-                    let mut acc = <E::Acc as ConvAcc>::ZERO;
-                    for kh in 0..geo.kernel_h {
-                        let Some(ih) = geo.source_h(oh, kh) else {
+    let cost = geo.kernel_h * geo.kernel_w * geo.in_channels;
+    for_each_output_row(
+        geo,
+        E::from_acc(<E::Acc as ConvAcc>::ZERO),
+        cost,
+        |out_row, n, oc, oh| {
+            for (ow, slot) in out_row.iter_mut().enumerate() {
+                let mut acc = <E::Acc as ConvAcc>::ZERO;
+                for kh in 0..geo.kernel_h {
+                    let Some(ih) = geo.source_h(oh, kh) else {
+                        continue;
+                    };
+                    for kw in 0..geo.kernel_w {
+                        let Some(iw) = geo.source_w(ow, kw) else {
                             continue;
                         };
-                        for kw in 0..geo.kernel_w {
-                            let Some(iw) = geo.source_w(ow, kw) else {
-                                continue;
-                            };
-                            for ic in 0..geo.in_channels {
-                                let x = input[idx4(input_l, n, ic, ih, iw)].to_acc();
-                                let w = weight[idx4(weight_l, oc, ic, kh, kw)].to_acc();
-                                acc = acc.add(x.mul(w));
-                            }
+                        for ic in 0..geo.in_channels {
+                            let x = input[idx4(input_l, n, ic, ih, iw)].to_acc();
+                            let w = weight[idx4(weight_l, oc, ic, kh, kw)].to_acc();
+                            acc = acc.add(x.mul(w));
                         }
                     }
-                    out.push(E::from_acc(acc));
                 }
+                *slot = E::from_acc(acc);
             }
-        }
-    }
-    out
+        },
+    )
 }
 
 /// `input_grad[n, ic, ih, iw] = Σ grad[n, oc, oh, ow] · weight[oc, ic, kh, kw]`
@@ -623,23 +663,22 @@ where
     E: Element,
     E::Acc: ConvAcc,
 {
-    let mut out = Vec::with_capacity(geo.batch * geo.out_channels * geo.out_h * geo.out_w);
-    for n in 0..geo.batch {
-        for c in 0..geo.out_channels {
-            for oh in 0..geo.out_h {
-                for ow in 0..geo.out_w {
-                    let value = match max_source(input, input_l, geo, n, c, oh, ow) {
-                        // The winning element is copied through unchanged, so
-                        // `max_pool2d` is exact for every dtype.
-                        Some((ih, iw)) => input[idx4(input_l, n, c, ih, iw)],
-                        None => E::from_acc(<E::Acc as ConvAcc>::ZERO),
-                    };
-                    out.push(value);
-                }
+    let zero = E::from_acc(<E::Acc as ConvAcc>::ZERO);
+    for_each_output_row(
+        geo,
+        zero,
+        geo.kernel_h * geo.kernel_w,
+        |out_row, n, c, oh| {
+            for (ow, slot) in out_row.iter_mut().enumerate() {
+                *slot = match max_source(input, input_l, geo, n, c, oh, ow) {
+                    // The winning element is copied through unchanged, so
+                    // `max_pool2d` is exact for every dtype.
+                    Some((ih, iw)) => input[idx4(input_l, n, c, ih, iw)],
+                    None => zero,
+                };
             }
-        }
-    }
-    out
+        },
+    )
 }
 
 /// Route each output cotangent to its window's winning input position.
@@ -680,29 +719,29 @@ where
     E: Element,
     E::Acc: ConvAcc,
 {
-    let mut out = Vec::with_capacity(geo.batch * geo.out_channels * geo.out_h * geo.out_w);
-    for n in 0..geo.batch {
-        for c in 0..geo.out_channels {
-            for oh in 0..geo.out_h {
-                for ow in 0..geo.out_w {
-                    let mut acc = <E::Acc as ConvAcc>::ZERO;
-                    for kh in 0..geo.kernel_h {
-                        let Some(ih) = geo.source_h(oh, kh) else {
+    let zero = E::from_acc(<E::Acc as ConvAcc>::ZERO);
+    for_each_output_row(
+        geo,
+        zero,
+        geo.kernel_h * geo.kernel_w,
+        |out_row, n, c, oh| {
+            for (ow, slot) in out_row.iter_mut().enumerate() {
+                let mut acc = <E::Acc as ConvAcc>::ZERO;
+                for kh in 0..geo.kernel_h {
+                    let Some(ih) = geo.source_h(oh, kh) else {
+                        continue;
+                    };
+                    for kw in 0..geo.kernel_w {
+                        let Some(iw) = geo.source_w(ow, kw) else {
                             continue;
                         };
-                        for kw in 0..geo.kernel_w {
-                            let Some(iw) = geo.source_w(ow, kw) else {
-                                continue;
-                            };
-                            acc = acc.add(input[idx4(input_l, n, c, ih, iw)].to_acc());
-                        }
+                        acc = acc.add(input[idx4(input_l, n, c, ih, iw)].to_acc());
                     }
-                    out.push(E::from_acc(acc.div_count(geo.window())));
                 }
+                *slot = E::from_acc(acc.div_count(geo.window()));
             }
-        }
-    }
-    out
+        },
+    )
 }
 
 /// Spread each output cotangent over the non-padding positions of its window.

@@ -239,9 +239,11 @@ where
     E::Acc: FloatAcc,
 {
     let use_momentum = momentum != E::Acc::ZERO;
-    let mut next_param = Vec::with_capacity(param_layout.num_elements());
-    let mut next_velocity = use_momentum.then(|| Vec::with_capacity(param_layout.num_elements()));
-    for logical in 0..param_layout.num_elements() {
+    let len = param_layout.num_elements();
+    // One element's update, given its logical position. Written once and shared
+    // by the momentum and no-momentum drivers below so the two spellings cannot
+    // drift apart.
+    let step = |logical: usize| -> (E, E::Acc) {
         let p = param[offset_for_linear(param_layout, logical)].to_acc();
         let grad = grad[offset_for_linear(grad_layout, logical)].to_acc();
         let g = if weight_decay != E::Acc::ZERO {
@@ -254,12 +256,41 @@ where
         } else {
             g
         };
-        if let Some(values) = &mut next_velocity {
-            values.push(direction);
-        }
-        next_param.push(E::from_acc(p - direction * lr));
+        (E::from_acc(p - direction * lr), direction)
+    };
+
+    let zero_param = E::from_acc(E::Acc::ZERO);
+    if use_momentum {
+        let mut next_param = vec![zero_param; len];
+        let mut next_velocity = vec![E::Acc::ZERO; len];
+        crate::backend::parallel::for_each_row_mut2(
+            len,
+            (&mut next_param, 1),
+            (&mut next_velocity, 1),
+            OPTIMIZER_STEP_COST,
+            |base, params, velocities| {
+                for ((slot, vel), logical) in
+                    params.iter_mut().zip(velocities.iter_mut()).zip(base..)
+                {
+                    (*slot, *vel) = step(logical);
+                }
+            },
+        );
+        (next_param, Some(next_velocity))
+    } else {
+        let next_param = crate::backend::parallel::build(
+            len,
+            zero_param,
+            1,
+            OPTIMIZER_STEP_COST,
+            |base, params| {
+                for (slot, logical) in params.iter_mut().zip(base..) {
+                    *slot = step(logical).0;
+                }
+            },
+        );
+        (next_param, None)
     }
-    (next_param, next_velocity)
 }
 
 fn adam_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
@@ -357,29 +388,53 @@ fn adam_generic<E: Element>(
 where
     E::Acc: FloatAcc,
 {
-    let mut next_param = Vec::with_capacity(param_layout.num_elements());
-    let mut next_m = Vec::with_capacity(param_layout.num_elements());
-    let mut next_v = Vec::with_capacity(param_layout.num_elements());
-    for logical in 0..param_layout.num_elements() {
-        let p = param[offset_for_linear(param_layout, logical)].to_acc();
-        let mut g = grad[offset_for_linear(grad_layout, logical)].to_acc();
-        if weight_decay != E::Acc::ZERO && !decoupled {
-            g = g + p * weight_decay;
-        }
-        let m = m[offset_for_linear(m_layout, logical)] * beta1 + g * one_minus_beta1;
-        let v = v[offset_for_linear(v_layout, logical)] * beta2 + (g * g) * one_minus_beta2;
-        let direction = (m / correction1) / ((v / correction2).sqrt() + eps);
-        let mut next = p;
-        if weight_decay != E::Acc::ZERO && decoupled {
-            next = next * decoupled_scale;
-        }
-        next = next - direction * lr;
-        next_param.push(E::from_acc(next));
-        next_m.push(m);
-        next_v.push(v);
-    }
+    let len = param_layout.num_elements();
+    let mut next_param = vec![E::from_acc(E::Acc::ZERO); len];
+    let mut next_m = vec![E::Acc::ZERO; len];
+    let mut next_v = vec![E::Acc::ZERO; len];
+    crate::backend::parallel::for_each_row_mut3(
+        len,
+        (&mut next_param, 1),
+        (&mut next_m, 1),
+        (&mut next_v, 1),
+        OPTIMIZER_STEP_COST,
+        |base, params, ms, vs| {
+            for (((slot, m_slot), v_slot), logical) in params
+                .iter_mut()
+                .zip(ms.iter_mut())
+                .zip(vs.iter_mut())
+                .zip(base..)
+            {
+                let p = param[offset_for_linear(param_layout, logical)].to_acc();
+                let mut g = grad[offset_for_linear(grad_layout, logical)].to_acc();
+                if weight_decay != E::Acc::ZERO && !decoupled {
+                    g = g + p * weight_decay;
+                }
+                let m = m[offset_for_linear(m_layout, logical)] * beta1 + g * one_minus_beta1;
+                let v = v[offset_for_linear(v_layout, logical)] * beta2 + (g * g) * one_minus_beta2;
+                let direction = (m / correction1) / ((v / correction2).sqrt() + eps);
+                let mut next = p;
+                if weight_decay != E::Acc::ZERO && decoupled {
+                    next = next * decoupled_scale;
+                }
+                next = next - direction * lr;
+                *slot = E::from_acc(next);
+                *m_slot = m;
+                *v_slot = v;
+            }
+        },
+    );
     (next_param, next_m, next_v)
 }
+
+/// What one parameter costs in a fused optimizer step, in the work units
+/// [`crate::backend::parallel`] budgets in.
+///
+/// Dominated not by the arithmetic but by [`offset_for_linear`], which walks
+/// the layout with an integer divide and remainder **per axis, per operand** —
+/// and Adam has four operands. Integer division is tens of cycles, so a
+/// parameter element here costs far more than a streaming one.
+const OPTIMIZER_STEP_COST: usize = 32;
 
 fn offset_for_linear(layout: &Layout, mut logical: usize) -> usize {
     let mut offset = layout.offset();
@@ -416,39 +471,70 @@ fn softmax(inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
 fn softmax_contiguous_f32(values: &[f32], layout: &Layout) -> Vec<f32> {
     let width = layout.dims()[layout.rank() - 1];
     let mut output = vec![0.0; layout.num_elements()];
+    // Rows are independent, so windows are whole rows and each row's three
+    // passes stay in one task — nothing is reassociated across a split.
+    crate::backend::parallel::for_each_window_mut(
+        &mut output,
+        width,
+        ROW_PASS_COST,
+        |base, window| {
+            let input = &values[base..base + window.len()];
+            for (input_row, output_row) in input
+                .chunks_exact(width)
+                .zip(window.chunks_exact_mut(width))
+            {
+                let mut peak = f32::NEG_INFINITY;
+                let mut has_nan = false;
+                for &value in input_row {
+                    peak = peak.max(value);
+                    has_nan |= value.is_nan();
+                }
+                if has_nan {
+                    output_row.fill(f32::NAN);
+                    continue;
+                }
 
-    for (input_row, output_row) in values
-        .chunks_exact(width)
-        .zip(output.chunks_exact_mut(width))
-    {
-        let mut peak = f32::NEG_INFINITY;
-        let mut has_nan = false;
-        for &value in input_row {
-            peak = peak.max(value);
-            has_nan |= value.is_nan();
-        }
-        if has_nan {
-            output_row.fill(f32::NAN);
-            continue;
-        }
+                if peak == f32::NEG_INFINITY {
+                    continue;
+                }
 
-        if peak == f32::NEG_INFINITY {
-            continue;
-        }
-
-        let mut denominator = 0.0;
-        for (output, &value) in output_row.iter_mut().zip(input_row) {
-            let exponent = (value - peak).exp();
-            denominator += exponent;
-            *output = exponent;
-        }
-        let scale = denominator.recip();
-        for value in output_row {
-            *value *= scale;
-        }
-    }
+                let mut denominator = 0.0;
+                for (output, &value) in output_row.iter_mut().zip(input_row) {
+                    let exponent = (value - peak).exp();
+                    denominator += exponent;
+                    *output = exponent;
+                }
+                let scale = denominator.recip();
+                for value in output_row {
+                    *value *= scale;
+                }
+            }
+        },
+    );
     output
 }
+
+/// How many work units **one element** of a row-normalizing kernel costs:
+/// softmax and layernorm each sweep their row about three times (statistics,
+/// then the transform), and softmax's middle pass evaluates `exp`, which is far
+/// dearer than the multiply-add the unit is calibrated to.
+///
+/// Measured rather than guessed. Sequentially, `softmax_last_f32/128x512` runs
+/// 65,536 elements in ~136 µs and `layernorm/forward_f32/128x512` the same
+/// count in ~255 µs — 2 ns and 3.9 ns per element against the ~0.067 ns of one
+/// calibrated unit, so an element here is worth roughly 30–60 of them. An
+/// earlier guess of 8 left these kernels just under the parallel threshold,
+/// where they picked up only two tasks and lost 13% to the sequential form.
+///
+/// Per element, not per row. The element-indexed drivers
+/// ([`build`](crate::backend::parallel::build),
+/// [`for_each_window_mut`](crate::backend::parallel::for_each_window_mut)) take
+/// a per-element cost and multiply by the output length themselves; only
+/// [`for_each_row_mut3`](crate::backend::parallel::for_each_row_mut3) is quoted
+/// per row and scales this by `width`. Passing the per-row figure to an
+/// element-indexed driver overstates the job by a factor of `width`, which sent
+/// a 32×128 softmax onto the thread pool and made it 4.6× slower.
+const ROW_PASS_COST: usize = 32;
 
 fn softmax_generic<E>(values: &[E], layout: &Layout) -> Vec<E>
 where
@@ -456,46 +542,49 @@ where
     E::Acc: FloatAcc,
 {
     let width = layout.dims()[layout.rank() - 1];
-    let rows = layout.num_elements() / width;
     let stride = layout.strides()[layout.rank() - 1];
-    let mut output = Vec::with_capacity(layout.num_elements());
-    let mut exponents = Vec::with_capacity(width);
+    crate::backend::parallel::build(
+        layout.num_elements(),
+        E::from_acc(E::Acc::ZERO),
+        width,
+        ROW_PASS_COST,
+        |base, window| {
+            // Per task, not per row: the exponent scratch is reused across
+            // every row this window owns.
+            let mut exponents: Vec<E::Acc> = Vec::with_capacity(width);
+            for (row, output_row) in (base / width..).zip(window.chunks_exact_mut(width)) {
+                let base = row_base(layout, row);
+                let mut peak = E::Acc::NEG_INFINITY;
+                for col in 0..width {
+                    let value = values[base + col * stride].to_acc();
+                    peak = if peak.is_nan() || value.is_nan() {
+                        // Match the composed Max reduction's NaN propagation.
+                        peak + value
+                    } else if value > peak {
+                        value
+                    } else {
+                        peak
+                    };
+                }
 
-    for row in 0..rows {
-        let base = row_base(layout, row);
-        let mut peak = E::Acc::NEG_INFINITY;
-        for col in 0..width {
-            let value = values[base + col * stride].to_acc();
-            peak = if peak.is_nan() || value.is_nan() {
-                // Match the composed Max reduction's NaN propagation.
-                peak + value
-            } else if value > peak {
-                value
-            } else {
-                peak
-            };
-        }
+                if peak == E::Acc::NEG_INFINITY {
+                    // The buffer arrives zeroed, which is this row's answer.
+                    continue;
+                }
 
-        if peak == E::Acc::NEG_INFINITY {
-            output.extend((0..width).map(|_| E::from_acc(E::Acc::ZERO)));
-            continue;
-        }
-
-        exponents.clear();
-        let mut denominator = E::Acc::ZERO;
-        for col in 0..width {
-            let exponent = (values[base + col * stride].to_acc() - peak).exp();
-            denominator = denominator + exponent;
-            exponents.push(exponent);
-        }
-        output.extend(
-            exponents
-                .iter()
-                .copied()
-                .map(|value| E::from_acc(value / denominator)),
-        );
-    }
-    output
+                exponents.clear();
+                let mut denominator = E::Acc::ZERO;
+                for col in 0..width {
+                    let exponent = (values[base + col * stride].to_acc() - peak).exp();
+                    denominator = denominator + exponent;
+                    exponents.push(exponent);
+                }
+                for (slot, &value) in output_row.iter_mut().zip(exponents.iter()) {
+                    *slot = E::from_acc(value / denominator);
+                }
+            }
+        },
+    )
 }
 
 fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
@@ -734,35 +823,41 @@ where
     E::Acc: FloatAcc,
 {
     let width = gradient_layout.dims()[gradient_layout.rank() - 1];
-    let rows = gradient_layout.num_elements() / width;
     let width_acc = E::Acc::from_usize(width);
-    let mut output = Vec::with_capacity(gradient_layout.num_elements());
-    let mut weighted = Vec::with_capacity(width);
-
-    for row in 0..rows {
-        let g_base = row_base(gradient_layout, row);
-        let x_base = row_base(xhat_layout, row);
-        let stat_base = row_base(inv_std_layout, row);
-        let mut sum = E::Acc::ZERO;
-        let mut projected = E::Acc::ZERO;
-        weighted.clear();
-        for col in 0..width {
-            let g = gradients[g_base + col * gradient_layout.strides()[gradient_layout.rank() - 1]];
-            let x = xhat[x_base + col * xhat_layout.strides()[xhat_layout.rank() - 1]];
-            let weight = weights[weight_layout.offset() + col * weight_layout.strides()[0]];
-            let value = g.to_acc() * weight.to_acc();
-            sum = sum + value;
-            projected = projected + value * x;
-            weighted.push(value);
-        }
-        let inverse = inv_std[stat_base];
-        for col in 0..width {
-            let x = xhat[x_base + col * xhat_layout.strides()[xhat_layout.rank() - 1]];
-            let centered = weighted[col] * width_acc - sum - x * projected;
-            output.push(E::from_acc(centered * inverse / width_acc));
-        }
-    }
-    output
+    crate::backend::parallel::build(
+        gradient_layout.num_elements(),
+        E::from_acc(E::Acc::ZERO),
+        width,
+        ROW_PASS_COST,
+        |base, window| {
+            // Per task, not per row.
+            let mut weighted: Vec<E::Acc> = Vec::with_capacity(width);
+            for (row, output_row) in (base / width..).zip(window.chunks_exact_mut(width)) {
+                let g_base = row_base(gradient_layout, row);
+                let x_base = row_base(xhat_layout, row);
+                let stat_base = row_base(inv_std_layout, row);
+                let mut sum = E::Acc::ZERO;
+                let mut projected = E::Acc::ZERO;
+                weighted.clear();
+                for col in 0..width {
+                    let g = gradients
+                        [g_base + col * gradient_layout.strides()[gradient_layout.rank() - 1]];
+                    let x = xhat[x_base + col * xhat_layout.strides()[xhat_layout.rank() - 1]];
+                    let weight = weights[weight_layout.offset() + col * weight_layout.strides()[0]];
+                    let value = g.to_acc() * weight.to_acc();
+                    sum = sum + value;
+                    projected = projected + value * x;
+                    weighted.push(value);
+                }
+                let inverse = inv_std[stat_base];
+                for (col, slot) in output_row.iter_mut().enumerate() {
+                    let x = xhat[x_base + col * xhat_layout.strides()[xhat_layout.rank() - 1]];
+                    let centered = weighted[col] * width_acc - sum - x * projected;
+                    *slot = E::from_acc(centered * inverse / width_acc);
+                }
+            }
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -783,11 +878,13 @@ where
     let width = layout.dims()[layout.rank() - 1];
     let rows = layout.num_elements() / width;
     let stride = layout.strides()[layout.rank() - 1];
-    let mut output = Vec::with_capacity(layout.num_elements());
-    let mut xhat = save_stats.then(|| Vec::with_capacity(layout.num_elements()));
-    let mut inv_std = save_stats.then(|| Vec::with_capacity(rows));
 
-    for row in 0..rows {
+    // One row's forward, writing the normalized output and — when the backward
+    // pass needs them — that row's saved state. Written once and driven by
+    // either the stats or no-stats loop below, so the two cannot diverge.
+    let row_forward = |row: usize,
+                       output_row: &mut [E],
+                       saved: Option<(&mut [E::Acc], &mut E::Acc)>| {
         let base = row_base(layout, row);
         let mut sum = E::Acc::ZERO;
         for col in 0..width {
@@ -800,44 +897,82 @@ where
             squared = squared + centered * centered;
         }
         let scale = (squared / E::Acc::from_usize(width) + eps).sqrt();
-        for col in 0..width {
+        for (col, slot) in output_row.iter_mut().enumerate() {
             let normalized = (values[base + col * stride].to_acc() - mean) / scale;
             let weight =
                 weights[weight_layout.offset() + col * weight_layout.strides()[0]].to_acc();
             let bias = biases[bias_layout.offset() + col * bias_layout.strides()[0]].to_acc();
-            output.push(E::from_acc(normalized * weight + bias));
+            *slot = E::from_acc(normalized * weight + bias);
         }
-        if let (Some(xhat), Some(inv_std)) = (&mut xhat, &mut inv_std) {
-            if matches!(E::DTYPE, DType::F16 | DType::BF16) {
-                let inverse = E::Acc::from_usize(1) / scale;
-                inv_std.push(inverse);
-                for col in 0..width {
-                    let centered = values[base + col * stride].to_acc() - mean;
-                    xhat.push(centered * inverse);
-                }
-            } else {
-                // Preserve the established F32/F64 state encoding exactly.
-                let state_mean = E::from_acc(mean).to_acc();
-                let mut state_squared = E::Acc::ZERO;
-                for col in 0..width {
-                    let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
-                    let centered_acc = centered.to_acc();
-                    state_squared =
-                        state_squared + E::from_acc(centered_acc * centered_acc).to_acc();
-                }
-                let variance = E::from_acc(state_squared / E::Acc::from_usize(width));
-                let variance_eps = E::from_acc(variance.to_acc() + eps);
-                let std = E::from_acc(variance_eps.to_acc().sqrt());
-                let inverse = E::from_acc(E::Acc::from_usize(1) / std.to_acc());
-                inv_std.push(inverse.to_acc());
-                for col in 0..width {
-                    let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
-                    xhat.push(E::from_acc(centered.to_acc() / std.to_acc()).to_acc());
-                }
+        let Some((xhat_row, inv_slot)) = saved else {
+            return;
+        };
+        if matches!(E::DTYPE, DType::F16 | DType::BF16) {
+            let inverse = E::Acc::from_usize(1) / scale;
+            *inv_slot = inverse;
+            for (col, slot) in xhat_row.iter_mut().enumerate() {
+                let centered = values[base + col * stride].to_acc() - mean;
+                *slot = centered * inverse;
+            }
+        } else {
+            // Preserve the established F32/F64 state encoding exactly.
+            let state_mean = E::from_acc(mean).to_acc();
+            let mut state_squared = E::Acc::ZERO;
+            for col in 0..width {
+                let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
+                let centered_acc = centered.to_acc();
+                state_squared = state_squared + E::from_acc(centered_acc * centered_acc).to_acc();
+            }
+            let variance = E::from_acc(state_squared / E::Acc::from_usize(width));
+            let variance_eps = E::from_acc(variance.to_acc() + eps);
+            let std = E::from_acc(variance_eps.to_acc().sqrt());
+            let inverse = E::from_acc(E::Acc::from_usize(1) / std.to_acc());
+            *inv_slot = inverse.to_acc();
+            for (col, slot) in xhat_row.iter_mut().enumerate() {
+                let centered = E::from_acc(values[base + col * stride].to_acc() - state_mean);
+                *slot = E::from_acc(centered.to_acc() / std.to_acc()).to_acc();
             }
         }
+    };
+
+    let zero = E::from_acc(E::Acc::ZERO);
+    let mut output = vec![zero; layout.num_elements()];
+    if !save_stats {
+        crate::backend::parallel::for_each_window_mut(
+            &mut output,
+            width,
+            ROW_PASS_COST,
+            |base, window| {
+                for (row, output_row) in (base / width..).zip(window.chunks_exact_mut(width)) {
+                    row_forward(row, output_row, None);
+                }
+            },
+        );
+        return (output, None);
     }
-    (output, xhat.zip(inv_std))
+
+    let mut xhat = vec![E::Acc::ZERO; layout.num_elements()];
+    let mut inv_std = vec![E::Acc::ZERO; rows];
+    // `inv_std` carries one element per row against the others' `width`, which
+    // is exactly what the row driver's per-output widths express.
+    crate::backend::parallel::for_each_row_mut3(
+        rows,
+        (&mut output, width),
+        (&mut xhat, width),
+        (&mut inv_std, 1),
+        width * ROW_PASS_COST,
+        |base, outputs, xhats, invs| {
+            for (row, ((output_row, xhat_row), inv_slot)) in (base..).zip(
+                outputs
+                    .chunks_exact_mut(width)
+                    .zip(xhats.chunks_exact_mut(width))
+                    .zip(invs.iter_mut()),
+            ) {
+                row_forward(row, output_row, Some((xhat_row, inv_slot)));
+            }
+        },
+    );
+    (output, Some((xhat, inv_std)))
 }
 
 fn row_base(layout: &Layout, row: usize) -> usize {

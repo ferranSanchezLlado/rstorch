@@ -104,39 +104,33 @@ impl Cursor {
     }
 }
 
-/// Fill `out` by writing `f(i)` at every position, in parallel under the
-/// `rayon` feature and sequentially otherwise.
+/// What one element of the strided path costs, in the work units
+/// [`crate::backend::parallel`] budgets in: the streaming load/store traffic a
+/// dense element already pays, plus a [`Cursor::index`] walk per input — a
+/// handful of integer ops each, feeding a scattered load the prefetcher misses.
+const STRIDED_COST: usize = 2 * DENSE_COST;
+
+/// What one element of the contiguous drivers costs: pure streaming traffic.
+const DENSE_COST: usize = crate::backend::parallel::STREAMING_COST;
+
+/// Fill `out` by writing `f(i)` at every position.
 ///
 /// This is the **general** driver: it pays one [`Cursor`] map per input per
 /// element. Kernels whose inputs are all contiguous use the `map*_dense`
-/// drivers below instead.
+/// drivers below instead. Whether the fill is threaded is
+/// [`parallel`](crate::backend::parallel)'s decision, not this module's.
 #[inline]
 fn fill<T, F>(out: &mut [T], f: F)
 where
     T: Send,
     F: Fn(usize) -> T + Send + Sync,
 {
-    #[cfg(feature = "rayon")]
-    {
-        crate::backend::parallel::for_each_mut(out, |idx, slot| *slot = f(idx));
-    }
-    #[cfg(not(feature = "rayon"))]
-    {
-        for (idx, slot) in out.iter_mut().enumerate() {
-            *slot = f(idx);
-        }
-    }
+    crate::backend::parallel::for_each_mut(out, STRIDED_COST, |idx, slot| *slot = f(idx));
 }
 
 // ---------------------------------------------------------------------------
 // Contiguous fast path
 // ---------------------------------------------------------------------------
-
-/// Elements per rayon task in the contiguous drivers. Large enough that the
-/// per-task overhead is amortized and the inner loop stays vectorized, small
-/// enough to keep every core fed on the shapes these kernels see.
-#[cfg(feature = "rayon")]
-const DENSE_CHUNK: usize = 16 * 1024;
 
 /// The dense `n`-element prefix of `data`, or `None` when `layout` is not the
 /// identity map into it.
@@ -166,37 +160,12 @@ fn dense<'a, E>(layout: &Layout, data: &'a [E], n: usize) -> Option<&'a [E]> {
     }
 }
 
-/// Hand `out` to `body` as `(base_index, window)` pairs: the whole slice in one
-/// call without `rayon`, and [`DENSE_CHUNK`]-sized parallel windows with it.
-///
-/// The windows are a pure partition of `out` — every slot is written by exactly
-/// one call, from the same input positions — so the result does not depend on
-/// the feature flag or on the thread count.
-#[cfg(feature = "rayon")]
-#[inline]
-fn fill_dense_chunks<T, F>(out: &mut [T], body: F)
-where
-    T: Send,
-    F: Fn(usize, &mut [T]) + Send + Sync,
-{
-    if out.is_empty() {
-        return;
-    }
-    let chunk = DENSE_CHUNK.min(out.len());
-    crate::backend::parallel::for_each_chunk_mut(out, chunk, |idx, window| {
-        body(idx * chunk, window)
-    });
-}
-
 /// Build the dense output `[f(a[0]), f(a[1]), …]`.
 ///
-/// Without `rayon` the buffer is `collect`ed straight from the input iterator:
-/// its length is exact (`TrustedLen`), so the allocation happens once and every
-/// output byte is written exactly once — where pre-sizing with `vec![ZERO; n]`
-/// and then overwriting costs a second pass over the whole output, which on a
-/// bandwidth-bound kernel is real traffic. With `rayon` the buffer is pre-sized
-/// and filled in windows, because the parallel façade partitions an existing
-/// slice. Both branches write the same value to every slot.
+/// Re-slicing each input to the window length is what lets the inner loop drop
+/// its bounds checks: every iterator in the zip then has the same length. That
+/// holds whether the window is the whole buffer (sequential) or one of several
+/// (threaded), so there is a single loop body either way.
 #[inline]
 fn map1_dense<A, O, F>(a: &[A], f: F) -> Vec<O>
 where
@@ -204,27 +173,16 @@ where
     O: TypedSlice,
     F: Fn(A) -> O + Send + Sync,
 {
-    #[cfg(not(feature = "rayon"))]
-    {
-        a.iter().map(|&x| f(x)).collect()
-    }
-    #[cfg(feature = "rayon")]
-    {
-        let mut out = vec![O::ZERO; a.len()];
-        fill_dense_chunks(&mut out, |base, window| {
-            // Re-slicing the input to the window length is what lets the loop
-            // drop its bounds checks: both iterators then have equal length.
-            let a = &a[base..base + window.len()];
-            for (slot, &x) in window.iter_mut().zip(a) {
-                *slot = f(x);
-            }
-        });
-        out
-    }
+    crate::backend::parallel::build(a.len(), O::ZERO, 1, DENSE_COST, |base, window| {
+        let a = &a[base..base + window.len()];
+        for (slot, &x) in window.iter_mut().zip(a) {
+            *slot = f(x);
+        }
+    })
 }
 
 /// Build the dense output `[f(a[0], b[0]), …]`. `a` and `b` must have equal
-/// length. See [`map1_dense`] for why the sequential branch collects.
+/// length.
 #[inline]
 fn map2_dense<A, B, O, F>(a: &[A], b: &[B], f: F) -> Vec<O>
 where
@@ -234,28 +192,18 @@ where
     F: Fn(A, B) -> O + Send + Sync,
 {
     debug_assert_eq!(a.len(), b.len());
-    #[cfg(not(feature = "rayon"))]
-    {
-        a.iter().zip(b).map(|(&x, &y)| f(x, y)).collect()
-    }
-    #[cfg(feature = "rayon")]
-    {
-        let mut out = vec![O::ZERO; a.len()];
-        fill_dense_chunks(&mut out, |base, window| {
-            let end = base + window.len();
-            let a = &a[base..end];
-            let b = &b[base..end];
-            for ((slot, &x), &y) in window.iter_mut().zip(a).zip(b) {
-                *slot = f(x, y);
-            }
-        });
-        out
-    }
+    crate::backend::parallel::build(a.len(), O::ZERO, 1, DENSE_COST, |base, window| {
+        let end = base + window.len();
+        let a = &a[base..end];
+        let b = &b[base..end];
+        for ((slot, &x), &y) in window.iter_mut().zip(a).zip(b) {
+            *slot = f(x, y);
+        }
+    })
 }
 
 /// Build the dense output `[f(a[0], b[0], c[0]), …]`. All three inputs must
-/// have equal length. See [`map1_dense`] for why the sequential branch
-/// collects.
+/// have equal length.
 #[inline]
 fn map3_dense<A, B, C, O, F>(a: &[A], b: &[B], c: &[C], f: F) -> Vec<O>
 where
@@ -267,28 +215,15 @@ where
 {
     debug_assert_eq!(a.len(), b.len());
     debug_assert_eq!(a.len(), c.len());
-    #[cfg(not(feature = "rayon"))]
-    {
-        a.iter()
-            .zip(b)
-            .zip(c)
-            .map(|((&x, &y), &z)| f(x, y, z))
-            .collect()
-    }
-    #[cfg(feature = "rayon")]
-    {
-        let mut out = vec![O::ZERO; a.len()];
-        fill_dense_chunks(&mut out, |base, window| {
-            let end = base + window.len();
-            let a = &a[base..end];
-            let b = &b[base..end];
-            let c = &c[base..end];
-            for (((slot, &x), &y), &z) in window.iter_mut().zip(a).zip(b).zip(c) {
-                *slot = f(x, y, z);
-            }
-        });
-        out
-    }
+    crate::backend::parallel::build(a.len(), O::ZERO, 1, DENSE_COST, |base, window| {
+        let end = base + window.len();
+        let a = &a[base..end];
+        let b = &b[base..end];
+        let c = &c[base..end];
+        for (((slot, &x), &y), &z) in window.iter_mut().zip(a).zip(b).zip(c) {
+            *slot = f(x, y, z);
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

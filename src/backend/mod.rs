@@ -40,9 +40,9 @@ pub(crate) mod conv_geometry;
 pub(crate) mod cpu;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) mod metal;
-// T10b: the rayon parallelism switch, compiled only under the `rayon`
-// feature (kernels fall back to sequential loops otherwise).
-#[cfg(feature = "rayon")]
+// T10b: the parallelism switch. Always compiled — the `rayon` feature is
+// consulted *inside* it, so a kernel writes one loop body and never carries a
+// `#[cfg]` arm of its own (see the module docs for why that matters).
 pub(crate) mod parallel;
 
 use crate::device::Device;

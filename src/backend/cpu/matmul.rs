@@ -205,6 +205,54 @@ const COL_BLOCK: usize = 8;
 /// changing any output element's ascending-`k` accumulation order.
 const ROW_BLOCK: usize = 4;
 
+/// Split the output across threads by whole rows and hand each contiguous run
+/// to `fill`.
+///
+/// Every matmul kernel below shares this driver, so the blocking, the batch
+/// decode, and the threading rule are stated once. `fill(rows, batch, first)`
+/// receives a slice holding `rows.len() / n` complete output rows, the batch
+/// index they belong to, and the logical row `first` at which they start; a run
+/// never straddles a batch boundary.
+///
+/// `unit_rows` is the row blocking the kernel wants preserved: every run except
+/// the last in a window starts at a multiple of it, so the blocked inner loops
+/// stay on their fast path instead of degrading to the scalar tail. Work is
+/// costed at `k` per output element — the length of the inner product — which
+/// is what keeps a small matmul off the thread pool entirely.
+fn for_each_row_run<F>(out: &mut [f32], plan: &Plan, unit_rows: usize, fill: F)
+where
+    F: Fn(&mut [f32], usize, usize) + Send + Sync,
+{
+    for_each_row_run_generic(out, plan, unit_rows, fill);
+}
+
+/// [`for_each_row_run`] over any element type (the generic kernel's output is
+/// `E`, not `f32`).
+fn for_each_row_run_generic<E, F>(out: &mut [E], plan: &Plan, unit_rows: usize, fill: F)
+where
+    E: Send,
+    F: Fn(&mut [E], usize, usize) + Send + Sync,
+{
+    let (m, n) = (plan.m, plan.n);
+    crate::backend::parallel::for_each_window_mut(out, unit_rows * n, plan.k, |base, window| {
+        // `base` and every window length are multiples of `n`: the window unit
+        // is `unit_rows * n` and the total is `batch_count * m * n`, so no
+        // window can split a row.
+        let mut row = base / n;
+        let mut pos = 0;
+        while pos < window.len() {
+            let batch = row / m;
+            let first = row % m;
+            // Stop at the batch boundary: `fill` resolves one pair of operand
+            // bases, which are only valid within a single batch.
+            let take = (m - first).min((window.len() - pos) / n);
+            fill(&mut window[pos..pos + take * n], batch, first);
+            pos += take * n;
+            row += take;
+        }
+    });
+}
+
 /// F32's common row-major-rhs path. Keeping the output in its final allocation
 /// avoids the generic accumulator row's refill/copy and reuses rhs values
 /// across four independent output rows.
@@ -216,23 +264,23 @@ fn matmul_f32_row_major_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> {
     }
 
     let mut out = vec![0.0; batch_count * m * n];
-    for b in 0..batch_count {
-        let (lhs_base, rhs_base) = batch_bases(plan, b);
-        let out_base = b * m * n;
+    for_each_row_run(&mut out, plan, ROW_BLOCK, |rows, batch, first| {
+        let (lhs_base, rhs_base) = batch_bases(plan, batch);
+        let count = rows.len() / n;
         let mut i = 0;
-        while i + ROW_BLOCK <= m {
-            let start = out_base + i * n;
-            let block = &mut out[start..start + ROW_BLOCK * n];
+        while i + ROW_BLOCK <= count {
+            let block = &mut rows[i * n..(i + ROW_BLOCK) * n];
             let (out0, rest) = block.split_at_mut(n);
             let (out1, rest) = rest.split_at_mut(n);
             let (out2, out3) = rest.split_at_mut(n);
+            let row = first + i;
             for p in 0..k {
                 let rhs_row = &rhs[rhs_base + p * plan.rhs_k_stride..][..n];
                 let lhs_col = lhs_base + p * plan.lhs_k_stride;
-                let a0 = lhs[lhs_col + i * plan.lhs_m_stride];
-                let a1 = lhs[lhs_col + (i + 1) * plan.lhs_m_stride];
-                let a2 = lhs[lhs_col + (i + 2) * plan.lhs_m_stride];
-                let a3 = lhs[lhs_col + (i + 3) * plan.lhs_m_stride];
+                let a0 = lhs[lhs_col + row * plan.lhs_m_stride];
+                let a1 = lhs[lhs_col + (row + 1) * plan.lhs_m_stride];
+                let a2 = lhs[lhs_col + (row + 2) * plan.lhs_m_stride];
+                let a3 = lhs[lhs_col + (row + 3) * plan.lhs_m_stride];
                 for j in 0..n {
                     let value = rhs_row[j];
                     out0[j] += a0 * value;
@@ -243,10 +291,9 @@ fn matmul_f32_row_major_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> {
             }
             i += ROW_BLOCK;
         }
-        while i < m {
-            let lhs_row = lhs_base + i * plan.lhs_m_stride;
-            let start = out_base + i * n;
-            let out_row = &mut out[start..start + n];
+        while i < count {
+            let lhs_row = lhs_base + (first + i) * plan.lhs_m_stride;
+            let out_row = &mut rows[i * n..(i + 1) * n];
             for p in 0..k {
                 let a = lhs[lhs_row + p * plan.lhs_k_stride];
                 let rhs_row = &rhs[rhs_base + p * plan.rhs_k_stride..][..n];
@@ -256,7 +303,7 @@ fn matmul_f32_row_major_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> {
             }
             i += 1;
         }
-    }
+    });
     out
 }
 
@@ -273,11 +320,12 @@ fn matmul_f32_transposed_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> 
     }
 
     let mut out = vec![0.0; batch_count * m * n];
-    for b in 0..batch_count {
-        let (lhs_base, rhs_base) = batch_bases(plan, b);
-        let out_base = b * m * n;
+    for_each_row_run(&mut out, plan, TILE, |rows, batch, first| {
+        let (lhs_base, rhs_base) = batch_bases(plan, batch);
+        let count = rows.len() / n;
         let mut i = 0;
-        while i + TILE <= m {
+        while i + TILE <= count {
+            let row = first + i;
             let mut j = 0;
             while j + TILE <= n {
                 let mut acc = [[0.0f32; TILE]; TILE];
@@ -285,10 +333,10 @@ fn matmul_f32_transposed_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> 
                     let lhs_col = lhs_base + p * plan.lhs_k_stride;
                     let rhs_row = rhs_base + p * plan.rhs_k_stride;
                     let av = [
-                        lhs[lhs_col + i * plan.lhs_m_stride],
-                        lhs[lhs_col + (i + 1) * plan.lhs_m_stride],
-                        lhs[lhs_col + (i + 2) * plan.lhs_m_stride],
-                        lhs[lhs_col + (i + 3) * plan.lhs_m_stride],
+                        lhs[lhs_col + row * plan.lhs_m_stride],
+                        lhs[lhs_col + (row + 1) * plan.lhs_m_stride],
+                        lhs[lhs_col + (row + 2) * plan.lhs_m_stride],
+                        lhs[lhs_col + (row + 3) * plan.lhs_m_stride],
                     ];
                     let bv = [
                         rhs[rhs_row + j * plan.rhs_n_stride],
@@ -303,8 +351,8 @@ fn matmul_f32_transposed_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> 
                     }
                 }
                 for (ii, acc_row) in acc.iter().enumerate() {
-                    let start = out_base + (i + ii) * n + j;
-                    out[start..start + TILE].copy_from_slice(acc_row);
+                    let start = (i + ii) * n + j;
+                    rows[start..start + TILE].copy_from_slice(acc_row);
                 }
                 j += TILE;
             }
@@ -312,27 +360,29 @@ fn matmul_f32_transposed_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> 
                 for ii in 0..TILE {
                     let mut acc = 0.0;
                     for p in 0..k {
-                        acc += lhs[lhs_base + (i + ii) * plan.lhs_m_stride + p * plan.lhs_k_stride]
+                        acc += lhs
+                            [lhs_base + (row + ii) * plan.lhs_m_stride + p * plan.lhs_k_stride]
                             * rhs[rhs_base + p * plan.rhs_k_stride + j * plan.rhs_n_stride];
                     }
-                    out[out_base + (i + ii) * n + j] = acc;
+                    rows[(i + ii) * n + j] = acc;
                 }
                 j += 1;
             }
             i += TILE;
         }
-        while i < m {
+        while i < count {
+            let lhs_row = lhs_base + (first + i) * plan.lhs_m_stride;
             for j in 0..n {
                 let mut acc = 0.0;
                 for p in 0..k {
-                    acc += lhs[lhs_base + i * plan.lhs_m_stride + p * plan.lhs_k_stride]
+                    acc += lhs[lhs_row + p * plan.lhs_k_stride]
                         * rhs[rhs_base + p * plan.rhs_k_stride + j * plan.rhs_n_stride];
                 }
-                out[out_base + i * n + j] = acc;
+                rows[i * n + j] = acc;
             }
             i += 1;
         }
-    }
+    });
     out
 }
 
@@ -357,15 +407,19 @@ where
     if batch_count == 0 || m == 0 || n == 0 {
         return Vec::new();
     }
-    let mut out = Vec::with_capacity(batch_count * m * n);
-    if plan.rhs_n_stride == 1 {
-        // One wide accumulator slot per output column, allocated once and
-        // refilled per output row so the hot loops never allocate.
-        let mut acc_row = vec![<E::Acc as MatAcc>::ZERO; n];
-        for b in 0..batch_count {
-            let (lhs_base, rhs_base) = batch_bases(plan, b);
-            for i in 0..m {
-                let lhs_row = lhs_base + i * plan.lhs_m_stride;
+    let zero = E::from_acc(<E::Acc as MatAcc>::ZERO);
+    let mut out = vec![zero; batch_count * m * n];
+    // One output row at a time either way, so the run driver preserves no
+    // blocking here and asks only that a run not split a row.
+    for_each_row_run_generic(&mut out, plan, 1, |rows, batch, first| {
+        let (lhs_base, rhs_base) = batch_bases(plan, batch);
+        let count = rows.len() / n;
+        if plan.rhs_n_stride == 1 {
+            // One wide accumulator slot per output column, allocated once per
+            // task and refilled per output row so the hot loops never allocate.
+            let mut acc_row = vec![<E::Acc as MatAcc>::ZERO; n];
+            for i in 0..count {
+                let lhs_row = lhs_base + (first + i) * plan.lhs_m_stride;
                 acc_row.fill(<E::Acc as MatAcc>::ZERO);
                 for p in 0..k {
                     let a = lhs[lhs_row + p * plan.lhs_k_stride].to_acc();
@@ -379,14 +433,15 @@ where
                         *slot = slot.mul_add(a, value.to_acc());
                     }
                 }
-                out.extend(acc_row.iter().copied().map(E::from_acc));
+                let out_row = &mut rows[i * n..(i + 1) * n];
+                for (slot, &acc) in out_row.iter_mut().zip(acc_row.iter()) {
+                    *slot = E::from_acc(acc);
+                }
             }
-        }
-    } else {
-        for b in 0..batch_count {
-            let (lhs_base, rhs_base) = batch_bases(plan, b);
-            for i in 0..m {
-                let lhs_row = lhs_base + i * plan.lhs_m_stride;
+        } else {
+            for i in 0..count {
+                let lhs_row = lhs_base + (first + i) * plan.lhs_m_stride;
+                let out_row = &mut rows[i * n..(i + 1) * n];
                 let mut j = 0;
                 while j + COL_BLOCK <= n {
                     let mut accs = [<E::Acc as MatAcc>::ZERO; COL_BLOCK];
@@ -398,7 +453,9 @@ where
                             *acc = acc.mul_add(a, rhs[row + u * plan.rhs_n_stride].to_acc());
                         }
                     }
-                    out.extend(accs.into_iter().map(E::from_acc));
+                    for (slot, acc) in out_row[j..j + COL_BLOCK].iter_mut().zip(accs) {
+                        *slot = E::from_acc(acc);
+                    }
                     j += COL_BLOCK;
                 }
                 // Tail columns, and every column when `n < COL_BLOCK`.
@@ -410,12 +467,12 @@ where
                         let bx = rhs[rhs_col + p * plan.rhs_k_stride].to_acc();
                         acc = acc.mul_add(a, bx);
                     }
-                    out.push(E::from_acc(acc));
+                    out_row[j] = E::from_acc(acc);
                     j += 1;
                 }
             }
         }
-    }
+    });
     out
 }
 
