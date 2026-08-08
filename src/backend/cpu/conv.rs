@@ -143,17 +143,6 @@ fn idx4(layout: &Layout, a: usize, b: usize, c: usize, d: usize) -> usize {
     layout.offset() + a * s[0] + b * s[1] + c * s[2] + d * s[3]
 }
 
-/// Row-major flat index into a contiguous rank-4 output buffer.
-fn flat4(dims: [usize; 4], a: usize, b: usize, c: usize, d: usize) -> usize {
-    ((a * dims[1] + b) * dims[2] + c) * dims[3] + d
-}
-
-/// The single output cast of the accumulation contract, applied to a whole
-/// scatter-accumulated buffer.
-fn narrow_all<E: Element>(acc: Vec<E::Acc>) -> Vec<E> {
-    acc.into_iter().map(E::from_acc).collect()
-}
-
 // ---------------------------------------------------------------------------
 // Dtype dispatch
 // ---------------------------------------------------------------------------
@@ -457,12 +446,11 @@ fn expect_dims(op: &'static str, layout: &Layout, want: [usize; 4]) -> Result<()
 /// `[batch, channels, out_h, out_w]` output, splitting whole output rows across
 /// threads.
 ///
-/// Only the **forward** kernels can use this. Each output element here reads
-/// its own window and owns its own accumulator, so the split is a pure
-/// partition. The backward kernels instead scatter each cotangent into a shared
-/// input-shaped accumulator, where two output positions can land on the same
-/// slot — those stay sequential rather than take a lock or reassociate a
-/// gradient sum.
+/// Each output element reads its own window and owns its own accumulator, so
+/// the split is a pure partition. The input-shaped gradient kernels get the
+/// same treatment from [`for_each_input_row`], which is why they are written as
+/// gathers over [`Conv2dGeometry::window_h`] rather than as scatters into a
+/// shared accumulator.
 ///
 /// `fill(row, n, c, oh)` receives one output row's slice and the coordinates it
 /// belongs to.
@@ -491,6 +479,78 @@ where
             );
         }
     })
+}
+
+/// [`for_each_output_row`]'s counterpart for `conv2d`'s **input** gradient,
+/// which is a scatter and so cannot be split by output element.
+///
+/// It can be split by **batch item**, because every contribution to
+/// `input_grad[n, …]` comes from `grad[n, …]`: one batch item's volume is a
+/// private accumulator that no other item touches. The kernel body is
+/// therefore the plain sequential scatter, and each task's result is
+/// bit-identical to what a single thread would have written — `rayon` changes
+/// the schedule, never the sum.
+///
+/// `scatter(acc, n)` receives one batch item's `[in_channels, in_h, in_w]`
+/// accumulator, indexed `(ic · in_h + ih) · in_w + iw`.
+fn for_each_batch_volume<E, F>(geo: &Conv2dGeometry, cost_per_element: usize, scatter: F) -> Vec<E>
+where
+    E: Element,
+    E::Acc: ConvAcc,
+    F: Fn(&mut [E::Acc], usize) + Send + Sync,
+{
+    let volume = geo.in_channels * geo.in_h * geo.in_w;
+    let len = geo.batch * volume;
+    crate::backend::parallel::build(
+        len,
+        E::from_acc(<E::Acc as ConvAcc>::ZERO),
+        volume,
+        cost_per_element,
+        |base, window| {
+            // One wide accumulator per task, reused across the batch items in
+            // it: the reset is a memset, the allocation would not be.
+            let mut acc = vec![<E::Acc as ConvAcc>::ZERO; volume];
+            for (n, out_volume) in (base / volume..).zip(window.chunks_exact_mut(volume)) {
+                acc.fill(<E::Acc as ConvAcc>::ZERO);
+                scatter(&mut acc, n);
+                for (slot, value) in out_volume.iter_mut().zip(&acc) {
+                    *slot = E::from_acc(*value);
+                }
+            }
+        },
+    )
+}
+
+/// [`for_each_batch_volume`] for the pool gradients, which scatter within one
+/// `[in_h, in_w]` **channel** plane rather than a whole batch volume — pooling
+/// never mixes channels, so the split is `batch × channels`-way.
+///
+/// `scatter(acc, n, c)` receives that plane's accumulator, indexed
+/// `ih · in_w + iw`.
+fn for_each_channel_plane<E, F>(geo: &Conv2dGeometry, cost_per_element: usize, scatter: F) -> Vec<E>
+where
+    E: Element,
+    E::Acc: ConvAcc,
+    F: Fn(&mut [E::Acc], usize, usize) + Send + Sync,
+{
+    let plane = geo.in_h * geo.in_w;
+    let len = geo.batch * geo.in_channels * plane;
+    crate::backend::parallel::build(
+        len,
+        E::from_acc(<E::Acc as ConvAcc>::ZERO),
+        plane,
+        cost_per_element,
+        |base, window| {
+            let mut acc = vec![<E::Acc as ConvAcc>::ZERO; plane];
+            for (index, out_plane) in (base / plane..).zip(window.chunks_exact_mut(plane)) {
+                acc.fill(<E::Acc as ConvAcc>::ZERO);
+                scatter(&mut acc, index / geo.in_channels, index % geo.in_channels);
+                for (slot, value) in out_plane.iter_mut().zip(&acc) {
+                    *slot = E::from_acc(*value);
+                }
+            }
+        },
+    )
 }
 
 fn conv2d_forward_generic<E>(
@@ -546,9 +606,10 @@ where
     E: Element,
     E::Acc: ConvAcc,
 {
-    let mut acc =
-        vec![<E::Acc as ConvAcc>::ZERO; geo.batch * geo.in_channels * geo.in_h * geo.in_w];
-    for n in 0..geo.batch {
+    // Cost per output element: the scatter's total work spread over the result.
+    let cost =
+        geo.out_channels * geo.window() * geo.out_h * geo.out_w / (geo.in_h * geo.in_w).max(1);
+    for_each_batch_volume(geo, cost, |acc: &mut [E::Acc], n| {
         for oc in 0..geo.out_channels {
             for oh in 0..geo.out_h {
                 for ow in 0..geo.out_w {
@@ -563,7 +624,7 @@ where
                             };
                             for ic in 0..geo.in_channels {
                                 let w = weight[idx4(weight_l, oc, ic, kh, kw)].to_acc();
-                                let dst = flat4(geo.input_dims(), n, ic, ih, iw);
+                                let dst = (ic * geo.in_h + ih) * geo.in_w + iw;
                                 acc[dst] = acc[dst].add(g.mul(w));
                             }
                         }
@@ -571,8 +632,7 @@ where
                 }
             }
         }
-    }
-    narrow_all::<E>(acc)
+    })
 }
 
 /// `weight_grad[oc, ic, kh, kw] = Σ grad[n, oc, oh, ow] · input[n, ic, ih, iw]`
@@ -588,35 +648,51 @@ where
     E: Element,
     E::Acc: ConvAcc,
 {
-    let mut acc = vec![
-        <E::Acc as ConvAcc>::ZERO;
-        geo.out_channels * geo.in_channels * geo.kernel_h * geo.kernel_w
-    ];
-    for n in 0..geo.batch {
-        for oc in 0..geo.out_channels {
-            for oh in 0..geo.out_h {
-                for ow in 0..geo.out_w {
-                    let g = grad[idx4(grad_l, n, oc, oh, ow)].to_acc();
-                    for kh in 0..geo.kernel_h {
-                        let Some(ih) = geo.source_h(oh, kh) else {
-                            continue;
-                        };
-                        for kw in 0..geo.kernel_w {
-                            let Some(iw) = geo.source_w(ow, kw) else {
-                                continue;
-                            };
-                            for ic in 0..geo.in_channels {
-                                let x = input[idx4(input_l, n, ic, ih, iw)].to_acc();
-                                let dst = flat4(geo.weight_dims(), oc, ic, kh, kw);
-                                acc[dst] = acc[dst].add(g.mul(x));
+    // Weight-shaped, so the batch split of [`for_each_batch_volume`] is out —
+    // every batch item contributes to every weight. The **output channel**
+    // works instead: `weight_grad[oc, …]` is fed only by `grad[:, oc, …]`, so
+    // one channel's slab is a private accumulator and the body stays the plain
+    // sequential scatter, bit-identical to what one thread would write.
+    let slab = geo.in_channels * geo.kernel_h * geo.kernel_w;
+    let len = geo.out_channels * slab;
+    let cost = geo.batch * geo.out_h * geo.out_w;
+    crate::backend::parallel::build(
+        len,
+        E::from_acc(<E::Acc as ConvAcc>::ZERO),
+        slab,
+        cost,
+        |base, window| {
+            let mut acc = vec![<E::Acc as ConvAcc>::ZERO; slab];
+            for (oc, out_slab) in (base / slab..).zip(window.chunks_exact_mut(slab)) {
+                acc.fill(<E::Acc as ConvAcc>::ZERO);
+                for n in 0..geo.batch {
+                    for oh in 0..geo.out_h {
+                        for ow in 0..geo.out_w {
+                            let g = grad[idx4(grad_l, n, oc, oh, ow)].to_acc();
+                            for kh in 0..geo.kernel_h {
+                                let Some(ih) = geo.source_h(oh, kh) else {
+                                    continue;
+                                };
+                                for kw in 0..geo.kernel_w {
+                                    let Some(iw) = geo.source_w(ow, kw) else {
+                                        continue;
+                                    };
+                                    for ic in 0..geo.in_channels {
+                                        let x = input[idx4(input_l, n, ic, ih, iw)].to_acc();
+                                        let dst = (ic * geo.kernel_h + kh) * geo.kernel_w + kw;
+                                        acc[dst] = acc[dst].add(g.mul(x));
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                for (slot, value) in out_slab.iter_mut().zip(&acc) {
+                    *slot = E::from_acc(*value);
+                }
             }
-        }
-    }
-    narrow_all::<E>(acc)
+        },
+    )
 }
 
 /// The `(ih, iw)` position that wins the pooling window at `(n, c, oh, ow)`,
@@ -693,23 +769,19 @@ where
     E: Element,
     E::Acc: ConvAcc,
 {
-    let mut acc =
-        vec![<E::Acc as ConvAcc>::ZERO; geo.batch * geo.in_channels * geo.in_h * geo.in_w];
-    for n in 0..geo.batch {
-        for c in 0..geo.out_channels {
-            for oh in 0..geo.out_h {
-                for ow in 0..geo.out_w {
-                    let Some((ih, iw)) = max_source(input, input_l, geo, n, c, oh, ow) else {
-                        continue;
-                    };
-                    let g = grad[idx4(grad_l, n, c, oh, ow)].to_acc();
-                    let dst = flat4(geo.input_dims(), n, c, ih, iw);
-                    acc[dst] = acc[dst].add(g);
-                }
+    let cost = geo.window() * geo.out_h * geo.out_w / (geo.in_h * geo.in_w).max(1);
+    for_each_channel_plane(geo, cost.max(1), |acc: &mut [E::Acc], n, c| {
+        for oh in 0..geo.out_h {
+            for ow in 0..geo.out_w {
+                let Some((ih, iw)) = max_source(input, input_l, geo, n, c, oh, ow) else {
+                    continue;
+                };
+                let g = grad[idx4(grad_l, n, c, oh, ow)].to_acc();
+                let dst = ih * geo.in_w + iw;
+                acc[dst] = acc[dst].add(g);
             }
         }
-    }
-    narrow_all::<E>(acc)
+    })
 }
 
 /// Window mean per output position, divided by the full window area
@@ -750,32 +822,28 @@ where
     E: Element,
     E::Acc: ConvAcc,
 {
-    let mut acc =
-        vec![<E::Acc as ConvAcc>::ZERO; geo.batch * geo.in_channels * geo.in_h * geo.in_w];
-    for n in 0..geo.batch {
-        for c in 0..geo.out_channels {
-            for oh in 0..geo.out_h {
-                for ow in 0..geo.out_w {
-                    let share = grad[idx4(grad_l, n, c, oh, ow)]
-                        .to_acc()
-                        .div_count(geo.window());
-                    for kh in 0..geo.kernel_h {
-                        let Some(ih) = geo.source_h(oh, kh) else {
+    let cost = geo.window() * geo.out_h * geo.out_w / (geo.in_h * geo.in_w).max(1);
+    for_each_channel_plane(geo, cost.max(1), |acc: &mut [E::Acc], n, c| {
+        for oh in 0..geo.out_h {
+            for ow in 0..geo.out_w {
+                let share = grad[idx4(grad_l, n, c, oh, ow)]
+                    .to_acc()
+                    .div_count(geo.window());
+                for kh in 0..geo.kernel_h {
+                    let Some(ih) = geo.source_h(oh, kh) else {
+                        continue;
+                    };
+                    for kw in 0..geo.kernel_w {
+                        let Some(iw) = geo.source_w(ow, kw) else {
                             continue;
                         };
-                        for kw in 0..geo.kernel_w {
-                            let Some(iw) = geo.source_w(ow, kw) else {
-                                continue;
-                            };
-                            let dst = flat4(geo.input_dims(), n, c, ih, iw);
-                            acc[dst] = acc[dst].add(share);
-                        }
+                        let dst = ih * geo.in_w + iw;
+                        acc[dst] = acc[dst].add(share);
                     }
                 }
             }
         }
-    }
-    narrow_all::<E>(acc)
+    })
 }
 
 #[cfg(test)]

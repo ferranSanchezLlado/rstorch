@@ -85,6 +85,7 @@
 /// Measured on `matmul/square_f32` (M4 Pro, 12 threads). A floor of 16 Ki left
 /// the 128³ case handing out 4-row tasks of ~4 µs each and scaling only 1.5×;
 /// at this floor the same case takes ~16-row tasks and scales far better.
+#[cfg(any(feature = "rayon", test))]
 const MIN_TASK_WORK: usize = 1 << 18;
 
 /// Total work below which a kernel runs sequentially.
@@ -93,6 +94,7 @@ const MIN_TASK_WORK: usize = 1 << 18;
 /// second thread busy past its own spawn cost. `matmul/square_f32/64` sits just
 /// under it at 2^18 units and was 2.3× *slower* threaded, which is what fixed
 /// this constant.
+#[cfg(any(feature = "rayon", test))]
 const PARALLEL_MIN_WORK: usize = 2 * MIN_TASK_WORK;
 
 /// The cost of one element of a bandwidth-bound streaming kernel — a load, an
@@ -108,6 +110,7 @@ pub(crate) const STREAMING_COST: usize = 4;
 /// How many tasks to aim for per thread. More than one so that an uneven
 /// window — a ragged tail, a core stolen by another process — does not leave
 /// the whole join waiting on a single straggler.
+#[cfg(any(feature = "rayon", test))]
 const TASKS_PER_THREAD: usize = 4;
 
 /// The number of threads the pool will actually use (1 without `rayon`).
@@ -118,6 +121,7 @@ const TASKS_PER_THREAD: usize = 4;
 /// go on to run sequentially, where it measured ~12% of a small `max` and
 /// ~48% of a `sum_all`. The global pool's size is fixed once it is built, so
 /// there is nothing to invalidate.
+#[cfg(any(feature = "rayon", test))]
 #[inline]
 fn thread_count() -> usize {
     #[cfg(feature = "rayon")]
@@ -135,6 +139,7 @@ fn thread_count() -> usize {
 ///
 /// Deliberately private: the decision is this module's alone, so kernels state
 /// only what their work *costs* and never branch on whether it is threaded.
+#[cfg(any(feature = "rayon", test))]
 #[inline]
 fn should_parallelize(work: usize) -> bool {
     thread_count() > 1 && work >= PARALLEL_MIN_WORK
@@ -144,6 +149,7 @@ fn should_parallelize(work: usize) -> bool {
 /// chosen to give every thread several tasks without letting any task fall
 /// below [`MIN_TASK_WORK`].
 #[inline]
+#[cfg(any(feature = "rayon", test))]
 fn window_len(total: usize, unit: usize, cost_per_element: usize) -> usize {
     let unit = unit.max(1);
     let units_total = total.div_ceil(unit);
@@ -250,6 +256,7 @@ pub(crate) type RowOutput<'a, T> = (&'a mut [T], usize);
 
 /// How many rows to give each task, and a debug check that every output is
 /// exactly `rows * width` long.
+#[cfg(any(feature = "rayon", test))]
 #[inline]
 fn rows_per_task(rows: usize, cost_per_row: usize, widths: &[(usize, usize)]) -> usize {
     for &(len, width) in widths {
@@ -268,6 +275,7 @@ fn rows_per_task(rows: usize, cost_per_row: usize, widths: &[(usize, usize)]) ->
 /// Each output is chunked by its own per-row width, so buffers carrying a
 /// different number of elements per row still line up row for row. `body`
 /// receives the index of the first row in the window.
+#[allow(unused_variables)]
 pub(crate) fn for_each_row_mut2<A, B, F>(
     rows: usize,
     a: RowOutput<'_, A>,
@@ -305,6 +313,7 @@ pub(crate) fn for_each_row_mut2<A, B, F>(
 /// [`for_each_row_mut2`] over three outputs — layer norm, which writes the
 /// normalized activation, the saved `xhat`, and one inverse standard deviation
 /// per row in a single pass.
+#[allow(unused_variables)]
 pub(crate) fn for_each_row_mut3<A, B, C, F>(
     rows: usize,
     a: RowOutput<'_, A>,
