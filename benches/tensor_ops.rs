@@ -69,7 +69,7 @@ fn bench_elementwise(c: &mut Criterion) {
 fn bench_matmul(c: &mut Criterion) {
     let mut group = c.benchmark_group("matmul");
     group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
+    group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
 
     for n in [64usize, 128, 256, 512, 1024] {
@@ -78,6 +78,19 @@ fn bench_matmul(c: &mut Criterion) {
         // A single 1024³ product is ~0.8 s on the reference machine, so the
         // default window cannot fit ten samples; give the largest size more.
         group.measurement_time(Duration::from_secs(if n >= 1024 { 10 } else { 5 }));
+        // Only the big products need the small sample count; the small ones
+        // are microseconds apiece and can afford the full 100.
+        //
+        // Ten samples is narrow enough that one transient hiccup lands in all
+        // of them and reads as a *confident* regression rather than noise:
+        // `square_f32/64` once reported "+40%, p = 0.00" with a tight interval
+        // that no rebuild, code-layout perturbation or re-run could reproduce
+        // (it is stable to within 0.3% across 17 runs and 5 differently
+        // laid-out builds). Criterion divides the measurement window by the
+        // sample count, so the extra samples are nearly free; together with
+        // the longer warm-up above this group costs ~56 s -> ~64 s, which is
+        // worth it to not chase a phantom regression again.
+        group.sample_size(if n >= 512 { 10 } else { 100 });
         group.throughput(Throughput::Elements((n * n * n) as u64));
         group.bench_function(BenchmarkId::new("square_f32", n), |b| {
             b.iter(|| black_box(black_box(&lhs).matmul(black_box(&rhs)).unwrap()));
@@ -85,6 +98,8 @@ fn bench_matmul(c: &mut Criterion) {
     }
 
     group.measurement_time(Duration::from_secs(5));
+    // Milliseconds apiece, so the loop's small-size sampling applies here too.
+    group.sample_size(100);
 
     // LM-shaped rectangles from the transformer path: an LM-head projection
     // (tokens x embed) @ (embed x vocab) and an FFN down-projection.
@@ -188,7 +203,9 @@ fn bench_layernorm(c: &mut Criterion) {
 
 fn bench_bmm(c: &mut Criterion) {
     let mut group = c.benchmark_group("bmm");
-    group.sample_size(10);
+    // Sub-millisecond products: take the full sample count, for the reason
+    // spelled out in `bench_matmul`.
+    group.sample_size(100);
 
     let lhs = randn(12, &[8, 64, 64], DType::F32);
     let rhs = randn(13, &[8, 64, 64], DType::F32);
@@ -212,7 +229,8 @@ fn bench_bmm(c: &mut Criterion) {
 /// visible: low-precision dtypes have no hardware arithmetic on this path.
 fn bench_dtype_spread(c: &mut Criterion) {
     let mut group = c.benchmark_group("dtype_spread");
-    group.sample_size(10);
+    // Same reasoning as `bench_matmul`: cheap enough for the full count.
+    group.sample_size(100);
 
     for (dtype, name) in [
         (DType::F32, "f32"),
