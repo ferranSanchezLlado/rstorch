@@ -1,4 +1,5 @@
 use super::{Mode, Module, ToDType, ToDevice, TypedParam, TypedVisitor, TypedVisitorMut};
+use crate::nn::{merge_heads, split_heads};
 use crate::typed::device::validate_binding;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
 use crate::typed::tensor::checked_wrap;
@@ -403,15 +404,8 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
         }
         check_input_width(input.dynamic(), EMBED)?;
         let projected = projection.apply(input, mode)?;
-        let rank = projected.rank();
-        let mut split = projected.dims()[..rank - 1].to_vec();
-        split.push(HEADS);
-        split.push(self.head_dim());
-        let split = projected.reshape(split)?;
-        let mut axes = (0..rank as isize + 1).collect::<Vec<_>>();
-        axes.swap(rank - 2, rank - 1);
         checked_wrap(
-            split.permute(&axes)?,
+            split_heads(&projected, HEADS, self.head_dim())?,
             Arc::clone(input.binding()),
             "typed::nn::MultiHeadAttention::project",
         )
@@ -477,14 +471,8 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
                 rhs: context.dynamic().shape().clone(),
             });
         }
-        let mut axes = (0..rank as isize).collect::<Vec<_>>();
-        axes.swap(rank - 3, rank - 2);
-        let merged = context.dynamic().permute(&axes)?;
-        let mut shape = dims[..rank - 3].to_vec();
-        shape.push(dims[rank - 2]);
-        shape.push(EMBED);
-        let merged =
-            checked_wrap::<C::Output>(merged.reshape(shape)?, Arc::clone(context.binding()), OP)?;
+        let merged = merge_heads(context.dynamic(), EMBED)?;
+        let merged = checked_wrap::<C::Output>(merged, Arc::clone(context.binding()), OP)?;
         let output = self.out_proj.apply(&merged, mode)?;
         checked_wrap(output, Arc::clone(context.binding()), OP)
     }

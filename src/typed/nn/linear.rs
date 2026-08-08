@@ -258,16 +258,11 @@ impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> std::fmt:
     for Linear<IN, OUT, E, P>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
+        crate::nn::debug_linear(
             f,
-            "Linear({} -> {}, {})",
             self.in_features(),
             self.out_features(),
-            if self.bias.is_some() {
-                "bias"
-            } else {
-                "no bias"
-            }
+            self.bias.is_some(),
         )
     }
 }

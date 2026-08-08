@@ -5,10 +5,8 @@ use std::collections::HashMap;
 use crate::autograd::{GradKey, Grads};
 use crate::backend::{FusedOp, dispatch};
 use crate::error::{Error, Result};
-use crate::layout::Layout;
 use crate::nn::{Module, Param};
 use crate::persist::Envelope;
-use crate::storage::Storage;
 use crate::tensor::Tensor;
 
 use super::engine::{self, Groups};
@@ -17,44 +15,6 @@ use super::state::{self, OutgoingParam};
 /// The `kind` tag in a saved state section.
 const KIND: &str = "sgd";
 const HYPERS: [&str; 3] = ["lr", "momentum", "weight_decay"];
-
-fn fused_outputs(outputs: Vec<Storage>, count: usize, like: &Tensor) -> Result<Vec<Tensor>> {
-    if outputs.len() != count {
-        return Err(Error::Backend {
-            op: "step",
-            msg: format!(
-                "fused SGD returned {} outputs, expected {count}",
-                outputs.len()
-            ),
-        });
-    }
-    let mut tensors = Vec::with_capacity(count);
-    for (index, storage) in outputs.into_iter().enumerate() {
-        if storage.dtype() != like.dtype()
-            || storage.device() != like.device()
-            || storage.len() != like.num_elements()
-        {
-            return Err(Error::Backend {
-                op: "step",
-                msg: format!(
-                    "fused SGD output {index} has dtype {}, device {}, and {} elements; \
-                     expected dtype {}, device {}, and shape {}",
-                    storage.dtype(),
-                    storage.device(),
-                    storage.len(),
-                    like.dtype(),
-                    like.device(),
-                    like.shape()
-                ),
-            });
-        }
-        tensors.push(Tensor::from_parts(
-            storage,
-            Layout::contiguous(like.shape().clone())?,
-        ));
-    }
-    Ok(tensors)
-}
 
 /// The hyperparameters of one parameter group (or of the optimizer itself).
 ///
@@ -253,51 +213,24 @@ impl Sgd {
             msg: "SGD global step clock cannot be advanced past u64::MAX".to_string(),
         })?;
         let base_lr = *lr;
-        let mut exhausted = None;
-        // Range-checked before any `Param::set`, for the reason given in
-        // `Adam::step`: the kernel's own check runs during the mutating walk, so
-        // a bad group hyperparameter would otherwise stop the step half-applied.
-        let mut invalid = None;
-        crate::nn::visit::visit_all(model, &mut |path, leaf| {
-            let crate::nn::visit::Leaf::Param(param) = leaf else {
-                return;
-            };
-            if param.is_frozen() {
-                return;
-            }
-            if state
-                .get(&param.grad_key())
-                .is_some_and(|entry| entry.clock.checked_add(1).is_none())
-            {
-                exhausted.get_or_insert_with(|| path.to_string());
-                return;
-            }
-            if invalid.is_some() {
-                return;
-            }
-            let hyper = groups.resolve(path);
-            let acc = param.value().dtype().accumulation_dtype();
-            if let Err(error) = crate::backend::cpu::fused::validate_sgd_scalars(
-                "step",
-                base_lr * hyper.lr_scale,
-                hyper.momentum,
-                hyper.weight_decay,
-                acc,
-            ) {
-                invalid = Some(error);
-            }
-        });
-        if let Some(path) = exhausted {
-            return Err(Error::InvalidArg {
-                op: "step",
-                msg: format!(
-                    "SGD step clock for parameter `{path}` cannot be advanced past u64::MAX"
-                ),
-            });
-        }
-        if let Some(error) = invalid {
-            return Err(error);
-        }
+        // Clocks and hyperparameters are checked before any `Param::set`; see
+        // `engine::prepass` for why the kernel's own range check is too late.
+        engine::prepass(
+            "SGD",
+            model,
+            groups,
+            |param| state.get(&param.grad_key()).map(|entry| entry.clock),
+            |_path, param, hyper, _next_clock| {
+                let acc = param.value().dtype().accumulation_dtype();
+                crate::backend::cpu::fused::validate_sgd_scalars(
+                    "step",
+                    base_lr * hyper.lr_scale,
+                    hyper.momentum,
+                    hyper.weight_decay,
+                    acc,
+                )
+            },
+        )?;
         engine::apply("step", model, grads, |path, param, grad| {
             let hyper = groups.resolve(path);
             let dtype = param.value().dtype();
@@ -332,7 +265,8 @@ impl Sgd {
                 &scalars,
             ) {
                 Ok(outputs) => {
-                    let mut outputs = fused_outputs(
+                    let mut outputs = engine::fused_outputs(
+                        "SGD",
                         outputs,
                         if hyper.momentum == 0.0 { 1 } else { 2 },
                         &weights,
@@ -737,6 +671,96 @@ mod tests {
         // step count did not advance either.
         assert_eq!(model.snapshot(), before);
         assert_eq!(opt.steps(), 0);
+    }
+
+    /// Seed a momentum run with two updates, let `derail` arrange a rejection,
+    /// and assert the step `attempt` is then refused moved nothing at all: not
+    /// a parameter, not a velocity buffer, not a clock.
+    fn rejected_step_changes_nothing(
+        derail: impl FnOnce(&mut Sgd, &mut Net),
+        attempt: impl FnOnce(&mut Sgd, &mut Net) -> Error,
+    ) {
+        let mut model = Net::ones();
+        let mut opt = Sgd::new(0.1).momentum(0.9).weight_decay(0.01);
+        for _ in 0..2 {
+            step(&mut opt, &mut model);
+        }
+        derail(&mut opt, &mut model);
+        // Velocities and per-parameter clocks both ride in the envelope, so one
+        // comparison covers every piece of optimizer state there is.
+        let params = model.snapshot();
+        let mut before = Envelope::new();
+        opt.save_state(&model, &mut before).unwrap();
+
+        let err = attempt(&mut opt, &mut model);
+
+        let mut after = Envelope::new();
+        opt.save_state(&model, &mut after).unwrap();
+        assert_eq!(model.snapshot(), params, "{err}");
+        assert_eq!(after, before, "{err}");
+        assert_eq!(opt.steps(), 2, "{err}");
+    }
+
+    /// Every rejection this layer can diagnose is raised before the first
+    /// `Param::set`, as `optim`'s module docs state normatively.
+    #[test]
+    fn a_rejected_step_leaves_parameters_velocities_and_clocks_untouched() {
+        // A missing gradient (the untraced-weight bug)…
+        rejected_step_changes_nothing(
+            |_, _| {},
+            |opt, model| {
+                let loss = model.untraced_head_bias_loss(Mode::TRAIN).unwrap();
+                opt.step(model, loss.backward().unwrap()).unwrap_err()
+            },
+        );
+        // …a per-parameter step clock with no room left…
+        rejected_step_changes_nothing(
+            |opt, model| {
+                opt.state
+                    .get_mut(&model.head.bias.grad_key())
+                    .unwrap()
+                    .clock = u64::MAX;
+            },
+            |opt, model| {
+                let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+                opt.step(model, loss.backward().unwrap()).unwrap_err()
+            },
+        );
+        // …and an out-of-range hyperparameter.
+        rejected_step_changes_nothing(
+            |opt, _| opt.set_lr(-1.0),
+            |opt, model| {
+                let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+                opt.step(model, loss.backward().unwrap()).unwrap_err()
+            },
+        );
+    }
+
+    /// The pre-pass's two bailouts are *ordered*, and which one a caller sees is
+    /// observable: an exhausted clock outranks an out-of-range hyperparameter
+    /// even though the walk meets the bad hyperparameter first (`trunk.weight`
+    /// leads, `head.bias` trails), because the whole walk runs before either is
+    /// reported.
+    #[test]
+    fn an_exhausted_clock_outranks_an_invalid_hyperparameter() {
+        let mut model = Net::ones();
+        let mut opt = Sgd::new(0.1).momentum(0.9);
+        step(&mut opt, &mut model);
+        // Invalid for every parameter, including the first one visited…
+        opt.set_lr(-1.0);
+        // …but the last one visited has no clock left.
+        opt.state
+            .get_mut(&model.head.bias.grad_key())
+            .unwrap()
+            .clock = u64::MAX;
+
+        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("SGD step clock for parameter `head.bias`"),
+            "{err}"
+        );
     }
 
     #[test]

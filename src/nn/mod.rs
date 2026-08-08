@@ -69,17 +69,25 @@ pub(crate) mod visit;
 
 pub use activation::{Gelu, Relu};
 pub use attention::{MultiHeadAttention, scaled_dot_product_attention};
+// The head axis motion, shared with the typed attention wrapper
+// (`typed::nn::attention`), which splits and merges heads identically.
+#[cfg(feature = "typed")]
+pub(crate) use attention::{merge_heads, split_heads};
 pub use dropout::Dropout;
 pub use embedding::Embedding;
 pub use linear::Linear;
+// Shared with the typed `Linear` (`typed::nn::linear`), whose `Debug` line is
+// this one.
+#[cfg(feature = "typed")]
+pub(crate) use linear::debug_linear;
 pub use mode::Mode;
 pub use norm::{BatchNorm2d, LayerNorm, RMSNorm};
 // Shared with the typed normalization wrappers (`typed::nn::norm`), the only
 // consumers outside `nn::norm` itself.
 #[cfg(feature = "typed")]
 pub(crate) use norm::{
-    batch_norm2d_forward, check_eps, check_normalized_shape, check_suffix, layer_norm_forward,
-    rms_norm_forward,
+    batch_norm2d_forward, check_eps, check_momentum, check_normalized_shape, check_suffix,
+    layer_norm_forward, rms_norm_forward,
 };
 pub use param::Param;
 pub use sequential::Sequential;

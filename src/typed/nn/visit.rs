@@ -2,18 +2,11 @@ use super::{
     LeafContract, LeafKind, Module, RuntimeModuleAdapter, StateEntry, TypedBuffer, TypedLeaf,
     TypedLeafMut, TypedParam, TypedStateDict, TypedVisitor, TypedVisitorMut,
 };
+use crate::nn::visit::{join, push_segment};
 use crate::typed::{FloatElement, TypedTensor};
 use crate::{Error, Result, Tensor};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-
-fn join(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_string()
-    } else {
-        format!("{prefix}.{name}")
-    }
-}
 
 impl<'a> TypedVisitor<'a> {
     fn new(sink: &'a mut dyn FnMut(&str, TypedLeaf<'_>)) -> Self {
@@ -56,11 +49,7 @@ impl<'a> TypedVisitor<'a> {
 
     /// Descends into a typed child module and restores the previous prefix.
     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &M) {
-        let saved = self.path.len();
-        if !self.path.is_empty() {
-            self.path.push('.');
-        }
-        self.path.push_str(name);
+        let saved = push_segment(&mut self.path, name);
         child.visit(self);
         self.path.truncate(saved);
     }
@@ -109,11 +98,7 @@ impl<'a> TypedVisitorMut<'a> {
 
     /// Descends into a mutable typed child and restores the previous prefix.
     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &mut M) {
-        let saved = self.path.len();
-        if !self.path.is_empty() {
-            self.path.push('.');
-        }
-        self.path.push_str(name);
+        let saved = push_segment(&mut self.path, name);
         child.visit_mut(self);
         self.path.truncate(saved);
     }
