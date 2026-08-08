@@ -69,11 +69,23 @@ name = "typed_overhead"
 harness = false
 required-features = ["typed"]
 
+# Big-model (ResNet/MNIST) backend throughput. One sample is a whole training
+# step, so it is gated behind its own feature and never joins a plain
+# `cargo bench`.
+[[bench]]
+name = "resnet_mnist"
+harness = false
+required-features = ["bench-resnet"]
+
 [features]
 default = []
 typed = []
 hub = ["dep:flate2", "dep:ureq"]
 rayon = ["dep:rayon"]
+# Enables the `resnet_mnist` bench target only — no library code depends on it.
+# It exists so a minutes-long big-model benchmark cannot be picked up by a plain
+# `cargo bench`.
+bench-resnet = []
 # Experimental until the T61 conformance + perf gate passes
 # (docs/restart-v3/implementation-plan.md §4 Wave 6).
 metal = ["dep:metal"]
