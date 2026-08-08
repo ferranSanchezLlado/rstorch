@@ -1,23 +1,12 @@
 use super::{
-    ArgKeepDimOutput, ArgOutput, KeepDimOutput, RemoveAxisOutput, ScalarOutput, relabel_error_op,
+    ArgKeepDimOutput, ArgOutput, KeepDimOutput, RemoveAxisOutput, ScalarOutput, dynamic,
+    relabel_error_op, wrap,
 };
-use crate::typed::device::validate_binding;
-use crate::typed::tensor::checked_wrap;
 use crate::typed::{
     DYN, FloatElement, NumericElement, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4,
     Tensor5, Tensor6, Tensor7, Tensor8, TypedTensor,
 };
 use crate::{Result, Tensor};
-use std::sync::Arc;
-
-fn wrap<T: TypedTensor, O: TypedTensor>(input: &T, output: Tensor, op: &'static str) -> Result<O> {
-    checked_wrap(output, Arc::clone(input.binding()), op)
-}
-
-fn dynamic<'a, T: TypedTensor>(input: &'a T, op: &'static str) -> Result<&'a Tensor> {
-    validate_binding::<T::Placement>(input.binding(), op)?;
-    Ok(input.dynamic())
-}
 
 fn dynamic_reduction<T: TypedTensor>(
     input: &T,
@@ -27,206 +16,131 @@ fn dynamic_reduction<T: TypedTensor>(
     reduction(dynamic(input, op)?).map_err(|error| relabel_error_op(op, error))
 }
 
+// One macro per reduction signature shape. Each expands to a single method whose
+// name is also its runtime method name and its error op label; the element bound
+// comes from the enclosing impl block, not from the macro.
+
+macro_rules! remove_axis_reduction {
+    ($method:ident) => {
+        pub fn $method<const AXIS: usize>(&self) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
+        where
+            Self: RemoveAxisOutput<AXIS>,
+        {
+            let op = stringify!($method);
+            wrap(self, dynamic(self, op)?.$method(AXIS as isize)?, op)
+        }
+    };
+}
+
+macro_rules! keepdim_reduction {
+    ($method:ident) => {
+        pub fn $method<const AXIS: usize>(&self) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
+        where
+            Self: KeepDimOutput<AXIS>,
+        {
+            let op = stringify!($method);
+            wrap(self, dynamic(self, op)?.$method(AXIS as isize)?, op)
+        }
+    };
+}
+
+macro_rules! whole_reduction {
+    ($method:ident) => {
+        pub fn $method(&self) -> Result<<Self as ScalarOutput>::Output> {
+            let op = stringify!($method);
+            wrap(self, dynamic(self, op)?.$method()?, op)
+        }
+    };
+}
+
+macro_rules! arg_reduction {
+    ($method:ident) => {
+        pub fn $method<const AXIS: usize>(&self) -> Result<<Self as ArgOutput<AXIS>>::Output>
+        where
+            Self: ArgOutput<AXIS>,
+        {
+            let op = stringify!($method);
+            wrap(self, dynamic(self, op)?.$method(AXIS as isize)?, op)
+        }
+    };
+}
+
+macro_rules! arg_keepdim_reduction {
+    ($method:ident) => {
+        pub fn $method<const AXIS: usize>(&self) -> Result<<Self as ArgKeepDimOutput<AXIS>>::Output>
+        where
+            Self: ArgKeepDimOutput<AXIS>,
+        {
+            let op = stringify!($method);
+            wrap(self, dynamic(self, op)?.$method(AXIS as isize)?, op)
+        }
+    };
+}
+
+macro_rules! shape_preserving_reduction {
+    ($method:ident) => {
+        pub fn $method<const AXIS: usize>(&self) -> Result<Self>
+        where
+            Self: KeepDimOutput<AXIS>,
+        {
+            let op = stringify!($method);
+            wrap(self, dynamic(self, op)?.$method(AXIS as isize)?, op)
+        }
+    };
+}
+
+// Runtime-axis escape. The output type cannot be projected from an axis known
+// only at runtime, so the enclosing rank macro passes it in.
+macro_rules! dyn_reduction {
+    ($method:ident, $runtime:ident, $output:ty) => {
+        pub fn $method(&self, axis: isize) -> Result<$output> {
+            let op = stringify!($method);
+            wrap(self, dynamic_reduction(self, op, |x| x.$runtime(axis))?, op)
+        }
+    };
+}
+
 macro_rules! numeric_reductions {
     ($name:ident, [$($dim:ident),+], $removed:ty, $dynamic:ty, $arg_removed:ty, $arg_dynamic:ty) => {
         impl<$(const $dim: usize,)+ E: NumericElement, P: Placement>
             $name<$($dim,)+ E, P>
         {
-            pub fn sum<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
-            where
-                Self: RemoveAxisOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "sum")?.sum(AXIS as isize)?, "sum")
-            }
+            remove_axis_reduction!(sum);
+            remove_axis_reduction!(mean);
+            remove_axis_reduction!(max);
+            remove_axis_reduction!(min);
 
-            pub fn sum_keepdim<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
-            where
-                Self: KeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "sum_keepdim")?.sum_keepdim(AXIS as isize)?,
-                    "sum_keepdim",
-                )
-            }
+            keepdim_reduction!(sum_keepdim);
+            keepdim_reduction!(mean_keepdim);
+            keepdim_reduction!(max_keepdim);
+            keepdim_reduction!(min_keepdim);
 
-            pub fn sum_all(&self) -> Result<<Self as ScalarOutput>::Output> {
-                wrap(self, dynamic(self, "sum_all")?.sum_all()?, "sum_all")
-            }
+            whole_reduction!(sum_all);
+            whole_reduction!(mean_all);
+            whole_reduction!(max_all);
+            whole_reduction!(min_all);
 
-            pub fn mean<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
-            where
-                Self: RemoveAxisOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "mean")?.mean(AXIS as isize)?, "mean")
-            }
+            arg_reduction!(argmax);
+            arg_reduction!(argmin);
 
-            pub fn mean_keepdim<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
-            where
-                Self: KeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "mean_keepdim")?.mean_keepdim(AXIS as isize)?,
-                    "mean_keepdim",
-                )
-            }
+            arg_keepdim_reduction!(argmax_keepdim);
+            arg_keepdim_reduction!(argmin_keepdim);
 
-            pub fn mean_all(&self) -> Result<<Self as ScalarOutput>::Output> {
-                wrap(self, dynamic(self, "mean_all")?.mean_all()?, "mean_all")
-            }
+            dyn_reduction!(sum_dyn, sum, $removed);
+            dyn_reduction!(mean_dyn, mean, $removed);
+            dyn_reduction!(max_dyn, max, $removed);
+            dyn_reduction!(min_dyn, min, $removed);
 
-            pub fn max<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
-            where
-                Self: RemoveAxisOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "max")?.max(AXIS as isize)?, "max")
-            }
+            dyn_reduction!(sum_keepdim_dyn, sum_keepdim, $dynamic);
+            dyn_reduction!(mean_keepdim_dyn, mean_keepdim, $dynamic);
+            dyn_reduction!(max_keepdim_dyn, max_keepdim, $dynamic);
+            dyn_reduction!(min_keepdim_dyn, min_keepdim, $dynamic);
 
-            pub fn max_keepdim<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
-            where
-                Self: KeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "max_keepdim")?.max_keepdim(AXIS as isize)?,
-                    "max_keepdim",
-                )
-            }
+            dyn_reduction!(argmax_dyn, argmax, $arg_removed);
+            dyn_reduction!(argmin_dyn, argmin, $arg_removed);
 
-            pub fn max_all(&self) -> Result<<Self as ScalarOutput>::Output> {
-                wrap(self, dynamic(self, "max_all")?.max_all()?, "max_all")
-            }
-
-            pub fn min<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
-            where
-                Self: RemoveAxisOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "min")?.min(AXIS as isize)?, "min")
-            }
-
-            pub fn min_keepdim<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
-            where
-                Self: KeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "min_keepdim")?.min_keepdim(AXIS as isize)?,
-                    "min_keepdim",
-                )
-            }
-
-            pub fn min_all(&self) -> Result<<Self as ScalarOutput>::Output> {
-                wrap(self, dynamic(self, "min_all")?.min_all()?, "min_all")
-            }
-
-            pub fn argmax<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as ArgOutput<AXIS>>::Output>
-            where
-                Self: ArgOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "argmax")?.argmax(AXIS as isize)?, "argmax")
-            }
-
-            pub fn argmax_keepdim<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as ArgKeepDimOutput<AXIS>>::Output>
-            where
-                Self: ArgKeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "argmax_keepdim")?.argmax_keepdim(AXIS as isize)?,
-                    "argmax_keepdim",
-                )
-            }
-
-            pub fn argmin<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as ArgOutput<AXIS>>::Output>
-            where
-                Self: ArgOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "argmin")?.argmin(AXIS as isize)?, "argmin")
-            }
-
-            pub fn argmin_keepdim<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as ArgKeepDimOutput<AXIS>>::Output>
-            where
-                Self: ArgKeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "argmin_keepdim")?.argmin_keepdim(AXIS as isize)?,
-                    "argmin_keepdim",
-                )
-            }
-
-            pub fn sum_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic_reduction(self, "sum_dyn", |x| x.sum(axis))?, "sum_dyn")
-            }
-
-            pub fn sum_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic_reduction(self, "sum_keepdim_dyn", |x| x.sum_keepdim(axis))?, "sum_keepdim_dyn")
-            }
-
-            pub fn mean_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic_reduction(self, "mean_dyn", |x| x.mean(axis))?, "mean_dyn")
-            }
-
-            pub fn mean_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic_reduction(self, "mean_keepdim_dyn", |x| x.mean_keepdim(axis))?, "mean_keepdim_dyn")
-            }
-
-            pub fn max_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic_reduction(self, "max_dyn", |x| x.max(axis))?, "max_dyn")
-            }
-
-            pub fn max_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic_reduction(self, "max_keepdim_dyn", |x| x.max_keepdim(axis))?, "max_keepdim_dyn")
-            }
-
-            pub fn min_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic_reduction(self, "min_dyn", |x| x.min(axis))?, "min_dyn")
-            }
-
-            pub fn min_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic_reduction(self, "min_keepdim_dyn", |x| x.min_keepdim(axis))?, "min_keepdim_dyn")
-            }
-
-            pub fn argmax_dyn(&self, axis: isize) -> Result<$arg_removed> {
-                wrap(self, dynamic_reduction(self, "argmax_dyn", |x| x.argmax(axis))?, "argmax_dyn")
-            }
-
-            pub fn argmax_keepdim_dyn(&self, axis: isize) -> Result<$arg_dynamic> {
-                wrap(self, dynamic_reduction(self, "argmax_keepdim_dyn", |x| x.argmax_keepdim(axis))?, "argmax_keepdim_dyn")
-            }
-
-            pub fn argmin_dyn(&self, axis: isize) -> Result<$arg_removed> {
-                wrap(self, dynamic_reduction(self, "argmin_dyn", |x| x.argmin(axis))?, "argmin_dyn")
-            }
-
-            pub fn argmin_keepdim_dyn(&self, axis: isize) -> Result<$arg_dynamic> {
-                wrap(self, dynamic_reduction(self, "argmin_keepdim_dyn", |x| x.argmin_keepdim(axis))?, "argmin_keepdim_dyn")
-            }
+            dyn_reduction!(argmax_keepdim_dyn, argmax_keepdim, $arg_dynamic);
+            dyn_reduction!(argmin_keepdim_dyn, argmin_keepdim, $arg_dynamic);
         }
     };
 }
@@ -236,99 +150,26 @@ macro_rules! float_reductions {
         impl<$(const $dim: usize,)+ E: FloatElement, P: Placement>
             $name<$($dim,)+ E, P>
         {
-            pub fn var<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
-            where
-                Self: RemoveAxisOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "var")?.var(AXIS as isize)?, "var")
-            }
+            remove_axis_reduction!(var);
+            remove_axis_reduction!(std);
 
-            pub fn var_keepdim<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
-            where
-                Self: KeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "var_keepdim")?.var_keepdim(AXIS as isize)?,
-                    "var_keepdim",
-                )
-            }
+            keepdim_reduction!(var_keepdim);
+            keepdim_reduction!(std_keepdim);
 
-            pub fn var_all(&self) -> Result<<Self as ScalarOutput>::Output> {
-                wrap(self, dynamic(self, "var_all")?.var_all()?, "var_all")
-            }
+            whole_reduction!(var_all);
+            whole_reduction!(std_all);
 
-            pub fn std<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
-            where
-                Self: RemoveAxisOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "std")?.std(AXIS as isize)?, "std")
-            }
+            shape_preserving_reduction!(softmax);
+            shape_preserving_reduction!(log_softmax);
 
-            pub fn std_keepdim<const AXIS: usize>(
-                &self,
-            ) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
-            where
-                Self: KeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "std_keepdim")?.std_keepdim(AXIS as isize)?,
-                    "std_keepdim",
-                )
-            }
+            dyn_reduction!(var_dyn, var, $removed);
+            dyn_reduction!(std_dyn, std, $removed);
 
-            pub fn std_all(&self) -> Result<<Self as ScalarOutput>::Output> {
-                wrap(self, dynamic(self, "std_all")?.std_all()?, "std_all")
-            }
+            dyn_reduction!(var_keepdim_dyn, var_keepdim, $dynamic);
+            dyn_reduction!(std_keepdim_dyn, std_keepdim, $dynamic);
 
-            pub fn softmax<const AXIS: usize>(&self) -> Result<Self>
-            where
-                Self: KeepDimOutput<AXIS>,
-            {
-                wrap(self, dynamic(self, "softmax")?.softmax(AXIS as isize)?, "softmax")
-            }
-
-            pub fn log_softmax<const AXIS: usize>(&self) -> Result<Self>
-            where
-                Self: KeepDimOutput<AXIS>,
-            {
-                wrap(
-                    self,
-                    dynamic(self, "log_softmax")?.log_softmax(AXIS as isize)?,
-                    "log_softmax",
-                )
-            }
-
-            pub fn var_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic_reduction(self, "var_dyn", |x| x.var(axis))?, "var_dyn")
-            }
-
-            pub fn var_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic_reduction(self, "var_keepdim_dyn", |x| x.var_keepdim(axis))?, "var_keepdim_dyn")
-            }
-
-            pub fn std_dyn(&self, axis: isize) -> Result<$removed> {
-                wrap(self, dynamic_reduction(self, "std_dyn", |x| x.std(axis))?, "std_dyn")
-            }
-
-            pub fn std_keepdim_dyn(&self, axis: isize) -> Result<$dynamic> {
-                wrap(self, dynamic_reduction(self, "std_keepdim_dyn", |x| x.std_keepdim(axis))?, "std_keepdim_dyn")
-            }
-
-            pub fn softmax_dyn(&self, axis: isize) -> Result<Self> {
-                wrap(self, dynamic_reduction(self, "softmax_dyn", |x| x.softmax(axis))?, "softmax_dyn")
-            }
-
-            pub fn log_softmax_dyn(&self, axis: isize) -> Result<Self> {
-                wrap(self, dynamic_reduction(self, "log_softmax_dyn", |x| x.log_softmax(axis))?, "log_softmax_dyn")
-            }
+            dyn_reduction!(softmax_dyn, softmax, Self);
+            dyn_reduction!(log_softmax_dyn, log_softmax, Self);
         }
     };
 }
@@ -355,6 +196,7 @@ mod tests {
     use crate::typed::sealed::TypedTensor as SealedTypedTensor;
     use crate::typed::{Cpu, DeviceBinding, DeviceCtx};
     use crate::{Device, Error, Grads};
+    use std::sync::Arc;
 
     trait Same<T> {}
     impl<T> Same<T> for T {}

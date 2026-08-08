@@ -392,6 +392,28 @@ struct StateEntry {
     contract: LeafContract,
 }
 
+/// Walks `model` twice and returns the first state dict only if both walks
+/// produced the same paths.
+///
+/// CT40 requires stable repeated read-only walks. `typed::optim` and
+/// `typed::persist` both preflight a model this way before handing it to the
+/// runtime adapter, so the walk-comparison lives here once.
+pub(in crate::typed) fn stable_state<M: Module + ?Sized>(
+    model: &M,
+    op: &'static str,
+) -> Result<TypedStateDict> {
+    let first = state_dict(model)?;
+    let second = state_dict(model)?;
+    if first.paths().ne(second.paths()) {
+        return Err(crate::Error::InvalidArg {
+            op,
+            msg: "typed Module paths changed between preflight walks; Module requires stable repeated walks"
+                .into(),
+        });
+    }
+    Ok(first)
+}
+
 /// The only seam through which runtime optimizers and persistence code may
 /// temporarily view a typed tree as a runtime module.
 ///

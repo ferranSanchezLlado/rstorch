@@ -1,11 +1,28 @@
-use super::{Conv2dOutput, Pool2dOutput};
+use super::{Conv2dOutput, Pool2dOutput, dynamic, wrap};
 use crate::Result;
 use crate::typed::const_check::assert_conv2d_channels;
-use crate::typed::device::validate_binding;
-use crate::typed::sealed::TypedTensor as SealedTypedTensor;
-use crate::typed::tensor::checked_wrap;
-use crate::typed::{DYN, NumericElement, Placement, Tensor4};
-use std::sync::Arc;
+use crate::typed::{NumericElement, Placement, Tensor4};
+
+/// Expands one rank-4 NCHW pooling method; `$kind` names the reduction in its
+/// doc line and `$method` is also the runtime method name and error op label.
+macro_rules! pool2d {
+    ($method:ident, $kind:literal) => {
+        #[doc = concat!("Applies rank-4 NCHW ", $kind, " pooling through the runtime tensor kernel.")]
+        pub fn $method(
+            &self,
+            kernel: (usize, usize),
+            stride: (usize, usize),
+            padding: (usize, usize),
+        ) -> Result<<Self as Pool2dOutput>::Output> {
+            let op = stringify!($method);
+            wrap(
+                self,
+                dynamic(self, op)?.$method(kernel, stride, padding)?,
+                op,
+            )
+        }
+    };
+}
 
 impl<
     const BATCH: usize,
@@ -25,60 +42,26 @@ impl<
         dilation: (usize, usize),
     ) -> Result<<Self as Conv2dOutput<Tensor4<OUT, WEIGHT_INPUT, KH, KW, E, P>>>::Output> {
         const { assert_conv2d_channels(INPUT_CHANNELS, WEIGHT_INPUT) };
-        validate_binding::<P>(SealedTypedTensor::binding(self), "conv2d")?;
-        validate_binding::<P>(SealedTypedTensor::binding(weight), "conv2d")?;
-
-        let output = SealedTypedTensor::dynamic(self).conv2d(
-            SealedTypedTensor::dynamic(weight),
+        let output = dynamic(self, "conv2d")?.conv2d(
+            dynamic(weight, "conv2d")?,
             stride,
             padding,
             dilation,
         )?;
-        checked_wrap::<Tensor4<BATCH, OUT, DYN, DYN, E, P>>(
-            output,
-            Arc::clone(SealedTypedTensor::binding(self)),
-            "conv2d",
-        )
+        wrap(self, output, "conv2d")
     }
 
-    /// Applies rank-4 NCHW max pooling through the runtime tensor kernel.
-    pub fn max_pool2d(
-        &self,
-        kernel: (usize, usize),
-        stride: (usize, usize),
-        padding: (usize, usize),
-    ) -> Result<<Self as Pool2dOutput>::Output> {
-        validate_binding::<P>(SealedTypedTensor::binding(self), "max_pool2d")?;
-        let output = SealedTypedTensor::dynamic(self).max_pool2d(kernel, stride, padding)?;
-        checked_wrap::<Tensor4<BATCH, INPUT_CHANNELS, DYN, DYN, E, P>>(
-            output,
-            Arc::clone(SealedTypedTensor::binding(self)),
-            "max_pool2d",
-        )
-    }
-
-    /// Applies rank-4 NCHW average pooling through the runtime tensor kernel.
-    pub fn avg_pool2d(
-        &self,
-        kernel: (usize, usize),
-        stride: (usize, usize),
-        padding: (usize, usize),
-    ) -> Result<<Self as Pool2dOutput>::Output> {
-        validate_binding::<P>(SealedTypedTensor::binding(self), "avg_pool2d")?;
-        let output = SealedTypedTensor::dynamic(self).avg_pool2d(kernel, stride, padding)?;
-        checked_wrap::<Tensor4<BATCH, INPUT_CHANNELS, DYN, DYN, E, P>>(
-            output,
-            Arc::clone(SealedTypedTensor::binding(self)),
-            "avg_pool2d",
-        )
-    }
+    pool2d!(max_pool2d, "max");
+    pool2d!(avg_pool2d, "average");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::{Cpu, DeviceBinding, DeviceCtx};
+    use crate::typed::sealed::TypedTensor as SealedTypedTensor;
+    use crate::typed::{Cpu, DYN, DeviceBinding, DeviceCtx};
     use crate::{Device, Error, Tensor};
+    use std::sync::Arc;
 
     fn ctx() -> DeviceCtx<Cpu> {
         DeviceCtx::cpu().unwrap()

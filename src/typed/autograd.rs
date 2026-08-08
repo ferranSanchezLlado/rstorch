@@ -1,15 +1,10 @@
 use super::device::validate_binding;
-use super::ops::{WithElement, WithPlacement};
+use super::ops::{WithElement, WithPlacement, dynamic, wrap};
 use super::sealed::TypedTensor as SealedTypedTensor;
 use super::tensor::checked_wrap;
 use super::{DeviceCtx, FloatElement, Placement, TypedTensor, typed_rank_table};
-use crate::{Element, Grads, Result, Tensor};
+use crate::{Element, Grads, Result};
 use std::sync::Arc;
-
-fn dynamic<'a, T: TypedTensor>(input: &'a T, op: &'static str) -> Result<&'a Tensor> {
-    validate_binding::<T::Placement>(SealedTypedTensor::binding(input), op)?;
-    Ok(SealedTypedTensor::dynamic(input))
-}
 
 macro_rules! impl_typed_core {
     ($(($name:ident, $rank:literal, [$($dim:ident),*])),+ $(,)?) => {
@@ -19,20 +14,12 @@ macro_rules! impl_typed_core {
             {
                 /// Returns an untraced tensor sharing this tensor's storage and layout.
                 pub fn detach(&self) -> Result<Self> {
-                    checked_wrap(
-                        dynamic(self, "detach")?.detach(),
-                        Arc::clone(SealedTypedTensor::binding(self)),
-                        "detach",
-                    )
+                    wrap(self, dynamic(self, "detach")?.detach(), "detach")
                 }
 
                 /// Returns a row-major contiguous tensor with unchanged typed metadata.
                 pub fn contiguous(&self) -> Result<Self> {
-                    checked_wrap(
-                        dynamic(self, "contiguous")?.contiguous()?,
-                        Arc::clone(SealedTypedTensor::binding(self)),
-                        "contiguous",
-                    )
+                    wrap(self, dynamic(self, "contiguous")?.contiguous()?, "contiguous")
                 }
 
                 /// Casts the element type while preserving shape and placement.
@@ -40,11 +27,7 @@ macro_rules! impl_typed_core {
                 where
                     Self: WithElement<F>,
                 {
-                    checked_wrap(
-                        dynamic(self, "to_dtype")?.to_dtype(F::DTYPE)?,
-                        Arc::clone(SealedTypedTensor::binding(self)),
-                        "to_dtype",
-                    )
+                    wrap(self, dynamic(self, "to_dtype")?.to_dtype(F::DTYPE)?, "to_dtype")
                 }
 
                 /// Moves the tensor while preserving shape and element type.
@@ -85,11 +68,7 @@ macro_rules! impl_typed_core {
             {
                 /// Returns a traced leaf for gradient lookup by typed input.
                 pub fn traced(&self) -> Result<Self> {
-                    checked_wrap(
-                        dynamic(self, "traced")?.traced()?,
-                        Arc::clone(SealedTypedTensor::binding(self)),
-                        "traced",
-                    )
+                    wrap(self, dynamic(self, "traced")?.traced()?, "traced")
                 }
 
                 /// Runs reverse-mode autodiff from this tensor.

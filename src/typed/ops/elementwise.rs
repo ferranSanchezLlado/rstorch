@@ -1,14 +1,13 @@
 //! Strict typed elementwise operations.
 
-use super::BooleanOutput;
+use super::{BooleanOutput, wrap};
 use crate::typed::device::validate_binding;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
-use crate::typed::tensor::checked_wrap;
 use crate::typed::{
     FloatElement, NumericElement, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4, Tensor5,
     Tensor6, Tensor7, Tensor8, TypedTensor, typed_rank_table,
 };
-use crate::{Element, Error, Result, Tensor};
+use crate::{Element, Error, Result};
 use std::ops::{Add as TypedAdd, Div as TypedDiv, Mul as TypedMul, Sub as TypedSub};
 use std::sync::Arc;
 
@@ -16,30 +15,10 @@ fn validate_operand<T: TypedTensor>(value: &T, op: &'static str) -> Result<()> {
     validate_binding::<T::Placement>(<T as SealedTypedTensor>::binding(value), op)
 }
 
-fn validate_pair<T: TypedTensor>(lhs: &T, rhs: &T, op: &'static str) -> Result<()> {
-    validate_operand(lhs, op)?;
-    validate_operand(rhs, op)?;
-    if !Arc::ptr_eq(
-        <T as SealedTypedTensor>::binding(lhs),
-        <T as SealedTypedTensor>::binding(rhs),
-    ) {
-        return Err(Error::InvalidArg {
-            op,
-            msg: "typed operands do not share the canonical placement binding".to_string(),
-        });
-    }
-    if <T as SealedTypedTensor>::dynamic(lhs).dims()
-        != <T as SealedTypedTensor>::dynamic(rhs).dims()
-    {
-        return Err(Error::ShapeMismatch {
-            op,
-            lhs: <T as SealedTypedTensor>::dynamic(lhs).shape().clone(),
-            rhs: <T as SealedTypedTensor>::dynamic(rhs).shape().clone(),
-        });
-    }
-    Ok(())
-}
-
+/// Requires two operands to share a binding and identical actual dimensions.
+///
+/// Two typed wrappers of the same type are the `L == R` case; nothing extra is
+/// checked for them, so they use this function too.
 fn validate_related<L, R>(lhs: &L, rhs: &R, op: &'static str) -> Result<()>
 where
     L: TypedTensor,
@@ -68,14 +47,6 @@ where
     Ok(())
 }
 
-fn wrap_like<T: TypedTensor>(source: &T, tensor: Tensor, op: &'static str) -> Result<T> {
-    checked_wrap::<T>(
-        tensor,
-        Arc::clone(<T as SealedTypedTensor>::binding(source)),
-        op,
-    )
-}
-
 #[track_caller]
 fn unwrap_op<T>(result: Result<T>) -> T {
     match result {
@@ -88,8 +59,8 @@ macro_rules! binary_numeric {
     ($method:ident) => {
         pub fn $method(&self, rhs: &Self) -> Result<Self> {
             let op = stringify!($method);
-            validate_pair(self, rhs, op)?;
-            wrap_like(self, self.as_dynamic().$method(rhs.as_dynamic())?, op)
+            validate_related(self, rhs, op)?;
+            wrap(self, self.as_dynamic().$method(rhs.as_dynamic())?, op)
         }
     };
 }
@@ -99,27 +70,19 @@ macro_rules! scalar_numeric {
         pub fn $method(&self, value: f64) -> Result<Self> {
             let op = stringify!($method);
             validate_operand(self, op)?;
-            wrap_like(self, self.as_dynamic().$method(value)?, op)
+            wrap(self, self.as_dynamic().$method(value)?, op)
         }
     };
 }
 
-macro_rules! unary_numeric {
+/// The element bound comes from the enclosing impl block, so one expansion
+/// serves both the `NumericElement` and the `FloatElement` unary methods.
+macro_rules! unary {
     ($method:ident) => {
         pub fn $method(&self) -> Result<Self> {
             let op = stringify!($method);
             validate_operand(self, op)?;
-            wrap_like(self, self.as_dynamic().$method()?, op)
-        }
-    };
-}
-
-macro_rules! unary_float {
-    ($method:ident) => {
-        pub fn $method(&self) -> Result<Self> {
-            let op = stringify!($method);
-            validate_operand(self, op)?;
-            wrap_like(self, self.as_dynamic().$method()?, op)
+            wrap(self, self.as_dynamic().$method()?, op)
         }
     };
 }
@@ -128,12 +91,8 @@ macro_rules! comparison {
     ($method:ident) => {
         pub fn $method(&self, rhs: &Self) -> Result<<Self as BooleanOutput>::Output> {
             let op = stringify!($method);
-            validate_pair(self, rhs, op)?;
-            checked_wrap::<<Self as BooleanOutput>::Output>(
-                self.as_dynamic().$method(rhs.as_dynamic())?,
-                Arc::clone(<Self as SealedTypedTensor>::binding(self)),
-                op,
-            )
+            validate_related(self, rhs, op)?;
+            wrap(self, self.as_dynamic().$method(rhs.as_dynamic())?, op)
         }
     };
 }
@@ -156,25 +115,25 @@ macro_rules! impl_elementwise {
                 scalar_numeric!(mul_scalar);
                 scalar_numeric!(div_scalar);
 
-                unary_numeric!(neg);
-                unary_numeric!(abs);
+                unary!(neg);
+                unary!(abs);
 
                 pub fn square(&self) -> Result<Self> {
                     validate_operand(self, "square")?;
-                    wrap_like(self, self.as_dynamic().mul(self.as_dynamic())?, "square")
+                    wrap(self, self.as_dynamic().mul(self.as_dynamic())?, "square")
                 }
             }
 
             impl<$(const $dim: usize,)* E: FloatElement, P: Placement>
                 $name<$($dim,)* E, P>
             {
-                unary_float!(relu);
-                unary_float!(gelu);
-                unary_float!(exp);
-                unary_float!(ln);
-                unary_float!(sqrt);
-                unary_float!(tanh);
-                unary_float!(sigmoid);
+                unary!(relu);
+                unary!(gelu);
+                unary!(exp);
+                unary!(ln);
+                unary!(sqrt);
+                unary!(tanh);
+                unary!(sigmoid);
             }
 
             impl<$(const $dim: usize,)* E: Element, P: Placement>
@@ -193,7 +152,7 @@ macro_rules! impl_elementwise {
                     value: f64,
                 ) -> Result<Self> {
                     validate_related(self, mask, "masked_fill")?;
-                    wrap_like(
+                    wrap(
                         self,
                         self.as_dynamic().masked_fill(mask.as_dynamic(), value)?,
                         "masked_fill",
@@ -209,11 +168,11 @@ macro_rules! impl_elementwise {
                 ) -> Result<$name<$($dim,)* E, P>> {
                     validate_related(self, on_true, "where")?;
                     validate_related(self, on_false, "where")?;
-                    validate_pair(on_true, on_false, "where")?;
-                    checked_wrap::<$name<$($dim,)* E, P>>(
+                    validate_related(on_true, on_false, "where")?;
+                    wrap(
+                        self,
                         self.as_dynamic()
                             .where_cond(on_true.as_dynamic(), on_false.as_dynamic())?,
-                        Arc::clone(<Self as SealedTypedTensor>::binding(self)),
                         "where",
                     )
                 }
@@ -297,7 +256,7 @@ typed_rank_table!(impl_elementwise);
 mod tests {
     use super::*;
     use crate::typed::{Cpu, DYN, DeviceCtx};
-    use crate::{DType, Device, Shape};
+    use crate::{DType, Device, Shape, Tensor};
 
     fn values<E: Element>(tensor: &Tensor) -> Vec<E> {
         tensor.to_vec::<E>().unwrap()

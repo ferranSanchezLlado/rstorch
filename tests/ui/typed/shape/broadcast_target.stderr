@@ -1,13 +1,13 @@
 error[E0080]: evaluation of `typed::const_check::assert_broadcast` failed
-  --> $WORKSPACE/src/typed/ops/shape.rs:89:1
+  --> $WORKSPACE/src/typed/ops/shape.rs:81:1
    |
-89 | / impl_shape_ops! {
-90 | |     (Tensor0, []),
-91 | |     (Tensor1, [D0]),
-92 | |     (Tensor2, [D0, D1]),
+81 | / impl_shape_ops! {
+82 | |     (Tensor0, []),
+83 | |     (Tensor1, [D0]),
+84 | |     (Tensor2, [D0, D1]),
 ...  |
-98 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
-99 | | }
+90 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+91 | | }
    | |_^ evaluation panicked: typed broadcast dimensions are incompatible
    |
 note: inside `typed::const_check::assert_broadcast`
@@ -20,15 +20,15 @@ note: inside `typed::const_check::assert_broadcast`
    | |_________^ the failure occurred here
 
 note: erroneous constant encountered
-  --> $WORKSPACE/src/typed/ops/shape.rs:89:1
+  --> $WORKSPACE/src/typed/ops/shape.rs:81:1
    |
-89 | / impl_shape_ops! {
-90 | |     (Tensor0, []),
-91 | |     (Tensor1, [D0]),
-92 | |     (Tensor2, [D0, D1]),
+81 | / impl_shape_ops! {
+82 | |     (Tensor0, []),
+83 | |     (Tensor1, [D0]),
+84 | |     (Tensor2, [D0, D1]),
 ...  |
-98 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
-99 | | }
+90 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+91 | | }
    | |_^
    |
    = note: this note originates in the macro `impl_shape_ops` (in Nightly builds, run with -Z macro-backtrace for more info)

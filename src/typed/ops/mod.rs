@@ -148,11 +148,15 @@
 //! The logits row marker and `TARGET_ROWS` are independent. All losses require
 //! `FloatElement`.
 
+use super::device::validate_binding;
+use super::sealed::TypedTensor as SealedTypedTensor;
+use super::tensor::checked_wrap;
 use super::{
     DYN, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4, Tensor5, Tensor6, Tensor7,
     Tensor8, TypedTensor,
 };
-use crate::{Element, Error};
+use crate::{Element, Error, Result, Tensor};
+use std::sync::Arc;
 
 mod conv;
 mod elementwise;
@@ -164,6 +168,21 @@ mod shape;
 
 mod sealed {
     pub trait OutputContract {}
+}
+
+/// Checks the operand's placement binding and hands back its runtime tensor.
+pub(super) fn dynamic<'a, T: TypedTensor>(input: &'a T, op: &'static str) -> Result<&'a Tensor> {
+    validate_binding::<T::Placement>(SealedTypedTensor::binding(input), op)?;
+    Ok(SealedTypedTensor::dynamic(input))
+}
+
+/// Rewraps a runtime result under `input`'s placement binding.
+pub(super) fn wrap<T: TypedTensor, O: TypedTensor>(
+    input: &T,
+    output: Tensor,
+    op: &'static str,
+) -> Result<O> {
+    checked_wrap(output, Arc::clone(SealedTypedTensor::binding(input)), op)
 }
 
 fn relabel_error_op(op: &'static str, error: Error) -> Error {
@@ -216,20 +235,6 @@ pub trait BooleanOutput: sealed::OutputContract {
 pub trait DynamicOutput: sealed::OutputContract {
     /// Erased output tensor.
     type Output: TypedTensor;
-}
-
-/// Strict binary compatibility, implemented only for an identical type.
-#[doc(hidden)]
-pub trait StrictlyCompatible<Rhs = Self>: sealed::OutputContract {
-    /// Unchanged common type.
-    type Output: TypedTensor;
-}
-
-impl<T> StrictlyCompatible<T> for T
-where
-    T: TypedTensor + sealed::OutputContract,
-{
-    type Output = T;
 }
 
 /// Whole-reduction output.
@@ -354,13 +359,6 @@ pub trait Conv2dOutput<Weight: TypedTensor>: sealed::OutputContract {
 #[doc(hidden)]
 pub trait Pool2dOutput: sealed::OutputContract {
     /// NCHW output retaining batch/channels and erasing spatial axes.
-    type Output: TypedTensor;
-}
-
-/// Loss output relationship.
-#[doc(hidden)]
-pub trait LossOutput<Target: TypedTensor>: sealed::OutputContract {
-    /// Rank-zero loss output.
     type Output: TypedTensor;
 }
 

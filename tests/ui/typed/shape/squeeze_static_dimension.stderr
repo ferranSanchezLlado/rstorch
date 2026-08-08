@@ -1,13 +1,13 @@
 error[E0080]: evaluation of `typed::const_check::assert_squeezable` failed
-   --> $WORKSPACE/src/typed/ops/shape.rs:217:1
+   --> $WORKSPACE/src/typed/ops/shape.rs:189:1
     |
-217 | / impl_existing_axis_ops! {
-218 | |     (Tensor1, [D0]),
-219 | |     (Tensor2, [D0, D1]),
-220 | |     (Tensor3, [D0, D1, D2]),
+189 | / impl_existing_axis_ops! {
+190 | |     (Tensor1, [D0]),
+191 | |     (Tensor2, [D0, D1]),
+192 | |     (Tensor3, [D0, D1, D2]),
 ...   |
-225 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
-226 | | }
+197 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+198 | | }
     | |_^ evaluation panicked: typed squeeze axis must have dimension one
     |
 note: inside `typed::const_check::assert_squeezable`
@@ -20,15 +20,15 @@ note: inside `typed::const_check::assert_squeezable`
     | |_____^ the failure occurred here
 
 note: erroneous constant encountered
-   --> $WORKSPACE/src/typed/ops/shape.rs:217:1
+   --> $WORKSPACE/src/typed/ops/shape.rs:189:1
     |
-217 | / impl_existing_axis_ops! {
-218 | |     (Tensor1, [D0]),
-219 | |     (Tensor2, [D0, D1]),
-220 | |     (Tensor3, [D0, D1, D2]),
+189 | / impl_existing_axis_ops! {
+190 | |     (Tensor1, [D0]),
+191 | |     (Tensor2, [D0, D1]),
+192 | |     (Tensor3, [D0, D1, D2]),
 ...   |
-225 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
-226 | | }
+197 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+198 | | }
     | |_^
     |
     = note: this note originates in the macro `impl_existing_axis_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
