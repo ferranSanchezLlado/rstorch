@@ -41,7 +41,7 @@
 
 use crate::backend::{
     ArgReduceOp, BackendOps, BinaryOp, CmpOp, Conv2dParams, ConvOp, ReduceOp, UnaryOp, View,
-    dispatch,
+    conv_geometry::Conv2dGeometry, dispatch,
 };
 use crate::device::Device;
 use crate::dtype::{DType, HostConv};
@@ -1197,7 +1197,73 @@ fn push_conv(cases: &mut Vec<Case>) {
                 ));
             }
         }
+        push_conv_backward(cases, label, &params, &input, &weight);
     }
+}
+
+/// The backward half of [`push_conv`], for one geometry.
+///
+/// Kept separate only for size. It matters as much as the forward half: a
+/// gradient kernel that maps output positions back to input positions
+/// incorrectly under a stride or a dilation still produces finite, plausible
+/// numbers, so nothing short of a reference diff catches it — the model just
+/// trains badly. The cotangent is deliberately non-uniform, because a uniform
+/// one is invariant under any permutation of output positions and would hide
+/// exactly the class of error these cases exist to find.
+fn push_conv_backward(
+    cases: &mut Vec<Case>,
+    label: &str,
+    params: &Conv2dParams,
+    input: &[f32],
+    weight: &[f32],
+) {
+    const INPUT_DIMS: [usize; 4] = [1, 1, 4, 4];
+    const WEIGHT_DIMS: [usize; 4] = [2, 1, 2, 2];
+
+    // Ask the geometry for the cotangent shape rather than restating the
+    // output formula here: a hand-written shape that disagrees would surface
+    // as a shape error in every backend at once, which proves nothing.
+    let conv = Conv2dGeometry::conv2d("conv2d", &INPUT_DIMS, &WEIGHT_DIMS, params)
+        .expect("conformance table: valid conv geometry");
+    let grad = cotangent(conv.output_dims());
+    cases.push(Case::new(
+        format!("conv.Conv2dInputGrad.f32.{label}"),
+        Call::Conv(ConvOp::Conv2dInputGrad, *params),
+        vec![
+            f32s(&conv.output_dims(), &grad),
+            f32s(&WEIGHT_DIMS, weight),
+            f32s(&INPUT_DIMS, input),
+        ],
+    ));
+    cases.push(Case::new(
+        format!("conv.Conv2dWeightGrad.f32.{label}"),
+        Call::Conv(ConvOp::Conv2dWeightGrad, *params),
+        vec![
+            f32s(&conv.output_dims(), &grad),
+            f32s(&INPUT_DIMS, input),
+            f32s(&WEIGHT_DIMS, weight),
+        ],
+    ));
+
+    let pool = Conv2dGeometry::pool("pool2d", &INPUT_DIMS, params)
+        .expect("conformance table: valid pool geometry");
+    let pool_grad = cotangent(pool.output_dims());
+    for op in [ConvOp::MaxPool2dBackward, ConvOp::AvgPool2dBackward] {
+        cases.push(Case::new(
+            format!("conv.{op:?}.f32.{label}"),
+            Call::Conv(op, *params),
+            vec![
+                f32s(&pool.output_dims(), &pool_grad),
+                f32s(&INPUT_DIMS, input),
+            ],
+        ));
+    }
+}
+
+/// A non-uniform, deterministic cotangent for `dims`.
+fn cotangent(dims: [usize; 4]) -> Vec<f32> {
+    let len: usize = dims.iter().product();
+    (0..len).map(|i| 0.75 - (i % 7) as f32 * 0.25).collect()
 }
 
 #[cfg(test)]
