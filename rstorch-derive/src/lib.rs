@@ -80,6 +80,7 @@
 //! alias for `TypedParam<T>` is treated as a child module.
 
 mod module;
+mod shared;
 mod typed_module;
 
 use proc_macro::TokenStream;
