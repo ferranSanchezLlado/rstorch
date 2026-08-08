@@ -179,4 +179,20 @@ mod tests {
     fn default_is_strict() {
         assert_eq!(LoadOptions::default(), LoadOptions::strict());
     }
+
+    #[test]
+    fn with_limits_tightens_without_touching_policies() {
+        let tight = Limits {
+            max_tensor_bytes: 1024,
+            ..Limits::defaults()
+        };
+        let o = LoadOptions::strict().allow_missing().with_limits(tight);
+        assert_eq!(o.limits, tight);
+        assert_eq!(o.limits.max_tensor_bytes, 1024);
+        // The other caps come from the base the caller built on, and the
+        // policies set before it are untouched.
+        assert_eq!(o.limits.max_records, Limits::defaults().max_records);
+        assert_eq!(o.missing, MissingPolicy::Allow);
+        assert_eq!(o.unexpected, UnexpectedPolicy::Reject);
+    }
 }

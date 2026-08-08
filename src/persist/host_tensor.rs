@@ -145,6 +145,25 @@ mod tests {
     }
 
     #[test]
+    fn into_parts_round_trips_from_bytes() {
+        // The zero-copy inverse of `from_bytes`: the accessors only borrow,
+        // so this is how a caller takes ownership of loaded tensor data
+        // without copying it.
+        let bytes: Vec<u8> = (0..24).collect();
+        let t = HostTensor::from_bytes(DType::F32, vec![2, 3], bytes.clone()).unwrap();
+        let (dtype, dims, out) = t.into_parts();
+        assert_eq!(dtype, DType::F32);
+        assert_eq!(dims, vec![2, 3]);
+        assert_eq!(out, bytes);
+        // and the parts rebuild the identical tensor.
+        let rebuilt = HostTensor::from_bytes(dtype, dims, out).unwrap();
+        assert_eq!(
+            rebuilt,
+            HostTensor::from_bytes(DType::F32, vec![2, 3], bytes).unwrap()
+        );
+    }
+
+    #[test]
     fn scalar_and_empty() {
         // rank-0 scalar: one element.
         let scalar = HostTensor::from_bytes(DType::I64, vec![], vec![0u8; 8]).unwrap();
