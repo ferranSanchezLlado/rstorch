@@ -1149,6 +1149,39 @@ mod tests {
         assert_eq!(as_f32(&out), vec![0.0, 3.0, 0.0, 3.0, 0.0, 4.0]);
     }
 
+    /// PyTorch's rule is `index.size(d) <= src.size(d)`, so `src` may be
+    /// strictly larger than the index grid: the grid names which `src`
+    /// positions participate, and the rest are simply never read.
+    ///
+    /// Every other `scatter_add` test passes an index grid of exactly `src`'s
+    /// shape, which makes "walk the grid" and "walk `src`" indistinguishable.
+    /// The Metal kernel walked `src`, so it visited positions the grid never
+    /// named and decoded one flat counter against two different shapes. Hand
+    /// computed rather than differential, so it pins the semantics here
+    /// without needing a second backend to agree with.
+    #[test]
+    fn scatter_add_reads_only_the_positions_the_index_grid_names() {
+        let base = f32_storage(vec![0.0; 6]);
+        let bl = lay([2, 3]);
+        // A [2, 2] grid selecting from a [2, 3] source: column 2 of `src`
+        // (30.0 and 60.0) lies outside the grid and must not contribute.
+        let idx = i64_storage(vec![0, 2, 1, 1]);
+        let il = lay([2, 2]);
+        let src = f32_storage(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+        let sl = lay([2, 3]);
+        let out = scatter_add(
+            View::new(&base, &bl),
+            1,
+            View::new(&idx, &il),
+            View::new(&src, &sl),
+        )
+        .unwrap();
+        // row 0: src[0,0]=10 -> col 0, src[0,1]=20 -> col 2.
+        // row 1: src[1,0]=40 and src[1,1]=50 both -> col 1.
+        assert_eq!(out.len(), 6, "the output has `x`'s shape, not `src`'s");
+        assert_eq!(as_f32(&out), vec![10.0, 0.0, 20.0, 0.0, 90.0, 0.0]);
+    }
+
     #[test]
     fn scatter_add_is_the_transpose_of_gather() {
         // Property: scattering ones through the same index grid a gather used

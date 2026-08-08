@@ -227,6 +227,73 @@ fn binary_i64_arithmetic_matches_reference() {
     }
 }
 
+/// The documented `i64` contract at its edges, as **literal** expected values.
+///
+/// `binary_i64_arithmetic_matches_reference` above compares the kernel against
+/// `binary_i64` — the very function the kernel calls — so it validates the
+/// iteration engine, not the arithmetic. The wrapping and the two division
+/// special cases were pinned to concrete numbers only in a `metal`-gated
+/// integration test, so a default `cargo test` never checked that
+/// `i64::MIN / -1` is `i64::MIN` (not `0`, and not a panic) or that `x / 0` is
+/// `0`. Nothing here panics, which is exactly why a wrong answer would be
+/// silent: it is simply a different large number.
+#[test]
+fn i64_wrapping_and_division_edges_have_literal_values() {
+    let dims = || Layout::contiguous([2, 3]).unwrap();
+    let lhs = Owned::<i64>::new(
+        vec![i64::MAX, i64::MIN, i64::MIN, i64::MIN, i64::MAX, -7],
+        dims(),
+    );
+    let rhs = Owned::<i64>::new(vec![1, -1, -1, i64::MIN, 2, 0], dims());
+
+    // Addition, subtraction, and multiplication wrap (PyTorch's integer
+    // overflow semantics), identically in debug and release.
+    assert_eq!(
+        out_slice::<i64>(&binary(BinaryOp::Add, lhs.view(), rhs.view()).unwrap()),
+        vec![i64::MIN, i64::MAX, i64::MAX, 0, i64::MIN + 1, -7],
+    );
+    assert_eq!(
+        out_slice::<i64>(&binary(BinaryOp::Sub, lhs.view(), rhs.view()).unwrap()),
+        vec![
+            i64::MAX - 1,
+            i64::MIN + 1,
+            i64::MIN + 1,
+            0,
+            i64::MAX - 2,
+            -7
+        ],
+    );
+    assert_eq!(
+        out_slice::<i64>(&binary(BinaryOp::Mul, lhs.view(), rhs.view()).unwrap()),
+        vec![i64::MAX, i64::MIN, i64::MIN, 0, -2, 0],
+    );
+    // Division: a zero divisor yields 0, but `i64::MIN / -1` is the *wrapping*
+    // result `i64::MIN`. Collapsing that to 0 as well would break the contract
+    // for a division that is perfectly legal.
+    assert_eq!(
+        out_slice::<i64>(&binary(BinaryOp::Div, lhs.view(), rhs.view()).unwrap()),
+        vec![i64::MAX, i64::MIN, i64::MIN, 1, i64::MAX / 2, 0],
+    );
+    // The same two guards on the scalar spelling.
+    assert_eq!(
+        out_slice::<i64>(&binary_scalar(BinaryOp::Div, lhs.view(), 0.0).unwrap()),
+        vec![0; 6],
+    );
+    assert_eq!(
+        out_slice::<i64>(&binary_scalar(BinaryOp::Div, lhs.view(), -1.0).unwrap()),
+        vec![i64::MIN + 1, i64::MIN, i64::MIN, i64::MIN, i64::MIN + 1, 7],
+    );
+    // `-i64::MIN` and `|i64::MIN|` are both `i64::MIN` under wrapping.
+    assert_eq!(
+        out_slice::<i64>(&unary(UnaryOp::Neg, lhs.view()).unwrap()),
+        vec![i64::MIN + 1, i64::MIN, i64::MIN, i64::MIN, i64::MIN + 1, 7],
+    );
+    assert_eq!(
+        out_slice::<i64>(&unary(UnaryOp::Abs, lhs.view()).unwrap()),
+        vec![i64::MAX, i64::MIN, i64::MIN, i64::MIN, i64::MAX, 7],
+    );
+}
+
 /// Assert a kernel result is an `Unsupported` error for `dtype` (works
 /// without `Storage: Debug`, which the frozen contract does not provide).
 fn assert_unsupported(r: Result<Storage>, dtype: DType) {
