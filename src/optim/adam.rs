@@ -5,10 +5,8 @@ use std::collections::HashMap;
 use crate::autograd::{GradKey, Grads};
 use crate::backend::{FusedOp, dispatch};
 use crate::error::{Error, Result};
-use crate::layout::Layout;
 use crate::nn::{Module, Param};
 use crate::persist::Envelope;
-use crate::storage::Storage;
 use crate::tensor::Tensor;
 
 use super::engine::{self, Groups};
@@ -18,45 +16,6 @@ use super::state::{self, OutgoingParam};
 /// they are the same optimizer.
 const KIND: &str = "adam";
 const HYPERS: [&str; 6] = ["lr", "beta1", "beta2", "eps", "weight_decay", "decoupled"];
-
-fn fused_outputs(outputs: Vec<Storage>, like: &Tensor) -> Result<[Tensor; 3]> {
-    if outputs.len() != 3 {
-        return Err(Error::Backend {
-            op: "step",
-            msg: format!("fused Adam returned {} outputs, expected 3", outputs.len()),
-        });
-    }
-    let mut tensors = Vec::with_capacity(3);
-    for (index, storage) in outputs.into_iter().enumerate() {
-        if storage.dtype() != like.dtype()
-            || storage.device() != like.device()
-            || storage.len() != like.num_elements()
-        {
-            return Err(Error::Backend {
-                op: "step",
-                msg: format!(
-                    "fused Adam output {index} has dtype {}, device {}, and {} elements; \
-                     expected dtype {}, device {}, and shape {}",
-                    storage.dtype(),
-                    storage.device(),
-                    storage.len(),
-                    like.dtype(),
-                    like.device(),
-                    like.shape()
-                ),
-            });
-        }
-        tensors.push(Tensor::from_parts(
-            storage,
-            Layout::contiguous(like.shape().clone())?,
-        ));
-    }
-    // The length was validated as 3 above and the loop pushes exactly one
-    // tensor per output, so this conversion cannot fail.
-    Ok(tensors
-        .try_into()
-        .unwrap_or_else(|_| unreachable!("fused Adam output count validated as 3")))
-}
 
 /// The hyperparameters of one parameter group (or of the optimizer itself).
 ///
@@ -309,62 +268,31 @@ impl Adam {
         })?;
         let base_lr = *lr;
         let decoupled = *decoupled;
-        let mut exhausted = None;
-        // Hyperparameters are range-checked here, before a single `Param::set`.
-        // The kernel checks them too, but it runs once per parameter *during*
-        // the mutating walk, so an out-of-range value in a group that matches
-        // only some parameters would stop the step half-applied — with the
-        // already-updated parameters' clocks advanced and `steps` not, which no
-        // retry can repair. `optim`'s module docs promise the opposite.
-        let mut invalid = None;
-        crate::nn::visit::visit_all(model, &mut |path, leaf| {
-            let crate::nn::visit::Leaf::Param(param) = leaf else {
-                return;
-            };
-            if param.is_frozen() {
-                return;
-            }
-            let clock = state.get(&param.grad_key()).map(|entry| entry.clock);
-            if clock.is_some_and(|clock| clock.checked_add(1).is_none()) {
-                exhausted.get_or_insert_with(|| path.to_string());
-                return;
-            }
-            if invalid.is_some() {
-                return;
-            }
-            // Exactly the scalars the step will hand the kernel for this
-            // parameter, including its own bias-correction clock.
-            let hyper = groups.resolve(path);
-            let next_clock = clock.unwrap_or(0) + 1;
-            let t = i32::try_from(next_clock).unwrap_or(i32::MAX);
-            let scalars = [
-                base_lr * hyper.lr_scale,
-                hyper.beta1,
-                hyper.beta2,
-                hyper.eps,
-                hyper.weight_decay,
-                1.0 - hyper.beta1.powi(t),
-                1.0 - hyper.beta2.powi(t),
-                f64::from(u8::from(decoupled)),
-            ];
-            let acc = param.value().dtype().accumulation_dtype();
-            if let Err(error) =
+        // Clocks and hyperparameters are checked before any `Param::set`; see
+        // `engine::prepass` for why the kernel's own range check is too late.
+        engine::prepass(
+            "Adam",
+            model,
+            groups,
+            |param| state.get(&param.grad_key()).map(|entry| entry.clock),
+            |_path, param, hyper, next_clock| {
+                // Exactly the scalars the step will hand the kernel for this
+                // parameter, including its own bias-correction clock.
+                let t = i32::try_from(next_clock).unwrap_or(i32::MAX);
+                let scalars = [
+                    base_lr * hyper.lr_scale,
+                    hyper.beta1,
+                    hyper.beta2,
+                    hyper.eps,
+                    hyper.weight_decay,
+                    1.0 - hyper.beta1.powi(t),
+                    1.0 - hyper.beta2.powi(t),
+                    f64::from(u8::from(decoupled)),
+                ];
+                let acc = param.value().dtype().accumulation_dtype();
                 crate::backend::cpu::fused::validate_adam_scalars("step", &scalars, acc)
-            {
-                invalid = Some(error);
-            }
-        });
-        if let Some(path) = exhausted {
-            return Err(Error::InvalidArg {
-                op: "step",
-                msg: format!(
-                    "Adam step clock for parameter `{path}` cannot be advanced past u64::MAX"
-                ),
-            });
-        }
-        if let Some(error) = invalid {
-            return Err(error);
-        }
+            },
+        )?;
         engine::apply("step", model, grads, |path, param, grad| {
             let hyper = groups.resolve(path);
             let lr = base_lr * hyper.lr_scale;
@@ -423,7 +351,14 @@ impl Adam {
                 &inputs,
                 &scalars,
             ) {
-                Ok(outputs) => fused_outputs(outputs, &weights)?,
+                Ok(outputs) => {
+                    let outputs = engine::fused_outputs("Adam", outputs, 3, &weights)?;
+                    // `fused_outputs` validated the length as 3 and pushes
+                    // exactly one tensor per output, so this cannot fail.
+                    outputs
+                        .try_into()
+                        .unwrap_or_else(|_| unreachable!("fused Adam output count validated as 3"))
+                }
                 Err(Error::Unsupported { .. }) => {
                     let mut g = grad;
                     if hyper.weight_decay != 0.0 && !decoupled {
@@ -984,6 +919,96 @@ mod tests {
         assert_eq!(model.snapshot(), before);
         assert_eq!(opt.steps(), 1);
         assert_eq!(opt.param_steps(&model.trunk.weight), 1);
+    }
+
+    /// Seed a run with two updates, let `derail` arrange a rejection, and assert
+    /// the step `attempt` is then refused moved nothing at all: not a parameter,
+    /// not a moment buffer, not a clock.
+    fn rejected_step_changes_nothing(
+        derail: impl FnOnce(&mut Adam, &mut Net),
+        attempt: impl FnOnce(&mut Adam, &mut Net) -> Error,
+    ) {
+        let mut model = Net::ones();
+        let mut opt = AdamW::new(0.1, 0.01);
+        for _ in 0..2 {
+            step(&mut opt, &mut model);
+        }
+        derail(&mut opt, &mut model);
+        // Both moments and every per-parameter clock ride in the envelope, so
+        // one comparison covers every piece of optimizer state there is.
+        let params = model.snapshot();
+        let mut before = Envelope::new();
+        opt.save_state(&model, &mut before).unwrap();
+
+        let err = attempt(&mut opt, &mut model);
+
+        let mut after = Envelope::new();
+        opt.save_state(&model, &mut after).unwrap();
+        assert_eq!(model.snapshot(), params, "{err}");
+        assert_eq!(after, before, "{err}");
+        assert_eq!(opt.steps(), 2, "{err}");
+    }
+
+    /// Every rejection this layer can diagnose is raised before the first
+    /// `Param::set`, as `optim`'s module docs state normatively.
+    #[test]
+    fn a_rejected_step_leaves_parameters_moments_and_clocks_untouched() {
+        // A missing gradient (the untraced-weight bug)…
+        rejected_step_changes_nothing(
+            |_, _| {},
+            |opt, model| {
+                let loss = model.untraced_head_bias_loss(Mode::TRAIN).unwrap();
+                opt.step(model, loss.backward().unwrap()).unwrap_err()
+            },
+        );
+        // …a per-parameter bias-correction clock with no room left…
+        rejected_step_changes_nothing(
+            |opt, model| {
+                opt.state
+                    .get_mut(&model.head.bias.grad_key())
+                    .unwrap()
+                    .clock = u64::MAX;
+            },
+            |opt, model| {
+                let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+                opt.step(model, loss.backward().unwrap()).unwrap_err()
+            },
+        );
+        // …and an out-of-range hyperparameter.
+        rejected_step_changes_nothing(
+            |opt, _| opt.set_lr(-1.0),
+            |opt, model| {
+                let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+                opt.step(model, loss.backward().unwrap()).unwrap_err()
+            },
+        );
+    }
+
+    /// The pre-pass's two bailouts are *ordered*, and which one a caller sees is
+    /// observable: an exhausted clock outranks an out-of-range hyperparameter
+    /// even though the walk meets the bad hyperparameter first (`trunk.weight`
+    /// leads, `head.bias` trails), because the whole walk runs before either is
+    /// reported.
+    #[test]
+    fn an_exhausted_clock_outranks_an_invalid_hyperparameter() {
+        let mut model = Net::ones();
+        let mut opt = Adam::new(0.1);
+        step(&mut opt, &mut model);
+        // Invalid for every parameter, including the first one visited…
+        opt.set_lr(-1.0);
+        // …but the last one visited has no clock left.
+        opt.state
+            .get_mut(&model.head.bias.grad_key())
+            .unwrap()
+            .clock = u64::MAX;
+
+        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Adam step clock for parameter `head.bias`"),
+            "{err}"
+        );
     }
 
     // ---- state persistence ----------------------------------------------

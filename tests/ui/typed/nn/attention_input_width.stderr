@@ -1,31 +1,31 @@
 error[E0080]: evaluation of `rstorch::typed::nn::attention::assert_input_width` failed
-   --> $WORKSPACE/src/typed/nn/attention.rs:402:13
+   --> $WORKSPACE/src/typed/nn/attention.rs:403:13
     |
-402 |             assert_input_width(I::MARKERS, EMBED);
+403 |             assert_input_width(I::MARKERS, EMBED);
     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation panicked: typed attention input width is incompatible with EMBED
     |
 note: inside `rstorch::typed::nn::attention::assert_input_width`
-   --> $WORKSPACE/src/typed/nn/attention.rs:27:5
+   --> $WORKSPACE/src/typed/nn/attention.rs:28:5
     |
-27  | /     assert!(
-28  | |         width == DYN || width == embed,
-29  | |         "typed attention input width is incompatible with EMBED"
-30  | |     );
+28  | /     assert!(
+29  | |         width == DYN || width == embed,
+30  | |         "typed attention input width is incompatible with EMBED"
+31  | |     );
     | |_____^ the failure occurred here
 
 note: erroneous constant encountered
-   --> $WORKSPACE/src/typed/nn/attention.rs:400:9
+   --> $WORKSPACE/src/typed/nn/attention.rs:401:9
     |
-400 | /         const {
-401 | |             assert_configuration(EMBED, HEADS);
-402 | |             assert_input_width(I::MARKERS, EMBED);
-403 | |         }
+401 | /         const {
+402 | |             assert_configuration(EMBED, HEADS);
+403 | |             assert_input_width(I::MARKERS, EMBED);
+404 | |         }
     | |_________^
 
 note: the above error was encountered while instantiating `fn rstorch::typed::nn::MultiHeadAttention::<4, 2>::project::<rstorch::typed::Tensor3<usize::MAX, usize::MAX, 5>>`
-   --> $WORKSPACE/src/typed/nn/attention.rs:425:9
+   --> $WORKSPACE/src/typed/nn/attention.rs:419:9
     |
-425 |         self.project(&self.q_proj, input, mode)
+419 |         self.project(&self.q_proj, input, mode)
     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For more information about this error, try `rustc --explain E0080`.

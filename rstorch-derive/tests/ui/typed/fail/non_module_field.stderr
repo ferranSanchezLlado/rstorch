@@ -15,9 +15,9 @@ error[E0277]: the trait bound `Config: rstorch::typed::nn::Module` is not satisf
              rstorch::typed::nn::MultiHeadAttention<EMBED, HEADS, E, P>
            and 4 others
 note: required by a bound in `rstorch::typed::nn::visit::<impl TypedVisitor<'a>>::module`
-  --> $WORKSPACE/src/typed/nn/visit.rs:58:22
+  --> $WORKSPACE/src/typed/nn/visit.rs:51:22
    |
-58 |     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &M) {
+51 |     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &M) {
    |                      ^^^^^^ required by this bound in `rstorch::typed::nn::visit::<impl TypedVisitor<'a>>::module`
    = note: this error originates in the derive macro `TypedModule` (in Nightly builds, run with -Z macro-backtrace for more info)
 
@@ -38,9 +38,9 @@ error[E0277]: the trait bound `Config: rstorch::typed::nn::Module` is not satisf
               rstorch::typed::nn::MultiHeadAttention<EMBED, HEADS, E, P>
             and 4 others
 note: required by a bound in `rstorch::typed::nn::visit::<impl TypedVisitorMut<'a>>::module`
-   --> $WORKSPACE/src/typed/nn/visit.rs:111:22
+   --> $WORKSPACE/src/typed/nn/visit.rs:100:22
     |
-111 |     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &mut M) {
+100 |     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &mut M) {
     |                      ^^^^^^ required by this bound in `rstorch::typed::nn::visit::<impl TypedVisitorMut<'a>>::module`
     = note: this error originates in the derive macro `TypedModule` (in Nightly builds, run with -Z macro-backtrace for more info)
 

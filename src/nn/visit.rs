@@ -20,12 +20,25 @@
 use crate::nn::{Module, Param};
 use crate::tensor::Tensor;
 
-fn join(prefix: &str, name: &str) -> String {
+/// A leaf's dotted path: `name` at the top level, `prefix.name` below it.
+/// Shared with the typed visitors, whose path semantics are the same.
+pub(crate) fn join(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
     } else {
         format!("{prefix}.{name}")
     }
+}
+
+/// Push child segment `name` onto a visitor's prefix, returning the length to
+/// [`truncate`](String::truncate) back to once that child's walk has finished.
+pub(crate) fn push_segment(path: &mut String, name: &str) -> usize {
+    let saved = path.len();
+    if !path.is_empty() {
+        path.push('.');
+    }
+    path.push_str(name);
+    saved
 }
 
 /// A read-only leaf handed to a visitor sink: a trainable [`Param`] or a
@@ -83,11 +96,7 @@ impl<'a> Visitor<'a> {
     /// Descend into child module `child` under segment `name`, prefixing all
     /// of its leaf paths with `name.`.
     pub fn module(&mut self, name: &str, child: &dyn Module) {
-        let saved = self.path.len();
-        if !self.path.is_empty() {
-            self.path.push('.');
-        }
-        self.path.push_str(name);
+        let saved = push_segment(&mut self.path, name);
         child.visit(self);
         self.path.truncate(saved);
     }
@@ -124,11 +133,7 @@ impl<'a> VisitorMut<'a> {
 
     /// Descend into mutable child module `child` under segment `name`.
     pub fn module(&mut self, name: &str, child: &mut dyn Module) {
-        let saved = self.path.len();
-        if !self.path.is_empty() {
-            self.path.push('.');
-        }
-        self.path.push_str(name);
+        let saved = push_segment(&mut self.path, name);
         child.visit_mut(self);
         self.path.truncate(saved);
     }

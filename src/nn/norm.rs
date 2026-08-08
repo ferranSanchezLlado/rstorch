@@ -396,6 +396,17 @@ pub(crate) fn check_eps(op: &'static str, eps: f64) -> Result<()> {
     Ok(())
 }
 
+/// Validate `momentum`, the weight the running statistics give a fresh batch.
+pub(crate) fn check_momentum(op: &'static str, momentum: f64) -> Result<()> {
+    if !(momentum.is_finite() && (0.0..=1.0).contains(&momentum)) {
+        return Err(Error::InvalidArg {
+            op,
+            msg: format!("momentum must lie in [0, 1], got {momentum}"),
+        });
+    }
+    Ok(())
+}
+
 /// The trailing-axes rule shared by [`LayerNorm`] and [`RMSNorm`].
 pub(crate) fn check_suffix(op: &'static str, x: &Tensor, normalized: &Shape) -> Result<()> {
     let (xd, nd) = (x.dims(), normalized.dims());
@@ -791,12 +802,7 @@ impl BatchNorm2d {
             });
         }
         check_eps(OP, eps)?;
-        if !(momentum.is_finite() && (0.0..=1.0).contains(&momentum)) {
-            return Err(Error::InvalidArg {
-                op: OP,
-                msg: format!("momentum must lie in [0, 1], got {momentum}"),
-            });
-        }
+        check_momentum(OP, momentum)?;
         Ok(BatchNorm2d {
             weight: Param::new(filled([channels], 1.0, device)?),
             bias: Param::new(filled([channels], 0.0, device)?),

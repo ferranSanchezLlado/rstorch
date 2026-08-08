@@ -10,8 +10,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::autograd::{GradKey, Grads};
 use crate::error::{Error, Result};
+use crate::layout::Layout;
 use crate::nn::visit::{Leaf, LeafMut, visit_all, visit_all_mut};
 use crate::nn::{Module, Param};
+use crate::storage::Storage;
 use crate::tensor::Tensor;
 
 /// A parameter-path predicate: given a dotted visitor path
@@ -84,6 +86,69 @@ impl<H: Clone> Groups<H> {
         }
         base
     }
+}
+
+/// The validation walk both optimizers run *before* the first `Param::set`,
+/// where `kind` names the optimizer ("SGD"/"Adam") in the clock rejection.
+///
+/// For every non-frozen parameter, in walk order: its step clock — read by
+/// `clock_of`, `None` for a parameter this optimizer has never updated — must
+/// have room for one more update, and `check`, the optimizer's own scalar range
+/// check, must accept the hyperparameters resolved for that path together with
+/// the clock value the step would give it.
+///
+/// Hyperparameters are range-checked here, before a single `Param::set`. The
+/// kernel checks them too, but it runs once per parameter *during* the mutating
+/// walk, so an out-of-range value in a group that matches only some parameters
+/// would stop the step half-applied — with the already-updated parameters'
+/// clocks advanced and `steps` not, which no retry can repair. `optim`'s module
+/// docs promise the opposite.
+///
+/// An exhausted clock outranks an invalid hyperparameter, and the whole walk
+/// runs before either is reported: a clock rejection wins even when the
+/// parameter that carries it is visited *after* the one whose scalars were
+/// refused. Which of the two a caller sees is observable, so the order is part
+/// of the contract rather than an accident.
+pub(crate) fn prepass<H: Clone>(
+    kind: &'static str,
+    model: &dyn Module,
+    groups: &Groups<H>,
+    clock_of: impl Fn(&Param) -> Option<u64>,
+    mut check: impl FnMut(&str, &Param, H, u64) -> Result<()>,
+) -> Result<()> {
+    let mut exhausted = None;
+    let mut invalid = None;
+    visit_all(model, &mut |path, leaf| {
+        let Leaf::Param(param) = leaf else {
+            return;
+        };
+        if param.is_frozen() {
+            return;
+        }
+        let clock = clock_of(param);
+        if clock.is_some_and(|clock| clock.checked_add(1).is_none()) {
+            exhausted.get_or_insert_with(|| path.to_string());
+            return;
+        }
+        if invalid.is_some() {
+            return;
+        }
+        if let Err(error) = check(path, param, groups.resolve(path), clock.unwrap_or(0) + 1) {
+            invalid = Some(error);
+        }
+    });
+    if let Some(path) = exhausted {
+        return Err(Error::InvalidArg {
+            op: "step",
+            msg: format!(
+                "{kind} step clock for parameter `{path}` cannot be advanced past u64::MAX"
+            ),
+        });
+    }
+    if let Some(error) = invalid {
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Drive one optimizer step over `model`, consuming `grads`.
@@ -276,6 +341,55 @@ pub(crate) fn apply(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Re-attach the `count` storages a fused optimizer kernel returned to tensors
+/// shaped like `like`, where `kind` names the optimizer ("SGD"/"Adam").
+///
+/// A backend that answers with the wrong number of buffers, or with one whose
+/// dtype/device/length does not match the parameter it belongs to, is a
+/// [`Error::Backend`] rather than a silently mis-shaped parameter.
+pub(crate) fn fused_outputs(
+    kind: &'static str,
+    outputs: Vec<Storage>,
+    count: usize,
+    like: &Tensor,
+) -> Result<Vec<Tensor>> {
+    if outputs.len() != count {
+        return Err(Error::Backend {
+            op: "step",
+            msg: format!(
+                "fused {kind} returned {} outputs, expected {count}",
+                outputs.len()
+            ),
+        });
+    }
+    let mut tensors = Vec::with_capacity(count);
+    for (index, storage) in outputs.into_iter().enumerate() {
+        if storage.dtype() != like.dtype()
+            || storage.device() != like.device()
+            || storage.len() != like.num_elements()
+        {
+            return Err(Error::Backend {
+                op: "step",
+                msg: format!(
+                    "fused {kind} output {index} has dtype {}, device {}, and {} elements; \
+                     expected dtype {}, device {}, and shape {}",
+                    storage.dtype(),
+                    storage.device(),
+                    storage.len(),
+                    like.dtype(),
+                    like.device(),
+                    like.shape()
+                ),
+            });
+        }
+        tensors.push(Tensor::from_parts(
+            storage,
+            Layout::contiguous(like.shape().clone())?,
+        ));
+    }
+    Ok(tensors)
 }
 
 /// The dotted paths of every parameter of `model`, paired with its gradient

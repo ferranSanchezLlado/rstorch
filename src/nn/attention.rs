@@ -212,6 +212,33 @@ fn swap_before_last(rank: usize) -> Vec<isize> {
     perm
 }
 
+/// `[.., seq, embed_dim]` → `[.., num_heads, seq, head_dim]`.
+///
+/// Shared with the typed wrapper, which splits heads over the same runtime
+/// tensor before re-wrapping the result in its marker type.
+pub(crate) fn split_heads(x: &Tensor, num_heads: usize, head_dim: usize) -> Result<Tensor> {
+    let rank = x.rank();
+    let mut dims = x.dims()[..rank - 1].to_vec();
+    dims.push(num_heads);
+    dims.push(head_dim);
+    // [.., seq, heads, head_dim], then swap `seq` and `heads`.
+    let split = x.reshape(dims)?;
+    split.permute(&swap_before_last(rank + 1))
+}
+
+/// The inverse: `[.., num_heads, seq, head_dim]` → `[.., seq, embed_dim]`,
+/// the form the output projection consumes. Shared with the typed wrapper.
+pub(crate) fn merge_heads(context: &Tensor, embed_dim: usize) -> Result<Tensor> {
+    let rank = context.rank();
+    let dims = context.dims();
+    // [.., heads, seq, head_dim] -> [.., seq, heads, head_dim] -> [.., seq, embed]
+    let merged = context.permute(&swap_before_last(rank))?;
+    let mut flat = dims[..rank - 3].to_vec();
+    flat.push(dims[rank - 2]);
+    flat.push(embed_dim);
+    merged.reshape(flat)
+}
+
 /// One affine projection: `x @ weightᵀ + bias`.
 ///
 /// The crate-private stand-in for `nn::Linear` (T41 owns that file, and the
@@ -554,12 +581,8 @@ impl MultiHeadAttention {
                 rhs: context.shape().clone(),
             });
         }
-        // [.., heads, seq, head_dim] -> [.., seq, heads, head_dim] -> [.., seq, embed]
-        let merged = context.permute(&swap_before_last(rank))?;
-        let mut flat = dims[..rank - 3].to_vec();
-        flat.push(dims[rank - 2]);
-        flat.push(self.embed_dim());
-        self.out_proj.apply(&merged.reshape(flat)?, mode)
+        let merged = merge_heads(context, self.embed_dim())?;
+        self.out_proj.apply(&merged, mode)
     }
 
     /// One projection with the input's last axis checked against `embed_dim`
@@ -587,13 +610,7 @@ impl MultiHeadAttention {
 
     /// `[.., seq, embed_dim]` → `[.., num_heads, seq, head_dim]`.
     fn split_heads(&self, x: &Tensor) -> Result<Tensor> {
-        let rank = x.rank();
-        let mut dims = x.dims()[..rank - 1].to_vec();
-        dims.push(self.num_heads);
-        dims.push(self.head_dim());
-        // [.., seq, heads, head_dim], then swap `seq` and `heads`.
-        let split = x.reshape(dims)?;
-        split.permute(&swap_before_last(rank + 1))
+        split_heads(x, self.num_heads, self.head_dim())
     }
 }
 

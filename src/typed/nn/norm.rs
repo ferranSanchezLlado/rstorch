@@ -9,7 +9,7 @@ use super::{
     Forward, Mode, Module, ToDType, ToDevice, TypedBuffer, TypedParam, TypedVisitor,
     TypedVisitorMut,
 };
-use crate::nn::{check_eps, check_normalized_shape, check_suffix};
+use crate::nn::{check_eps, check_momentum, check_normalized_shape, check_suffix};
 use crate::typed::device::validate_binding;
 use crate::typed::ops::{WithElement, WithPlacement};
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
@@ -418,12 +418,7 @@ impl<const C: usize, E: FloatElement, P: Placement> BatchNorm2d<C, E, P> {
             });
         }
         check_eps(OP, eps)?;
-        if !(momentum.is_finite() && (0.0..=1.0).contains(&momentum)) {
-            return Err(Error::InvalidArg {
-                op: OP,
-                msg: format!("momentum must lie in [0, 1], got {momentum}"),
-            });
-        }
+        check_momentum(OP, momentum)?;
         let make = |value| {
             checked_wrap::<Tensor1<C, E, P>>(
                 Tensor::full([channels], value, E::DTYPE, &ctx.device())?,

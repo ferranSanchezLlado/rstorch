@@ -192,19 +192,25 @@ impl Forward for Linear {
     }
 }
 
+/// The `Debug` line of a linear layer, runtime or typed: the geometry rather
+/// than the values, `Linear(3 -> 2, bias)`.
+pub(crate) fn debug_linear(
+    f: &mut std::fmt::Formatter<'_>,
+    in_features: usize,
+    out_features: usize,
+    has_bias: bool,
+) -> std::fmt::Result {
+    let bias = if has_bias { "bias" } else { "no bias" };
+    write!(f, "Linear({in_features} -> {out_features}, {bias})")
+}
+
 impl std::fmt::Debug for Linear {
-    /// Reports the geometry rather than the values: `Linear(3 -> 2, bias)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
+        debug_linear(
             f,
-            "Linear({} -> {}, {})",
             self.in_features(),
             self.out_features(),
-            if self.bias.is_some() {
-                "bias"
-            } else {
-                "no bias"
-            }
+            self.bias.is_some(),
         )
     }
 }
