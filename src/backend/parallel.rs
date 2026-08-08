@@ -256,7 +256,7 @@ pub(crate) type RowOutput<'a, T> = (&'a mut [T], usize);
 
 /// How many rows to give each task, and a debug check that every output is
 /// exactly `rows * width` long.
-#[cfg(any(feature = "rayon", test))]
+#[cfg(feature = "rayon")]
 #[inline]
 fn rows_per_task(rows: usize, cost_per_row: usize, widths: &[(usize, usize)]) -> usize {
     for &(len, width) in widths {
