@@ -44,44 +44,11 @@
 //! pins it.
 
 use crate::backend::View;
+use crate::backend::cpu::acc::NumAcc;
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::storage::{CpuStorage, Storage};
-
-/// Wide-accumulator arithmetic for matmul inner products. Implemented for the
-/// numeric accumulator types (`f32` for `f16`/`bf16`/`f32`, `f64`, `i64`);
-/// `Bool` has `Acc = bool` and deliberately does not implement it, so a bool
-/// matmul is rejected before this generic code is instantiated.
-trait MatAcc: Copy {
-    /// Additive identity (inner-product seed).
-    const ZERO: Self;
-    /// Fused multiply-add step `self + a*b` (kept as separate ops so integer
-    /// accumulation wraps deterministically rather than aborting on debug
-    /// overflow — matmul over huge i64 magnitudes is a defined wrap).
-    fn mul_add(self, a: Self, b: Self) -> Self;
-}
-
-impl MatAcc for f32 {
-    const ZERO: Self = 0.0;
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        self + a * b
-    }
-}
-
-impl MatAcc for f64 {
-    const ZERO: Self = 0.0;
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        self + a * b
-    }
-}
-
-impl MatAcc for i64 {
-    const ZERO: Self = 0;
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        self.wrapping_add(a.wrapping_mul(b))
-    }
-}
 
 /// The resolved matmul geometry: batch shape (already broadcast), matrix
 /// dims, and per-operand leading-batch strides padded to the batch rank.
@@ -392,7 +359,7 @@ fn matmul_f32_transposed_rhs(lhs: &[f32], rhs: &[f32], plan: &Plan) -> Vec<f32> 
 fn matmul_generic<E>(lhs: &[E], rhs: &[E], plan: &Plan) -> Vec<E>
 where
     E: Element,
-    E::Acc: MatAcc,
+    E::Acc: NumAcc,
 {
     let (m, k, n) = (plan.m, plan.k, plan.n);
     // A rank-2 operand pair has no batch axes, so the product is 1 and the
@@ -407,7 +374,7 @@ where
     if batch_count == 0 || m == 0 || n == 0 {
         return Vec::new();
     }
-    let zero = E::from_acc(<E::Acc as MatAcc>::ZERO);
+    let zero = E::from_acc(<E::Acc as NumAcc>::ZERO);
     let mut out = vec![zero; batch_count * m * n];
     // One output row at a time either way, so the run driver preserves no
     // blocking here and asks only that a run not split a row.
@@ -417,10 +384,10 @@ where
         if plan.rhs_n_stride == 1 {
             // One wide accumulator slot per output column, allocated once per
             // task and refilled per output row so the hot loops never allocate.
-            let mut acc_row = vec![<E::Acc as MatAcc>::ZERO; n];
+            let mut acc_row = vec![<E::Acc as NumAcc>::ZERO; n];
             for i in 0..count {
                 let lhs_row = lhs_base + (first + i) * plan.lhs_m_stride;
-                acc_row.fill(<E::Acc as MatAcc>::ZERO);
+                acc_row.fill(<E::Acc as NumAcc>::ZERO);
                 for p in 0..k {
                     let a = lhs[lhs_row + p * plan.lhs_k_stride].to_acc();
                     // In bounds for any valid view: with an `n` stride of 1 the
@@ -444,7 +411,7 @@ where
                 let out_row = &mut rows[i * n..(i + 1) * n];
                 let mut j = 0;
                 while j + COL_BLOCK <= n {
-                    let mut accs = [<E::Acc as MatAcc>::ZERO; COL_BLOCK];
+                    let mut accs = [<E::Acc as NumAcc>::ZERO; COL_BLOCK];
                     let col_base = rhs_base + j * plan.rhs_n_stride;
                     for p in 0..k {
                         let a = lhs[lhs_row + p * plan.lhs_k_stride].to_acc();
@@ -461,7 +428,7 @@ where
                 // Tail columns, and every column when `n < COL_BLOCK`.
                 while j < n {
                     let rhs_col = rhs_base + j * plan.rhs_n_stride;
-                    let mut acc = <E::Acc as MatAcc>::ZERO;
+                    let mut acc = <E::Acc as NumAcc>::ZERO;
                     for p in 0..k {
                         let a = lhs[lhs_row + p * plan.lhs_k_stride].to_acc();
                         let bx = rhs[rhs_col + p * plan.rhs_k_stride].to_acc();
@@ -649,7 +616,7 @@ mod tests {
     }
 
     /// The naive `i` → `j` → `p` nest both loop orders must match bit for bit,
-    /// with the same unfused `acc + a*b` step `MatAcc` performs.
+    /// with the same unfused `acc + a*b` step `NumAcc::mul_add` performs.
     fn naive(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
         let mut out = Vec::with_capacity(m * n);
         for i in 0..m {
