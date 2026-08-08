@@ -2,132 +2,31 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, Error, GenericArgument, PathArguments, Result, Type, TypePath};
+use syn::{DeriveInput, Error, Result, Type, TypePath};
 
-enum FieldKind {
-    Param,
-    OptionParam,
-    Buffer,
-    OptionBuffer,
-    VecModule,
-    OptionModule,
-    Skip,
-    Module,
-}
+use crate::shared::{self, FieldKind};
 
 /// The helper attribute's name, shared by the struct-level rejection and the
 /// per-field parser so the two cannot drift apart.
 const ATTR: &str = "typed_module";
 
 pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
-    let fields = match &input.data {
-        Data::Struct(data) => &data.fields,
-        Data::Enum(_) => {
-            return Err(Error::new_spanned(
-                &input,
-                "#[derive(TypedModule)] supports structs only, not enums (a module's field set must be statically known so every typed parameter is visited)",
-            ));
-        }
-        Data::Union(_) => {
-            return Err(Error::new_spanned(
-                &input,
-                "#[derive(TypedModule)] supports structs only, not unions",
-            ));
-        }
+    let spec = shared::Spec {
+        derive_name: "TypedModule",
+        parameter_noun: "typed parameter",
+        field_only_attr: Some(ATTR),
+        trait_path: quote!(::rstorch::typed::nn::Module),
+        visitor: quote!(::rstorch::typed::nn::TypedVisitor<'_>),
+        visitor_mut: quote!(::rstorch::typed::nn::TypedVisitorMut<'_>),
     };
-
-    // The helper attribute is only meaningful on a field. Registering it puts
-    // `#[typed_module(...)]` in scope on the struct too, where rustc accepts it
-    // silently — so a misplaced or misspelled attribute would otherwise be
-    // ignored rather than reported, exactly the silence this derive exists to
-    // avoid.
-    if let Some(attr) = input.attrs.iter().find(|a| a.path().is_ident(ATTR)) {
-        return Err(Error::new_spanned(
-            attr,
-            "#[typed_module(...)] applies to a field, not to the struct; remove it or move it onto the field it should govern",
-        ));
-    }
-
-    let mut visit_calls = Vec::new();
-    let mut visit_mut_calls = Vec::new();
-    for (index, field) in fields.iter().enumerate() {
-        let (accessor, segment) = match &field.ident {
-            Some(ident) => (quote!(#ident), ident.to_string()),
-            None => {
-                let member = syn::Index::from(index);
-                (quote!(#member), index.to_string())
-            }
-        };
-        let kind = classify(field)?;
-        visit_calls.push(emit(&kind, &accessor, &segment, false));
-        visit_mut_calls.push(emit(&kind, &accessor, &segment, true));
-    }
-
-    let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    Ok(quote! {
-        #[automatically_derived]
-        impl #impl_generics ::rstorch::typed::nn::Module for #name #ty_generics #where_clause {
-            fn visit(&self, visitor: &mut ::rstorch::typed::nn::TypedVisitor<'_>) {
-                #(#visit_calls)*
-            }
-
-            fn visit_mut(&mut self, visitor: &mut ::rstorch::typed::nn::TypedVisitorMut<'_>) {
-                #(#visit_mut_calls)*
-            }
-        }
-    })
-}
-
-fn emit(kind: &FieldKind, accessor: &TokenStream, segment: &str, is_mut: bool) -> TokenStream {
-    let borrow = if is_mut { quote!(&mut) } else { quote!(&) };
-    match kind {
-        FieldKind::Skip => quote!(),
-        FieldKind::Param => quote! {
-            visitor.param(#segment, #borrow self.#accessor);
-        },
-        FieldKind::Buffer => quote! {
-            visitor.buffer(#segment, #borrow self.#accessor);
-        },
-        FieldKind::Module => quote! {
-            visitor.module(#segment, #borrow self.#accessor);
-        },
-        FieldKind::OptionParam => quote! {
-            if let ::core::option::Option::Some(__param) = #borrow self.#accessor {
-                visitor.param(#segment, __param);
-            }
-        },
-        FieldKind::OptionBuffer => quote! {
-            if let ::core::option::Option::Some(__buffer) = #borrow self.#accessor {
-                visitor.buffer(#segment, __buffer);
-            }
-        },
-        FieldKind::OptionModule => quote! {
-            if let ::core::option::Option::Some(__module) = #borrow self.#accessor {
-                visitor.module(#segment, __module);
-            }
-        },
-        FieldKind::VecModule => {
-            let iter = if is_mut {
-                quote!(self.#accessor.iter_mut())
-            } else {
-                quote!(self.#accessor.iter())
-            };
-            quote! {
-                for (__index, __module) in #iter.enumerate() {
-                    visitor.module(&::std::format!("{}.{}", #segment, __index), __module);
-                }
-            }
-        }
-    }
+    shared::expand(input, &spec, classify)
 }
 
 fn classify(field: &syn::Field) -> Result<FieldKind> {
     // Classify first so an explicit opt-out cannot hide state whose spelling
     // the derive knows how to walk.
     let kind = classify_type(&field.ty);
-    if !has_skip_attr(field)? {
+    if !shared::has_skip_attr(field, ATTR)? {
         return Ok(kind);
     }
 
@@ -175,7 +74,7 @@ fn classify_type(ty: &Type) -> FieldKind {
     match last.ident.to_string().as_str() {
         "TypedParam" if has_one_type_argument(last) => FieldKind::Param,
         "TypedBuffer" if has_one_type_argument(last) => FieldKind::Buffer,
-        "Option" => match inner_of_angle(last) {
+        "Option" => match shared::inner_of_angle(last) {
             Some(inner) => classify_option_inner(inner),
             None => FieldKind::Module,
         },
@@ -199,41 +98,7 @@ fn classify_option_inner(inner: &Type) -> FieldKind {
 }
 
 fn has_one_type_argument(segment: &syn::PathSegment) -> bool {
-    inner_of_angle(segment).is_some()
-}
-
-fn inner_of_angle(segment: &syn::PathSegment) -> Option<&Type> {
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return None;
-    };
-    if arguments.args.len() != 1 {
-        return None;
-    }
-    match arguments.args.first()? {
-        GenericArgument::Type(ty) => Some(ty),
-        _ => None,
-    }
-}
-
-fn has_skip_attr(field: &syn::Field) -> Result<bool> {
-    let mut skip = false;
-    for attr in &field.attrs {
-        if !attr.path().is_ident(ATTR) {
-            continue;
-        }
-        attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("skip") {
-                skip = true;
-                Ok(())
-            } else {
-                Err(Error::new(
-                    meta.path.span(),
-                    "unknown #[typed_module(...)] option; the only supported option is `skip`",
-                ))
-            }
-        })?;
-    }
-    Ok(skip)
+    shared::inner_of_angle(segment).is_some()
 }
 
 #[cfg(test)]
