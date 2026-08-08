@@ -1,6 +1,7 @@
 use super::{
     BroadcastOutput, ConcatOutput, DynamicOutput, InsertAxisOutput, RemoveAxisOutput,
-    ReplaceAxisOutput, ReshapeOutput, StackOutput, TransposeOutput, relabel_error_op,
+    ReplaceAxisOutput, ReshapeOutput, StackOutput, TransposeOutput, dynamic, relabel_error_op,
+    wrap,
 };
 use crate::typed::const_check::{assert_broadcast, assert_reshape_numel, assert_squeezable};
 use crate::typed::device::validate_binding;
@@ -12,11 +13,6 @@ use crate::typed::{
 };
 use crate::{Element, Error, Result, Shape, Tensor};
 use std::sync::Arc;
-
-fn dynamic<'a, T: TypedTensor>(input: &'a T, op: &'static str) -> Result<&'a Tensor> {
-    validate_binding::<T::Placement>(input.binding(), op)?;
-    Ok(input.dynamic())
-}
 
 fn validate_operands<T: TypedTensor>(tensors: &[&T], op: &'static str) -> Result<()> {
     let Some(first) = tensors.first() else {
@@ -52,7 +48,7 @@ macro_rules! impl_shape_ops {
                         )
                     };
                     let tensor = dynamic(self, "reshape")?.reshape(Shape::from(dims.as_ref().to_vec()))?;
-                    checked_wrap::<Target>(tensor, self.binding().clone(), "reshape")
+                    wrap(self, tensor, "reshape")
                 }
 
                 /// Broadcasts explicitly into a caller-named typed target.
@@ -69,17 +65,13 @@ macro_rules! impl_shape_ops {
                     };
                     let tensor = dynamic(self, "broadcast_to")?
                         .broadcast_to(Shape::from(dims.as_ref().to_vec()))?;
-                    checked_wrap::<Target>(tensor, self.binding().clone(), "broadcast_to")
+                    wrap(self, tensor, "broadcast_to")
                 }
 
                 /// Permutes runtime axes and erases every dimension marker.
                 pub fn permute(&self, axes: &[isize]) -> Result<<Self as DynamicOutput>::Output> {
                     let tensor = dynamic(self, "permute")?.permute(axes)?;
-                    checked_wrap::<<Self as DynamicOutput>::Output>(
-                        tensor,
-                        self.binding().clone(),
-                        "permute",
-                    )
+                    wrap(self, tensor, "permute")
                 }
             }
         )+
@@ -110,11 +102,7 @@ macro_rules! impl_existing_axis_ops {
                     Self: TransposeOutput<A, B>,
                 {
                     let tensor = dynamic(self, "transpose")?.transpose(A as isize, B as isize)?;
-                    checked_wrap::<<Self as TransposeOutput<A, B>>::Output>(
-                        tensor,
-                        self.binding().clone(),
-                        "transpose",
-                    )
+                    wrap(self, tensor, "transpose")
                 }
 
                 /// Transposes two runtime axes and erases every dimension marker.
@@ -126,11 +114,7 @@ macro_rules! impl_existing_axis_ops {
                     let tensor = dynamic(self, "transpose_dyn")?
                         .transpose(a, b)
                         .map_err(|error| relabel_error_op("transpose_dyn", error))?;
-                    checked_wrap::<<Self as DynamicOutput>::Output>(
-                        tensor,
-                        self.binding().clone(),
-                        "transpose_dyn",
-                    )
+                    wrap(self, tensor, "transpose_dyn")
                 }
 
                 /// Removes a compile-time axis whose marker is one or [`DYN`].
@@ -144,11 +128,7 @@ macro_rules! impl_existing_axis_ops {
                         assert_squeezable(<Self as SealedTypedTensor>::MARKERS[AXIS])
                     };
                     let tensor = dynamic(self, "squeeze")?.squeeze(AXIS as isize)?;
-                    checked_wrap::<<Self as RemoveAxisOutput<AXIS>>::Output>(
-                        tensor,
-                        self.binding().clone(),
-                        "squeeze",
-                    )
+                    wrap(self, tensor, "squeeze")
                 }
 
                 /// Removes a runtime axis and returns the dynamic tensor escape.
@@ -168,11 +148,7 @@ macro_rules! impl_existing_axis_ops {
                     Self: ReplaceAxisOutput<AXIS, DYN>,
                 {
                     let tensor = dynamic(self, "narrow")?.narrow(AXIS as isize, start, len)?;
-                    checked_wrap::<<Self as ReplaceAxisOutput<AXIS, DYN>>::Output>(
-                        tensor,
-                        self.binding().clone(),
-                        "narrow",
-                    )
+                    wrap(self, tensor, "narrow")
                 }
 
                 /// Narrows a runtime axis and erases every dimension marker.
@@ -185,11 +161,7 @@ macro_rules! impl_existing_axis_ops {
                     let tensor = dynamic(self, "narrow_dyn")?
                         .narrow(axis, start, len)
                         .map_err(|error| relabel_error_op("narrow_dyn", error))?;
-                    checked_wrap::<<Self as DynamicOutput>::Output>(
-                        tensor,
-                        self.binding().clone(),
-                        "narrow_dyn",
-                    )
+                    wrap(self, tensor, "narrow_dyn")
                 }
 
                 /// Concatenates homogeneous typed tensors along a compile-time axis.
@@ -237,11 +209,7 @@ macro_rules! impl_rank_increasing_ops {
                     Self: InsertAxisOutput<AXIS, 1>,
                 {
                     let tensor = dynamic(self, "unsqueeze")?.unsqueeze(AXIS as isize)?;
-                    checked_wrap::<<Self as InsertAxisOutput<AXIS, 1>>::Output>(
-                        tensor,
-                        self.binding().clone(),
-                        "unsqueeze",
-                    )
+                    wrap(self, tensor, "unsqueeze")
                 }
 
                 /// Inserts a runtime axis and returns the dynamic tensor escape.

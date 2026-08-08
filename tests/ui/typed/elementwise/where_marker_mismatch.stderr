@@ -9,9 +9,9 @@ error[E0308]: mismatched types
     = note: expected reference `&Tensor2<2, _>`
                found reference `&Tensor2<1, _>`
 note: method defined here
-   --> $WORKSPACE/src/typed/ops/elementwise.rs:294:1
+   --> $WORKSPACE/src/typed/ops/elementwise.rs:253:1
     |
-294 | typed_rank_table!(impl_elementwise);
+253 | typed_rank_table!(impl_elementwise);
     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     = note: this error originates in the macro `impl_elementwise` which comes from the expansion of the macro `typed_rank_table` (in Nightly builds, run with -Z macro-backtrace for more info)
 

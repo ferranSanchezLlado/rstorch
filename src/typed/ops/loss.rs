@@ -1,22 +1,13 @@
 //! Typed loss operations.
 
 use super::super::const_check::assert_loss_rows;
-use super::super::device::validate_binding;
-use super::super::sealed::TypedTensor as SealedTypedTensor;
 use super::super::{FloatElement, Placement, Tensor0, Tensor1, Tensor2, typed_rank_table};
-use super::LossOutput;
+use super::{dynamic, wrap};
 use crate::Result;
-use std::sync::Arc;
 
 macro_rules! impl_mse_loss {
     ($(($name:ident, $rank:literal, [$($dim:ident),*])),+ $(,)?) => {
         $(
-            impl<$(const $dim: usize,)* E: FloatElement, P: Placement> LossOutput<Self>
-                for super::super::$name<$($dim,)* E, P>
-            {
-                type Output = Tensor0<E, P>;
-            }
-
             impl<$(const $dim: usize,)* E: FloatElement, P: Placement>
                 super::super::$name<$($dim,)* E, P>
             {
@@ -26,15 +17,8 @@ macro_rules! impl_mse_loss {
                 /// [`DYN`](super::super::DYN); this operation never broadcasts.
                 pub fn mse_loss(&self, target: &Self) -> Result<Tensor0<E, P>> {
                     const OP: &str = "mse_loss";
-                    validate_binding::<P>(SealedTypedTensor::binding(self), OP)?;
-                    validate_binding::<P>(SealedTypedTensor::binding(target), OP)?;
-                    let output = SealedTypedTensor::dynamic(self)
-                        .mse_loss(SealedTypedTensor::dynamic(target))?;
-                    super::super::tensor::checked_wrap(
-                        output,
-                        Arc::clone(SealedTypedTensor::binding(self)),
-                        OP,
-                    )
+                    let output = dynamic(self, OP)?.mse_loss(dynamic(target, OP)?)?;
+                    wrap(self, output, OP)
                 }
             }
         )+
@@ -74,15 +58,13 @@ impl<const ROWS: usize, const CLASSES: usize, E: FloatElement, P: Placement>
         ignore_index: Option<i64>,
         op: &'static str,
     ) -> Result<Tensor0<E, P>> {
-        validate_binding::<P>(SealedTypedTensor::binding(self), op)?;
-        validate_binding::<P>(SealedTypedTensor::binding(targets), op)?;
-        let logits = SealedTypedTensor::dynamic(self);
-        let targets = SealedTypedTensor::dynamic(targets);
+        let logits = dynamic(self, op)?;
+        let targets = dynamic(targets, op)?;
         let output = match ignore_index {
             Some(ignore_index) => logits.cross_entropy_ignore_index(targets, ignore_index)?,
             None => logits.cross_entropy(targets)?,
         };
-        super::super::tensor::checked_wrap(output, Arc::clone(SealedTypedTensor::binding(self)), op)
+        wrap(self, output, op)
     }
 }
 
@@ -92,6 +74,7 @@ mod tests {
     use crate::typed::sealed::{DeviceBinding, TypedTensor as SealedTypedTensor};
     use crate::typed::{Cpu, DYN, DeviceCtx, Tensor3};
     use crate::{Device, Error, Tensor};
+    use std::sync::Arc;
 
     fn cpu() -> DeviceCtx<Cpu> {
         DeviceCtx::cpu().unwrap()

@@ -2,8 +2,8 @@
 
 use super::ops::{
     ArgKeepDimOutput, ArgOutput, BroadcastOutput, ConcatOutput, Conv2dOutput, GatherOutput,
-    IndexSelectOutput, InsertAxisOutput, KeepDimOutput, LossOutput, MatmulOutput, Pool2dOutput,
-    RefinementOf, RemoveAxisOutput, ReplaceAxisOutput, StackOutput, TransposeOutput,
+    IndexSelectOutput, InsertAxisOutput, KeepDimOutput, MatmulOutput, Pool2dOutput, RefinementOf,
+    RemoveAxisOutput, ReplaceAxisOutput, StackOutput, TransposeOutput,
 };
 use super::{
     Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4, Tensor5, Tensor6, Tensor7, Tensor8,
@@ -385,12 +385,6 @@ impl<const B: usize, const C: usize, const H: usize, const W: usize, E: Element,
     Pool2dOutput for Tensor4<B, C, H, W, E, P>
 {
     type Output = Tensor4<B, C, DYN, DYN, E, P>;
-}
-
-impl<const ROWS: usize, const COLS: usize, const TARGET_ROWS: usize, E: Element, P: Placement>
-    LossOutput<Tensor1<TARGET_ROWS, i64, P>> for Tensor2<ROWS, COLS, E, P>
-{
-    type Output = Tensor0<E, P>;
 }
 
 #[cfg(test)]

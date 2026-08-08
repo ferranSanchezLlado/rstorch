@@ -1,7 +1,7 @@
 error[E0080]: evaluation of `typed::const_check::assert_loss_rows` failed
-  --> $WORKSPACE/src/typed/ops/loss.rs:54:17
+  --> $WORKSPACE/src/typed/ops/loss.rs:38:17
    |
-54 |         const { assert_loss_rows(ROWS, TARGET_ROWS) };
+38 |         const { assert_loss_rows(ROWS, TARGET_ROWS) };
    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation panicked: typed loss row dimensions are incompatible
    |
 note: inside `typed::const_check::assert_loss_rows`
@@ -14,9 +14,9 @@ note: inside `typed::const_check::assert_loss_rows`
    | |_____^ the failure occurred here
 
 note: erroneous constant encountered
-  --> $WORKSPACE/src/typed/ops/loss.rs:54:9
+  --> $WORKSPACE/src/typed/ops/loss.rs:38:9
    |
-54 |         const { assert_loss_rows(ROWS, TARGET_ROWS) };
+38 |         const { assert_loss_rows(ROWS, TARGET_ROWS) };
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `fn rstorch::typed::ops::loss::<impl rstorch::typed::Tensor2<2, 3>>::cross_entropy::<1>`

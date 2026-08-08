@@ -22,7 +22,7 @@
 //! on an `optim.*` buffer, a duplicated optimizer key, and a missing `optimizer`
 //! section all fail the load and leave both halves untouched.
 
-use super::nn::{self, Module, RuntimeModuleAdapter, TypedStateDict};
+use super::nn::{self, Module, RuntimeModuleAdapter, TypedStateDict, stable_state};
 use crate::persist::{Envelope, Expected, Limits, LoadOptions};
 use crate::{Error, Result};
 use std::collections::BTreeMap;
@@ -60,19 +60,6 @@ fn reject_reserved_paths<'a>(paths: impl Iterator<Item = &'a str>, op: &'static 
         });
     }
     Ok(())
-}
-
-fn stable_state<M: Module + ?Sized>(model: &M, op: &'static str) -> Result<TypedStateDict> {
-    let first = nn::state_dict(model)?;
-    let second = nn::state_dict(model)?;
-    if first.paths().ne(second.paths()) {
-        return Err(Error::InvalidArg {
-            op,
-            msg: "typed Module paths changed between preflight walks; Module requires stable repeated walks"
-                .into(),
-        });
-    }
-    Ok(first)
 }
 
 /// Adds every model parameter and persistent buffer to `envelope`.

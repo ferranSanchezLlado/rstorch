@@ -14,25 +14,12 @@
 //! whose paths vary between calls violates that safe semantic contract and no
 //! finite preflight can make its future walks predictable.
 
-use super::nn::{self, Module, RuntimeModuleAdapter};
+use super::nn::{self, Module, RuntimeModuleAdapter, stable_state};
 use crate::persist::{Envelope, Limits, LoadOptions};
 use crate::{Error, Grads, Result};
 use std::path::Path;
 
 pub use crate::optim::{Adam, AdamGroup, AdamW, Sgd, SgdGroup};
-
-fn preflight<M: Module + ?Sized>(model: &M, op: &'static str) -> Result<nn::TypedStateDict> {
-    let first = nn::state_dict(model)?;
-    let second = nn::state_dict(model)?;
-    if first.paths().ne(second.paths()) {
-        return Err(Error::InvalidArg {
-            op,
-            msg: "typed Module paths changed between preflight walks; Module requires stable repeated walks"
-                .into(),
-        });
-    }
-    Ok(first)
-}
 
 fn validate_advancing_clocks(envelope: &Envelope) -> Result<()> {
     let Some(section) = envelope.section("optimizer") else {
@@ -86,7 +73,7 @@ pub fn sgd_step<M: Module + ?Sized>(
     model: &mut M,
     grads: Grads,
 ) -> Result<()> {
-    preflight(model, "typed::optim::sgd_step")?;
+    stable_state(model, "typed::optim::sgd_step")?;
     optimizer.step(&mut RuntimeModuleAdapter::new(model), grads)
 }
 
@@ -99,7 +86,7 @@ pub fn adam_step<M: Module + ?Sized>(
     model: &mut M,
     grads: Grads,
 ) -> Result<()> {
-    preflight(model, "typed::optim::adam_step")?;
+    stable_state(model, "typed::optim::adam_step")?;
     optimizer.step(&mut RuntimeModuleAdapter::new(model), grads)
 }
 
@@ -109,7 +96,7 @@ pub fn save_sgd_state<M: Module + ?Sized>(
     model: &mut M,
     envelope: &mut Envelope,
 ) -> Result<()> {
-    preflight(model, "typed::optim::save_sgd_state")?;
+    stable_state(model, "typed::optim::save_sgd_state")?;
     optimizer.save_state(&RuntimeModuleAdapter::new(model), envelope)
 }
 
@@ -122,7 +109,7 @@ pub fn load_sgd_state<M: Module + ?Sized>(
     model: &mut M,
     envelope: &Envelope,
 ) -> Result<()> {
-    preflight(model, "typed::optim::load_sgd_state")?;
+    stable_state(model, "typed::optim::load_sgd_state")?;
     validate_advancing_clocks(envelope)?;
     optimizer.load_state(&RuntimeModuleAdapter::new(model), envelope)
 }
@@ -133,7 +120,7 @@ pub fn save_adam_state<M: Module + ?Sized>(
     model: &mut M,
     envelope: &mut Envelope,
 ) -> Result<()> {
-    preflight(model, "typed::optim::save_adam_state")?;
+    stable_state(model, "typed::optim::save_adam_state")?;
     optimizer.save_state(&RuntimeModuleAdapter::new(model), envelope)
 }
 
@@ -143,7 +130,7 @@ pub fn load_adam_state<M: Module + ?Sized>(
     model: &mut M,
     envelope: &Envelope,
 ) -> Result<()> {
-    preflight(model, "typed::optim::load_adam_state")?;
+    stable_state(model, "typed::optim::load_adam_state")?;
     validate_advancing_clocks(envelope)?;
     optimizer.load_state(&RuntimeModuleAdapter::new(model), envelope)
 }
@@ -189,7 +176,7 @@ pub fn sgd_param_steps<M: Module + ?Sized>(
     model: &mut M,
     path: &str,
 ) -> Result<u64> {
-    let state = preflight(model, "typed::optim::sgd_param_steps")?;
+    let state = stable_state(model, "typed::optim::sgd_param_steps")?;
     if !state.is_param_path(path) {
         return Err(Error::InvalidArg {
             op: "typed::optim::sgd_param_steps",
@@ -207,7 +194,7 @@ pub fn adam_param_steps<M: Module + ?Sized>(
     model: &mut M,
     path: &str,
 ) -> Result<u64> {
-    let state = preflight(model, "typed::optim::adam_param_steps")?;
+    let state = stable_state(model, "typed::optim::adam_param_steps")?;
     if !state.is_param_path(path) {
         return Err(Error::InvalidArg {
             op: "typed::optim::adam_param_steps",
@@ -246,7 +233,7 @@ pub fn load_sgd_checkpoint<M: Module + ?Sized>(
 ) -> Result<()> {
     let envelope = Envelope::load(path, &options.limits)?;
     validate_advancing_clocks(&envelope)?;
-    preflight(model, "typed::optim::load_sgd_checkpoint")?;
+    stable_state(model, "typed::optim::load_sgd_checkpoint")?;
     let model_before = nn::state_dict(model)?;
     super::persist::load_combined_model_state(model, &envelope, options)?;
     if let Err(load) = optimizer.load_state(&RuntimeModuleAdapter::new(model), &envelope) {
@@ -271,7 +258,7 @@ pub fn load_adam_checkpoint<M: Module + ?Sized>(
 ) -> Result<()> {
     let envelope = Envelope::load(path, &options.limits)?;
     validate_advancing_clocks(&envelope)?;
-    preflight(model, "typed::optim::load_adam_checkpoint")?;
+    stable_state(model, "typed::optim::load_adam_checkpoint")?;
     let model_before = nn::state_dict(model)?;
     super::persist::load_combined_model_state(model, &envelope, options)?;
     if let Err(load) = optimizer.load_state(&RuntimeModuleAdapter::new(model), &envelope) {
