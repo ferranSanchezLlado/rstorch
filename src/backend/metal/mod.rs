@@ -1527,6 +1527,16 @@ impl BackendOps for MetalBackend {
         Ok(Storage::Metal(output))
     }
     fn binary(&self, op: BinaryOp, lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
+        // `Bool` has no arithmetic — comparisons live in `compare`, which
+        // shares `encode_binary` and *does* have a `bool` kernel. Declining
+        // here rather than falling through is what keeps the decline an
+        // `Unsupported`: without it the shared path looks up `binary_bool`,
+        // which does not exist, and reports a shader-lookup `Backend` error.
+        // Every sibling entry point (`binary_scalar`, `unary`, `matmul`,
+        // `conv`, `index_add`, `scatter_add`) already guards the same way.
+        if lhs.dtype() == DType::Bool {
+            return Err(unsupported("binary", lhs));
+        }
         encode_binary(self, "binary", lhs, rhs, lhs.dtype(), op_code_binary(op))
     }
     fn binary_scalar(&self, op: BinaryOp, x: View<'_>, scalar: f64) -> Result<Storage> {
@@ -1997,7 +2007,11 @@ impl BackendOps for MetalBackend {
                 layout_args(encoder, 12, src.layout());
                 set_bytes(encoder, 16, &[axis as u32]);
                 set_bytes(encoder, 17, &[output.len as u64]);
-                set_bytes(encoder, 18, &[src.layout().num_elements() as u64]);
+                // The *index grid*'s element count, not `src`'s. `src` need
+                // only be at least as large as the grid on every axis
+                // (PyTorch's `scatter_add_` rule, and what the check above
+                // enforces), and the kernel walks the grid.
+                set_bytes(encoder, 18, &[indices.layout().num_elements() as u64]);
             },
         )?;
         Ok(Storage::Metal(output))
@@ -2318,6 +2332,120 @@ mod tests {
             "Metal conformance failures:\n{}",
             report.failures.join("\n")
         );
+    }
+
+    /// A dtype this backend cannot honor must be an `Unsupported`, never any
+    /// other error.
+    ///
+    /// The whole "loudly declined vs. actually failed" distinction the
+    /// conformance runner draws — and the op layer's fallback to a composed
+    /// form for a fused variant — keys off this one error variant. `binary`
+    /// used to fall through to the shared `encode_binary` path for `Bool`,
+    /// where the missing `binary_bool` shader surfaced as a `Backend`
+    /// shader-lookup error instead; the harness never noticed, because the CPU
+    /// reference declines the same row first and the runner short-circuits on
+    /// whichever side reports `Unsupported`.
+    #[test]
+    fn declined_dtypes_report_unsupported_and_not_another_error() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        let mask = Tensor::from_vec(vec![true, false, true, true], [2, 2], &METAL).unwrap();
+        let other = Tensor::from_vec(vec![true, true, false, true], [2, 2], &METAL).unwrap();
+        for (label, result) in [
+            ("add", mask.add(&other)),
+            ("sub", mask.sub(&other)),
+            ("mul", mask.mul(&other)),
+            ("div", mask.div(&other)),
+            ("maximum", mask.maximum(&other)),
+            ("minimum", mask.minimum(&other)),
+            ("add_scalar", mask.add_scalar(1.0)),
+            ("neg", mask.neg()),
+            ("matmul", mask.matmul(&other)),
+            ("sum", mask.sum(0)),
+            ("argmax", mask.argmax(0)),
+        ] {
+            match result {
+                Err(Error::Unsupported { .. }) => {}
+                Err(other) => panic!("{label} on Bool must be Unsupported, got {other:?}"),
+                Ok(_) => panic!("{label} on Bool must be declined"),
+            }
+        }
+        // …and a dtype the device has no storage for is refused at the door.
+        for dtype in [DType::BF16, DType::F64] {
+            assert!(matches!(
+                Tensor::zeros([2], dtype, &METAL),
+                Err(Error::Unsupported { .. })
+            ));
+        }
+    }
+
+    /// `tanh` saturates to ±1 at the infinities, on both backends.
+    ///
+    /// MSL evaluates `tanh`'s positive branch as `(exp(2x)-1)/(exp(2x)+1)`,
+    /// which is `inf/inf` — a NaN — at `+inf`, while `-inf` correctly gives
+    /// `-1`. The asymmetry is what makes it survive casual testing: a
+    /// saturated activation turned into a NaN on Metal and into a `1.0` on
+    /// CPU, so the same model diverged on one backend only. NaN must still
+    /// propagate.
+    #[test]
+    fn saturating_tanh_matches_the_cpu_through_the_overflow_region() {
+        let _lane = HARDWARE_LANE.lock().unwrap();
+        // The finite values matter as much as the infinities: MSL's tanh
+        // returned a silently wrong *0* on [43.75, 44.25] and NaN from 44.5 up,
+        // both of which an infinity-only test walks straight past. This steps
+        // through the whole broken region and across the saturation threshold
+        // the kernel now uses.
+        let mut data = vec![f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 0.0, -0.0];
+        let mut probe = 9.0f32;
+        while probe <= 45.0 {
+            data.push(probe);
+            data.push(-probe);
+            probe += 0.25;
+        }
+        let n = data.len();
+        let run = |device: &Device| {
+            Tensor::from_vec(data.clone(), [n], device)
+                .unwrap()
+                .tanh()
+                .unwrap()
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()
+        };
+        let cpu = run(&Device::Cpu);
+        let metal = run(&METAL);
+
+        // Metal must agree with the CPU reference bit for bit. Note tanh(9) is
+        // 0.99999994 in f32, not 1.0, so "saturates" is only asserted where it
+        // is actually true — the differential is what covers the rest.
+        for (i, &v) in data.iter().enumerate() {
+            if cpu[i].is_nan() && metal[i].is_nan() {
+                continue;
+            }
+            assert_eq!(
+                cpu[i].to_bits(),
+                metal[i].to_bits(),
+                "tanh({v}): cpu {} vs metal {}",
+                cpu[i],
+                metal[i]
+            );
+        }
+        assert_eq!(cpu[0], 1.0, "tanh(+inf) must saturate to 1");
+        assert_eq!(cpu[1], -1.0, "tanh(-inf) must saturate to -1");
+        assert!(cpu[2].is_nan(), "tanh(NaN) must stay NaN");
+        assert_eq!(cpu[3], 0.0, "tanh(0) must be 0");
+        assert_eq!(
+            cpu[4].to_bits(),
+            (-0.0f32).to_bits(),
+            "tanh(-0) keeps its sign"
+        );
+        // The values that were wrong before: 0 on [43.75, 44.25], NaN above.
+        for (i, &v) in data.iter().enumerate().skip(5) {
+            if v.abs() >= 10.0 {
+                let want = if v > 0.0 { 1.0 } else { -1.0 };
+                assert_eq!(metal[i], want, "tanh({v}) must saturate to {want}");
+            }
+        }
     }
 
     #[test]

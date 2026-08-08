@@ -30,18 +30,20 @@
 //!   no silent fallbacks). Declared out-of-scope rows land in
 //!   `Report::expected_unsupported`; any other decline lands in
 //!   `Report::skipped`, which a promotion gate requires to be empty.
-//! - **Fused ops are absent from the table.** Their multi-output encodings do
-//!   not fit this single-output harness; softmax, LayerNorm, and optimizer
-//!   kernels instead have direct dtype-specific CPU tests. T61 may extend the
-//!   harness when accelerator fused parity lands.
+//! - **Fused ops are in the table.** The runner compares a *list* of
+//!   downloaded outputs, so the multi-output encodings (`LayerNorm` with
+//!   `save_stats`, the optimizer steps' `(param, state…)` tuples) are ordinary
+//!   rows. A backend that declines a fused variant lands in
+//!   `expected_unsupported` only if the declining is declared; otherwise it is
+//!   an unexpected skip, exactly as for any other entry point.
 //!
 //! Today the only backend is CPU, so the shipped test is the self-check
 //! (CPU vs CPU): it proves the whole table is runnable and exactly matched
 //! on the reference. T61 reuses `run` unchanged for Metal.
 
 use crate::backend::{
-    ArgReduceOp, BackendOps, BinaryOp, CmpOp, Conv2dParams, ConvOp, ReduceOp, UnaryOp, View,
-    conv_geometry::Conv2dGeometry, dispatch,
+    ArgReduceOp, BackendOps, BinaryOp, CmpOp, Conv2dParams, ConvOp, FusedOp, ReduceOp, UnaryOp,
+    View, conv_geometry::Conv2dGeometry, dispatch,
 };
 use crate::device::Device;
 use crate::dtype::{DType, HostConv};
@@ -108,6 +110,25 @@ pub(crate) enum Call {
     Cast(DType),
     /// [`BackendOps::copy_strided`].
     CopyStrided,
+    /// [`BackendOps::copy_into`]: allocate a `dst_dims` destination filled with
+    /// `fill`, copy the single operand into the region `narrow(axis, start,
+    /// len)` of it, and hand the **whole** destination back so the untouched
+    /// surroundings are compared too.
+    ///
+    /// This is the only entry point whose result is a mutated buffer rather
+    /// than a returned one, which is exactly why it needs a row: a kernel that
+    /// ignores the destination layout writes plausible values into the wrong
+    /// slots and nothing else in the table would notice.
+    CopyInto {
+        /// Shape of the freshly allocated destination.
+        dst_dims: Vec<usize>,
+        /// Value the destination is filled with before the copy.
+        fill: f64,
+        /// Axis the destination region is narrowed on.
+        axis: usize,
+        /// First index of the destination region.
+        start: usize,
+    },
     /// [`BackendOps::binary`].
     Binary(BinaryOp),
     /// [`BackendOps::binary_scalar`].
@@ -136,35 +157,62 @@ pub(crate) enum Call {
     ScatterAdd(usize),
     /// [`BackendOps::conv`] with the given geometry.
     Conv(ConvOp, Conv2dParams),
+    /// [`BackendOps::fused`] with the given scalar tail. Multi-output by
+    /// nature, which is why [`Call::apply`] returns a list.
+    Fused(FusedOp, Vec<f64>),
 }
 
 impl Call {
     /// Invoke the entry point on `backend` with `views` bound in table order.
-    fn apply(&self, backend: &dyn BackendOps, views: &[View<'_>]) -> Result<Storage> {
+    ///
+    /// Returns a **list** of outputs: every entry point but
+    /// [`BackendOps::fused`] produces exactly one, and the fused encodings
+    /// produce one, two, or three depending on the variant. The runner
+    /// compares the lists element-wise, so an output *count* divergence is a
+    /// reported failure rather than a silently ignored one.
+    fn apply(&self, backend: &dyn BackendOps, views: &[View<'_>]) -> Result<Vec<Storage>> {
         let arity = |want: usize| Error::InvalidArg {
             op: "conformance",
             msg: format!("expected {want} operand view(s), got {}", views.len()),
         };
+        let one = |storage: Result<Storage>| storage.map(|value| vec![value]);
         match (self, views) {
-            (Call::Full { len, dtype, value }, []) => backend.full(*len, *dtype, *value),
-            (Call::Cast(to), [x]) => backend.cast(*x, *to),
-            (Call::CopyStrided, [x]) => backend.copy_strided(*x),
-            (Call::Binary(op), [a, b]) => backend.binary(*op, *a, *b),
-            (Call::BinaryScalar(op, s), [x]) => backend.binary_scalar(*op, *x, *s),
-            (Call::Unary(op), [x]) => backend.unary(*op, *x),
-            (Call::Compare(op), [a, b]) => backend.compare(*op, *a, *b),
-            (Call::WhereCond, [c, t, f]) => backend.where_cond(*c, *t, *f),
-            (Call::MaskedFill(v), [x, m]) => backend.masked_fill(*x, *m, *v),
-            (Call::Reduce(op, axis), [x]) => backend.reduce(*op, *x, *axis),
-            (Call::ArgReduce(op, axis), [x]) => backend.arg_reduce(*op, *x, *axis),
-            (Call::Matmul, [a, b]) => backend.matmul(*a, *b),
-            (Call::IndexSelect(axis), [x, i]) => backend.index_select(*x, *axis, *i),
-            (Call::IndexAdd(axis), [x, i, s]) => backend.index_add(*x, *axis, *i, *s),
-            (Call::Gather(axis), [x, i]) => backend.gather(*x, *axis, *i),
-            (Call::ScatterAdd(axis), [x, i, s]) => backend.scatter_add(*x, *axis, *i, *s),
-            (Call::Conv(op, params), inputs) => backend.conv(*op, inputs, params),
+            (Call::Full { len, dtype, value }, []) => one(backend.full(*len, *dtype, *value)),
+            (Call::Cast(to), [x]) => one(backend.cast(*x, *to)),
+            (Call::CopyStrided, [x]) => one(backend.copy_strided(*x)),
+            (
+                Call::CopyInto {
+                    dst_dims,
+                    fill,
+                    axis,
+                    start,
+                },
+                [src],
+            ) => {
+                let dst_layout = Layout::contiguous(dst_dims.clone())?;
+                let region = dst_layout.narrow(*axis, *start, src.layout().dims()[*axis])?;
+                let mut dst = backend.full(dst_layout.num_elements(), src.dtype(), *fill)?;
+                backend.copy_into(*src, &mut dst, &region)?;
+                Ok(vec![dst])
+            }
+            (Call::Binary(op), [a, b]) => one(backend.binary(*op, *a, *b)),
+            (Call::BinaryScalar(op, s), [x]) => one(backend.binary_scalar(*op, *x, *s)),
+            (Call::Unary(op), [x]) => one(backend.unary(*op, *x)),
+            (Call::Compare(op), [a, b]) => one(backend.compare(*op, *a, *b)),
+            (Call::WhereCond, [c, t, f]) => one(backend.where_cond(*c, *t, *f)),
+            (Call::MaskedFill(v), [x, m]) => one(backend.masked_fill(*x, *m, *v)),
+            (Call::Reduce(op, axis), [x]) => one(backend.reduce(*op, *x, *axis)),
+            (Call::ArgReduce(op, axis), [x]) => one(backend.arg_reduce(*op, *x, *axis)),
+            (Call::Matmul, [a, b]) => one(backend.matmul(*a, *b)),
+            (Call::IndexSelect(axis), [x, i]) => one(backend.index_select(*x, *axis, *i)),
+            (Call::IndexAdd(axis), [x, i, s]) => one(backend.index_add(*x, *axis, *i, *s)),
+            (Call::Gather(axis), [x, i]) => one(backend.gather(*x, *axis, *i)),
+            (Call::ScatterAdd(axis), [x, i, s]) => one(backend.scatter_add(*x, *axis, *i, *s)),
+            (Call::Conv(op, params), inputs) => one(backend.conv(*op, inputs, params)),
+            (Call::Fused(op, scalars), inputs) => backend.fused(*op, inputs, scalars),
             (Call::Full { .. }, _) => Err(arity(0)),
             (Call::Cast(_) | Call::CopyStrided | Call::BinaryScalar(..), _) => Err(arity(1)),
+            (Call::CopyInto { .. }, _) => Err(arity(1)),
             (Call::Unary(_) | Call::Reduce(..) | Call::ArgReduce(..), _) => Err(arity(1)),
             (Call::Binary(_) | Call::Compare(_) | Call::Matmul, _) => Err(arity(2)),
             (Call::MaskedFill(_) | Call::IndexSelect(_) | Call::Gather(_), _) => Err(arity(2)),
@@ -193,6 +241,7 @@ impl Case {
             Call::WhereCond => operands[1].host.dtype(),
             Call::MaskedFill(_)
             | Call::CopyStrided
+            | Call::CopyInto { .. }
             | Call::BinaryScalar(..)
             | Call::Unary(_)
             | Call::Reduce(..)
@@ -200,7 +249,14 @@ impl Case {
             | Call::IndexAdd(_)
             | Call::Gather(_)
             | Call::ScatterAdd(_)
-            | Call::Conv(..) => operands[0].host.dtype(),
+            | Call::Conv(..)
+            // A fused row's outputs are the parameter dtype plus, for the
+            // recorded/optimizer encodings, wide state in the accumulation
+            // dtype. Taking the *parameter* dtype's tolerance is the loose
+            // bound of the two, which is the safe direction: it never demands
+            // more of an F32 state buffer than the reduced parameter can
+            // deliver, and `compare` still rejects a dtype divergence outright.
+            | Call::Fused(..) => operands[0].host.dtype(),
             Call::Binary(_) | Call::Matmul => operands[0].host.dtype(),
         };
         // Casts are deterministic representation conversions. In particular,
@@ -211,6 +267,7 @@ impl Case {
             Call::Full { .. }
                 | Call::Cast(_)
                 | Call::CopyStrided
+                | Call::CopyInto { .. }
                 | Call::Compare(_)
                 | Call::WhereCond
                 | Call::MaskedFill(_)
@@ -306,7 +363,7 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
             (_, Err(e)) => report
                 .failures
                 .push(format!("{}: {device} backend failed: {e}", case.name)),
-            (Ok(want), Ok(got)) => match compare(&want, &got, case.tol) {
+            (Ok(want), Ok(got)) => match compare_all(&want, &got, case.tol) {
                 Ok(()) => report.matched.push(case.name),
                 Err(diff) => report.failures.push(format!("{}: {diff}", case.name)),
             },
@@ -315,11 +372,25 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
     report
 }
 
+/// Whether a declined case is *declared* out of contract rather than a hole.
+///
+/// Two tiers, and the distinction matters: the first is the **common** backend
+/// contract — combinations the op enums themselves put out of scope, which
+/// every backend including the CPU reference declines, so the row exists to
+/// prove the decline is loud and universal. The second is a **per-backend**
+/// capability declaration (Metal has no BF16 and no F64 storage at all).
+///
+/// Nothing here may name a combination one backend implements and another
+/// merely has not got round to: that is the entry that would silently excuse a
+/// real gap, so every arm below is justified by a rule stated in
+/// [`crate::backend`] or in the kernel module that enforces it.
 fn expected_unsupported(_device: Device, case: &Case) -> bool {
     let input_dtype = case.operands.first().map(|operand| operand.host.dtype());
-    let outside_common_contract = matches!(
-        (&case.call, input_dtype),
-        (
+    let outside_common_contract =
+        matches!(
+            (&case.call, input_dtype),
+            // `UnaryOp`'s doc comment: the transcendental unaries are float-only.
+            (
             Call::Unary(
                 UnaryOp::Relu
                     | UnaryOp::Gelu
@@ -330,8 +401,24 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
                     | UnaryOp::Sigmoid
             ),
             Some(DType::I64)
-        ) | (Call::Reduce(..), Some(DType::Bool))
-    );
+        )
+        // `bool` has no `NumAcc`, so it has no accumulation and hence no
+        // reduction, arg-reduction, matmul, conv, or accumulating scatter
+        // (see `cpu::acc`'s module docs). `Bool` also has no arithmetic:
+        // comparisons live in `compare`, and `where`/`masked_fill` carry it.
+            | (Call::Reduce(..) | Call::ArgReduce(..), Some(DType::Bool))
+            | (Call::Matmul | Call::Conv(..), Some(DType::Bool))
+            | (Call::IndexAdd(_) | Call::ScatterAdd(_), Some(DType::Bool))
+            | (Call::Binary(_) | Call::BinaryScalar(..) | Call::Unary(_), Some(DType::Bool))
+        // `i64` has no `FloatAcc`, which is what makes softmax, LayerNorm, and
+        // the optimizer steps decline an integer dtype instead of computing
+        // something numerically meaningless.
+            | (Call::Fused(..), Some(DType::I64 | DType::Bool))
+        // `BackendOps::cast`'s doc comment: the F64 conversion lanes are
+        // deferred, and declining is required to be loud rather than a silent
+        // reinterpretation.
+            | (Call::Cast(DType::F64), _)
+        ) || matches!((&case.call, input_dtype), (Call::Cast(_), Some(DType::F64)));
     if outside_common_contract {
         return true;
     }
@@ -364,7 +451,7 @@ pub(crate) fn run_device(device: Device) -> Report {
 /// returned buffer: kernels return dense row-major storage, so this observes
 /// every element (and any length divergence) without the table having to
 /// restate each op's output shape.
-fn evaluate(backend: &dyn BackendOps, case: &Case) -> Result<CpuStorage> {
+fn evaluate(backend: &dyn BackendOps, case: &Case) -> Result<Vec<CpuStorage>> {
     let storages = case
         .operands
         .iter()
@@ -375,9 +462,36 @@ fn evaluate(backend: &dyn BackendOps, case: &Case) -> Result<CpuStorage> {
         .zip(&case.operands)
         .map(|(s, o)| View::new(s, &o.layout))
         .collect();
-    let out = case.call.apply(backend, &views)?;
-    let layout = Layout::contiguous([out.len()])?;
-    backend.transfer_out(View::new(&out, &layout))
+    case.call
+        .apply(backend, &views)?
+        .iter()
+        .map(|out| {
+            let layout = Layout::contiguous([out.len()])?;
+            backend.transfer_out(View::new(out, &layout))
+        })
+        .collect()
+}
+
+/// Compare two output *lists*, naming the diverging output when there is more
+/// than one. A differing output count is itself a divergence.
+fn compare_all(
+    want: &[CpuStorage],
+    got: &[CpuStorage],
+    tol: f64,
+) -> std::result::Result<(), String> {
+    if want.len() != got.len() {
+        return Err(format!("output count {} != {}", want.len(), got.len()));
+    }
+    for (index, (a, b)) in want.iter().zip(got).enumerate() {
+        compare(a, b, tol).map_err(|diff| {
+            if want.len() == 1 {
+                diff
+            } else {
+                format!("output {index}: {diff}")
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// Compare two downloaded buffers, describing the first divergence.
@@ -500,6 +614,45 @@ fn reduceds_broadcast(dtype: DType, data: &[f32]) -> Operand {
     reduceds_strided(dtype, data, layout)
 }
 
+/// A float operand of **any** float dtype, built from one `f32` source array.
+///
+/// `reduceds` above covers only the two reduced dtypes; this covers the four,
+/// so a table row can be written once and swept over `[F16, BF16, F32, F64]`.
+/// That sweep is what puts `F64` — a dtype the CPU kernels implement in full
+/// and the table previously never touched — under the harness.
+///
+/// # Panics
+/// On a non-float dtype (a malformed table entry).
+fn floats(dtype: DType, dims: &[usize], data: &[f32]) -> Operand {
+    Operand::new(float_host(dtype, data), dims)
+}
+
+/// [`floats`] viewed through an arbitrary layout.
+fn floats_strided(dtype: DType, data: &[f32], layout: Layout) -> Operand {
+    Operand::strided(float_host(dtype, data), layout)
+}
+
+fn float_host(dtype: DType, data: &[f32]) -> CpuStorage {
+    match dtype {
+        DType::F16 => {
+            HostConv::into_cpu_storage(data.iter().copied().map(half::f16::from_f32).collect())
+        }
+        DType::BF16 => {
+            HostConv::into_cpu_storage(data.iter().copied().map(half::bf16::from_f32).collect())
+        }
+        DType::F32 => HostConv::into_cpu_storage(data.to_vec()),
+        DType::F64 => {
+            HostConv::into_cpu_storage(data.iter().map(|&v| f64::from(v)).collect::<Vec<f64>>())
+        }
+        other => panic!("conformance float operand requires a float dtype, got {other}"),
+    }
+}
+
+/// Every float dtype the CPU reference implements. Metal declares BF16 and F64
+/// outside its capability, so those rows land in `expected_unsupported` there
+/// and still hold the CPU reference to account.
+const FLOATS: [DType; 4] = [DType::F16, DType::BF16, DType::F32, DType::F64];
+
 fn i64s(dims: &[usize], data: &[i64]) -> Operand {
     Operand::new(HostConv::into_cpu_storage(data.to_vec()), dims)
 }
@@ -561,7 +714,207 @@ pub(crate) fn suite() -> Vec<Case> {
     push_matmul(&mut cases);
     push_index(&mut cases);
     push_conv(&mut cases);
+    push_fused(&mut cases);
+    push_edges(&mut cases);
     cases
+}
+
+/// Softmax, LayerNorm (plain, recorded, and its input gradient), and the two
+/// optimizer steps, over every float dtype and both layout paths.
+///
+/// These are the rows that used to be missing entirely. Nothing else in the
+/// suite reaches [`BackendOps::fused`], so before this section a backend could
+/// return anything at all from any fused variant — or, worse, return *nearly*
+/// the right thing for a dtype no bespoke test happened to cover — and the
+/// conformance gate would still be green.
+fn push_fused(cases: &mut Vec<Case>) {
+    // Two rows of four, deliberately asymmetric and signed: a symmetric row
+    // hides a reversed traversal of the normalized axis.
+    const X: [f32; 8] = [0.5, -1.5, 2.0, 0.25, -0.75, 1.25, -2.5, 3.0];
+    const G: [f32; 8] = [1.0, -0.5, 0.25, 2.0, -1.25, 0.75, 1.5, -2.0];
+    const W: [f32; 4] = [1.5, -0.5, 2.0, 0.75];
+    const B: [f32; 4] = [0.25, -1.0, 0.5, 2.0];
+    // Saved statistics for the backward encoding, in the accumulation dtype.
+    const XHAT: [f32; 8] = [-0.25, 1.5, -0.75, 0.5, 2.0, -1.25, 0.25, -1.0];
+    const INV_STD: [f32; 2] = [1.25, 0.5];
+    // Optimizer state. `V` is strictly positive: Adam takes its square root.
+    const P: [f32; 6] = [0.5, -1.5, 2.0, -0.25, 1.75, -3.0];
+    const PG: [f32; 6] = [0.25, 1.0, -0.5, 2.0, -1.25, 0.75];
+    const M: [f32; 6] = [0.1, -0.2, 0.3, -0.4, 0.5, -0.6];
+    const V: [f32; 6] = [0.04, 0.09, 0.16, 0.25, 0.36, 0.49];
+
+    for dtype in FLOATS {
+        let acc = dtype.accumulation_dtype();
+
+        cases.push(Case::new(
+            format!("fused.Softmax.{dtype}"),
+            Call::Fused(FusedOp::Softmax, vec![]),
+            vec![floats(dtype, &[2, 4], &X)],
+        ));
+        // A transposed source makes the normalized axis strided, which is the
+        // only thing separating a stride-aware row walk from `base + c`.
+        let transposed = Layout::contiguous([2, 4])
+            .and_then(|layout| layout.transpose(0, 1))
+            .expect("conformance table: transposable softmax layout");
+        cases.push(Case::new(
+            format!("fused.Softmax.{dtype}.strided"),
+            Call::Fused(FusedOp::Softmax, vec![]),
+            vec![floats_strided(dtype, &X, transposed)],
+        ));
+        // An offset view: the row walk must start from `layout.offset()`, not 0.
+        let offset = Layout::from_parts(Shape::from([2, 3]), Box::from([3usize, 1]), 2)
+            .expect("conformance table: offset softmax layout");
+        cases.push(Case::new(
+            format!("fused.Softmax.{dtype}.offset"),
+            Call::Fused(FusedOp::Softmax, vec![]),
+            vec![floats_strided(dtype, &X, offset)],
+        ));
+
+        for (label, scalars) in [
+            ("fused.LayerNorm", vec![1e-3]),
+            ("fused.LayerNorm.saved", vec![1e-3, 1.0]),
+        ] {
+            cases.push(Case::new(
+                format!("{label}.{dtype}"),
+                Call::Fused(FusedOp::LayerNorm, scalars.clone()),
+                vec![
+                    floats(dtype, &[2, 4], &X),
+                    floats(dtype, &[4], &W),
+                    floats(dtype, &[4], &B),
+                ],
+            ));
+            // Strided `x` with strided rank-1 affine views: `weight`/`bias` are
+            // read through their own strides, which a kernel that indexes them
+            // as `w[c]` gets wrong without ever producing a NaN.
+            let strided_x = Layout::contiguous([4, 2])
+                .and_then(|layout| layout.transpose(0, 1))
+                .expect("conformance table: transposable layer-norm layout");
+            let stride2 = Layout::from_parts(Shape::from([4]), Box::from([2usize]), 0)
+                .expect("conformance table: strided affine layout");
+            cases.push(Case::new(
+                format!("{label}.{dtype}.strided"),
+                Call::Fused(FusedOp::LayerNorm, scalars),
+                vec![
+                    floats_strided(dtype, &X, strided_x),
+                    floats_strided(dtype, &G, stride2.clone()),
+                    floats_strided(dtype, &X, stride2),
+                ],
+            ));
+        }
+
+        cases.push(Case::new(
+            format!("fused.LayerNormBackward.{dtype}"),
+            Call::Fused(FusedOp::LayerNorm, vec![]),
+            vec![
+                floats(dtype, &[2, 4], &G),
+                floats(acc, &[2, 4], &XHAT),
+                floats(acc, &[2, 1], &INV_STD),
+                floats(dtype, &[4], &W),
+            ],
+        ));
+
+        for (label, momentum) in [("plain", 0.0), ("momentum", 0.9)] {
+            cases.push(Case::new(
+                format!("fused.SgdStep.{label}.{dtype}"),
+                Call::Fused(FusedOp::SgdStep, vec![0.1, momentum, 0.01]),
+                vec![floats(dtype, &[2, 3], &P), floats(dtype, &[2, 3], &PG)],
+            ));
+        }
+        // The three-input form: a velocity carried in the accumulation dtype.
+        cases.push(Case::new(
+            format!("fused.SgdStep.velocity.{dtype}"),
+            Call::Fused(FusedOp::SgdStep, vec![0.1, 0.9, 0.01]),
+            vec![
+                floats(dtype, &[2, 3], &P),
+                floats(dtype, &[2, 3], &PG),
+                floats(acc, &[2, 3], &M),
+            ],
+        ));
+        // Strided parameter and gradient: the Metal optimizer kernels
+        // densify with `copy_strided` first, a path no other test reaches.
+        let strided_p = Layout::contiguous([3, 2])
+            .and_then(|layout| layout.transpose(0, 1))
+            .expect("conformance table: transposable optimizer layout");
+        cases.push(Case::new(
+            format!("fused.SgdStep.strided.{dtype}"),
+            Call::Fused(FusedOp::SgdStep, vec![0.1, 0.9, 0.01]),
+            vec![
+                floats_strided(dtype, &P, strided_p.clone()),
+                floats_strided(dtype, &PG, strided_p.clone()),
+                floats_strided(acc, &M, strided_p.clone()),
+            ],
+        ));
+
+        for (label, decoupled) in [("coupled", 0.0), ("decoupled", 1.0)] {
+            cases.push(Case::new(
+                format!("fused.AdamStep.{label}.{dtype}"),
+                Call::Fused(
+                    FusedOp::AdamStep,
+                    vec![0.1, 0.9, 0.999, 1e-8, 0.01, 0.19, 0.002, decoupled],
+                ),
+                vec![
+                    floats(dtype, &[2, 3], &P),
+                    floats(dtype, &[2, 3], &PG),
+                    floats(acc, &[2, 3], &M),
+                    floats(acc, &[2, 3], &V),
+                ],
+            ));
+        }
+        cases.push(Case::new(
+            format!("fused.AdamStep.strided.{dtype}"),
+            Call::Fused(
+                FusedOp::AdamStep,
+                vec![0.1, 0.9, 0.999, 1e-8, 0.0, 0.19, 0.002, 0.0],
+            ),
+            vec![
+                floats_strided(dtype, &P, strided_p.clone()),
+                floats_strided(dtype, &PG, strided_p.clone()),
+                floats_strided(acc, &M, strided_p.clone()),
+                floats_strided(acc, &V, strided_p),
+            ],
+        ));
+    }
+
+    // The non-float dtypes: every fused variant must decline them *loudly*,
+    // which is the `FloatAcc` gate working. A backend that quietly computed
+    // something here would be caught as an unexpected match, not a skip.
+    cases.push(Case::new(
+        "fused.Softmax.i64".to_string(),
+        Call::Fused(FusedOp::Softmax, vec![]),
+        vec![i64s(&[2, 3], &A_I64)],
+    ));
+    cases.push(Case::new(
+        "fused.Softmax.bool".to_string(),
+        Call::Fused(FusedOp::Softmax, vec![]),
+        vec![bools(&[2, 3], &A_BOOL)],
+    ));
+    cases.push(Case::new(
+        "fused.LayerNorm.i64".to_string(),
+        Call::Fused(FusedOp::LayerNorm, vec![1e-3]),
+        vec![
+            i64s(&[2, 3], &A_I64),
+            i64s(&[3], &[1, 2, 3]),
+            i64s(&[3], &[0, 1, 0]),
+        ],
+    ));
+    cases.push(Case::new(
+        "fused.SgdStep.i64".to_string(),
+        Call::Fused(FusedOp::SgdStep, vec![0.1, 0.0, 0.0]),
+        vec![i64s(&[2, 3], &A_I64), i64s(&[2, 3], &B_I64)],
+    ));
+    cases.push(Case::new(
+        "fused.AdamStep.i64".to_string(),
+        Call::Fused(
+            FusedOp::AdamStep,
+            vec![0.1, 0.9, 0.999, 1e-8, 0.0, 0.19, 0.002, 0.0],
+        ),
+        vec![
+            i64s(&[2, 3], &A_I64),
+            i64s(&[2, 3], &B_I64),
+            i64s(&[2, 3], &A_I64),
+            i64s(&[2, 3], &B_I64),
+        ],
+    ));
 }
 
 /// Allocation, cast, and strided-materialization cases.
@@ -679,16 +1032,42 @@ fn clone_operand(o: &Operand) -> Operand {
     }
 }
 
+/// Every variant of each op enum, hoisted so the edge-case sections below
+/// sweep exactly the same set the main sections do — a variant added to an
+/// enum and forgotten in one list would then be missing from both, which is a
+/// compile-time-visible omission rather than a silent hole.
+const BINARY_OPS: [BinaryOp; 6] = [
+    BinaryOp::Add,
+    BinaryOp::Sub,
+    BinaryOp::Mul,
+    BinaryOp::Div,
+    BinaryOp::Maximum,
+    BinaryOp::Minimum,
+];
+const UNARY_OPS: [UnaryOp; 9] = [
+    UnaryOp::Relu,
+    UnaryOp::Gelu,
+    UnaryOp::Exp,
+    UnaryOp::Ln,
+    UnaryOp::Sqrt,
+    UnaryOp::Tanh,
+    UnaryOp::Sigmoid,
+    UnaryOp::Neg,
+    UnaryOp::Abs,
+];
+const CMP_OPS: [CmpOp; 6] = [
+    CmpOp::Eq,
+    CmpOp::Ne,
+    CmpOp::Lt,
+    CmpOp::Le,
+    CmpOp::Gt,
+    CmpOp::Ge,
+];
+const REDUCE_OPS: [ReduceOp; 4] = [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min];
+
 /// Binary, scalar-binary, unary, comparison, `where`, and `masked_fill`.
 fn push_elementwise(cases: &mut Vec<Case>) {
-    const BINARY: [BinaryOp; 6] = [
-        BinaryOp::Add,
-        BinaryOp::Sub,
-        BinaryOp::Mul,
-        BinaryOp::Div,
-        BinaryOp::Maximum,
-        BinaryOp::Minimum,
-    ];
+    const BINARY: [BinaryOp; 6] = BINARY_OPS;
     for op in BINARY {
         cases.push(Case::new(
             format!("binary.{op:?}.f32"),
@@ -741,17 +1120,7 @@ fn push_elementwise(cases: &mut Vec<Case>) {
         ));
     }
 
-    const UNARY: [UnaryOp; 9] = [
-        UnaryOp::Relu,
-        UnaryOp::Gelu,
-        UnaryOp::Exp,
-        UnaryOp::Ln,
-        UnaryOp::Sqrt,
-        UnaryOp::Tanh,
-        UnaryOp::Sigmoid,
-        UnaryOp::Neg,
-        UnaryOp::Abs,
-    ];
+    const UNARY: [UnaryOp; 9] = UNARY_OPS;
     for op in UNARY {
         // Strictly positive data keeps `ln`/`sqrt` in-domain; the signed
         // sample below covers the sign-sensitive unaries.
@@ -786,14 +1155,7 @@ fn push_elementwise(cases: &mut Vec<Case>) {
         ));
     }
 
-    const CMP: [CmpOp; 6] = [
-        CmpOp::Eq,
-        CmpOp::Ne,
-        CmpOp::Lt,
-        CmpOp::Le,
-        CmpOp::Gt,
-        CmpOp::Ge,
-    ];
+    const CMP: [CmpOp; 6] = CMP_OPS;
     for op in CMP {
         cases.push(Case::new(
             format!("compare.{op:?}.f32"),
@@ -881,7 +1243,7 @@ fn push_elementwise(cases: &mut Vec<Case>) {
 /// Axis reductions and index-producing reductions, over dense and strided
 /// views, on every axis.
 fn push_reduce(cases: &mut Vec<Case>) {
-    const REDUCE: [ReduceOp; 4] = [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min];
+    const REDUCE: [ReduceOp; 4] = REDUCE_OPS;
     for op in REDUCE {
         for axis in [0usize, 1] {
             cases.push(Case::new(
@@ -1151,11 +1513,21 @@ fn push_index(cases: &mut Vec<Case>) {
 fn push_conv(cases: &mut Vec<Case>) {
     let input: Vec<f32> = (0..16).map(|i| i as f32 * 0.5 - 3.0).collect();
     let weight: Vec<f32> = vec![1.0, -0.5, 0.25, 2.0, 0.0, 1.5, -1.0, 0.75];
+    // The last four are *combinations* with the two spatial axes deliberately
+    // disagreeing. That is where a gradient kernel breaks: mapping an output
+    // position back to an input position is correct under a stride alone and
+    // under a dilation alone far more often than under both, and an (h, w)
+    // transposition survives every symmetric geometry above it.
+    // Pooling caps padding at half the window, so no padding here exceeds 1.
     let geoms = [
         ("dense", (1, 1), (0, 0), (1, 1)),
         ("strided", (2, 2), (0, 0), (1, 1)),
         ("padded", (1, 1), (1, 1), (1, 1)),
         ("dilated", (1, 1), (0, 0), (2, 2)),
+        ("stride_pad", (2, 1), (1, 0), (1, 1)),
+        ("stride_dilate", (2, 1), (0, 0), (1, 2)),
+        ("pad_dilate", (1, 2), (1, 1), (2, 1)),
+        ("all_three", (2, 1), (1, 1), (2, 1)),
     ];
     for (label, stride, padding, dilation) in geoms {
         let params = Conv2dParams {
@@ -1183,6 +1555,28 @@ fn push_conv(cases: &mut Vec<Case>) {
                 ],
             ));
         }
+        // Multi-batch, multi-channel: the only shape in which a kernel that
+        // decodes its flat thread index in the wrong axis order is visible.
+        let batched: Vec<f32> = (0..2 * 2 * 4 * 4).map(|i| i as f32 * 0.25 - 4.0).collect();
+        let wide_weight: Vec<f32> = (0..3 * 2 * 2 * 2).map(|i| 0.5 - i as f32 * 0.125).collect();
+        cases.push(Case::new(
+            format!("conv.Conv2d.f32.{label}.batched"),
+            Call::Conv(ConvOp::Conv2d, params),
+            vec![
+                f32s(&[2, 2, 4, 4], &batched),
+                f32s(&[3, 2, 2, 2], &wide_weight),
+            ],
+        ));
+        // Integer convolution and pooling: `i64` has a `NumAcc`, so it is in
+        // contract, and its accumulation wraps rather than saturating.
+        cases.push(Case::new(
+            format!("conv.Conv2d.i64.{label}"),
+            Call::Conv(ConvOp::Conv2d, params),
+            vec![
+                i64s(&[1, 1, 4, 4], &(0..16).map(|i| i - 7).collect::<Vec<i64>>()),
+                i64s(&[2, 1, 2, 2], &[1, -2, 3, -4, 5, -6, 7, -8]),
+            ],
+        ));
         for op in [ConvOp::MaxPool2d, ConvOp::AvgPool2d] {
             cases.push(Case::new(
                 format!("conv.{op:?}.f32.{label}"),
@@ -1196,6 +1590,19 @@ fn push_conv(cases: &mut Vec<Case>) {
                     vec![reduceds(dtype, &[1, 1, 4, 4], &input)],
                 ));
             }
+            cases.push(Case::new(
+                format!("conv.{op:?}.i64.{label}"),
+                Call::Conv(op, params),
+                vec![i64s(
+                    &[1, 1, 4, 4],
+                    &(0..16).map(|i| i - 7).collect::<Vec<i64>>(),
+                )],
+            ));
+            cases.push(Case::new(
+                format!("conv.{op:?}.f32.{label}.batched"),
+                Call::Conv(op, params),
+                vec![f32s(&[2, 2, 4, 4], &batched)],
+            ));
         }
         push_conv_backward(cases, label, &params, &input, &weight);
     }
@@ -1245,9 +1652,65 @@ fn push_conv_backward(
         ],
     ));
 
+    // The reduced dtypes have their own accumulation contract, and before this
+    // no backward row exercised it: a gradient kernel that accumulates in F16
+    // rather than in `Acc` still produces plausible numbers, just wrong ones.
+    for dtype in [DType::F16, DType::BF16] {
+        cases.push(Case::new(
+            format!("conv.Conv2dInputGrad.{dtype}.{label}"),
+            Call::Conv(ConvOp::Conv2dInputGrad, *params),
+            vec![
+                reduceds(dtype, &conv.output_dims(), &grad),
+                reduceds(dtype, &WEIGHT_DIMS, weight),
+                reduceds(dtype, &INPUT_DIMS, input),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("conv.Conv2dWeightGrad.{dtype}.{label}"),
+            Call::Conv(ConvOp::Conv2dWeightGrad, *params),
+            vec![
+                reduceds(dtype, &conv.output_dims(), &grad),
+                reduceds(dtype, &INPUT_DIMS, input),
+                reduceds(dtype, &WEIGHT_DIMS, weight),
+            ],
+        ));
+    }
+
+    // Multi-batch, multi-channel backward. The single-batch single-channel
+    // shape above cannot distinguish a kernel that decodes `(b, c)` in the
+    // wrong order from a correct one, because both indices are always 0.
+    const BATCH_DIMS: [usize; 4] = [2, 2, 4, 4];
+    const WIDE_WEIGHT_DIMS: [usize; 4] = [3, 2, 2, 2];
+    let batched: Vec<f32> = (0..2 * 2 * 4 * 4).map(|i| i as f32 * 0.25 - 4.0).collect();
+    let wide_weight: Vec<f32> = (0..3 * 2 * 2 * 2).map(|i| 0.5 - i as f32 * 0.125).collect();
+    let wide = Conv2dGeometry::conv2d("conv2d", &BATCH_DIMS, &WIDE_WEIGHT_DIMS, params)
+        .expect("conformance table: valid batched conv geometry");
+    let wide_grad = cotangent(wide.output_dims());
+    cases.push(Case::new(
+        format!("conv.Conv2dInputGrad.f32.{label}.batched"),
+        Call::Conv(ConvOp::Conv2dInputGrad, *params),
+        vec![
+            f32s(&wide.output_dims(), &wide_grad),
+            f32s(&WIDE_WEIGHT_DIMS, &wide_weight),
+            f32s(&BATCH_DIMS, &batched),
+        ],
+    ));
+    cases.push(Case::new(
+        format!("conv.Conv2dWeightGrad.f32.{label}.batched"),
+        Call::Conv(ConvOp::Conv2dWeightGrad, *params),
+        vec![
+            f32s(&wide.output_dims(), &wide_grad),
+            f32s(&BATCH_DIMS, &batched),
+            f32s(&WIDE_WEIGHT_DIMS, &wide_weight),
+        ],
+    ));
+
     let pool = Conv2dGeometry::pool("pool2d", &INPUT_DIMS, params)
         .expect("conformance table: valid pool geometry");
     let pool_grad = cotangent(pool.output_dims());
+    let wide_pool = Conv2dGeometry::pool("pool2d", &BATCH_DIMS, params)
+        .expect("conformance table: valid batched pool geometry");
+    let wide_pool_grad = cotangent(wide_pool.output_dims());
     for op in [ConvOp::MaxPool2dBackward, ConvOp::AvgPool2dBackward] {
         cases.push(Case::new(
             format!("conv.{op:?}.f32.{label}"),
@@ -1256,6 +1719,1018 @@ fn push_conv_backward(
                 f32s(&pool.output_dims(), &pool_grad),
                 f32s(&INPUT_DIMS, input),
             ],
+        ));
+        for dtype in [DType::F16, DType::BF16] {
+            cases.push(Case::new(
+                format!("conv.{op:?}.{dtype}.{label}"),
+                Call::Conv(op, *params),
+                vec![
+                    reduceds(dtype, &pool.output_dims(), &pool_grad),
+                    reduceds(dtype, &INPUT_DIMS, input),
+                ],
+            ));
+        }
+        cases.push(Case::new(
+            format!("conv.{op:?}.f32.{label}.batched"),
+            Call::Conv(op, *params),
+            vec![
+                f32s(&wide_pool.output_dims(), &wide_pool_grad),
+                f32s(&BATCH_DIMS, &batched),
+            ],
+        ));
+        // Repeated values inside the window make max-pool tie-breaking
+        // observable: the *first* maximum owns the whole gradient.
+        let ties: Vec<f32> = (0..16).map(|i| ((i % 4) / 2) as f32).collect();
+        cases.push(Case::new(
+            format!("conv.{op:?}.f32.{label}.ties"),
+            Call::Conv(op, *params),
+            vec![
+                f32s(&pool.output_dims(), &pool_grad),
+                f32s(&INPUT_DIMS, &ties),
+            ],
+        ));
+    }
+}
+
+/// The dimensions kernels actually break in: values (NaN, infinities, signed
+/// zero, subnormals, integer extremes), degenerate shapes (empty axes,
+/// single-element axes), offset views, `copy_into`, and the `F64` lane the
+/// table never touched.
+///
+/// Every row here is a *differential* row like any other, so it costs one
+/// table entry and covers every present and future backend at once.
+fn push_edges(cases: &mut Vec<Case>) {
+    push_non_finite(cases);
+    push_integer_extremes(cases);
+    push_degenerate_shapes(cases);
+    push_offset_views(cases);
+    push_copy_into(cases);
+    push_f64(cases);
+    push_bool_declines(cases);
+    push_extreme_ranks(cases);
+}
+
+/// Rank 0 and rank 5: the two ends of the rank range.
+///
+/// A rank-0 view has one element and *no* axes, so every per-axis loop runs
+/// zero times and the storage index is the offset alone — which is exactly the
+/// field a kernel can drop unnoticed, since there is no stride left to get
+/// wrong. Rank 5 is past the four spatial axes conv works in, so it catches a
+/// kernel that sized a fixed per-axis buffer.
+fn push_extreme_ranks(cases: &mut Vec<Case>) {
+    let scalar = || f32s(&[], &[-1.5]);
+    // A rank-0 view of element 3 of a longer buffer: one element, no axes, and
+    // a non-zero offset that only the offset field can express.
+    let offset_scalar = || {
+        Operand::strided(
+            HostConv::into_cpu_storage(vec![9.0f32, -9.0, 8.0, -1.5, 7.0]),
+            Layout::from_parts(Shape::from([]), Box::from([]), 3)
+                .expect("conformance table: rank-0 offset layout"),
+        )
+    };
+    cases.push(Case::new(
+        "copy_strided.f32.rank0".to_string(),
+        Call::CopyStrided,
+        vec![offset_scalar()],
+    ));
+    cases.push(Case::new(
+        "cast.f32_to_i64.rank0".to_string(),
+        Call::Cast(DType::I64),
+        vec![offset_scalar()],
+    ));
+    cases.push(Case::new(
+        "binary.Add.f32.rank0".to_string(),
+        Call::Binary(BinaryOp::Add),
+        vec![offset_scalar(), scalar()],
+    ));
+    cases.push(Case::new(
+        "binary_scalar.Mul.f32.rank0".to_string(),
+        Call::BinaryScalar(BinaryOp::Mul, 3.0),
+        vec![offset_scalar()],
+    ));
+    cases.push(Case::new(
+        "unary.Relu.f32.rank0".to_string(),
+        Call::Unary(UnaryOp::Relu),
+        vec![offset_scalar()],
+    ));
+    cases.push(Case::new(
+        "compare.Lt.f32.rank0".to_string(),
+        Call::Compare(CmpOp::Lt),
+        vec![offset_scalar(), scalar()],
+    ));
+    cases.push(Case::new(
+        "where_cond.f32.rank0".to_string(),
+        Call::WhereCond,
+        vec![bools(&[], &[true]), offset_scalar(), scalar()],
+    ));
+    cases.push(Case::new(
+        "masked_fill.f32.rank0".to_string(),
+        Call::MaskedFill(-7.0),
+        vec![offset_scalar(), bools(&[], &[true])],
+    ));
+
+    // Rank 5, with two axes transposed so the walk is non-trivial.
+    let wide: Vec<f32> = (0..24).map(|i| i as f32 * 0.5 - 6.0).collect();
+    let rank5 = || {
+        Layout::contiguous([2, 1, 3, 2, 2])
+            .and_then(|layout| layout.transpose(0, 2))
+            .expect("conformance table: rank-5 layout")
+    };
+    let rank5_dense =
+        || Layout::contiguous([3, 1, 2, 2, 2]).expect("conformance table: dense rank-5 layout");
+    let strided5 = || Operand::strided(HostConv::into_cpu_storage(wide.clone()), rank5());
+    cases.push(Case::new(
+        "copy_strided.f32.rank5".to_string(),
+        Call::CopyStrided,
+        vec![strided5()],
+    ));
+    cases.push(Case::new(
+        "binary.Sub.f32.rank5".to_string(),
+        Call::Binary(BinaryOp::Sub),
+        vec![
+            strided5(),
+            Operand::strided(HostConv::into_cpu_storage(wide.clone()), rank5_dense()),
+        ],
+    ));
+    for axis in [0usize, 2, 4] {
+        cases.push(Case::new(
+            format!("reduce.Sum.f32.rank5.axis{axis}"),
+            Call::Reduce(ReduceOp::Sum, axis),
+            vec![strided5()],
+        ));
+    }
+    cases.push(Case::new(
+        "arg_reduce.ArgMax.f32.rank5".to_string(),
+        Call::ArgReduce(ArgReduceOp::ArgMax, 2),
+        vec![strided5()],
+    ));
+    // Three batch axes on the left against a bare rank-2 right-hand side.
+    cases.push(Case::new(
+        "matmul.f32.rank5_batch".to_string(),
+        Call::Matmul,
+        vec![
+            strided5(),
+            f32s(&[2, 3], &[1.0, -2.0, 0.5, 2.0, -1.0, 0.25]),
+        ],
+    ));
+    cases.push(Case::new(
+        "index_select.f32.rank5".to_string(),
+        Call::IndexSelect(2),
+        vec![strided5(), i64s(&[3], &[1, 0, 1])],
+    ));
+    cases.push(Case::new(
+        "gather.f32.rank5".to_string(),
+        Call::Gather(4),
+        vec![
+            strided5(),
+            i64s(
+                &[3, 1, 2, 2, 2],
+                &[
+                    1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1,
+                ],
+            ),
+        ],
+    ));
+}
+
+/// The arithmetic entry points `Bool` has no answer for.
+///
+/// `bool` has no [`NumAcc`](crate::backend::cpu::acc::NumAcc), so it has no
+/// accumulation and therefore no reduction, matmul, convolution, or
+/// accumulating scatter; and it has no arithmetic at all, comparisons living
+/// in [`BackendOps::compare`] instead. These rows exist to prove the decline
+/// keeps happening: a backend that started quietly computing `true + true`
+/// would move from `expected_unsupported` to `matched`, and the self-check's
+/// exact expected-skip list would fail.
+fn push_bool_declines(cases: &mut Vec<Case>) {
+    cases.push(Case::new(
+        "binary.Add.bool".to_string(),
+        Call::Binary(BinaryOp::Add),
+        vec![bools(&[2, 3], &A_BOOL), bools(&[2, 3], &B_BOOL)],
+    ));
+    cases.push(Case::new(
+        "binary_scalar.Add.bool".to_string(),
+        Call::BinaryScalar(BinaryOp::Add, 1.0),
+        vec![bools(&[2, 3], &A_BOOL)],
+    ));
+    cases.push(Case::new(
+        "unary.Neg.bool".to_string(),
+        Call::Unary(UnaryOp::Neg),
+        vec![bools(&[2, 3], &A_BOOL)],
+    ));
+    cases.push(Case::new(
+        "arg_reduce.ArgMax.bool".to_string(),
+        Call::ArgReduce(ArgReduceOp::ArgMax, 1),
+        vec![bools(&[2, 3], &A_BOOL)],
+    ));
+    cases.push(Case::new(
+        "matmul.bool".to_string(),
+        Call::Matmul,
+        vec![bools(&[2, 3], &A_BOOL), bools(&[3, 2], &B_BOOL)],
+    ));
+    cases.push(Case::new(
+        "index_add.bool".to_string(),
+        Call::IndexAdd(0),
+        vec![
+            bools(&[2, 3], &A_BOOL),
+            i64s(&[1], &[1]),
+            bools(&[1, 3], &[true, false, true]),
+        ],
+    ));
+    cases.push(Case::new(
+        "scatter_add.bool".to_string(),
+        Call::ScatterAdd(1),
+        vec![
+            bools(&[2, 3], &A_BOOL),
+            i64s(&[2, 2], &[0, 2, 1, 1]),
+            bools(&[2, 2], &[true, false, true, true]),
+        ],
+    ));
+    cases.push(Case::new(
+        "conv.Conv2d.bool".to_string(),
+        Call::Conv(ConvOp::Conv2d, CONV_DENSE),
+        vec![
+            bools(&[1, 1, 4, 4], &[true; 16]),
+            bools(&[2, 1, 2, 2], &[true; 8]),
+        ],
+    ));
+    cases.push(Case::new(
+        "conv.MaxPool2d.bool".to_string(),
+        Call::Conv(ConvOp::MaxPool2d, CONV_DENSE),
+        vec![bools(&[1, 1, 4, 4], &[true; 16])],
+    ));
+}
+
+/// Shape `[2, 4]`: NaN, both infinities, both zeros, a subnormal, and ordinary
+/// values, so no lane is accidentally uniform.
+const NAN_A: [f32; 8] = [
+    f32::NAN,
+    f32::INFINITY,
+    f32::NEG_INFINITY,
+    -0.0,
+    0.0,
+    1.5,
+    -2.5,
+    3.0,
+];
+/// The partner array, arranged so every interesting pair occurs somewhere:
+/// NaN-vs-number, inf-vs-inf, inf-vs-(-inf), zero-vs-zero.
+const NAN_B: [f32; 8] = [
+    2.0,
+    f32::INFINITY,
+    f32::INFINITY,
+    0.0,
+    -0.0,
+    f32::NAN,
+    -2.5,
+    // The smallest positive subnormal `f32`: it survives the host conversion
+    // to F16/BF16 as a zero, identically on both sides, so the row stays a
+    // fair comparison while the F32 lane really does carry a subnormal.
+    1.0e-45,
+];
+
+/// Non-finite and signed-zero inputs to every element-wise family.
+///
+/// `maximum`/`minimum`/`relu`/`max`/`argmax` are the ops with a genuine choice
+/// to make here, and the fixture data everywhere else in the table is finite,
+/// so without these rows a backend could pick the opposite convention for all
+/// of them and stay green.
+fn push_non_finite(cases: &mut Vec<Case>) {
+    for op in BINARY_OPS {
+        cases.push(Case::new(
+            format!("binary.{op:?}.f32.non_finite"),
+            Call::Binary(op),
+            vec![f32s(&[2, 4], &NAN_A), f32s(&[2, 4], &NAN_B)],
+        ));
+        cases.push(Case::new(
+            format!("binary_scalar.{op:?}.f32.infinite"),
+            Call::BinaryScalar(op, f64::INFINITY),
+            vec![f32s(&[2, 4], &NAN_A)],
+        ));
+    }
+    for op in UNARY_OPS {
+        cases.push(Case::new(
+            format!("unary.{op:?}.f32.non_finite"),
+            Call::Unary(op),
+            vec![f32s(&[2, 4], &NAN_A)],
+        ));
+    }
+    for op in CMP_OPS {
+        // Every comparison against NaN is false, including `Ne`… which is
+        // true. A kernel that folds `Ne` into `!Eq` gets this wrong.
+        cases.push(Case::new(
+            format!("compare.{op:?}.f32.non_finite"),
+            Call::Compare(op),
+            vec![f32s(&[2, 4], &NAN_A), f32s(&[2, 4], &NAN_B)],
+        ));
+    }
+    for op in REDUCE_OPS {
+        for axis in [0usize, 1] {
+            cases.push(Case::new(
+                format!("reduce.{op:?}.f32.non_finite.axis{axis}"),
+                Call::Reduce(op, axis),
+                vec![f32s(&[2, 4], &NAN_A)],
+            ));
+        }
+    }
+    for op in [ArgReduceOp::ArgMax, ArgReduceOp::ArgMin] {
+        // A NaN must win *both* directions, so `max`/`argmax` name the same
+        // element. Both axes, because the NaN is in a different position
+        // relative to the walk in each.
+        for axis in [0usize, 1] {
+            cases.push(Case::new(
+                format!("arg_reduce.{op:?}.f32.non_finite.axis{axis}"),
+                Call::ArgReduce(op, axis),
+                vec![f32s(&[2, 4], &NAN_A)],
+            ));
+        }
+    }
+    cases.push(Case::new(
+        "matmul.f32.non_finite".to_string(),
+        Call::Matmul,
+        vec![f32s(&[2, 4], &NAN_A), f32s(&[4, 2], &NAN_B)],
+    ));
+    cases.push(Case::new(
+        "where_cond.f32.non_finite".to_string(),
+        Call::WhereCond,
+        vec![
+            bools(
+                &[2, 4],
+                &[true, false, true, false, true, false, true, false],
+            ),
+            f32s(&[2, 4], &NAN_A),
+            f32s(&[2, 4], &NAN_B),
+        ],
+    ));
+    cases.push(Case::new(
+        "masked_fill.f32.non_finite".to_string(),
+        Call::MaskedFill(f64::NEG_INFINITY),
+        vec![
+            f32s(&[2, 4], &NAN_A),
+            bools(
+                &[2, 4],
+                &[true, false, true, false, true, false, true, false],
+            ),
+        ],
+    ));
+    // Float→int saturation is a documented conversion, not UB: `NaN as i64` is
+    // 0 and the infinities clamp to the extremes.
+    cases.push(Case::new(
+        "cast.f32_to_i64.non_finite".to_string(),
+        Call::Cast(DType::I64),
+        vec![f32s(&[2, 4], &NAN_A)],
+    ));
+    cases.push(Case::new(
+        "cast.f32_to_bool.non_finite".to_string(),
+        Call::Cast(DType::Bool),
+        vec![f32s(&[2, 4], &NAN_A)],
+    ));
+    // The reduced dtypes carry the same policy at their own precision.
+    for dtype in [DType::F16, DType::BF16] {
+        cases.push(Case::new(
+            format!("binary.Maximum.{dtype}.non_finite"),
+            Call::Binary(BinaryOp::Maximum),
+            vec![
+                reduceds(dtype, &[2, 4], &NAN_A),
+                reduceds(dtype, &[2, 4], &NAN_B),
+            ],
+        ));
+        cases.push(Case::new(
+            format!("reduce.Max.{dtype}.non_finite"),
+            Call::Reduce(ReduceOp::Max, 1),
+            vec![reduceds(dtype, &[2, 4], &NAN_A)],
+        ));
+        cases.push(Case::new(
+            format!("arg_reduce.ArgMax.{dtype}.non_finite"),
+            Call::ArgReduce(ArgReduceOp::ArgMax, 1),
+            vec![reduceds(dtype, &[2, 4], &NAN_A)],
+        ));
+        cases.push(Case::new(
+            format!("unary.Relu.{dtype}.non_finite"),
+            Call::Unary(UnaryOp::Relu),
+            vec![reduceds(dtype, &[2, 4], &NAN_A)],
+        ));
+    }
+    // A fully `-inf` softmax row is the masked-attention case; a NaN row must
+    // stay NaN rather than being laundered into a uniform distribution.
+    for dtype in [DType::F16, DType::F32] {
+        cases.push(Case::new(
+            format!("fused.Softmax.{dtype}.non_finite"),
+            Call::Fused(FusedOp::Softmax, vec![]),
+            vec![floats(
+                dtype,
+                &[3, 3],
+                &[
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                    1.0,
+                    f32::NAN,
+                    2.0,
+                    0.5,
+                    f32::NEG_INFINITY,
+                    1.5,
+                ],
+            )],
+        ));
+    }
+}
+
+/// `i64` at the edges: wrapping arithmetic, the two division special cases,
+/// and the extremes under `Neg`/`Abs` and accumulation.
+///
+/// The contract is *wrapping*, and wrapping is exactly what a kernel gets
+/// wrong silently: nothing panics, the answer is simply a different large
+/// number. The only division-by-zero and `i64::MIN / -1` values pinned before
+/// this lived behind the `metal` feature, so a default `cargo test` never
+/// checked them at all.
+fn push_integer_extremes(cases: &mut Vec<Case>) {
+    const EXTREME_A: [i64; 6] = [i64::MIN, i64::MAX, i64::MIN, i64::MAX, -7, i64::MIN];
+    const EXTREME_B: [i64; 6] = [-1, 1, -1, 2, 0, i64::MIN];
+    for op in BINARY_OPS {
+        cases.push(Case::new(
+            format!("binary.{op:?}.i64.extremes"),
+            Call::Binary(op),
+            vec![i64s(&[2, 3], &EXTREME_A), i64s(&[2, 3], &EXTREME_B)],
+        ));
+        for (label, scalar) in [("zero", 0.0), ("minus_one", -1.0)] {
+            cases.push(Case::new(
+                format!("binary_scalar.{op:?}.i64.{label}"),
+                Call::BinaryScalar(op, scalar),
+                vec![i64s(&[2, 3], &EXTREME_A)],
+            ));
+        }
+    }
+    for op in [UnaryOp::Neg, UnaryOp::Abs] {
+        cases.push(Case::new(
+            format!("unary.{op:?}.i64.extremes"),
+            Call::Unary(op),
+            vec![i64s(&[2, 3], &EXTREME_A)],
+        ));
+    }
+    for op in REDUCE_OPS {
+        cases.push(Case::new(
+            format!("reduce.{op:?}.i64.extremes"),
+            Call::Reduce(op, 1),
+            vec![i64s(&[2, 3], &EXTREME_A)],
+        ));
+    }
+    for op in [ArgReduceOp::ArgMax, ArgReduceOp::ArgMin] {
+        cases.push(Case::new(
+            format!("arg_reduce.{op:?}.i64.extremes"),
+            Call::ArgReduce(op, 1),
+            vec![i64s(&[2, 3], &EXTREME_A)],
+        ));
+    }
+    cases.push(Case::new(
+        "matmul.i64.extremes".to_string(),
+        Call::Matmul,
+        vec![i64s(&[2, 3], &EXTREME_A), i64s(&[3, 2], &EXTREME_B)],
+    ));
+    cases.push(Case::new(
+        "index_add.i64.extremes".to_string(),
+        Call::IndexAdd(0),
+        vec![
+            i64s(&[2, 3], &EXTREME_A),
+            i64s(&[2], &[0, 0]),
+            i64s(&[2, 3], &EXTREME_A),
+        ],
+    ));
+    cases.push(Case::new(
+        "cast.i64_to_f32.extremes".to_string(),
+        Call::Cast(DType::F32),
+        vec![i64s(&[2, 3], &EXTREME_A)],
+    ));
+}
+
+/// Empty axes and single-element axes.
+///
+/// `sum` over an empty axis is legal (the identity), and `narrow(axis, i, 0)`
+/// or a zero batch makes it reachable, so every entry point has to survive a
+/// zero-length operand without dividing by the axis length or dispatching a
+/// zero-thread grid it then reads the output of.
+fn push_degenerate_shapes(cases: &mut Vec<Case>) {
+    let empty_f32 = || f32s(&[2, 0], &[]);
+    let empty_i64 = || i64s(&[2, 0], &[]);
+    let empty_bool = || bools(&[2, 0], &[]);
+
+    cases.push(Case::new(
+        "copy_strided.f32.empty".to_string(),
+        Call::CopyStrided,
+        vec![empty_f32()],
+    ));
+    cases.push(Case::new(
+        "cast.f32_to_i64.empty".to_string(),
+        Call::Cast(DType::I64),
+        vec![empty_f32()],
+    ));
+    cases.push(Case::new(
+        "full.f32.empty".to_string(),
+        Call::Full {
+            len: 0,
+            dtype: DType::F32,
+            value: 1.0,
+        },
+        vec![],
+    ));
+    for op in BINARY_OPS {
+        cases.push(Case::new(
+            format!("binary.{op:?}.f32.empty"),
+            Call::Binary(op),
+            vec![empty_f32(), empty_f32()],
+        ));
+    }
+    cases.push(Case::new(
+        "binary_scalar.Add.f32.empty".to_string(),
+        Call::BinaryScalar(BinaryOp::Add, 2.0),
+        vec![empty_f32()],
+    ));
+    cases.push(Case::new(
+        "unary.Relu.f32.empty".to_string(),
+        Call::Unary(UnaryOp::Relu),
+        vec![empty_f32()],
+    ));
+    cases.push(Case::new(
+        "compare.Lt.f32.empty".to_string(),
+        Call::Compare(CmpOp::Lt),
+        vec![empty_f32(), empty_f32()],
+    ));
+    cases.push(Case::new(
+        "where_cond.f32.empty".to_string(),
+        Call::WhereCond,
+        vec![empty_bool(), empty_f32(), empty_f32()],
+    ));
+    cases.push(Case::new(
+        "masked_fill.f32.empty".to_string(),
+        Call::MaskedFill(1.0),
+        vec![empty_f32(), empty_bool()],
+    ));
+    // Summing over the empty axis keeps the *other* axis, so the output is a
+    // non-empty buffer of identities: the one shape where a backend that sizes
+    // its grid as `num_elements` writes nothing at all.
+    cases.push(Case::new(
+        "reduce.Sum.f32.empty_axis".to_string(),
+        Call::Reduce(ReduceOp::Sum, 1),
+        vec![empty_f32()],
+    ));
+    cases.push(Case::new(
+        "reduce.Sum.i64.empty_axis".to_string(),
+        Call::Reduce(ReduceOp::Sum, 1),
+        vec![empty_i64()],
+    ));
+    // Reducing the *non-empty* axis of an empty tensor stays empty.
+    cases.push(Case::new(
+        "reduce.Sum.f32.empty_output".to_string(),
+        Call::Reduce(ReduceOp::Sum, 0),
+        vec![empty_f32()],
+    ));
+    cases.push(Case::new(
+        "matmul.f32.empty_inner".to_string(),
+        Call::Matmul,
+        vec![f32s(&[2, 0], &[]), f32s(&[0, 3], &[])],
+    ));
+    cases.push(Case::new(
+        "matmul.f32.empty_batch".to_string(),
+        Call::Matmul,
+        vec![f32s(&[0, 2, 3], &[]), f32s(&[0, 3, 2], &[])],
+    ));
+    cases.push(Case::new(
+        "index_select.f32.empty_indices".to_string(),
+        Call::IndexSelect(1),
+        vec![f32s(&[2, 3], &A_F32), i64s(&[0], &[])],
+    ));
+    cases.push(Case::new(
+        "index_add.f32.empty_indices".to_string(),
+        Call::IndexAdd(0),
+        vec![f32s(&[2, 3], &A_F32), i64s(&[0], &[]), f32s(&[0, 3], &[])],
+    ));
+    cases.push(Case::new(
+        "gather.f32.empty_indices".to_string(),
+        Call::Gather(1),
+        vec![f32s(&[2, 3], &A_F32), i64s(&[2, 0], &[])],
+    ));
+    cases.push(Case::new(
+        "scatter_add.f32.empty_indices".to_string(),
+        Call::ScatterAdd(1),
+        vec![
+            f32s(&[2, 3], &A_F32),
+            i64s(&[2, 0], &[]),
+            f32s(&[2, 0], &[]),
+        ],
+    ));
+    // A zero batch through conv and pooling: the geometry is valid, the output
+    // is empty, and nothing may divide by the batch count.
+    let empty_conv = Conv2dParams {
+        kernel: (2, 2),
+        stride: (1, 1),
+        padding: (0, 0),
+        dilation: (1, 1),
+    };
+    cases.push(Case::new(
+        "conv.Conv2d.f32.empty_batch".to_string(),
+        Call::Conv(ConvOp::Conv2d, empty_conv),
+        vec![
+            f32s(&[0, 1, 4, 4], &[]),
+            f32s(&[2, 1, 2, 2], &[1.0, -0.5, 0.25, 2.0, 0.0, 1.5, -1.0, 0.75]),
+        ],
+    ));
+    cases.push(Case::new(
+        "conv.MaxPool2d.f32.empty_batch".to_string(),
+        Call::Conv(ConvOp::MaxPool2d, empty_conv),
+        vec![f32s(&[0, 1, 4, 4], &[])],
+    ));
+
+    // Single-element axes: `[1, 1]` exercises every divisor-of-one path, and a
+    // width-1 softmax/LayerNorm row must normalize to exactly 1 / to the bias.
+    cases.push(Case::new(
+        "reduce.Mean.f32.unit_axis".to_string(),
+        Call::Reduce(ReduceOp::Mean, 1),
+        vec![f32s(&[3, 1], &[1.5, -2.5, 0.0])],
+    ));
+    cases.push(Case::new(
+        "matmul.f32.unit_inner".to_string(),
+        Call::Matmul,
+        vec![
+            f32s(&[2, 1], &[1.5, -2.5]),
+            f32s(&[1, 3], &[2.0, -1.0, 0.5]),
+        ],
+    ));
+    for dtype in [DType::F16, DType::F32] {
+        cases.push(Case::new(
+            format!("fused.Softmax.{dtype}.unit_width"),
+            Call::Fused(FusedOp::Softmax, vec![]),
+            vec![floats(dtype, &[3, 1], &[1.5, -2.5, 0.0])],
+        ));
+        cases.push(Case::new(
+            format!("fused.LayerNorm.{dtype}.unit_width"),
+            Call::Fused(FusedOp::LayerNorm, vec![1e-3]),
+            vec![
+                floats(dtype, &[3, 1], &[1.5, -2.5, 0.0]),
+                floats(dtype, &[1], &[2.0]),
+                floats(dtype, &[1], &[-0.5]),
+            ],
+        ));
+    }
+}
+
+/// Views with a non-zero storage offset.
+///
+/// `narrow` produces them constantly, and an offset is the one layout field a
+/// kernel can drop without any shape check noticing: the result has the right
+/// size and plausible values, just read from the wrong place.
+fn push_offset_views(cases: &mut Vec<Case>) {
+    // A `[2, 3]` window starting at element 2 of an 8-element buffer.
+    let offset = || {
+        Layout::from_parts(Shape::from([2, 3]), Box::from([3usize, 1]), 2)
+            .expect("conformance table: offset layout")
+    };
+    // The same window, transposed: offset *and* non-canonical strides.
+    let offset_t = || {
+        Layout::from_parts(Shape::from([3, 2]), Box::from([1usize, 3]), 2)
+            .expect("conformance table: transposed offset layout")
+    };
+    const WIDE: [f32; 8] = [9.0, -9.0, 1.0, -2.0, 3.0, -4.0, 5.0, 6.5];
+    const WIDE_B: [f32; 8] = [-8.0, 8.0, 0.5, 2.0, -1.0, 4.0, 0.25, -3.0];
+    let wide = |data: &[f32]| Operand::strided(HostConv::into_cpu_storage(data.to_vec()), offset());
+    let wide_t =
+        |data: &[f32]| Operand::strided(HostConv::into_cpu_storage(data.to_vec()), offset_t());
+
+    cases.push(Case::new(
+        "copy_strided.f32.offset".to_string(),
+        Call::CopyStrided,
+        vec![wide(&WIDE)],
+    ));
+    cases.push(Case::new(
+        "cast.f32_to_i64.offset".to_string(),
+        Call::Cast(DType::I64),
+        vec![wide(&WIDE)],
+    ));
+    cases.push(Case::new(
+        "binary.Sub.f32.offset".to_string(),
+        Call::Binary(BinaryOp::Sub),
+        vec![wide(&WIDE), wide(&WIDE_B)],
+    ));
+    cases.push(Case::new(
+        "binary_scalar.Sub.f32.offset".to_string(),
+        Call::BinaryScalar(BinaryOp::Sub, 2.5),
+        vec![wide(&WIDE)],
+    ));
+    cases.push(Case::new(
+        "unary.Neg.f32.offset".to_string(),
+        Call::Unary(UnaryOp::Neg),
+        vec![wide(&WIDE)],
+    ));
+    cases.push(Case::new(
+        "compare.Lt.f32.offset".to_string(),
+        Call::Compare(CmpOp::Lt),
+        vec![wide(&WIDE), wide(&WIDE_B)],
+    ));
+    cases.push(Case::new(
+        "where_cond.f32.offset".to_string(),
+        Call::WhereCond,
+        vec![
+            Operand::strided(
+                HostConv::into_cpu_storage(vec![
+                    false, false, true, false, true, false, true, true,
+                ]),
+                offset(),
+            ),
+            wide(&WIDE),
+            wide(&WIDE_B),
+        ],
+    ));
+    cases.push(Case::new(
+        "masked_fill.f32.offset".to_string(),
+        Call::MaskedFill(-7.0),
+        vec![
+            wide(&WIDE),
+            Operand::strided(
+                HostConv::into_cpu_storage(vec![
+                    false, false, true, false, true, false, true, true,
+                ]),
+                offset(),
+            ),
+        ],
+    ));
+    for op in REDUCE_OPS {
+        cases.push(Case::new(
+            format!("reduce.{op:?}.f32.offset"),
+            Call::Reduce(op, 1),
+            vec![wide(&WIDE)],
+        ));
+    }
+    cases.push(Case::new(
+        "arg_reduce.ArgMax.f32.offset".to_string(),
+        Call::ArgReduce(ArgReduceOp::ArgMax, 0),
+        vec![wide(&WIDE)],
+    ));
+    cases.push(Case::new(
+        "matmul.f32.offset".to_string(),
+        Call::Matmul,
+        vec![wide(&WIDE), wide_t(&WIDE_B)],
+    ));
+    cases.push(Case::new(
+        "index_select.f32.offset".to_string(),
+        Call::IndexSelect(1),
+        vec![wide(&WIDE), i64s(&[3], &[2, 0, 1])],
+    ));
+    cases.push(Case::new(
+        "gather.f32.offset".to_string(),
+        Call::Gather(1),
+        vec![wide(&WIDE), i64s(&[2, 2], &[2, 0, 1, 1])],
+    ));
+    cases.push(Case::new(
+        "index_add.f32.offset".to_string(),
+        Call::IndexAdd(0),
+        vec![wide(&WIDE), i64s(&[2], &[1, 1]), wide(&WIDE_B)],
+    ));
+    cases.push(Case::new(
+        "scatter_add.f32.offset".to_string(),
+        Call::ScatterAdd(1),
+        vec![wide(&WIDE), i64s(&[2, 2], &[2, 0, 1, 1]), wide(&WIDE_B)],
+    ));
+    // A conv whose input is an offset window of a larger buffer.
+    let conv_offset =
+        Layout::from_parts(Shape::from([1, 1, 4, 4]), Box::from([16usize, 16, 4, 1]), 4)
+            .expect("conformance table: offset conv layout");
+    let conv_input: Vec<f32> = (0..20).map(|i| i as f32 * 0.5 - 3.0).collect();
+    cases.push(Case::new(
+        "conv.Conv2d.f32.offset".to_string(),
+        Call::Conv(ConvOp::Conv2d, CONV_DENSE),
+        vec![
+            Operand::strided(HostConv::into_cpu_storage(conv_input), conv_offset),
+            f32s(&[2, 1, 2, 2], &[1.0, -0.5, 0.25, 2.0, 0.0, 1.5, -1.0, 0.75]),
+        ],
+    ));
+}
+
+/// The dense 2×2 geometry, shared by the offset-conv and F64 conv rows.
+const CONV_DENSE: Conv2dParams = Conv2dParams {
+    kernel: (2, 2),
+    stride: (1, 1),
+    padding: (0, 0),
+    dilation: (1, 1),
+};
+
+/// [`BackendOps::copy_into`], the entry point no test reached at all.
+///
+/// It is the device-side assembly primitive behind `cat`/`stack`/`pad`, and
+/// unlike every other entry point its result is a *mutated destination*, so
+/// the row hands the whole destination back: a kernel that writes the region
+/// contiguously instead of through `dst_layout` corrupts the surroundings, and
+/// only comparing the untouched slots catches it.
+fn push_copy_into(cases: &mut Vec<Case>) {
+    for (label, src) in [
+        ("f32", f32s(&[2, 3], &A_F32)),
+        ("i64", i64s(&[2, 3], &A_I64)),
+        ("bool", bools(&[2, 3], &A_BOOL)),
+        ("f16", reduceds(DType::F16, &[2, 3], &A_F32)),
+        ("bf16", reduceds(DType::BF16, &[2, 3], &A_F32)),
+        ("f64", floats(DType::F64, &[2, 3], &A_F32)),
+    ] {
+        // Copy into rows 1..3 of a [4, 3] destination.
+        cases.push(Case::new(
+            format!("copy_into.{label}.axis0"),
+            Call::CopyInto {
+                dst_dims: vec![4, 3],
+                fill: -1.0,
+                axis: 0,
+                start: 1,
+            },
+            vec![src],
+        ));
+    }
+    // A destination region on the *inner* axis is the one `cat` uses that is
+    // not a straight run of storage.
+    cases.push(Case::new(
+        "copy_into.f32.axis1".to_string(),
+        Call::CopyInto {
+            dst_dims: vec![2, 7],
+            fill: -1.0,
+            axis: 1,
+            start: 2,
+        },
+        vec![f32s(&[2, 3], &A_F32)],
+    ));
+    // …and a strided source into that inner region: both cursors non-trivial.
+    cases.push(Case::new(
+        "copy_into.f32.strided_src".to_string(),
+        Call::CopyInto {
+            dst_dims: vec![3, 5],
+            fill: -1.0,
+            axis: 1,
+            start: 1,
+        },
+        vec![f32s_transposed(&A_F32)],
+    ));
+    cases.push(Case::new(
+        "copy_into.f32.broadcast_src".to_string(),
+        Call::CopyInto {
+            dst_dims: vec![3, 4],
+            fill: -1.0,
+            axis: 1,
+            start: 1,
+        },
+        vec![f32s_broadcast(&[1.0, 2.0, 3.0])],
+    ));
+    cases.push(Case::new(
+        "copy_into.f32.empty".to_string(),
+        Call::CopyInto {
+            dst_dims: vec![2, 3],
+            fill: -1.0,
+            axis: 1,
+            start: 1,
+        },
+        vec![f32s(&[2, 0], &[])],
+    ));
+}
+
+/// The `F64` lane, which the table never touched.
+///
+/// The CPU kernels implement `F64` in full — every match arm is live — but
+/// before this section nothing in the suite instantiated one, so a broken
+/// `F64` arm in any kernel was invisible to the conformance gate. Metal
+/// declares `F64` outside its capability, so these rows land in
+/// `expected_unsupported` there and hold only the reference to account, which
+/// is exactly what a per-backend capability declaration is for.
+fn push_f64(cases: &mut Vec<Case>) {
+    const D: DType = DType::F64;
+    cases.push(Case::new(
+        "full.f64".to_string(),
+        Call::Full {
+            len: 6,
+            dtype: D,
+            value: -1.5,
+        },
+        vec![],
+    ));
+    // Both F64 cast directions are the deferred lane: they must decline
+    // loudly, and the row is what proves the decline still happens.
+    cases.push(Case::new(
+        "cast.f32_to_f64".to_string(),
+        Call::Cast(D),
+        vec![f32s(&[2, 3], &A_F32)],
+    ));
+    cases.push(Case::new(
+        "cast.f64_to_f32".to_string(),
+        Call::Cast(DType::F32),
+        vec![floats(D, &[2, 3], &A_F32)],
+    ));
+    cases.push(Case::new(
+        "copy_strided.f64.transposed".to_string(),
+        Call::CopyStrided,
+        vec![floats_strided(
+            D,
+            &A_F32,
+            Layout::contiguous([2, 3])
+                .and_then(|layout| layout.transpose(0, 1))
+                .expect("conformance table: transposable f64 layout"),
+        )],
+    ));
+    for op in BINARY_OPS {
+        cases.push(Case::new(
+            format!("binary.{op:?}.f64"),
+            Call::Binary(op),
+            vec![floats(D, &[2, 3], &A_F32), floats(D, &[2, 3], &B_F32)],
+        ));
+        cases.push(Case::new(
+            format!("binary_scalar.{op:?}.f64"),
+            Call::BinaryScalar(op, 2.5),
+            vec![floats(D, &[2, 3], &A_F32)],
+        ));
+    }
+    for op in UNARY_OPS {
+        cases.push(Case::new(
+            format!("unary.{op:?}.f64"),
+            Call::Unary(op),
+            vec![floats(D, &[2, 3], &P_F32)],
+        ));
+    }
+    for op in CMP_OPS {
+        cases.push(Case::new(
+            format!("compare.{op:?}.f64"),
+            Call::Compare(op),
+            vec![floats(D, &[2, 3], &A_F32), floats(D, &[2, 3], &B_F32)],
+        ));
+    }
+    cases.push(Case::new(
+        "where_cond.f64".to_string(),
+        Call::WhereCond,
+        vec![
+            bools(&[2, 3], &A_BOOL),
+            floats(D, &[2, 3], &A_F32),
+            floats(D, &[2, 3], &B_F32),
+        ],
+    ));
+    cases.push(Case::new(
+        "masked_fill.f64".to_string(),
+        Call::MaskedFill(-7.0),
+        vec![floats(D, &[2, 3], &A_F32), bools(&[2, 3], &A_BOOL)],
+    ));
+    for op in REDUCE_OPS {
+        for axis in [0usize, 1] {
+            cases.push(Case::new(
+                format!("reduce.{op:?}.f64.axis{axis}"),
+                Call::Reduce(op, axis),
+                vec![floats(D, &[2, 3], &A_F32)],
+            ));
+        }
+    }
+    for op in [ArgReduceOp::ArgMax, ArgReduceOp::ArgMin] {
+        cases.push(Case::new(
+            format!("arg_reduce.{op:?}.f64"),
+            Call::ArgReduce(op, 1),
+            vec![floats(D, &[2, 3], &A_F32)],
+        ));
+    }
+    cases.push(Case::new(
+        "matmul.f64.2d".to_string(),
+        Call::Matmul,
+        vec![floats(D, &[2, 3], &A_F32), floats(D, &[3, 2], &B_F32)],
+    ));
+    cases.push(Case::new(
+        "index_select.f64.axis1".to_string(),
+        Call::IndexSelect(1),
+        vec![floats(D, &[2, 3], &A_F32), i64s(&[4], &[2, 0, 2, 1])],
+    ));
+    cases.push(Case::new(
+        "index_add.f64.axis0".to_string(),
+        Call::IndexAdd(0),
+        vec![
+            floats(D, &[2, 3], &A_F32),
+            i64s(&[1], &[1]),
+            floats(D, &[1, 3], &[1.0, 2.0, 3.0]),
+        ],
+    ));
+    cases.push(Case::new(
+        "gather.f64.axis1".to_string(),
+        Call::Gather(1),
+        vec![floats(D, &[2, 3], &A_F32), i64s(&[2, 2], &[0, 2, 1, 1])],
+    ));
+    cases.push(Case::new(
+        "scatter_add.f64.axis1".to_string(),
+        Call::ScatterAdd(1),
+        vec![
+            floats(D, &[2, 3], &A_F32),
+            i64s(&[2, 2], &[0, 2, 1, 1]),
+            floats(D, &[2, 2], &[10.0, 20.0, 30.0, 40.0]),
+        ],
+    ));
+    let conv_input: Vec<f32> = (0..16).map(|i| i as f32 * 0.5 - 3.0).collect();
+    let conv_weight = [1.0f32, -0.5, 0.25, 2.0, 0.0, 1.5, -1.0, 0.75];
+    cases.push(Case::new(
+        "conv.Conv2d.f64.dense".to_string(),
+        Call::Conv(ConvOp::Conv2d, CONV_DENSE),
+        vec![
+            floats(D, &[1, 1, 4, 4], &conv_input),
+            floats(D, &[2, 1, 2, 2], &conv_weight),
+        ],
+    ));
+    for op in [ConvOp::MaxPool2d, ConvOp::AvgPool2d] {
+        cases.push(Case::new(
+            format!("conv.{op:?}.f64.dense"),
+            Call::Conv(op, CONV_DENSE),
+            vec![floats(D, &[1, 1, 4, 4], &conv_input)],
         ));
     }
 }
@@ -1285,9 +2760,15 @@ mod tests {
         );
         report.into_result(Device::Cpu).expect("cpu self-check");
         assert!(matched > 100, "suite is too thin: {matched} matched cases");
-        // Exactly the rows the op enums put out of contract: the float-only
-        // unaries on `I64`, and reductions over `Bool`. Anything else
-        // appearing here means a kernel silently lost a dtype.
+        // Exactly the rows the op enums put out of contract — nothing else may
+        // appear here, because anything else means a kernel silently lost a
+        // dtype and `expected_unsupported` quietly excused it:
+        //
+        // - the float-only unaries on `I64` (`UnaryOp`'s contract);
+        // - every accumulating or arithmetic entry point on `Bool`, which has
+        //   no `NumAcc` and no arithmetic;
+        // - every fused variant on `I64`/`Bool`, which have no `FloatAcc`;
+        // - both `F64` cast lanes, which `BackendOps::cast` defers.
         let expected: Vec<String> = ["Relu", "Gelu", "Exp", "Ln", "Sqrt", "Tanh", "Sigmoid"]
             .iter()
             .map(|op| format!("unary.{op}.i64"))
@@ -1295,6 +2776,28 @@ mod tests {
                 ["Sum", "Mean", "Max", "Min"]
                     .iter()
                     .map(|op| format!("reduce.{op}.bool")),
+            )
+            .chain(
+                [
+                    "fused.Softmax.i64",
+                    "fused.Softmax.bool",
+                    "fused.LayerNorm.i64",
+                    "fused.SgdStep.i64",
+                    "fused.AdamStep.i64",
+                    "cast.f32_to_f64",
+                    "cast.f64_to_f32",
+                    "binary.Add.bool",
+                    "binary_scalar.Add.bool",
+                    "unary.Neg.bool",
+                    "arg_reduce.ArgMax.bool",
+                    "matmul.bool",
+                    "index_add.bool",
+                    "scatter_add.bool",
+                    "conv.Conv2d.bool",
+                    "conv.MaxPool2d.bool",
+                ]
+                .iter()
+                .map(|name| (*name).to_string()),
             )
             .collect();
         assert_eq!(skipped, expected);

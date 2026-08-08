@@ -250,7 +250,19 @@ kernel void unary_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[b
     turn a diverged activation back into 0. */ \
  if(gid>=len)return;float v=float(x[view_offset(gid,d,s,r,off)]),z;switch(op){case 0:z=isnan(v)?v:max(v,0.0f);break; \
  case 1:z=0.5f*v*(1.0f+erf_accurate(v*0.7071067811865475f));break;case 2:z=exp(v);break;case 3:z=log(v);break; \
- case 4:z=sqrt(v);break;case 5:z=tanh(v);break;case 6:z=1.0f/(1.0f+exp(-v));break;case 7:z=-v;break;default:z=fabs(v);}out[gid]=FROM(z);}
+ /* MSL's tanh evaluates its positive branch as (exp(2x)-1)/(exp(2x)+1), so it
+    breaks well before infinity: exp(2x) loses precision and then overflows,
+    giving 0 for x in [43.75, 44.25] and NaN from 44.5 up, where the CPU
+    reference (and PyTorch) saturate to 1. A silently wrong finite 0 from a
+    saturating activation is the worse half of that.
+    tanh is within one f32 ulp of +/-1 from |x| >= 10 (tanh(10) = 1 - 4.1e-9,
+    against a spacing of 6.0e-8 below 1), so saturating there is exact in f32
+    and avoids the broken region entirely; native tanh is used below it, where
+    it agrees with the CPU. Evaluating on |x| and restoring the sign uses that
+    tanh is odd, which also repairs tanh(-0): MSL returns +0 there, where the
+    CPU keeps the sign. fabs(NaN) is NaN and NaN >= 10 is false, so a NaN still
+    reaches tanh and propagates (copysign only moves the sign bit). */ \
+ case 4:z=sqrt(v);break;case 5:{float a=fabs(v);z=copysign(a>=10.0f?1.0f:tanh(a),v);}break;case 6:z=1.0f/(1.0f+exp(-v));break;case 7:z=-v;break;default:z=fabs(v);}out[gid]=FROM(z);}
 FLOAT_UNARY(half,f16,FROM_F16)
 FLOAT_UNARY(float,f32,FROM_F32)
 
@@ -322,8 +334,14 @@ kernel void scatter_add_##NAME(device const TYPE* x [[buffer(0)]],device const l
  constant ulong* xd [[buffer(4)]],constant ulong* xs [[buffer(5)]],constant uint& xr [[buffer(6)]],constant ulong& xo [[buffer(7)]], \
  constant ulong* id [[buffer(8)]],constant ulong* is [[buffer(9)]],constant uint& ir [[buffer(10)]],constant ulong& io [[buffer(11)]], \
  constant ulong* sd [[buffer(12)]],constant ulong* ss [[buffer(13)]],constant uint& sr [[buffer(14)]],constant ulong& so [[buffer(15)]], \
- constant uint& axis [[buffer(16)]],constant ulong& out_len [[buffer(17)]],constant ulong& src_len [[buffer(18)]],uint gid [[thread_position_in_grid]]){if(gid>=out_len)return;ACC acc=TO_ACC(x[view_offset(gid,xd,xs,xr,xo)]); \
- for(ulong q=0;q<src_len;q++){bool same=true;for(uint a=0;a<xr;a++){ulong dc=logical_coord(gid,xd,xr,a),sc=logical_coord(q,id,ir,a);if(a==axis){long raw=idx[view_offset(q,id,is,ir,io)];if(raw<0||ulong(raw)>=xd[axis]){same=false;break;}sc=ulong(raw);}if(dc!=sc)same=false;}if(same)acc+=TO_ACC(src[view_offset(q,sd,ss,sr,so)]);}out[gid]=FROM_ACC(acc);}
+ constant uint& axis [[buffer(16)]],constant ulong& out_len [[buffer(17)]],constant ulong& idx_len [[buffer(18)]],uint gid [[thread_position_in_grid]]){if(gid>=out_len)return;ACC acc=TO_ACC(x[view_offset(gid,xd,xs,xr,xo)]); \
+ /* `q` walks the *index grid*, not `src`. PyTorch's rule is
+    index.size(d) <= src.size(d), so `src` may be strictly larger: walking it
+    instead would visit positions the index grid never names, and decode the
+    same flat `q` against two different shapes. `src` is then addressed at the
+    grid's own coordinates through its strides, which is identical to
+    view_offset when the two shapes agree. */ \
+ for(ulong q=0;q<idx_len;q++){bool same=true;for(uint a=0;a<xr;a++){ulong dc=logical_coord(gid,xd,xr,a),sc=logical_coord(q,id,ir,a);if(a==axis){long raw=idx[view_offset(q,id,is,ir,io)];if(raw<0||ulong(raw)>=xd[axis]){same=false;break;}sc=ulong(raw);}if(dc!=sc)same=false;}if(same){ulong sb=so;for(uint a=0;a<sr;a++)sb+=logical_coord(q,id,ir,a)*ss[a];acc+=TO_ACC(src[sb]);}}out[gid]=FROM_ACC(acc);}
 INDEX_KERNELS(half,float,f16,IDENTITY_F32,FROM_F16)
 INDEX_KERNELS(float,float,f32,IDENTITY_F32,FROM_F32)
 INDEX_KERNELS(long,long,i64,IDENTITY_I64,FROM_I64)
