@@ -12,142 +12,13 @@
 //! sum-saturation bug). The reduced axis is dropped from the result shape;
 //! the op layer re-inserts it for the `_keepdim` spellings.
 
+use crate::backend::cpu::acc::NumAcc;
 use crate::backend::{ArgReduceOp, ReduceOp, View};
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::{CpuStorage, Storage};
-
-/// Wide-accumulator arithmetic used by the reduction kernels.
-///
-/// Implemented for exactly the accumulator types the `Acc` contract yields
-/// for a numeric element (`f32` for `f16`/`bf16`/`f32`, `f64`, `i64`). `Bool`
-/// has `Acc = bool`, which deliberately does not implement this trait: bool
-/// reductions are not part of the kernel contract and are rejected before a
-/// generic reduce is ever instantiated.
-trait Acc: Copy {
-    /// The additive identity (`Sum`/`Mean` seed).
-    const ZERO: Self;
-    /// Widening sum step.
-    fn add(self, other: Self) -> Self;
-    /// Running maximum, propagating NaN (so a NaN anywhere in the axis wins,
-    /// matching PyTorch).
-    fn max(self, other: Self) -> Self;
-    /// Running minimum, propagating NaN.
-    fn min(self, other: Self) -> Self;
-    /// Divide an accumulated sum by a (wide) element count for `Mean`. The
-    /// count is passed as `usize` and widened inside the impl.
-    fn div_count(self, count: usize) -> Self;
-    /// Order two accumulated values for `argmax`/`argmin`, with the first
-    /// occurrence winning a tie (as in PyTorch).
-    ///
-    /// NaN never reaches here: [`arg_reduce_generic`] settles a NaN candidate
-    /// before comparing, because a NaN must win *both* directions and so
-    /// cannot be expressed as a position in any single total order.
-    fn order(self, other: Self) -> std::cmp::Ordering;
-    /// Whether this value is NaN — always `false` for integer accumulators.
-    ///
-    /// Arg-reductions need this because a NaN anywhere in the line is the
-    /// selected element for both `argmax` and `argmin`, which is what keeps
-    /// them consistent with `max`/`min` (both of which propagate NaN).
-    fn is_nan(self) -> bool;
-}
-
-impl Acc for f32 {
-    const ZERO: Self = 0.0;
-    fn add(self, other: Self) -> Self {
-        self + other
-    }
-    fn max(self, other: Self) -> Self {
-        if self.is_nan() || other.is_nan() {
-            f32::NAN
-        } else if self >= other {
-            self
-        } else {
-            other
-        }
-    }
-    fn min(self, other: Self) -> Self {
-        if self.is_nan() || other.is_nan() {
-            f32::NAN
-        } else if self <= other {
-            self
-        } else {
-            other
-        }
-    }
-    fn div_count(self, count: usize) -> Self {
-        self / (count as f32)
-    }
-    fn order(self, other: Self) -> std::cmp::Ordering {
-        self.partial_cmp(&other)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }
-    fn is_nan(self) -> bool {
-        f32::is_nan(self)
-    }
-}
-
-impl Acc for f64 {
-    const ZERO: Self = 0.0;
-    fn add(self, other: Self) -> Self {
-        self + other
-    }
-    fn max(self, other: Self) -> Self {
-        if self.is_nan() || other.is_nan() {
-            f64::NAN
-        } else if self >= other {
-            self
-        } else {
-            other
-        }
-    }
-    fn min(self, other: Self) -> Self {
-        if self.is_nan() || other.is_nan() {
-            f64::NAN
-        } else if self <= other {
-            self
-        } else {
-            other
-        }
-    }
-    fn div_count(self, count: usize) -> Self {
-        self / (count as f64)
-    }
-    fn order(self, other: Self) -> std::cmp::Ordering {
-        self.partial_cmp(&other)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }
-    fn is_nan(self) -> bool {
-        f64::is_nan(self)
-    }
-}
-
-impl Acc for i64 {
-    const ZERO: Self = 0;
-    fn add(self, other: Self) -> Self {
-        self.wrapping_add(other)
-    }
-    fn max(self, other: Self) -> Self {
-        std::cmp::Ord::max(self, other)
-    }
-    fn min(self, other: Self) -> Self {
-        std::cmp::Ord::min(self, other)
-    }
-    fn div_count(self, count: usize) -> Self {
-        // Integer mean truncates toward zero (PyTorch does not offer an
-        // integer mean, but the kernel contract keeps counts wide and casts
-        // once; truncation is the only sensible integer division).
-        self / (count as i64)
-    }
-    fn order(self, other: Self) -> std::cmp::Ordering {
-        std::cmp::Ord::cmp(&self, &other)
-    }
-    fn is_nan(self) -> bool {
-        false
-    }
-}
 
 /// Enumerate the storage indices of the `axis` line through `x` whose other
 /// coordinates are fixed by `outer` (a row-major index into the shape with
@@ -200,7 +71,7 @@ fn reduced_shape(layout: &Layout, axis: usize) -> Shape {
 fn reduce_generic<E>(op: ReduceOp, slice: &[E], layout: &Layout, axis: usize) -> Vec<E>
 where
     E: Element,
-    E::Acc: Acc,
+    E::Acc: NumAcc,
 {
     let out_shape = reduced_shape(layout, axis);
     let out_len = out_shape.num_elements();
@@ -210,7 +81,7 @@ where
         // Seed per op: Sum/Mean from ZERO; Max/Min from the first element so
         // an empty axis (guarded by the op layer's empty-reduction policy)
         // never dereferences a missing element here.
-        let mut acc = <E::Acc as Acc>::ZERO;
+        let mut acc = <E::Acc as NumAcc>::ZERO;
         let mut first = true;
         for_each_on_axis(layout, axis, outer, |_pos, idx| {
             let v = slice[idx].to_acc();
@@ -249,7 +120,7 @@ where
 fn arg_reduce_generic<E>(op: ArgReduceOp, slice: &[E], layout: &Layout, axis: usize) -> Vec<i64>
 where
     E: Element,
-    E::Acc: Acc,
+    E::Acc: NumAcc,
 {
     use std::cmp::Ordering;
     let out_shape = reduced_shape(layout, axis);

@@ -40,6 +40,7 @@
 
 use super::host::{Walk, dense_offset};
 use crate::backend::View;
+use crate::backend::cpu::acc::NumAcc;
 use crate::device::Device;
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
@@ -193,38 +194,6 @@ fn check_dtype(op: &'static str, expected: DType, got: DType) -> Result<()> {
         Ok(())
     } else {
         Err(Error::DTypeMismatch { op, expected, got })
-    }
-}
-
-/// Wide-accumulator addition for the `Acc` contract.
-///
-/// Implemented for exactly the accumulator types
-/// [`Element::Acc`](crate::dtype::Element::Acc) yields for a numeric element
-/// (`f32` for `f16`/`bf16`/`f32`, `f64`, `i64`). `Bool` has `Acc = bool`,
-/// which deliberately does not implement this: accumulating booleans is not
-/// part of the kernel contract, and the dispatch below rejects it loudly.
-trait AccAdd: Copy {
-    /// Widening addition step.
-    fn add(self, other: Self) -> Self;
-}
-
-impl AccAdd for f32 {
-    fn add(self, other: Self) -> Self {
-        self + other
-    }
-}
-
-impl AccAdd for f64 {
-    fn add(self, other: Self) -> Self {
-        self + other
-    }
-}
-
-impl AccAdd for i64 {
-    fn add(self, other: Self) -> Self {
-        // Matches the reduction kernels: integer overflow wraps rather than
-        // panicking in debug and silently differing in release.
-        self.wrapping_add(other)
     }
 }
 
@@ -449,7 +418,7 @@ fn index_add_generic<E>(
 ) -> Vec<E>
 where
     E: Element,
-    E::Acc: AccAdd,
+    E::Acc: NumAcc,
 {
     let x_place = place_values(x_layout.dims());
     let mut acc = seed_acc(x_data, x_layout);
@@ -515,7 +484,7 @@ fn scatter_add_generic<E>(
 ) -> Vec<E>
 where
     E: Element,
-    E::Acc: AccAdd,
+    E::Acc: NumAcc,
 {
     let x_place = place_values(x_layout.dims());
     let mut acc = seed_acc(x_data, x_layout);
@@ -551,7 +520,7 @@ trait AccKernel {
     fn run<E>(&self, x: &[E], src: &[E]) -> Vec<E>
     where
         E: Element,
-        E::Acc: AccAdd;
+        E::Acc: NumAcc;
 }
 
 /// [`index_add`]'s body as an [`AccKernel`].
@@ -566,7 +535,7 @@ impl AccKernel for IndexAddKernel<'_> {
     fn run<E>(&self, x: &[E], src: &[E]) -> Vec<E>
     where
         E: Element,
-        E::Acc: AccAdd,
+        E::Acc: NumAcc,
     {
         index_add_generic(
             x,
@@ -592,7 +561,7 @@ impl AccKernel for ScatterAddKernel<'_> {
     fn run<E>(&self, x: &[E], src: &[E]) -> Vec<E>
     where
         E: Element,
-        E::Acc: AccAdd,
+        E::Acc: NumAcc,
     {
         scatter_add_generic(
             x,

@@ -41,6 +41,7 @@
 //! module's [`Conv2dGeometry`] through the backend contract.
 
 use crate::backend::conv_geometry::Conv2dGeometry;
+use crate::backend::cpu::acc::NumAcc;
 use crate::backend::{Conv2dParams, ConvOp, View};
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
@@ -48,94 +49,6 @@ use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::{CpuStorage, Storage};
 use std::sync::Arc;
-
-// ---------------------------------------------------------------------------
-// Wide accumulation
-// ---------------------------------------------------------------------------
-
-/// Wide-accumulator arithmetic for the conv/pool kernels.
-///
-/// Implemented for exactly the accumulator types the
-/// [`Acc`](crate::dtype::Element::Acc) contract yields for a numeric element
-/// (`f32` for `f16`/`bf16`/`f32`, `f64`, `i64`). `Bool` has `Acc = bool`,
-/// which deliberately does not implement this trait, so a bool convolution is
-/// rejected before any generic code is instantiated.
-trait ConvAcc: Copy {
-    /// Additive identity (window-accumulation seed).
-    const ZERO: Self;
-    /// Widening sum step.
-    fn add(self, other: Self) -> Self;
-    /// Widening product (integers wrap deterministically rather than aborting
-    /// on a debug overflow, matching the matmul kernel).
-    fn mul(self, other: Self) -> Self;
-    /// Divide an accumulated window sum by the window area (`AvgPool2d`).
-    fn div_count(self, count: usize) -> Self;
-    /// Whether `self` strictly beats `other` as a running maximum.
-    ///
-    /// NaN beats every number but not another NaN, so a window containing a
-    /// NaN pools to NaN (PyTorch's propagation) and the **first** NaN — or,
-    /// with no NaN, the first occurrence of the maximum — owns the gradient.
-    fn beats(self, other: Self) -> bool;
-}
-
-impl ConvAcc for f32 {
-    const ZERO: Self = 0.0;
-    fn add(self, other: Self) -> Self {
-        self + other
-    }
-    fn mul(self, other: Self) -> Self {
-        self * other
-    }
-    fn div_count(self, count: usize) -> Self {
-        self / (count as f32)
-    }
-    fn beats(self, other: Self) -> bool {
-        if self.is_nan() {
-            !other.is_nan()
-        } else {
-            !other.is_nan() && self > other
-        }
-    }
-}
-
-impl ConvAcc for f64 {
-    const ZERO: Self = 0.0;
-    fn add(self, other: Self) -> Self {
-        self + other
-    }
-    fn mul(self, other: Self) -> Self {
-        self * other
-    }
-    fn div_count(self, count: usize) -> Self {
-        self / (count as f64)
-    }
-    fn beats(self, other: Self) -> bool {
-        if self.is_nan() {
-            !other.is_nan()
-        } else {
-            !other.is_nan() && self > other
-        }
-    }
-}
-
-impl ConvAcc for i64 {
-    const ZERO: Self = 0;
-    fn add(self, other: Self) -> Self {
-        self.wrapping_add(other)
-    }
-    fn mul(self, other: Self) -> Self {
-        self.wrapping_mul(other)
-    }
-    fn div_count(self, count: usize) -> Self {
-        // Integer division truncates toward zero: an integer average is
-        // deliberately not rounded (there is no single obvious rule, and the
-        // float dtypes are the ones nn code pools with).
-        self / (count as i64)
-    }
-    fn beats(self, other: Self) -> bool {
-        self > other
-    }
-}
 
 /// The storage index of logical element `(a, b, c, d)` of a rank-4 view.
 fn idx4(layout: &Layout, a: usize, b: usize, c: usize, d: usize) -> usize {
@@ -496,22 +409,22 @@ where
 fn for_each_batch_volume<E, F>(geo: &Conv2dGeometry, cost_per_element: usize, scatter: F) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
     F: Fn(&mut [E::Acc], usize) + Send + Sync,
 {
     let volume = geo.in_channels * geo.in_h * geo.in_w;
     let len = geo.batch * volume;
     crate::backend::parallel::build(
         len,
-        E::from_acc(<E::Acc as ConvAcc>::ZERO),
+        E::from_acc(<E::Acc as NumAcc>::ZERO),
         volume,
         cost_per_element,
         |base, window| {
             // One wide accumulator per task, reused across the batch items in
             // it: the reset is a memset, the allocation would not be.
-            let mut acc = vec![<E::Acc as ConvAcc>::ZERO; volume];
+            let mut acc = vec![<E::Acc as NumAcc>::ZERO; volume];
             for (n, out_volume) in (base / volume..).zip(window.chunks_exact_mut(volume)) {
-                acc.fill(<E::Acc as ConvAcc>::ZERO);
+                acc.fill(<E::Acc as NumAcc>::ZERO);
                 scatter(&mut acc, n);
                 for (slot, value) in out_volume.iter_mut().zip(&acc) {
                     *slot = E::from_acc(*value);
@@ -530,20 +443,20 @@ where
 fn for_each_channel_plane<E, F>(geo: &Conv2dGeometry, cost_per_element: usize, scatter: F) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
     F: Fn(&mut [E::Acc], usize, usize) + Send + Sync,
 {
     let plane = geo.in_h * geo.in_w;
     let len = geo.batch * geo.in_channels * plane;
     crate::backend::parallel::build(
         len,
-        E::from_acc(<E::Acc as ConvAcc>::ZERO),
+        E::from_acc(<E::Acc as NumAcc>::ZERO),
         plane,
         cost_per_element,
         |base, window| {
-            let mut acc = vec![<E::Acc as ConvAcc>::ZERO; plane];
+            let mut acc = vec![<E::Acc as NumAcc>::ZERO; plane];
             for (index, out_plane) in (base / plane..).zip(window.chunks_exact_mut(plane)) {
-                acc.fill(<E::Acc as ConvAcc>::ZERO);
+                acc.fill(<E::Acc as NumAcc>::ZERO);
                 scatter(&mut acc, index / geo.in_channels, index % geo.in_channels);
                 for (slot, value) in out_plane.iter_mut().zip(&acc) {
                     *slot = E::from_acc(*value);
@@ -562,16 +475,16 @@ fn conv2d_forward_generic<E>(
 ) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
 {
     let cost = geo.kernel_h * geo.kernel_w * geo.in_channels;
     for_each_output_row(
         geo,
-        E::from_acc(<E::Acc as ConvAcc>::ZERO),
+        E::from_acc(<E::Acc as NumAcc>::ZERO),
         cost,
         |out_row, n, oc, oh| {
             for (ow, slot) in out_row.iter_mut().enumerate() {
-                let mut acc = <E::Acc as ConvAcc>::ZERO;
+                let mut acc = <E::Acc as NumAcc>::ZERO;
                 for kh in 0..geo.kernel_h {
                     let Some(ih) = geo.source_h(oh, kh) else {
                         continue;
@@ -604,7 +517,7 @@ fn conv2d_input_grad_generic<E>(
 ) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
 {
     // Cost per output element: the scatter's total work spread over the result.
     let cost =
@@ -646,7 +559,7 @@ fn conv2d_weight_grad_generic<E>(
 ) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
 {
     // Weight-shaped, so the batch split of [`for_each_batch_volume`] is out —
     // every batch item contributes to every weight. The **output channel**
@@ -658,13 +571,13 @@ where
     let cost = geo.batch * geo.out_h * geo.out_w;
     crate::backend::parallel::build(
         len,
-        E::from_acc(<E::Acc as ConvAcc>::ZERO),
+        E::from_acc(<E::Acc as NumAcc>::ZERO),
         slab,
         cost,
         |base, window| {
-            let mut acc = vec![<E::Acc as ConvAcc>::ZERO; slab];
+            let mut acc = vec![<E::Acc as NumAcc>::ZERO; slab];
             for (oc, out_slab) in (base / slab..).zip(window.chunks_exact_mut(slab)) {
-                acc.fill(<E::Acc as ConvAcc>::ZERO);
+                acc.fill(<E::Acc as NumAcc>::ZERO);
                 for n in 0..geo.batch {
                     for oh in 0..geo.out_h {
                         for ow in 0..geo.out_w {
@@ -709,7 +622,7 @@ fn max_source<E>(
 ) -> Option<(usize, usize)>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
 {
     let mut best: Option<((usize, usize), E::Acc)> = None;
     for kh in 0..geo.kernel_h {
@@ -737,9 +650,9 @@ where
 fn max_pool2d_forward_generic<E>(input: &[E], input_l: &Layout, geo: &Conv2dGeometry) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
 {
-    let zero = E::from_acc(<E::Acc as ConvAcc>::ZERO);
+    let zero = E::from_acc(<E::Acc as NumAcc>::ZERO);
     for_each_output_row(
         geo,
         zero,
@@ -767,7 +680,7 @@ fn max_pool2d_backward_generic<E>(
 ) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
 {
     let cost = geo.window() * geo.out_h * geo.out_w / (geo.in_h * geo.in_w).max(1);
     for_each_channel_plane(geo, cost.max(1), |acc: &mut [E::Acc], n, c| {
@@ -789,16 +702,16 @@ where
 fn avg_pool2d_forward_generic<E>(input: &[E], input_l: &Layout, geo: &Conv2dGeometry) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
 {
-    let zero = E::from_acc(<E::Acc as ConvAcc>::ZERO);
+    let zero = E::from_acc(<E::Acc as NumAcc>::ZERO);
     for_each_output_row(
         geo,
         zero,
         geo.kernel_h * geo.kernel_w,
         |out_row, n, c, oh| {
             for (ow, slot) in out_row.iter_mut().enumerate() {
-                let mut acc = <E::Acc as ConvAcc>::ZERO;
+                let mut acc = <E::Acc as NumAcc>::ZERO;
                 for kh in 0..geo.kernel_h {
                     let Some(ih) = geo.source_h(oh, kh) else {
                         continue;
@@ -820,7 +733,7 @@ where
 fn avg_pool2d_backward_generic<E>(grad: &[E], grad_l: &Layout, geo: &Conv2dGeometry) -> Vec<E>
 where
     E: Element,
-    E::Acc: ConvAcc,
+    E::Acc: NumAcc,
 {
     let cost = geo.window() * geo.out_h * geo.out_w / (geo.in_h * geo.in_w).max(1);
     for_each_channel_plane(geo, cost.max(1), |acc: &mut [E::Acc], n, c| {

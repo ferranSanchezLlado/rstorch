@@ -479,10 +479,17 @@ fn binary_op_name(op: BinaryOp) -> &'static str {
 
 // `f32::max`/`f64::max` implement IEEE `maxNum`, which *ignores* a NaN operand
 // and returns the other one. `torch.maximum`/`torch.minimum` propagate instead,
-// and so does every other extremum in this crate (`reduce.rs`'s `Acc::order`,
-// `conv.rs`'s `ConvAcc::beats`). Propagating here keeps a NaN visible instead of
-// letting `maximum` quietly launder it out of the graph, which is exactly what
-// makes a diverging model diagnosable.
+// and so does every other extremum in this crate (`acc.rs`'s `NumAcc::max`,
+// `NumAcc::order`, `NumAcc::beats`). Propagating here keeps a NaN visible
+// instead of letting `maximum` quietly launder it out of the graph, which is
+// exactly what makes a diverging model diagnosable.
+//
+// These four bodies stay here rather than deferring to `NumAcc::max`/`min`:
+// once NaN is excluded they hand off to IEEE `max`/`min`, which on equal
+// operands may return *either* — `f32::max(-0.0, 0.0)` is `+0.0`, whereas
+// `NumAcc::max` keeps the receiver and answers `-0.0`. The two are not the
+// same function, and `binary_op_matches_scalar_semantics_on_signed_zero`
+// pins the difference.
 #[inline(always)]
 fn f32_maximum(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {

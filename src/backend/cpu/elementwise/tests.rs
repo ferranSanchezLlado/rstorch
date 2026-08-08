@@ -1002,3 +1002,56 @@ fn dense_classifies_layouts_and_clamps_to_the_view_length() {
     // Too short a buffer falls back rather than panicking.
     assert!(dense(&contig, &data[..8], 12).is_none());
 }
+
+/// `maximum`/`minimum` here are **not** `NumAcc::max`/`min`, and must not be
+/// refactored into them.
+///
+/// Both propagate NaN, but they disagree on ±0: once NaN is excluded these
+/// bodies defer to IEEE `max`/`min`, which on equal operands may return
+/// either, while `NumAcc::max`/`min` keep the receiver. Pinned bitwise so a
+/// "these are the same function" cleanup fails loudly instead of silently
+/// flipping a zero's sign.
+#[test]
+fn binary_op_matches_scalar_semantics_on_signed_zero() {
+    use crate::backend::cpu::acc::NumAcc;
+
+    let lhs = Owned::<f32>::new(vec![0.0, 0.0, -0.0, -0.0], Layout::contiguous([4]).unwrap());
+    let rhs = Owned::<f32>::new(vec![0.0, -0.0, 0.0, -0.0], Layout::contiguous([4]).unwrap());
+
+    let max = binary(BinaryOp::Maximum, lhs.view(), rhs.view()).unwrap();
+    let min = binary(BinaryOp::Minimum, lhs.view(), rhs.view()).unwrap();
+
+    // The kernel agrees with its own scalar bodies, bit for bit.
+    assert_eq!(
+        exact::<f32>(&max),
+        lhs.data()
+            .iter()
+            .zip(rhs.data())
+            .map(|(&a, b)| f32_maximum(a, b).exact_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        exact::<f32>(&min),
+        lhs.data()
+            .iter()
+            .zip(rhs.data())
+            .map(|(&a, b)| f32_minimum(a, b).exact_bits())
+            .collect::<Vec<_>>()
+    );
+
+    // And it deliberately differs from the reduction accumulator, which keeps
+    // the receiver on a tie: `(-0.0).max(0.0)` is `+0.0` under IEEE `maxNum`
+    // but `-0.0` under `NumAcc::max`.
+    assert_eq!(f32_maximum(-0.0, 0.0).to_bits(), 0.0f32.to_bits());
+    assert_eq!(NumAcc::max(-0.0f32, 0.0).to_bits(), (-0.0f32).to_bits());
+    assert_eq!(f32_minimum(0.0, -0.0).to_bits(), (-0.0f32).to_bits());
+    assert_eq!(NumAcc::min(0.0f32, -0.0).to_bits(), 0.0f32.to_bits());
+
+    // NaN propagation is the property both *do* share.
+    for (a, b) in [(f32::NAN, 1.0f32), (1.0, f32::NAN)] {
+        assert!(f32_maximum(a, b).is_nan());
+        assert!(f32_minimum(a, b).is_nan());
+        assert!(NumAcc::max(a, b).is_nan());
+        assert!(NumAcc::min(a, b).is_nan());
+    }
+}

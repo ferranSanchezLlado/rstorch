@@ -7,54 +7,12 @@
 
 use std::sync::Arc;
 
+use crate::backend::cpu::acc::{FloatAcc, NumAcc};
 use crate::backend::{FusedOp, View};
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::storage::{CpuStorage, Storage};
-
-trait FloatAcc:
-    Copy
-    + PartialEq
-    + PartialOrd
-    + std::ops::Add<Output = Self>
-    + std::ops::Sub<Output = Self>
-    + std::ops::Mul<Output = Self>
-    + std::ops::Div<Output = Self>
-{
-    const ZERO: Self;
-    const NEG_INFINITY: Self;
-
-    fn from_usize(value: usize) -> Self;
-    fn exp(self) -> Self;
-    fn sqrt(self) -> Self;
-    fn is_nan(self) -> bool;
-}
-
-macro_rules! impl_float_acc {
-    ($ty:ty) => {
-        impl FloatAcc for $ty {
-            const ZERO: Self = 0.0;
-            const NEG_INFINITY: Self = Self::NEG_INFINITY;
-
-            fn from_usize(value: usize) -> Self {
-                value as Self
-            }
-            fn exp(self) -> Self {
-                self.exp()
-            }
-            fn sqrt(self) -> Self {
-                self.sqrt()
-            }
-            fn is_nan(self) -> bool {
-                self.is_nan()
-            }
-        }
-    };
-}
-
-impl_float_acc!(f32);
-impl_float_acc!(f64);
 
 /// See [`BackendOps::fused`](crate::backend::BackendOps::fused).
 ///
