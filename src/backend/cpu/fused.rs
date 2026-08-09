@@ -32,6 +32,122 @@ pub(crate) fn fused(op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result
     }
 }
 
+// ---------------------------------------------------------------------------
+// Float dtype dispatch
+// ---------------------------------------------------------------------------
+
+/// The per-dtype plumbing a fused kernel needs *once* it has been routed to a
+/// concrete element type: borrowing its operands out of the runtime-tagged
+/// [`CpuStorage`], re-tagging its owned outputs, and narrowing the
+/// `f64`-encoded scalars to the accumulation dtype.
+///
+/// Implemented for the four float dtypes only — the same gate
+/// [`FloatAcc`](crate::backend::cpu::acc::FloatAcc) applies one level down, so
+/// an integer or bool dtype has no impl for a dispatch to land on.
+///
+/// Every method runs once per kernel call, outside the element loop. The loops
+/// stay monomorphized over `Self` exactly as they were when each dtype had its
+/// own hand-written match arm.
+trait FusedFloat: Element {
+    /// Borrow this dtype's elements: a parameter, gradient, or kernel input.
+    ///
+    /// The caller has already dispatched on the validated runtime dtype, so a
+    /// different variant is an internal invariant break, not a user error.
+    fn slice(storage: &CpuStorage) -> &[Self];
+
+    /// Borrow accumulation-dtype elements: optimizer state, or LayerNorm's
+    /// saved statistics, both of which stay wide for `f16`/`bf16` parameters.
+    fn acc_slice(storage: &CpuStorage) -> &[Self::Acc];
+
+    /// Re-tag an owned element buffer as CPU storage.
+    fn storage(values: Vec<Self>) -> Storage;
+
+    /// Re-tag an owned accumulation-dtype buffer as CPU storage.
+    fn acc_storage(values: Vec<Self::Acc>) -> Storage;
+
+    /// Narrow one `f64`-encoded scalar to the accumulation dtype, so a
+    /// hyperparameter reaches the kernel at the precision the step runs in.
+    fn scalar(value: f64) -> Self::Acc;
+}
+
+/// Generate one [`FusedFloat`] impl.
+///
+/// The `#[inline]` on each method is load-bearing, not decoration: these are
+/// one-line accessors, and leaving them out of line grew this module's share of
+/// the crate's codegen units enough to change how `reduce.rs`'s hot loop was
+/// partitioned, costing `max_last_f32` ~50% under the default
+/// `codegen-units = 16`. Measured, then fixed by inlining.
+macro_rules! impl_fused_float {
+    ($ty:ty, $variant:ident, $acc_variant:ident, $scalar:expr) => {
+        impl FusedFloat for $ty {
+            #[inline]
+            fn slice(storage: &CpuStorage) -> &[Self] {
+                match storage {
+                    CpuStorage::$variant(values) => values.as_slice(),
+                    _ => unreachable!("dispatched on the validated dtype"),
+                }
+            }
+
+            #[inline]
+            fn acc_slice(storage: &CpuStorage) -> &[Self::Acc] {
+                match storage {
+                    CpuStorage::$acc_variant(values) => values.as_slice(),
+                    _ => unreachable!("dispatched on the validated dtype"),
+                }
+            }
+
+            #[inline]
+            fn storage(values: Vec<Self>) -> Storage {
+                Storage::Cpu(CpuStorage::$variant(Arc::new(values)))
+            }
+
+            #[inline]
+            fn acc_storage(values: Vec<Self::Acc>) -> Storage {
+                Storage::Cpu(CpuStorage::$acc_variant(Arc::new(values)))
+            }
+
+            #[inline]
+            fn scalar(value: f64) -> Self::Acc {
+                ($scalar)(value)
+            }
+        }
+    };
+}
+
+impl_fused_float!(half::f16, F16, F32, |value| value as f32);
+impl_fused_float!(half::bf16, BF16, F32, |value| value as f32);
+impl_fused_float!(f32, F32, F32, |value| value as f32);
+impl_fused_float!(f64, F64, F64, |value| value);
+
+/// Route a validated float [`DType`] to one monomorphized copy of `$body`,
+/// with `$elem` bound to the concrete element type.
+///
+/// This is the only dtype dispatch in the file, and it runs once per kernel
+/// call — never per element, so the inner loops still see a concrete type.
+macro_rules! dispatch_float {
+    ($dtype:expr, $elem:ident => $body:block) => {
+        match $dtype {
+            DType::F16 => {
+                type $elem = half::f16;
+                $body
+            }
+            DType::BF16 => {
+                type $elem = half::bf16;
+                $body
+            }
+            DType::F32 => {
+                type $elem = f32;
+                $body
+            }
+            DType::F64 => {
+                type $elem = f64;
+                $body
+            }
+            DType::I64 | DType::Bool => unreachable!("validated float dtype"),
+        }
+    };
+}
+
 fn sgd_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
     const OP: &str = "fused_sgd_step";
     if !(inputs.len() == 2 || inputs.len() == 3) || scalars.len() != 3 {
@@ -55,131 +171,26 @@ fn sgd_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         .get(2)
         .map(|view| cpu_storage(OP, *view))
         .transpose()?;
-    match (param, grad, velocity) {
-        (CpuStorage::F16(p), CpuStorage::F16(g), None) => {
-            let (p, v) = sgd_generic::<half::f16>(
-                p,
-                inputs[0].layout(),
-                g,
-                inputs[1].layout(),
-                None,
-                *lr as f32,
-                *momentum as f32,
-                *weight_decay as f32,
-            );
-            let mut out = vec![Storage::Cpu(CpuStorage::F16(Arc::new(p)))];
-            if let Some(v) = v {
-                out.push(Storage::Cpu(CpuStorage::F32(Arc::new(v))));
-            }
-            Ok(out)
+    dispatch_float!(inputs[0].dtype(), E => {
+        // The guard above rejects a velocity operand under zero momentum, so
+        // whenever one is supplied the step returns a velocity as well.
+        let velocity = velocity.map(|state| (E::acc_slice(state), inputs[2].layout()));
+        let (param, velocity) = sgd_generic::<E>(
+            E::slice(param),
+            inputs[0].layout(),
+            E::slice(grad),
+            inputs[1].layout(),
+            velocity,
+            E::scalar(*lr),
+            E::scalar(*momentum),
+            E::scalar(*weight_decay),
+        );
+        let mut outputs = vec![E::storage(param)];
+        if let Some(velocity) = velocity {
+            outputs.push(E::acc_storage(velocity));
         }
-        (CpuStorage::BF16(p), CpuStorage::BF16(g), None) => {
-            let (p, v) = sgd_generic::<half::bf16>(
-                p,
-                inputs[0].layout(),
-                g,
-                inputs[1].layout(),
-                None,
-                *lr as f32,
-                *momentum as f32,
-                *weight_decay as f32,
-            );
-            let mut out = vec![Storage::Cpu(CpuStorage::BF16(Arc::new(p)))];
-            if let Some(v) = v {
-                out.push(Storage::Cpu(CpuStorage::F32(Arc::new(v))));
-            }
-            Ok(out)
-        }
-        (CpuStorage::F32(p), CpuStorage::F32(g), v) => {
-            let v = match v {
-                Some(CpuStorage::F32(v)) => Some((v.as_slice(), inputs[2].layout())),
-                None => None,
-                _ => unreachable!("state dtype validated"),
-            };
-            let (p, v) = sgd_generic::<f32>(
-                p,
-                inputs[0].layout(),
-                g,
-                inputs[1].layout(),
-                v,
-                *lr as f32,
-                *momentum as f32,
-                *weight_decay as f32,
-            );
-            let mut out = vec![Storage::Cpu(CpuStorage::F32(Arc::new(p)))];
-            if let Some(v) = v {
-                out.push(Storage::Cpu(CpuStorage::F32(Arc::new(v))));
-            }
-            Ok(out)
-        }
-        (CpuStorage::F64(p), CpuStorage::F64(g), v) => {
-            let v = match v {
-                Some(CpuStorage::F64(v)) => Some((v.as_slice(), inputs[2].layout())),
-                None => None,
-                _ => unreachable!("state dtype validated"),
-            };
-            let (p, v) = sgd_generic::<f64>(
-                p,
-                inputs[0].layout(),
-                g,
-                inputs[1].layout(),
-                v,
-                *lr,
-                *momentum,
-                *weight_decay,
-            );
-            let mut out = vec![Storage::Cpu(CpuStorage::F64(Arc::new(p)))];
-            if let Some(v) = v {
-                out.push(Storage::Cpu(CpuStorage::F64(Arc::new(v))));
-            }
-            Ok(out)
-        }
-        (CpuStorage::F16(p), CpuStorage::F16(g), Some(CpuStorage::F32(v))) => {
-            let (p, v) = sgd_generic::<half::f16>(
-                p,
-                inputs[0].layout(),
-                g,
-                inputs[1].layout(),
-                Some((v, inputs[2].layout())),
-                *lr as f32,
-                *momentum as f32,
-                *weight_decay as f32,
-            );
-            let Some(v) = v else {
-                return Err(Error::InvalidArg {
-                    op: OP,
-                    msg: "a velocity input requires non-zero momentum".to_owned(),
-                });
-            };
-            Ok(vec![
-                Storage::Cpu(CpuStorage::F16(Arc::new(p))),
-                Storage::Cpu(CpuStorage::F32(Arc::new(v))),
-            ])
-        }
-        (CpuStorage::BF16(p), CpuStorage::BF16(g), Some(CpuStorage::F32(v))) => {
-            let (p, v) = sgd_generic::<half::bf16>(
-                p,
-                inputs[0].layout(),
-                g,
-                inputs[1].layout(),
-                Some((v, inputs[2].layout())),
-                *lr as f32,
-                *momentum as f32,
-                *weight_decay as f32,
-            );
-            let Some(v) = v else {
-                return Err(Error::InvalidArg {
-                    op: OP,
-                    msg: "a velocity input requires non-zero momentum".to_owned(),
-                });
-            };
-            Ok(vec![
-                Storage::Cpu(CpuStorage::BF16(Arc::new(p))),
-                Storage::Cpu(CpuStorage::F32(Arc::new(v))),
-            ])
-        }
-        _ => unreachable!("parameter, gradient, and state dtypes validated"),
-    }
+        Ok(outputs)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -269,56 +280,39 @@ fn adam_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         unreachable!("arity validated")
     };
     validate_adam_scalars(OP, scalars, inputs[0].dtype())?;
-    let p = cpu_storage(OP, inputs[0])?;
-    let g = cpu_storage(OP, inputs[1])?;
-    let m = cpu_storage(OP, inputs[2])?;
-    let v = cpu_storage(OP, inputs[3])?;
+    let param = cpu_storage(OP, inputs[0])?;
+    let grad = cpu_storage(OP, inputs[1])?;
+    let first = cpu_storage(OP, inputs[2])?;
+    let second = cpu_storage(OP, inputs[3])?;
 
-    macro_rules! run {
-        ($element:ty, $p:expr, $g:expr, $m:expr, $v:expr, $variant:ident, $acc_variant:ident, $cast:ty) => {{
-            let (p, m, v) = adam_generic::<$element>(
-                $p,
-                inputs[0].layout(),
-                $g,
-                inputs[1].layout(),
-                $m,
-                inputs[2].layout(),
-                $v,
-                inputs[3].layout(),
-                *lr as $cast,
-                *beta1 as $cast,
-                (1.0 - *beta1) as $cast,
-                *beta2 as $cast,
-                (1.0 - *beta2) as $cast,
-                *eps as $cast,
-                *weight_decay as $cast,
-                *correction1 as $cast,
-                *correction2 as $cast,
-                (1.0 - *lr * *weight_decay) as $cast,
-                *decoupled == 1.0,
-            );
-            Ok(vec![
-                Storage::Cpu(CpuStorage::$variant(Arc::new(p))),
-                Storage::Cpu(CpuStorage::$acc_variant(Arc::new(m))),
-                Storage::Cpu(CpuStorage::$acc_variant(Arc::new(v))),
-            ])
-        }};
-    }
-    match (p, g, m, v) {
-        (CpuStorage::F16(p), CpuStorage::F16(g), CpuStorage::F32(m), CpuStorage::F32(v)) => {
-            run!(half::f16, p, g, m, v, F16, F32, f32)
-        }
-        (CpuStorage::BF16(p), CpuStorage::BF16(g), CpuStorage::F32(m), CpuStorage::F32(v)) => {
-            run!(half::bf16, p, g, m, v, BF16, F32, f32)
-        }
-        (CpuStorage::F32(p), CpuStorage::F32(g), CpuStorage::F32(m), CpuStorage::F32(v)) => {
-            run!(f32, p, g, m, v, F32, F32, f32)
-        }
-        (CpuStorage::F64(p), CpuStorage::F64(g), CpuStorage::F64(m), CpuStorage::F64(v)) => {
-            run!(f64, p, g, m, v, F64, F64, f64)
-        }
-        _ => unreachable!("parameter, gradient, and state dtypes validated"),
-    }
+    dispatch_float!(inputs[0].dtype(), E => {
+        let (param, first, second) = adam_generic::<E>(
+            E::slice(param),
+            inputs[0].layout(),
+            E::slice(grad),
+            inputs[1].layout(),
+            E::acc_slice(first),
+            inputs[2].layout(),
+            E::acc_slice(second),
+            inputs[3].layout(),
+            E::scalar(*lr),
+            E::scalar(*beta1),
+            E::scalar(1.0 - *beta1),
+            E::scalar(*beta2),
+            E::scalar(1.0 - *beta2),
+            E::scalar(*eps),
+            E::scalar(*weight_decay),
+            E::scalar(*correction1),
+            E::scalar(*correction2),
+            E::scalar(1.0 - *lr * *weight_decay),
+            *decoupled == 1.0,
+        );
+        Ok(vec![
+            E::storage(param),
+            E::acc_storage(first),
+            E::acc_storage(second),
+        ])
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -413,17 +407,17 @@ fn softmax(inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
     require_float(OP, x)?;
     validate_view(OP, x)?;
 
-    let output = match cpu_storage(OP, x)? {
-        CpuStorage::F16(values) => CpuStorage::F16(Arc::new(softmax_generic(values, x.layout()))),
-        CpuStorage::BF16(values) => CpuStorage::BF16(Arc::new(softmax_generic(values, x.layout()))),
-        CpuStorage::F32(values) if x.layout().is_contiguous() => {
-            CpuStorage::F32(Arc::new(softmax_contiguous_f32(values, x.layout())))
-        }
-        CpuStorage::F32(values) => CpuStorage::F32(Arc::new(softmax_generic(values, x.layout()))),
-        CpuStorage::F64(values) => CpuStorage::F64(Arc::new(softmax_generic(values, x.layout()))),
-        CpuStorage::I64(_) | CpuStorage::Bool(_) => unreachable!("validated float dtype"),
-    };
-    Ok(Storage::Cpu(output))
+    let values = cpu_storage(OP, x)?;
+    if x.dtype() == DType::F32 && x.layout().is_contiguous() {
+        // The one dtype with a dedicated flat-slice kernel.
+        return Ok(f32::storage(softmax_contiguous_f32(
+            f32::slice(values),
+            x.layout(),
+        )));
+    }
+    Ok(dispatch_float!(x.dtype(), E => {
+        E::storage(softmax_generic::<E>(E::slice(values), x.layout()))
+    }))
 }
 
 fn softmax_contiguous_f32(values: &[f32], layout: &Layout) -> Vec<f32> {
@@ -599,61 +593,31 @@ fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         }
     };
 
-    let storages = [
+    let [x_values, weight_values, bias_values] = [
         cpu_storage(OP, *x)?,
         cpu_storage(OP, *weight)?,
         cpu_storage(OP, *bias)?,
     ];
-    macro_rules! run {
-        ($variant:ident, $acc_variant:ident, $xv:expr, $wv:expr, $bv:expr, $eps:expr) => {{
-            let (output, stats) = layer_norm_generic(
-                $xv,
-                x.layout(),
-                $wv,
-                weight.layout(),
-                $bv,
-                bias.layout(),
-                $eps,
-                save_stats,
-            );
-            (
-                CpuStorage::$variant(Arc::new(output)),
-                stats.map(|(xhat, inv_std)| {
-                    (
-                        CpuStorage::$acc_variant(Arc::new(xhat)),
-                        CpuStorage::$acc_variant(Arc::new(inv_std)),
-                    )
-                }),
-            )
-        }};
-    }
-    let (output, stats) = match storages {
-        [
-            CpuStorage::F16(xv),
-            CpuStorage::F16(wv),
-            CpuStorage::F16(bv),
-        ] => run!(F16, F32, xv, wv, bv, eps as f32),
-        [
-            CpuStorage::BF16(xv),
-            CpuStorage::BF16(wv),
-            CpuStorage::BF16(bv),
-        ] => run!(BF16, F32, xv, wv, bv, eps as f32),
-        [
-            CpuStorage::F32(xv),
-            CpuStorage::F32(wv),
-            CpuStorage::F32(bv),
-        ] => run!(F32, F32, xv, wv, bv, eps as f32),
-        [
-            CpuStorage::F64(xv),
-            CpuStorage::F64(wv),
-            CpuStorage::F64(bv),
-        ] => run!(F64, F64, xv, wv, bv, eps),
-        _ => unreachable!("dtypes validated equal and float"),
-    };
-    let mut outputs = vec![Storage::Cpu(output)];
+    let (output, stats) = dispatch_float!(x.dtype(), E => {
+        let (output, stats) = layer_norm_generic::<E>(
+            E::slice(x_values),
+            x.layout(),
+            E::slice(weight_values),
+            weight.layout(),
+            E::slice(bias_values),
+            bias.layout(),
+            E::scalar(eps),
+            save_stats,
+        );
+        (
+            E::storage(output),
+            stats.map(|(xhat, inv_std)| (E::acc_storage(xhat), E::acc_storage(inv_std))),
+        )
+    });
+    let mut outputs = vec![output];
     if let Some((xhat, inv_std)) = stats {
-        outputs.push(Storage::Cpu(xhat));
-        outputs.push(Storage::Cpu(inv_std));
+        outputs.push(xhat);
+        outputs.push(inv_std);
     }
     Ok(outputs)
 }
@@ -708,62 +672,25 @@ fn layer_norm_backward_input(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec
         });
     }
 
-    let storages = [
+    let [g_values, xhat_values, inv_std_values, weight_values] = [
         cpu_storage(OP, *g)?,
         cpu_storage(OP, *xhat)?,
         cpu_storage(OP, *inv_std)?,
         cpu_storage(OP, *weight)?,
     ];
-    macro_rules! run {
-        ($variant:ident, $g:expr, $xhat:expr, $inv_std:expr, $weight:expr) => {
-            CpuStorage::$variant(Arc::new(layer_norm_backward_input_generic(
-                $g,
-                g.layout(),
-                $xhat,
-                xhat.layout(),
-                $inv_std,
-                inv_std.layout(),
-                $weight,
-                weight.layout(),
-            )))
-        };
-    }
-    let output = match storages {
-        [
-            CpuStorage::F16(g),
-            CpuStorage::F32(x),
-            CpuStorage::F32(s),
-            CpuStorage::F16(w),
-        ] => {
-            run!(F16, g, x, s, w)
-        }
-        [
-            CpuStorage::BF16(g),
-            CpuStorage::F32(x),
-            CpuStorage::F32(s),
-            CpuStorage::BF16(w),
-        ] => {
-            run!(BF16, g, x, s, w)
-        }
-        [
-            CpuStorage::F32(g),
-            CpuStorage::F32(x),
-            CpuStorage::F32(s),
-            CpuStorage::F32(w),
-        ] => {
-            run!(F32, g, x, s, w)
-        }
-        [
-            CpuStorage::F64(g),
-            CpuStorage::F64(x),
-            CpuStorage::F64(s),
-            CpuStorage::F64(w),
-        ] => {
-            run!(F64, g, x, s, w)
-        }
-        _ => unreachable!("dtypes validated equal and float"),
-    };
-    Ok(vec![Storage::Cpu(output)])
+    let output = dispatch_float!(g.dtype(), E => {
+        E::storage(layer_norm_backward_input_generic::<E>(
+            E::slice(g_values),
+            g.layout(),
+            E::acc_slice(xhat_values),
+            xhat.layout(),
+            E::acc_slice(inv_std_values),
+            inv_std.layout(),
+            E::slice(weight_values),
+            weight.layout(),
+        ))
+    });
+    Ok(vec![output])
 }
 
 #[allow(clippy::too_many_arguments)]
