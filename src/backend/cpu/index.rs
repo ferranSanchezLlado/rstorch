@@ -41,13 +41,13 @@
 use super::host::{Walk, dense_offset};
 use crate::backend::View;
 use crate::backend::cpu::acc::NumAcc;
+use crate::backend::cpu::dispatch::{CpuElement, dispatch_all, dispatch_numeric};
 use crate::device::Device;
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::{CpuStorage, Storage};
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Shared plumbing
@@ -265,27 +265,12 @@ pub(crate) fn index_select(x: View<'_>, axis: usize, indices: View<'_>) -> Resul
     let strides = layout.strides();
     let offset = layout.offset();
 
-    let out = match cpu_storage(x, OP)? {
-        CpuStorage::F16(v) => CpuStorage::F16(Arc::new(index_select_generic(
-            v, strides, offset, &out_dims, axis, &picks,
-        ))),
-        CpuStorage::BF16(v) => CpuStorage::BF16(Arc::new(index_select_generic(
-            v, strides, offset, &out_dims, axis, &picks,
-        ))),
-        CpuStorage::F32(v) => CpuStorage::F32(Arc::new(index_select_generic(
-            v, strides, offset, &out_dims, axis, &picks,
-        ))),
-        CpuStorage::F64(v) => CpuStorage::F64(Arc::new(index_select_generic(
-            v, strides, offset, &out_dims, axis, &picks,
-        ))),
-        CpuStorage::I64(v) => CpuStorage::I64(Arc::new(index_select_generic(
-            v, strides, offset, &out_dims, axis, &picks,
-        ))),
-        CpuStorage::Bool(v) => CpuStorage::Bool(Arc::new(index_select_generic(
-            v, strides, offset, &out_dims, axis, &picks,
-        ))),
-    };
-    Ok(Storage::Cpu(out))
+    let values = cpu_storage(x, OP)?;
+    Ok(dispatch_all!(x.dtype(), E => {
+        E::storage(index_select_generic(
+            E::slice(values), strides, offset, &out_dims, axis, &picks,
+        ))
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -348,27 +333,12 @@ pub(crate) fn gather(x: View<'_>, axis: usize, indices: View<'_>) -> Result<Stor
     let out_dims = idx_layout.dims();
     let strides = layout.strides();
     let offset = layout.offset();
-    let out = match cpu_storage(x, OP)? {
-        CpuStorage::F16(v) => CpuStorage::F16(Arc::new(gather_generic(
-            v, strides, offset, out_dims, axis, &picks,
-        ))),
-        CpuStorage::BF16(v) => CpuStorage::BF16(Arc::new(gather_generic(
-            v, strides, offset, out_dims, axis, &picks,
-        ))),
-        CpuStorage::F32(v) => CpuStorage::F32(Arc::new(gather_generic(
-            v, strides, offset, out_dims, axis, &picks,
-        ))),
-        CpuStorage::F64(v) => CpuStorage::F64(Arc::new(gather_generic(
-            v, strides, offset, out_dims, axis, &picks,
-        ))),
-        CpuStorage::I64(v) => CpuStorage::I64(Arc::new(gather_generic(
-            v, strides, offset, out_dims, axis, &picks,
-        ))),
-        CpuStorage::Bool(v) => CpuStorage::Bool(Arc::new(gather_generic(
-            v, strides, offset, out_dims, axis, &picks,
-        ))),
-    };
-    Ok(Storage::Cpu(out))
+    let values = cpu_storage(x, OP)?;
+    Ok(dispatch_all!(x.dtype(), E => {
+        E::storage(gather_generic(
+            E::slice(values), strides, offset, out_dims, axis, &picks,
+        ))
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -588,30 +558,9 @@ fn dispatch_acc<K: AccKernel>(
     src: &CpuStorage,
     kernel: K,
 ) -> Result<Storage> {
-    let out = match (x, src) {
-        (CpuStorage::F16(a), CpuStorage::F16(b)) => CpuStorage::F16(Arc::new(kernel.run(a, b))),
-        (CpuStorage::BF16(a), CpuStorage::BF16(b)) => CpuStorage::BF16(Arc::new(kernel.run(a, b))),
-        (CpuStorage::F32(a), CpuStorage::F32(b)) => CpuStorage::F32(Arc::new(kernel.run(a, b))),
-        (CpuStorage::F64(a), CpuStorage::F64(b)) => CpuStorage::F64(Arc::new(kernel.run(a, b))),
-        (CpuStorage::I64(a), CpuStorage::I64(b)) => CpuStorage::I64(Arc::new(kernel.run(a, b))),
-        (CpuStorage::Bool(_), _) => {
-            return Err(Error::Unsupported {
-                op,
-                device,
-                dtype: DType::Bool,
-            });
-        }
-        // The op layer and the dtype guard above make this unreachable; a
-        // kernel still reports rather than panics.
-        (a, b) => {
-            return Err(Error::DTypeMismatch {
-                op,
-                expected: a.dtype(),
-                got: b.dtype(),
-            });
-        }
-    };
-    Ok(Storage::Cpu(out))
+    dispatch_numeric!(x.dtype(), op, device, E => {
+        Ok(E::storage(kernel.run(E::slice(x), E::slice(src))))
+    })
 }
 
 /// See [`BackendOps::index_add`](crate::backend::BackendOps::index_add).
@@ -718,6 +667,7 @@ pub(crate) fn scatter_add(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     // ----- helpers ------------------------------------------------------
 

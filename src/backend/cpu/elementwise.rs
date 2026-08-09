@@ -22,9 +22,10 @@
 //!   particular a broadcast operand) keep the general [`Cursor`] path, which
 //!   is allowed to stay slower.
 //! - **Two families of dispatch macro, both hoisted out of the loop.**
-//!   `dispatch_typed!` routes a runtime [`DType`](crate::dtype::DType) to a
-//!   monomorphized body over the concrete element type, so each multi-dtype op
-//!   is written once. `dispatch_binary_op!`/`dispatch_unary_op!`/
+//!   `super::dispatch`'s `dispatch_all!` routes a runtime
+//!   [`DType`](crate::dtype::DType) to a monomorphized body over the concrete
+//!   element type, so each multi-dtype op is written once.
+//!   `dispatch_binary_op!`/`dispatch_unary_op!`/
 //!   `dispatch_cmp_op!` do the same for the *op discriminant*: they rebind it
 //!   as a `const`, so the kernel closure captures nothing and the arithmetic
 //!   `match` inside `binary_f32` and friends folds at compile time instead of
@@ -33,12 +34,12 @@
 //!   which becomes a rayon parallel loop under the `rayon` feature
 //!   (`backend::parallel`) and a sequential loop otherwise.
 
+use crate::backend::cpu::dispatch::{CpuElement, dispatch_all};
 use crate::backend::{BinaryOp, CmpOp, UnaryOp, View};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
-use crate::storage::{CpuStorage, Storage};
-use std::sync::Arc;
+use crate::storage::Storage;
 
 // ---------------------------------------------------------------------------
 // Iteration engine
@@ -170,7 +171,7 @@ fn dense<'a, E>(layout: &Layout, data: &'a [E], n: usize) -> Option<&'a [E]> {
 fn map1_dense<A, O, F>(a: &[A], f: F) -> Vec<O>
 where
     A: Copy + Sync,
-    O: TypedSlice,
+    O: CpuElement,
     F: Fn(A) -> O + Send + Sync,
 {
     crate::backend::parallel::build(a.len(), O::ZERO, 1, DENSE_COST, |base, window| {
@@ -188,7 +189,7 @@ fn map2_dense<A, B, O, F>(a: &[A], b: &[B], f: F) -> Vec<O>
 where
     A: Copy + Sync,
     B: Copy + Sync,
-    O: TypedSlice,
+    O: CpuElement,
     F: Fn(A, B) -> O + Send + Sync,
 {
     debug_assert_eq!(a.len(), b.len());
@@ -210,7 +211,7 @@ where
     A: Copy + Sync,
     B: Copy + Sync,
     C: Copy + Sync,
-    O: TypedSlice,
+    O: CpuElement,
     F: Fn(A, B, C) -> O + Send + Sync,
 {
     debug_assert_eq!(a.len(), b.len());
@@ -230,90 +231,34 @@ where
 // Typed storage access
 // ---------------------------------------------------------------------------
 
-/// Extract a `&[Self]` from the matching [`CpuStorage`] variant and wrap an
-/// owned output buffer back into a [`Storage`]. Implemented for the six
-/// element types; `Zero` gives a cheap placeholder for pre-sizing buffers.
-trait TypedSlice: Sized + Copy + Send + Sync {
-    /// The dtype tag for this element type.
-    const DTYPE: DType;
-    /// The additive identity, used only to pre-size output buffers (every
-    /// slot is overwritten by `fill`).
-    const ZERO: Self;
-    /// Borrow the element slice, erroring if the storage variant differs.
-    fn slice<'a>(cpu: &'a CpuStorage, op: &'static str) -> Result<&'a [Self]>;
-    /// Wrap an owned output buffer as a CPU [`Storage`].
-    fn into_storage(v: Vec<Self>) -> Storage;
-}
-
-macro_rules! impl_typed_slice {
-    ($ty:ty, $variant:ident, $dtype:ident, $zero:expr) => {
-        impl TypedSlice for $ty {
-            const DTYPE: DType = DType::$dtype;
-            const ZERO: Self = $zero;
-            fn slice<'a>(cpu: &'a CpuStorage, op: &'static str) -> Result<&'a [Self]> {
-                match cpu {
-                    CpuStorage::$variant(v) => Ok(v.as_slice()),
-                    other => Err(Error::Backend {
-                        op,
-                        msg: format!(
-                            "cpu elementwise kernel expected {} storage, got {}",
-                            DType::$dtype,
-                            other.dtype()
-                        ),
-                    }),
-                }
-            }
-            fn into_storage(v: Vec<Self>) -> Storage {
-                Storage::Cpu(CpuStorage::$variant(Arc::new(v)))
-            }
-        }
-    };
-}
-
-impl_typed_slice!(half::f16, F16, F16, half::f16::ZERO);
-impl_typed_slice!(half::bf16, BF16, BF16, half::bf16::ZERO);
-impl_typed_slice!(f32, F32, F32, 0.0);
-impl_typed_slice!(f64, F64, F64, 0.0);
-impl_typed_slice!(i64, I64, I64, 0);
-impl_typed_slice!(bool, Bool, Bool, false);
-
-/// Borrow the typed element slice for `E` from a CPU `Storage`. The caller
-/// has dispatched on the view's runtime dtype, so a mismatch or a non-CPU
-/// storage is an internal invariant break reported as [`Error::Backend`].
+/// Borrow the typed element slice for `E` from a CPU `Storage`.
+///
+/// Unlike the other kernel families, this is **fallible**: a kernel here
+/// dispatches on one view's dtype and then reads its other operands at that
+/// same type (`binary`'s right-hand side, `where`'s condition, `masked_fill`'s
+/// mask). The op layer has already equalized them, so a mismatch — or a non-CPU
+/// storage — is an internal invariant break, reported as [`Error::Backend`]
+/// rather than trusted.
 fn cpu_slice<'a, E>(storage: &'a Storage, op: &'static str) -> Result<&'a [E]>
 where
-    E: TypedSlice,
+    E: CpuElement,
 {
     match storage {
-        Storage::Cpu(cpu) => E::slice(cpu, op),
+        Storage::Cpu(cpu) if cpu.dtype() == E::DTYPE => Ok(E::slice(cpu)),
+        Storage::Cpu(cpu) => Err(Error::Backend {
+            op,
+            msg: format!(
+                "cpu elementwise kernel expected {} storage, got {}",
+                E::DTYPE,
+                cpu.dtype()
+            ),
+        }),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         _ => Err(Error::Backend {
             op,
             msg: "cpu elementwise kernel received non-cpu storage".into(),
         }),
     }
-}
-
-/// Route a runtime [`DType`] to a monomorphized block bound to the concrete
-/// element type named `$elem`. Dtypes not listed fall through to an
-/// [`Error::Unsupported`] for `$op` on `$device`.
-macro_rules! dispatch_typed {
-    ($dtype:expr, $op:expr, $device:expr, $elem:ident => $body:block, [$($ty:ty),+ $(,)?]) => {{
-        match $dtype {
-            $(
-                <$ty as TypedSlice>::DTYPE => {
-                    type $elem = $ty;
-                    $body
-                }
-            )+
-            #[allow(unreachable_patterns)]
-            other => Err(Error::Unsupported {
-                op: $op,
-                device: $device,
-                dtype: other,
-            }),
-        }
-    }};
 }
 
 /// Re-dispatch a runtime op enum into one `const` per variant, binding it as
@@ -374,7 +319,7 @@ macro_rules! dispatch_cmp_op {
 /// operand pair for the same output slot, so the two paths agree bit for bit.
 fn zip_map<E, F>(op: &'static str, lhs: View<'_>, rhs: View<'_>, f: F) -> Result<Storage>
 where
-    E: TypedSlice,
+    E: CpuElement,
     F: Fn(E, E) -> E + Send + Sync,
 {
     let n = lhs.layout().num_elements();
@@ -395,7 +340,7 @@ where
             out
         }
     };
-    Ok(E::into_storage(out))
+    Ok(E::storage(out))
 }
 
 /// See [`BackendOps::binary`](crate::backend::BackendOps::binary).
@@ -586,7 +531,7 @@ fn binary_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
 /// either way, so the two paths agree bit for bit.
 fn unary_map<E, F>(op: &'static str, x: View<'_>, f: F) -> Result<Storage>
 where
-    E: TypedSlice,
+    E: CpuElement,
     F: Fn(E) -> E + Send + Sync,
 {
     let n = x.layout().num_elements();
@@ -600,7 +545,7 @@ where
             out
         }
     };
-    Ok(E::into_storage(out))
+    Ok(E::storage(out))
 }
 
 /// See [`BackendOps::unary`](crate::backend::BackendOps::unary). Note the
@@ -692,19 +637,14 @@ fn unary_f64(op: UnaryOp, x: f64) -> f64 {
 /// See [`BackendOps::compare`](crate::backend::BackendOps::compare).
 pub(crate) fn compare(op: CmpOp, lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
     let name = cmp_op_name(op);
-    match lhs.dtype() {
-        DType::F32 => compare_typed::<f32>(op, name, lhs, rhs),
-        DType::F64 => compare_typed::<f64>(op, name, lhs, rhs),
-        DType::F16 => compare_typed::<half::f16>(op, name, lhs, rhs),
-        DType::BF16 => compare_typed::<half::bf16>(op, name, lhs, rhs),
-        DType::I64 => compare_typed::<i64>(op, name, lhs, rhs),
-        DType::Bool => compare_typed::<bool>(op, name, lhs, rhs),
-    }
+    dispatch_all!(lhs.dtype(), E => {
+        compare_typed::<E>(op, name, lhs, rhs)
+    })
 }
 
 fn compare_typed<E>(op: CmpOp, name: &'static str, lhs: View<'_>, rhs: View<'_>) -> Result<Storage>
 where
-    E: TypedSlice + PartialOrd,
+    E: CpuElement + PartialOrd,
 {
     let n = lhs.layout().num_elements();
     let lhs_data = cpu_slice::<E>(lhs.storage(), name)?;
@@ -725,7 +665,7 @@ where
             }
         }
     });
-    Ok(<bool as TypedSlice>::into_storage(out))
+    Ok(<bool as CpuElement>::storage(out))
 }
 
 /// The comparison itself: one definition shared by every dtype and both layout
@@ -762,19 +702,14 @@ fn cmp_op_name(op: CmpOp) -> &'static str {
 
 /// See [`BackendOps::where_cond`](crate::backend::BackendOps::where_cond).
 pub(crate) fn where_cond(cond: View<'_>, on_true: View<'_>, on_false: View<'_>) -> Result<Storage> {
-    const OP: &str = "where";
-    dispatch_typed!(
-        on_true.dtype(),
-        OP,
-        on_true.device(),
-        Elem => { where_typed::<Elem>(cond, on_true, on_false) },
-        [half::f16, half::bf16, f32, f64, i64, bool]
-    )
+    dispatch_all!(on_true.dtype(), Elem => {
+        where_typed::<Elem>(cond, on_true, on_false)
+    })
 }
 
 fn where_typed<E>(cond: View<'_>, on_true: View<'_>, on_false: View<'_>) -> Result<Storage>
 where
-    E: TypedSlice,
+    E: CpuElement,
 {
     const OP: &str = "where";
     let n = cond.layout().num_elements();
@@ -805,7 +740,7 @@ where
             out
         }
     };
-    Ok(E::into_storage(out))
+    Ok(E::storage(out))
 }
 
 /// See [`BackendOps::masked_fill`](crate::backend::BackendOps::masked_fill).
@@ -822,7 +757,7 @@ pub(crate) fn masked_fill(x: View<'_>, mask: View<'_>, value: f64) -> Result<Sto
 
 fn masked_fill_typed<E>(x: View<'_>, mask: View<'_>, value: E) -> Result<Storage>
 where
-    E: TypedSlice,
+    E: CpuElement,
 {
     const OP: &str = "masked_fill";
     let n = x.layout().num_elements();
@@ -847,7 +782,7 @@ where
             out
         }
     };
-    Ok(E::into_storage(out))
+    Ok(E::storage(out))
 }
 
 // ---------------------------------------------------------------------------

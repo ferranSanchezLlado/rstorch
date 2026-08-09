@@ -5,7 +5,10 @@
 //! specified on [`BackendOps`](crate::backend::BackendOps) — these are the
 //! delegation targets of `CpuBackend`.
 
+use std::sync::Arc;
+
 use crate::backend::View;
+use crate::backend::cpu::dispatch::{CpuElement, dispatch_all};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
@@ -191,6 +194,16 @@ fn is_whole_buffer(layout: &Layout, len: usize) -> bool {
     layout.num_elements() == len && dense_offset(layout) == Some(0)
 }
 
+/// How one typed buffer is materialized row-major under a layout.
+///
+/// A trait rather than a function argument because the two implementations are
+/// used at all six element types: a `fn` pointer cannot stay generic, and a
+/// closure cannot carry the `for<T>` quantification.
+trait Materialize {
+    /// Produce the row-major buffer this view addresses.
+    fn buffer<T: Copy>(&self, buf: &Arc<Vec<T>>, layout: &Layout) -> Arc<Vec<T>>;
+}
+
 /// Row-major materialization of one typed buffer under `layout`, for the
 /// *host-interchange* path.
 ///
@@ -206,11 +219,15 @@ fn is_whole_buffer(layout: &Layout, len: usize) -> bool {
 /// This is what makes `cat`/`stack` cheap: their host assembly calls
 /// `transfer_out` once per part, and for the usual dense part that is now free
 /// instead of a per-element gather.
-fn share_or_copy<T: Copy>(buf: &std::sync::Arc<Vec<T>>, layout: &Layout) -> std::sync::Arc<Vec<T>> {
-    if is_whole_buffer(layout, buf.len()) {
-        return std::sync::Arc::clone(buf);
+struct ShareOrCopy;
+
+impl Materialize for ShareOrCopy {
+    fn buffer<T: Copy>(&self, buf: &Arc<Vec<T>>, layout: &Layout) -> Arc<Vec<T>> {
+        if is_whole_buffer(layout, buf.len()) {
+            return Arc::clone(buf);
+        }
+        Arc::new(copy_view(buf, layout))
     }
-    std::sync::Arc::new(copy_view(buf, layout))
 }
 
 /// Row-major materialization into a **freshly allocated** buffer, for
@@ -219,36 +236,32 @@ fn share_or_copy<T: Copy>(buf: &std::sync::Arc<Vec<T>>, layout: &Layout) -> std:
 /// The whole-buffer case still copies here, so `contiguous()` and the copying
 /// branch of `reshape` keep handing back storage that shares nothing with
 /// their input. Everything strided takes the same [`copy_view`] tiers as
-/// [`share_or_copy`], so the fast paths are not given up — only the
-/// zero-copy case is, and that case is unreachable from `copy_strided`'s
-/// callers anyway (both test contiguity first).
-fn copy_owned<T: Copy>(buf: &std::sync::Arc<Vec<T>>, layout: &Layout) -> std::sync::Arc<Vec<T>> {
-    if is_whole_buffer(layout, buf.len()) {
-        return std::sync::Arc::new(buf.as_ref().clone());
+/// [`ShareOrCopy`], so the fast paths are not given up — only the zero-copy
+/// case is, and that case is unreachable from `copy_strided`'s callers anyway
+/// (both test contiguity first).
+struct CopyOwned;
+
+impl Materialize for CopyOwned {
+    fn buffer<T: Copy>(&self, buf: &Arc<Vec<T>>, layout: &Layout) -> Arc<Vec<T>> {
+        if is_whole_buffer(layout, buf.len()) {
+            return Arc::new(buf.as_ref().clone());
+        }
+        Arc::new(copy_view(buf, layout))
     }
-    std::sync::Arc::new(copy_view(buf, layout))
 }
 
 /// Materialize a view into a contiguous row-major [`CpuStorage`], preserving
-/// dtype, dispatching each dtype arm to `per_buffer`.
+/// dtype.
 ///
 /// The two callers differ only in whether the whole-buffer case may share:
-/// [`transfer_out`] passes [`share_or_copy`], [`copy_strided`] passes
-/// [`copy_owned`].
-macro_rules! materialize_with {
-    ($x:expr, $per_buffer:ident) => {{
-        let x = $x;
-        let storage = cpu_storage(&x);
-        let layout = x.layout();
-        match storage {
-            CpuStorage::F16(v) => CpuStorage::F16($per_buffer(v, layout)),
-            CpuStorage::BF16(v) => CpuStorage::BF16($per_buffer(v, layout)),
-            CpuStorage::F32(v) => CpuStorage::F32($per_buffer(v, layout)),
-            CpuStorage::F64(v) => CpuStorage::F64($per_buffer(v, layout)),
-            CpuStorage::I64(v) => CpuStorage::I64($per_buffer(v, layout)),
-            CpuStorage::Bool(v) => CpuStorage::Bool($per_buffer(v, layout)),
-        }
-    }};
+/// [`transfer_out`] passes [`ShareOrCopy`], [`copy_strided`] and [`cast`] pass
+/// [`CopyOwned`].
+fn materialize(x: View<'_>, how: impl Materialize) -> CpuStorage {
+    let storage = cpu_storage(&x);
+    let layout = x.layout();
+    dispatch_all!(x.dtype(), E => {
+        E::from_buffer(how.buffer(E::buffer(storage), layout))
+    })
 }
 
 /// See [`BackendOps::transfer_in`](crate::backend::BackendOps::transfer_in).
@@ -259,12 +272,12 @@ pub(crate) fn transfer_in(host: CpuStorage) -> Result<Storage> {
 
 /// See [`BackendOps::transfer_out`](crate::backend::BackendOps::transfer_out).
 pub(crate) fn transfer_out(x: View<'_>) -> Result<CpuStorage> {
-    Ok(materialize_with!(x, share_or_copy))
+    Ok(materialize(x, ShareOrCopy))
 }
 
 /// See [`BackendOps::copy_strided`](crate::backend::BackendOps::copy_strided).
 pub(crate) fn copy_strided(x: View<'_>) -> Result<Storage> {
-    Ok(Storage::Cpu(materialize_with!(x, copy_owned)))
+    Ok(Storage::Cpu(materialize(x, CopyOwned)))
 }
 
 fn copy_into_typed<T: Copy>(src: &[T], src_layout: &Layout, dst: &mut [T], dst_layout: &Layout) {
@@ -317,21 +330,12 @@ pub(crate) fn copy_into(src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -
             });
         }
     };
-    macro_rules! copy {
-        ($from:expr, $to:expr) => {{
-            let to = std::sync::Arc::make_mut($to);
-            copy_into_typed($from, src_layout, to.as_mut_slice(), dst_layout)
-        }};
-    }
-    match (src, dst) {
-        (CpuStorage::F16(from), CpuStorage::F16(to)) => copy!(from, to),
-        (CpuStorage::BF16(from), CpuStorage::BF16(to)) => copy!(from, to),
-        (CpuStorage::F32(from), CpuStorage::F32(to)) => copy!(from, to),
-        (CpuStorage::F64(from), CpuStorage::F64(to)) => copy!(from, to),
-        (CpuStorage::I64(from), CpuStorage::I64(to)) => copy!(from, to),
-        (CpuStorage::Bool(from), CpuStorage::Bool(to)) => copy!(from, to),
-        _ => unreachable!("copy_into dtype validated"),
-    }
+    // The dtype guard above proves both sides carry the same variant, so one
+    // dispatch addresses the pair.
+    dispatch_all!(src.dtype(), E => {
+        let to = Arc::make_mut(E::buffer_mut(dst));
+        copy_into_typed(E::slice(src), src_layout, to.as_mut_slice(), dst_layout);
+    });
     Ok(())
 }
 
@@ -370,152 +374,65 @@ pub(crate) fn cast(x: View<'_>, to: DType) -> Result<Storage> {
     };
 
     // Materialize the (possibly strided) source contiguously first so the
-    // per-lane conversion is a flat map. `copy_owned`, not `share_or_copy`:
+    // per-lane conversion is a flat map. `CopyOwned`, not `ShareOrCopy`:
     // the identity lane hands `src` straight back as the result storage, and
     // this function documents that as "a contiguous copy".
-    let src = materialize_with!(x, copy_owned);
+    let src = materialize(x, CopyOwned);
 
+    // One line per supported lane, each naming only its conversion. `convert`
+    // supplies the plumbing the lanes used to spell out: borrow the source
+    // elements, map, re-tag as the destination dtype.
     let out = match (from, to) {
         // Identity: a contiguous copy, no conversion.
         (a, b) if a == b => src,
 
         // Reduced floats <-> F32 and each other.
-        (DType::F16, DType::F32) => match &src {
-            CpuStorage::F16(v) => {
-                CpuStorage::F32(std::sync::Arc::new(v.iter().map(|e| e.to_f32()).collect()))
-            }
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::F32, DType::F16) => match &src {
-            CpuStorage::F32(v) => CpuStorage::F16(std::sync::Arc::new(
-                v.iter().map(|&e| half::f16::from_f32(e)).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::BF16, DType::F32) => match &src {
-            CpuStorage::BF16(v) => {
-                CpuStorage::F32(std::sync::Arc::new(v.iter().map(|e| e.to_f32()).collect()))
-            }
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::F32, DType::BF16) => match &src {
-            CpuStorage::F32(v) => CpuStorage::BF16(std::sync::Arc::new(
-                v.iter().map(|&e| half::bf16::from_f32(e)).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::F16, DType::BF16) => match &src {
-            CpuStorage::F16(v) => CpuStorage::BF16(std::sync::Arc::new(
-                v.iter().map(|e| half::bf16::from_f32(e.to_f32())).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::BF16, DType::F16) => match &src {
-            CpuStorage::BF16(v) => CpuStorage::F16(std::sync::Arc::new(
-                v.iter().map(|e| half::f16::from_f32(e.to_f32())).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
+        (DType::F16, DType::F32) => convert(&src, half::f16::to_f32),
+        (DType::F32, DType::F16) => convert(&src, half::f16::from_f32),
+        (DType::BF16, DType::F32) => convert(&src, half::bf16::to_f32),
+        (DType::F32, DType::BF16) => convert(&src, half::bf16::from_f32),
+        (DType::F16, DType::BF16) => convert(&src, |e: half::f16| half::bf16::from_f32(e.to_f32())),
+        (DType::BF16, DType::F16) => convert(&src, |e: half::bf16| half::f16::from_f32(e.to_f32())),
 
         // Float <-> I64.
-        (DType::F32, DType::I64) => match &src {
-            CpuStorage::F32(v) => {
-                CpuStorage::I64(std::sync::Arc::new(v.iter().map(|&e| e as i64).collect()))
-            }
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::I64, DType::F32) => match &src {
-            CpuStorage::I64(v) => {
-                CpuStorage::F32(std::sync::Arc::new(v.iter().map(|&e| e as f32).collect()))
-            }
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::F16, DType::I64) => match &src {
-            CpuStorage::F16(v) => CpuStorage::I64(std::sync::Arc::new(
-                v.iter().map(|e| e.to_f32() as i64).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::I64, DType::F16) => match &src {
-            CpuStorage::I64(v) => CpuStorage::F16(std::sync::Arc::new(
-                v.iter().map(|&e| half::f16::from_f32(e as f32)).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::BF16, DType::I64) => match &src {
-            CpuStorage::BF16(v) => CpuStorage::I64(std::sync::Arc::new(
-                v.iter().map(|e| e.to_f32() as i64).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::I64, DType::BF16) => match &src {
-            CpuStorage::I64(v) => CpuStorage::BF16(std::sync::Arc::new(
-                v.iter().map(|&e| half::bf16::from_f32(e as f32)).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
+        (DType::F32, DType::I64) => convert(&src, |e: f32| e as i64),
+        (DType::I64, DType::F32) => convert(&src, |e: i64| e as f32),
+        (DType::F16, DType::I64) => convert(&src, |e: half::f16| e.to_f32() as i64),
+        (DType::I64, DType::F16) => convert(&src, |e: i64| half::f16::from_f32(e as f32)),
+        (DType::BF16, DType::I64) => convert(&src, |e: half::bf16| e.to_f32() as i64),
+        (DType::I64, DType::BF16) => convert(&src, |e: i64| half::bf16::from_f32(e as f32)),
 
         // F32 <-> Bool.
-        (DType::F32, DType::Bool) => match &src {
-            CpuStorage::F32(v) => {
-                CpuStorage::Bool(std::sync::Arc::new(v.iter().map(|&e| e != 0.0).collect()))
-            }
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::Bool, DType::F32) => match &src {
-            CpuStorage::Bool(v) => CpuStorage::F32(std::sync::Arc::new(
-                v.iter().map(|&e| if e { 1.0 } else { 0.0 }).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::F16, DType::Bool) => match &src {
-            CpuStorage::F16(v) => CpuStorage::Bool(std::sync::Arc::new(
-                v.iter().map(|e| e.to_f32() != 0.0).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::Bool, DType::F16) => match &src {
-            CpuStorage::Bool(v) => CpuStorage::F16(std::sync::Arc::new(
-                v.iter()
-                    .map(|&e| half::f16::from_f32(if e { 1.0 } else { 0.0 }))
-                    .collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::BF16, DType::Bool) => match &src {
-            CpuStorage::BF16(v) => CpuStorage::Bool(std::sync::Arc::new(
-                v.iter().map(|e| e.to_f32() != 0.0).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::Bool, DType::BF16) => match &src {
-            CpuStorage::Bool(v) => CpuStorage::BF16(std::sync::Arc::new(
-                v.iter()
-                    .map(|&e| half::bf16::from_f32(if e { 1.0 } else { 0.0 }))
-                    .collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
+        (DType::F32, DType::Bool) => convert(&src, |e: f32| e != 0.0),
+        (DType::Bool, DType::F32) => convert(&src, |e: bool| if e { 1.0f32 } else { 0.0 }),
+        (DType::F16, DType::Bool) => convert(&src, |e: half::f16| e.to_f32() != 0.0),
+        (DType::Bool, DType::F16) => convert(&src, |e: bool| {
+            half::f16::from_f32(if e { 1.0 } else { 0.0 })
+        }),
+        (DType::BF16, DType::Bool) => convert(&src, |e: half::bf16| e.to_f32() != 0.0),
+        (DType::Bool, DType::BF16) => convert(&src, |e: bool| {
+            half::bf16::from_f32(if e { 1.0 } else { 0.0 })
+        }),
 
         // I64 <-> Bool.
-        (DType::I64, DType::Bool) => match &src {
-            CpuStorage::I64(v) => {
-                CpuStorage::Bool(std::sync::Arc::new(v.iter().map(|&e| e != 0).collect()))
-            }
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
-        (DType::Bool, DType::I64) => match &src {
-            CpuStorage::Bool(v) => CpuStorage::I64(std::sync::Arc::new(
-                v.iter().map(|&e| i64::from(e)).collect(),
-            )),
-            _ => unreachable!("materialized dtype disagrees with view dtype"),
-        },
+        (DType::I64, DType::Bool) => convert(&src, |e: i64| e != 0),
+        (DType::Bool, DType::I64) => convert(&src, |e: bool| i64::from(e)),
 
         // F64 cast scope remains deferred: loud, never a silent reinterpretation.
         _ => return Err(unsupported()),
     };
 
     Ok(Storage::Cpu(out))
+}
+
+/// One cast lane: map every element of a materialized `S` buffer through `f`
+/// and re-tag the result as `D` storage.
+///
+/// `src` is the already-materialized source, so the dtype it carries is `S` by
+/// construction — the lane table above selects both type parameters from the
+/// same `(from, to)` pair it matched on.
+fn convert<S: CpuElement, D: CpuElement>(src: &CpuStorage, f: impl Fn(S) -> D) -> CpuStorage {
+    D::cpu_storage(S::slice(src).iter().copied().map(f).collect())
 }
 
 #[cfg(test)]
