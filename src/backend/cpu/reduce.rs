@@ -13,9 +13,10 @@
 //! the op layer re-inserts it for the `_keepdim` spellings.
 
 use crate::backend::cpu::acc::NumAcc;
+use crate::backend::cpu::dispatch::{CpuElement, dispatch_numeric};
 use crate::backend::{ArgReduceOp, ReduceOp, View};
-use crate::dtype::{DType, Element};
-use crate::error::{Error, Result};
+use crate::dtype::Element;
+use crate::error::Result;
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::{CpuStorage, Storage};
@@ -166,31 +167,9 @@ pub(crate) fn reduce(op: ReduceOp, x: View<'_>, axis: usize) -> Result<Storage> 
         "reduce: axis pre-resolved by op layer"
     );
     let cpu = cpu_storage(x, "reduce")?;
-    let storage = match cpu {
-        CpuStorage::F16(v) => {
-            CpuStorage::F16(std::sync::Arc::new(reduce_generic(op, v, layout, axis)))
-        }
-        CpuStorage::BF16(v) => {
-            CpuStorage::BF16(std::sync::Arc::new(reduce_generic(op, v, layout, axis)))
-        }
-        CpuStorage::F32(v) => {
-            CpuStorage::F32(std::sync::Arc::new(reduce_generic(op, v, layout, axis)))
-        }
-        CpuStorage::F64(v) => {
-            CpuStorage::F64(std::sync::Arc::new(reduce_generic(op, v, layout, axis)))
-        }
-        CpuStorage::I64(v) => {
-            CpuStorage::I64(std::sync::Arc::new(reduce_generic(op, v, layout, axis)))
-        }
-        CpuStorage::Bool(_) => {
-            return Err(Error::Unsupported {
-                op: "reduce",
-                device: x.device(),
-                dtype: DType::Bool,
-            });
-        }
-    };
-    Ok(Storage::Cpu(storage))
+    dispatch_numeric!(x.dtype(), "reduce", x.device(), E => {
+        Ok(E::storage(reduce_generic(op, E::slice(cpu), layout, axis)))
+    })
 }
 
 /// See [`BackendOps::arg_reduce`](crate::backend::BackendOps::arg_reduce).
@@ -201,23 +180,10 @@ pub(crate) fn arg_reduce(op: ArgReduceOp, x: View<'_>, axis: usize) -> Result<St
         "arg_reduce: axis pre-resolved by op layer"
     );
     let cpu = cpu_storage(x, "arg_reduce")?;
-    let positions = match cpu {
-        CpuStorage::F16(v) => arg_reduce_generic(op, v, layout, axis),
-        CpuStorage::BF16(v) => arg_reduce_generic(op, v, layout, axis),
-        CpuStorage::F32(v) => arg_reduce_generic(op, v, layout, axis),
-        CpuStorage::F64(v) => arg_reduce_generic(op, v, layout, axis),
-        CpuStorage::I64(v) => arg_reduce_generic(op, v, layout, axis),
-        CpuStorage::Bool(_) => {
-            return Err(Error::Unsupported {
-                op: "arg_reduce",
-                device: x.device(),
-                dtype: DType::Bool,
-            });
-        }
-    };
-    Ok(Storage::Cpu(CpuStorage::I64(std::sync::Arc::new(
-        positions,
-    ))))
+    dispatch_numeric!(x.dtype(), "arg_reduce", x.device(), E => {
+        // The positions are `I64` whatever the input dtype was.
+        Ok(i64::storage(arg_reduce_generic(op, E::slice(cpu), layout, axis)))
+    })
 }
 
 /// Borrow the [`CpuStorage`] behind a CPU view, or report the op as
@@ -244,6 +210,8 @@ fn cpu_storage<'a>(x: View<'a>, op: &'static str) -> Result<&'a CpuStorage> {
 mod tests {
     use super::*;
     use crate::backend::View;
+    use crate::dtype::DType;
+    use crate::error::Error;
     use crate::layout::Layout;
     use std::sync::Arc;
 

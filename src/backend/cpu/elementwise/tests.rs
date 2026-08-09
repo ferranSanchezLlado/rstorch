@@ -34,9 +34,9 @@ impl Prng {
 }
 
 /// Read the flat contiguous output buffer of a kernel result for element `E`.
-fn out_slice<E: TypedSlice>(storage: &Storage) -> Vec<E> {
+fn out_slice<E: CpuElement>(storage: &Storage) -> Vec<E> {
     match storage {
-        Storage::Cpu(cpu) => E::slice(cpu, "test").unwrap().to_vec(),
+        Storage::Cpu(cpu) => E::slice(cpu).to_vec(),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         _ => panic!("non-cpu storage in cpu test"),
     }
@@ -91,16 +91,16 @@ fn gather<E: Copy>(data: &[E], layout: &Layout) -> Vec<E> {
 // ---------------------------------------------------------------------------
 
 /// Owns a storage buffer + layout so a `View` can borrow both.
-struct Owned<E: TypedSlice> {
+struct Owned<E: CpuElement> {
     storage: Storage,
     layout: Layout,
     _marker: std::marker::PhantomData<E>,
 }
 
-impl<E: TypedSlice> Owned<E> {
+impl<E: CpuElement> Owned<E> {
     fn new(data: Vec<E>, layout: Layout) -> Owned<E> {
         Owned {
-            storage: E::into_storage(data),
+            storage: E::storage(data),
             layout,
             _marker: std::marker::PhantomData,
         }
@@ -751,7 +751,7 @@ impl ExactBits for bool {
 }
 
 /// Read a kernel result as a list of exact bit patterns.
-fn exact<E: TypedSlice + ExactBits>(storage: &Storage) -> Vec<u64> {
+fn exact<E: CpuElement + ExactBits>(storage: &Storage) -> Vec<u64> {
     out_slice::<E>(storage)
         .into_iter()
         .map(ExactBits::exact_bits)
@@ -762,7 +762,7 @@ fn exact<E: TypedSlice + ExactBits>(storage: &Storage) -> Vec<u64> {
 /// (the dense fast path) and once as a column-major buffer read through
 /// transposed strides (the general `Cursor` path). Both views gather to
 /// `values` in row-major order.
-fn dense_and_strided<E: TypedSlice>(
+fn dense_and_strided<E: CpuElement>(
     values: &[E],
     rows: usize,
     cols: usize,

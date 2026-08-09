@@ -45,6 +45,7 @@
 
 use crate::backend::View;
 use crate::backend::cpu::acc::NumAcc;
+use crate::backend::cpu::dispatch::{CpuElement, dispatch_numeric};
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
@@ -473,47 +474,23 @@ pub(crate) fn matmul(lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
     let plan = plan(lhs.layout(), rhs.layout())?;
     let lhs_cpu = cpu_storage(lhs, "matmul")?;
     let rhs_cpu = cpu_storage(rhs, "matmul")?;
-    let storage = match (lhs_cpu, rhs_cpu) {
-        (CpuStorage::F16(a), CpuStorage::F16(b)) => {
-            CpuStorage::F16(std::sync::Arc::new(matmul_generic(a, b, &plan)))
-        }
-        (CpuStorage::BF16(a), CpuStorage::BF16(b)) => {
-            CpuStorage::BF16(std::sync::Arc::new(matmul_generic(a, b, &plan)))
-        }
-        (CpuStorage::F32(a), CpuStorage::F32(b)) => {
-            let out = if plan.rhs_n_stride == 1 {
-                matmul_f32_row_major_rhs(a, b, &plan)
-            } else if plan.lhs_k_stride == 1 && plan.rhs_k_stride == 1 {
-                matmul_f32_transposed_rhs(a, b, &plan)
-            } else {
-                matmul_generic(a, b, &plan)
-            };
-            CpuStorage::F32(std::sync::Arc::new(out))
-        }
-        (CpuStorage::F64(a), CpuStorage::F64(b)) => {
-            CpuStorage::F64(std::sync::Arc::new(matmul_generic(a, b, &plan)))
-        }
-        (CpuStorage::I64(a), CpuStorage::I64(b)) => {
-            CpuStorage::I64(std::sync::Arc::new(matmul_generic(a, b, &plan)))
-        }
-        (CpuStorage::Bool(_), _) => {
-            return Err(Error::Unsupported {
-                op: "matmul",
-                device: lhs.device(),
-                dtype: DType::Bool,
-            });
-        }
-        // dtype equality was checked above, so the remaining cross-variant
-        // pairs are unreachable; report loudly rather than silently.
-        _ => {
-            return Err(Error::DTypeMismatch {
-                op: "matmul",
-                expected: lhs.dtype(),
-                got: rhs.dtype(),
-            });
-        }
-    };
-    Ok(Storage::Cpu(storage))
+    // F32 is the one dtype with dedicated stride-specialized kernels, so it is
+    // taken before the dispatch rather than inside it: which of the three runs
+    // is a property of the plan, not of the element type.
+    if lhs.dtype() == DType::F32 {
+        let (a, b) = (f32::slice(lhs_cpu), f32::slice(rhs_cpu));
+        let out = if plan.rhs_n_stride == 1 {
+            matmul_f32_row_major_rhs(a, b, &plan)
+        } else if plan.lhs_k_stride == 1 && plan.rhs_k_stride == 1 {
+            matmul_f32_transposed_rhs(a, b, &plan)
+        } else {
+            matmul_generic(a, b, &plan)
+        };
+        return Ok(f32::storage(out));
+    }
+    dispatch_numeric!(lhs.dtype(), "matmul", lhs.device(), E => {
+        Ok(E::storage(matmul_generic(E::slice(lhs_cpu), E::slice(rhs_cpu), &plan)))
+    })
 }
 
 /// Borrow the [`CpuStorage`] behind a CPU view, or report the op as

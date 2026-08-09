@@ -5,9 +5,8 @@
 //! Optimizer variants use the multi-output encoding documented on
 //! [`BackendOps::fused`](crate::backend::BackendOps::fused).
 
-use std::sync::Arc;
-
 use crate::backend::cpu::acc::{FloatAcc, NumAcc};
+use crate::backend::cpu::dispatch::{CpuElement, CpuFloat, dispatch_float};
 use crate::backend::{FusedOp, View};
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
@@ -30,122 +29,6 @@ pub(crate) fn fused(op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result
         FusedOp::SgdStep => sgd_step(inputs, scalars),
         FusedOp::AdamStep => adam_step(inputs, scalars),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Float dtype dispatch
-// ---------------------------------------------------------------------------
-
-/// The per-dtype plumbing a fused kernel needs *once* it has been routed to a
-/// concrete element type: borrowing its operands out of the runtime-tagged
-/// [`CpuStorage`], re-tagging its owned outputs, and narrowing the
-/// `f64`-encoded scalars to the accumulation dtype.
-///
-/// Implemented for the four float dtypes only — the same gate
-/// [`FloatAcc`](crate::backend::cpu::acc::FloatAcc) applies one level down, so
-/// an integer or bool dtype has no impl for a dispatch to land on.
-///
-/// Every method runs once per kernel call, outside the element loop. The loops
-/// stay monomorphized over `Self` exactly as they were when each dtype had its
-/// own hand-written match arm.
-trait FusedFloat: Element {
-    /// Borrow this dtype's elements: a parameter, gradient, or kernel input.
-    ///
-    /// The caller has already dispatched on the validated runtime dtype, so a
-    /// different variant is an internal invariant break, not a user error.
-    fn slice(storage: &CpuStorage) -> &[Self];
-
-    /// Borrow accumulation-dtype elements: optimizer state, or LayerNorm's
-    /// saved statistics, both of which stay wide for `f16`/`bf16` parameters.
-    fn acc_slice(storage: &CpuStorage) -> &[Self::Acc];
-
-    /// Re-tag an owned element buffer as CPU storage.
-    fn storage(values: Vec<Self>) -> Storage;
-
-    /// Re-tag an owned accumulation-dtype buffer as CPU storage.
-    fn acc_storage(values: Vec<Self::Acc>) -> Storage;
-
-    /// Narrow one `f64`-encoded scalar to the accumulation dtype, so a
-    /// hyperparameter reaches the kernel at the precision the step runs in.
-    fn scalar(value: f64) -> Self::Acc;
-}
-
-/// Generate one [`FusedFloat`] impl.
-///
-/// The `#[inline]` on each method is load-bearing, not decoration: these are
-/// one-line accessors, and leaving them out of line grew this module's share of
-/// the crate's codegen units enough to change how `reduce.rs`'s hot loop was
-/// partitioned, costing `max_last_f32` ~50% under the default
-/// `codegen-units = 16`. Measured, then fixed by inlining.
-macro_rules! impl_fused_float {
-    ($ty:ty, $variant:ident, $acc_variant:ident, $scalar:expr) => {
-        impl FusedFloat for $ty {
-            #[inline]
-            fn slice(storage: &CpuStorage) -> &[Self] {
-                match storage {
-                    CpuStorage::$variant(values) => values.as_slice(),
-                    _ => unreachable!("dispatched on the validated dtype"),
-                }
-            }
-
-            #[inline]
-            fn acc_slice(storage: &CpuStorage) -> &[Self::Acc] {
-                match storage {
-                    CpuStorage::$acc_variant(values) => values.as_slice(),
-                    _ => unreachable!("dispatched on the validated dtype"),
-                }
-            }
-
-            #[inline]
-            fn storage(values: Vec<Self>) -> Storage {
-                Storage::Cpu(CpuStorage::$variant(Arc::new(values)))
-            }
-
-            #[inline]
-            fn acc_storage(values: Vec<Self::Acc>) -> Storage {
-                Storage::Cpu(CpuStorage::$acc_variant(Arc::new(values)))
-            }
-
-            #[inline]
-            fn scalar(value: f64) -> Self::Acc {
-                ($scalar)(value)
-            }
-        }
-    };
-}
-
-impl_fused_float!(half::f16, F16, F32, |value| value as f32);
-impl_fused_float!(half::bf16, BF16, F32, |value| value as f32);
-impl_fused_float!(f32, F32, F32, |value| value as f32);
-impl_fused_float!(f64, F64, F64, |value| value);
-
-/// Route a validated float [`DType`] to one monomorphized copy of `$body`,
-/// with `$elem` bound to the concrete element type.
-///
-/// This is the only dtype dispatch in the file, and it runs once per kernel
-/// call — never per element, so the inner loops still see a concrete type.
-macro_rules! dispatch_float {
-    ($dtype:expr, $elem:ident => $body:block) => {
-        match $dtype {
-            DType::F16 => {
-                type $elem = half::f16;
-                $body
-            }
-            DType::BF16 => {
-                type $elem = half::bf16;
-                $body
-            }
-            DType::F32 => {
-                type $elem = f32;
-                $body
-            }
-            DType::F64 => {
-                type $elem = f64;
-                $body
-            }
-            DType::I64 | DType::Bool => unreachable!("validated float dtype"),
-        }
-    };
 }
 
 fn sgd_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
@@ -1167,6 +1050,7 @@ fn cpu_storage<'a>(op: &'static str, view: View<'a>) -> Result<&'a CpuStorage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn storage(values: Vec<f32>) -> Storage {
         Storage::Cpu(CpuStorage::F32(Arc::new(values)))

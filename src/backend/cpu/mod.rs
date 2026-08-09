@@ -5,10 +5,12 @@
 //! `host` (T10a), `elementwise` (T10b), `reduce`/`matmul` (T11),
 //! `index` (T25), `conv` (T26), `fused` (T48). T10b additionally owns
 //! this file and `backend/parallel.rs` (the rayon switch). `acc` holds the
-//! wide-accumulator traits every one of those kernel families shares.
+//! wide-accumulator traits every one of those kernel families shares, and
+//! `dispatch` the single runtime-dtype dispatch they all route through.
 
 pub(crate) mod acc;
 pub(crate) mod conv;
+pub(crate) mod dispatch;
 pub(crate) mod elementwise;
 pub(crate) mod fused;
 pub(crate) mod host;

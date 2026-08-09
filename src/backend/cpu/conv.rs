@@ -42,13 +42,13 @@
 
 use crate::backend::conv_geometry::Conv2dGeometry;
 use crate::backend::cpu::acc::NumAcc;
+use crate::backend::cpu::dispatch::{CpuElement, dispatch_numeric};
 use crate::backend::{Conv2dParams, ConvOp, View};
-use crate::dtype::{DType, Element};
+use crate::dtype::Element;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::{CpuStorage, Storage};
-use std::sync::Arc;
 
 /// The storage index of logical element `(a, b, c, d)` of a rank-4 view.
 fn idx4(layout: &Layout, a: usize, b: usize, c: usize, d: usize) -> usize {
@@ -79,90 +79,17 @@ fn cpu_storage<'a>(op: &'static str, x: View<'a>) -> Result<&'a CpuStorage> {
     }
 }
 
-/// Run `$body` over the numeric element slice of one CPU view, re-wrapping the
-/// produced `Vec<E>` as storage of the same dtype. `Bool` is rejected with
-/// `Error::Unsupported`.
-macro_rules! numeric1 {
-    ($op:expr, $x:expr, |$a:ident| $body:expr) => {{
-        let x: View<'_> = $x;
-        match cpu_storage($op, x)? {
-            CpuStorage::F16($a) => {
-                let $a: &[half::f16] = $a;
-                Ok(Storage::Cpu(CpuStorage::F16(Arc::new($body))))
-            }
-            CpuStorage::BF16($a) => {
-                let $a: &[half::bf16] = $a;
-                Ok(Storage::Cpu(CpuStorage::BF16(Arc::new($body))))
-            }
-            CpuStorage::F32($a) => {
-                let $a: &[f32] = $a;
-                Ok(Storage::Cpu(CpuStorage::F32(Arc::new($body))))
-            }
-            CpuStorage::F64($a) => {
-                let $a: &[f64] = $a;
-                Ok(Storage::Cpu(CpuStorage::F64(Arc::new($body))))
-            }
-            CpuStorage::I64($a) => {
-                let $a: &[i64] = $a;
-                Ok(Storage::Cpu(CpuStorage::I64(Arc::new($body))))
-            }
-            CpuStorage::Bool(_) => Err(Error::Unsupported {
-                op: $op,
-                device: x.device(),
-                dtype: DType::Bool,
-            }),
-        }
-    }};
-}
-
-/// Two-operand form of `numeric1`. The operands must share a dtype
-/// (`Error::DTypeMismatch` otherwise).
-macro_rules! numeric2 {
-    ($op:expr, $x:expr, $y:expr, |$a:ident, $b:ident| $body:expr) => {{
-        let x: View<'_> = $x;
-        let y: View<'_> = $y;
-        if x.dtype() != y.dtype() {
-            return Err(Error::DTypeMismatch {
-                op: $op,
-                expected: x.dtype(),
-                got: y.dtype(),
-            });
-        }
-        match (cpu_storage($op, x)?, cpu_storage($op, y)?) {
-            (CpuStorage::F16($a), CpuStorage::F16($b)) => {
-                let ($a, $b): (&[half::f16], &[half::f16]) = ($a, $b);
-                Ok(Storage::Cpu(CpuStorage::F16(Arc::new($body))))
-            }
-            (CpuStorage::BF16($a), CpuStorage::BF16($b)) => {
-                let ($a, $b): (&[half::bf16], &[half::bf16]) = ($a, $b);
-                Ok(Storage::Cpu(CpuStorage::BF16(Arc::new($body))))
-            }
-            (CpuStorage::F32($a), CpuStorage::F32($b)) => {
-                let ($a, $b): (&[f32], &[f32]) = ($a, $b);
-                Ok(Storage::Cpu(CpuStorage::F32(Arc::new($body))))
-            }
-            (CpuStorage::F64($a), CpuStorage::F64($b)) => {
-                let ($a, $b): (&[f64], &[f64]) = ($a, $b);
-                Ok(Storage::Cpu(CpuStorage::F64(Arc::new($body))))
-            }
-            (CpuStorage::I64($a), CpuStorage::I64($b)) => {
-                let ($a, $b): (&[i64], &[i64]) = ($a, $b);
-                Ok(Storage::Cpu(CpuStorage::I64(Arc::new($body))))
-            }
-            (CpuStorage::Bool(_), _) => Err(Error::Unsupported {
-                op: $op,
-                device: x.device(),
-                dtype: DType::Bool,
-            }),
-            // Dtype equality was checked above, so the remaining cross-variant
-            // pairs are unreachable; report loudly rather than silently.
-            _ => Err(Error::DTypeMismatch {
-                op: $op,
-                expected: x.dtype(),
-                got: y.dtype(),
-            }),
-        }
-    }};
+/// Guard that a two-operand kernel's operands share a dtype, so the single
+/// [`dispatch_numeric!`] that follows addresses both of them.
+fn require_same_dtype(op: &'static str, x: View<'_>, y: View<'_>) -> Result<()> {
+    if x.dtype() != y.dtype() {
+        return Err(Error::DTypeMismatch {
+            op,
+            expected: x.dtype(),
+            got: y.dtype(),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -180,31 +107,44 @@ pub(crate) fn conv(op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Re
                 weight.layout().dims(),
                 params,
             )?;
-            numeric2!("conv2d", input, weight, |a, b| conv2d_forward_generic(
-                a,
-                input.layout(),
-                b,
-                weight.layout(),
-                &geo
-            ))
+            require_same_dtype("conv2d", input, weight)?;
+            let (a, b) = (
+                cpu_storage("conv2d", input)?,
+                cpu_storage("conv2d", weight)?,
+            );
+            dispatch_numeric!(input.dtype(), "conv2d", input.device(), E => {
+                Ok(E::storage(conv2d_forward_generic(
+                    E::slice(a),
+                    input.layout(),
+                    E::slice(b),
+                    weight.layout(),
+                    &geo,
+                )))
+            })
         }
         ConvOp::MaxPool2d => {
             let [input] = operands("max_pool2d", inputs)?;
             let geo = Conv2dGeometry::pool("max_pool2d", input.layout().dims(), params)?;
-            numeric1!("max_pool2d", input, |a| max_pool2d_forward_generic(
-                a,
-                input.layout(),
-                &geo
-            ))
+            let a = cpu_storage("max_pool2d", input)?;
+            dispatch_numeric!(input.dtype(), "max_pool2d", input.device(), E => {
+                Ok(E::storage(max_pool2d_forward_generic(
+                    E::slice(a),
+                    input.layout(),
+                    &geo,
+                )))
+            })
         }
         ConvOp::AvgPool2d => {
             let [input] = operands("avg_pool2d", inputs)?;
             let geo = Conv2dGeometry::pool("avg_pool2d", input.layout().dims(), params)?;
-            numeric1!("avg_pool2d", input, |a| avg_pool2d_forward_generic(
-                a,
-                input.layout(),
-                &geo
-            ))
+            let a = cpu_storage("avg_pool2d", input)?;
+            dispatch_numeric!(input.dtype(), "avg_pool2d", input.device(), E => {
+                Ok(E::storage(avg_pool2d_forward_generic(
+                    E::slice(a),
+                    input.layout(),
+                    &geo,
+                )))
+            })
         }
         ConvOp::Conv2dInputGrad => {
             let [grad, weight, input] = operands("conv2d", inputs)?;
@@ -270,13 +210,17 @@ pub(crate) fn conv2d_input_grad(
 ) -> Result<Storage> {
     expect_dims(geo.op, grad.layout(), geo.output_dims())?;
     expect_dims(geo.op, weight.layout(), geo.weight_dims())?;
-    numeric2!(geo.op, grad, weight, |a, b| conv2d_input_grad_generic(
-        a,
-        grad.layout(),
-        b,
-        weight.layout(),
-        geo
-    ))
+    require_same_dtype(geo.op, grad, weight)?;
+    let (a, b) = (cpu_storage(geo.op, grad)?, cpu_storage(geo.op, weight)?);
+    dispatch_numeric!(grad.dtype(), geo.op, grad.device(), E => {
+        Ok(E::storage(conv2d_input_grad_generic(
+            E::slice(a),
+            grad.layout(),
+            E::slice(b),
+            weight.layout(),
+            geo,
+        )))
+    })
 }
 
 /// Gradient of `conv2d` with respect to its **weight**, given the output
@@ -289,13 +233,17 @@ pub(crate) fn conv2d_weight_grad(
 ) -> Result<Storage> {
     expect_dims(geo.op, grad.layout(), geo.output_dims())?;
     expect_dims(geo.op, input.layout(), geo.input_dims())?;
-    numeric2!(geo.op, grad, input, |a, b| conv2d_weight_grad_generic(
-        a,
-        grad.layout(),
-        b,
-        input.layout(),
-        geo
-    ))
+    require_same_dtype(geo.op, grad, input)?;
+    let (a, b) = (cpu_storage(geo.op, grad)?, cpu_storage(geo.op, input)?);
+    dispatch_numeric!(grad.dtype(), geo.op, grad.device(), E => {
+        Ok(E::storage(conv2d_weight_grad_generic(
+            E::slice(a),
+            grad.layout(),
+            E::slice(b),
+            input.layout(),
+            geo,
+        )))
+    })
 }
 
 /// Gradient of `max_pool2d`: route each output cotangent to the single input
@@ -308,13 +256,17 @@ pub(crate) fn max_pool2d_backward(
 ) -> Result<Storage> {
     expect_dims(geo.op, grad.layout(), geo.output_dims())?;
     expect_dims(geo.op, input.layout(), geo.input_dims())?;
-    numeric2!(geo.op, grad, input, |a, b| max_pool2d_backward_generic(
-        a,
-        grad.layout(),
-        b,
-        input.layout(),
-        geo
-    ))
+    require_same_dtype(geo.op, grad, input)?;
+    let (a, b) = (cpu_storage(geo.op, grad)?, cpu_storage(geo.op, input)?);
+    dispatch_numeric!(grad.dtype(), geo.op, grad.device(), E => {
+        Ok(E::storage(max_pool2d_backward_generic(
+            E::slice(a),
+            grad.layout(),
+            E::slice(b),
+            input.layout(),
+            geo,
+        )))
+    })
 }
 
 /// Gradient of `avg_pool2d`: spread each output cotangent over the
@@ -322,11 +274,14 @@ pub(crate) fn max_pool2d_backward(
 /// (`count_include_pad = true`). Independent of the forward input values.
 pub(crate) fn avg_pool2d_backward(grad: View<'_>, geo: &Conv2dGeometry) -> Result<Storage> {
     expect_dims(geo.op, grad.layout(), geo.output_dims())?;
-    numeric1!(geo.op, grad, |a| avg_pool2d_backward_generic(
-        a,
-        grad.layout(),
-        geo
-    ))
+    let a = cpu_storage(geo.op, grad)?;
+    dispatch_numeric!(grad.dtype(), geo.op, grad.device(), E => {
+        Ok(E::storage(avg_pool2d_backward_generic(
+            E::slice(a),
+            grad.layout(),
+            geo,
+        )))
+    })
 }
 
 /// Check that a gradient-kernel operand has exactly the shape the resolved
@@ -762,6 +717,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dtype::DType;
+    use std::sync::Arc;
 
     const IDENTITY: Conv2dParams = Conv2dParams {
         kernel: (2, 2),
