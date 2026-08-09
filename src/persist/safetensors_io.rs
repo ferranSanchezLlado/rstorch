@@ -261,76 +261,24 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
 /// Detect duplicates before serde_json's HashMap representation can collapse
 /// them. Scanning every object also rejects duplicate tensor-info fields.
 fn reject_duplicate_json_keys(header: &[u8]) -> Result<()> {
-    check_json_nesting(header)?;
     JsonScanner {
         input: header,
         at: 0,
+        depth: 0,
     }
     .scan()
 }
 
-// Ordinary safetensors headers use only a few levels. Bounding nesting before
-// the decoded-key scan keeps its recursive descent away from the call-stack
-// limits even when the header itself is close to the byte limit.
+// Ordinary safetensors headers use only a few levels. The scanner is a
+// recursive descent, so bounding nesting as it descends keeps it away from the
+// call-stack limits even when the header itself is close to the byte limit.
 const MAX_JSON_NESTING: usize = 32;
-
-fn check_json_nesting(header: &[u8]) -> Result<()> {
-    let mut stack = Vec::with_capacity(MAX_JSON_NESTING);
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (at, &ch) in header.iter().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == b'\\' {
-                escaped = true;
-            } else if ch == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                if stack.len() == MAX_JSON_NESTING {
-                    return Err(Error::Persistence {
-                        msg: format!(
-                            "safetensors JSON nesting exceeds limit {MAX_JSON_NESTING} at byte {at}"
-                        ),
-                    });
-                }
-                stack.push(ch);
-            }
-            b'}' | b']' => {
-                let expected = if ch == b'}' { b'{' } else { b'[' };
-                if stack.pop() != Some(expected) {
-                    return Err(Error::Persistence {
-                        msg: format!("mismatched safetensors JSON bracket at byte {at}"),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if in_string {
-        return Err(Error::Persistence {
-            msg: "unterminated string in safetensors JSON header".to_string(),
-        });
-    }
-    if !stack.is_empty() {
-        return Err(Error::Persistence {
-            msg: "unclosed bracket in safetensors JSON header".to_string(),
-        });
-    }
-    Ok(())
-}
 
 struct JsonScanner<'a> {
     input: &'a [u8],
     at: usize,
+    /// How many `{`/`[` levels the scanner is currently inside.
+    depth: usize,
 }
 
 impl JsonScanner<'_> {
@@ -346,8 +294,8 @@ impl JsonScanner<'_> {
     fn value(&mut self) -> Result<()> {
         self.ws();
         match self.peek() {
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
+            Some(b'{') => self.nested(Self::object),
+            Some(b'[') => self.nested(Self::array),
             Some(b'"') => self.string().map(|_| ()),
             Some(_) => {
                 let start = self.at;
@@ -365,6 +313,24 @@ impl JsonScanner<'_> {
             }
             None => self.invalid("expected JSON value"),
         }
+    }
+
+    /// Descend into one `{`/`[` level, refusing to go past
+    /// [`MAX_JSON_NESTING`]. A header may claim any depth it likes; this is
+    /// what keeps the recursion here bounded regardless.
+    fn nested(&mut self, parse: fn(&mut Self) -> Result<()>) -> Result<()> {
+        if self.depth == MAX_JSON_NESTING {
+            return Err(Error::Persistence {
+                msg: format!(
+                    "safetensors JSON nesting exceeds limit {MAX_JSON_NESTING} at byte {}",
+                    self.at
+                ),
+            });
+        }
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
     }
 
     fn object(&mut self) -> Result<()> {
