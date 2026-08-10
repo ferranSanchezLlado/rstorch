@@ -13,86 +13,7 @@
 //! [`ToDevice`] or [`ToDType`]; constructing a fresh target and checked-loading
 //! an opaque [`TypedStateDict`] is the other supported route.
 //!
-//! # Frozen CT41 surface
-//!
-//! CT41 implements the following inherent methods and free functions without
-//! changing receiver types, ownership, bounds, names, or fallibility:
-//!
-//! ```text
-//! impl<T> TypedParam<T>
-//! where
-//!     T: TypedTensor,
-//!     T::Elem: FloatElement,
-//! {
-//!     pub fn new(value: T) -> Result<Self>;
-//!     pub fn get(&self, mode: Mode) -> Result<T>;
-//!     pub fn value(&self) -> Result<T>;
-//!     pub fn set(&mut self, value: T) -> Result<()>;
-//!     pub fn grad_from(&self, grads: &Grads) -> Result<T>;
-//!     pub fn freeze(&mut self);
-//!     pub fn unfreeze(&mut self);
-//!     pub fn is_frozen(&self) -> bool;
-//!
-//!     pub fn to_device<Q>(self, target: &DeviceCtx<Q>)
-//!         -> Result<TypedParam<<T as WithPlacement<Q>>::Output>>
-//!     where
-//!         Q: Placement,
-//!         T: WithPlacement<Q>,
-//!         <<T as WithPlacement<Q>>::Output as TypedTensor>::Elem: FloatElement;
-//!
-//!     pub fn to_dtype<F>(self)
-//!         -> Result<TypedParam<<T as WithElement<F>>::Output>>
-//!     where
-//!         F: FloatElement,
-//!         T: WithElement<F>;
-//! }
-//!
-//! impl<T: TypedTensor> TypedBuffer<T> {
-//!     pub fn new(value: T) -> Result<Self>;
-//!     pub fn value(&self) -> Result<T>;
-//!     pub fn set(&mut self, value: T) -> Result<()>;
-//!
-//!     pub fn to_device<Q>(self, target: &DeviceCtx<Q>)
-//!         -> Result<TypedBuffer<<T as WithPlacement<Q>>::Output>>
-//!     where
-//!         Q: Placement,
-//!         T: WithPlacement<Q>;
-//!
-//!     pub fn to_dtype<F>(self)
-//!         -> Result<TypedBuffer<<T as WithElement<F>>::Output>>
-//!     where
-//!         F: Element,
-//!         T: WithElement<F>;
-//! }
-//!
-//! impl TypedVisitor<'_> {
-//!     pub fn param<T>(&mut self, name: &str, param: &TypedParam<T>)
-//!     where
-//!         T: TypedTensor,
-//!         T::Elem: FloatElement;
-//!     pub fn buffer<T: TypedTensor>(&mut self, name: &str, buffer: &TypedBuffer<T>);
-//!     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &M);
-//! }
-//!
-//! impl TypedVisitorMut<'_> {
-//!     pub fn param<T>(&mut self, name: &str, param: &mut TypedParam<T>)
-//!     where
-//!         T: TypedTensor,
-//!         T::Elem: FloatElement;
-//!     pub fn buffer<T: TypedTensor>(
-//!         &mut self,
-//!         name: &str,
-//!         buffer: &mut TypedBuffer<T>,
-//!     );
-//!     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &mut M);
-//! }
-//!
-//! pub fn state_dict<M: Module + ?Sized>(module: &M) -> Result<TypedStateDict>;
-//! pub fn load_state_dict<M: Module + ?Sized>(
-//!     module: &mut M,
-//!     state: &TypedStateDict,
-//! ) -> Result<()>;
-//! ```
+//! # Parameters and buffers
 //!
 //! Parameter `new` detaches `value`, validates its canonical binding, and mints
 //! one runtime identity. `get` returns the cached traced leaf exactly when
@@ -114,8 +35,7 @@
 //! parameter, has no runtime shape backstop during a state load, which is why
 //! `load_state_dict` checks staged dimensions against the target walk itself.
 //!
-//! A
-//! consuming parameter conversion first computes and validates the replacement
+//! A consuming parameter conversion first computes and validates the replacement
 //! runtime tensor, then uses [`crate::nn::Param::set`] on the moved runtime
 //! parameter before sealing the output type. Thus conversion preserves the
 //! existing key, cached-leaf behavior, and freeze flag without a new runtime
@@ -152,17 +72,16 @@
 //! identity and contract, so malformed behavior cannot stale typed metadata.
 //!
 //! The private runtime adapter does not add rollback to dynamic optimizers or
-//! other runtime operations. It preserves their existing failure semantics.
-//! CT47 must provide dedicated typed wrappers, validate typed metadata around
-//! the short-lived adapter, and must not claim optimizer transactionality that
-//! the runtime optimizer does not already provide. Transactional all-or-nothing
-//! behavior frozen here applies specifically to typed state staging and commit.
+//! other runtime operations; it preserves their existing failure semantics. The
+//! typed optimizer wrappers therefore validate typed metadata *around* the
+//! short-lived adapter and do not claim a transactionality the runtime optimizer
+//! does not provide. The all-or-nothing behavior described above applies
+//! specifically to typed state staging and commit.
 //!
 //! # Imports
 //!
-//! Typed neural-network items are namespace-only under `rstorch::typed::nn`
-//! until CT53 decides the final default/import policy. CT40 and CT41 add
-//! nothing to [`crate::typed::prelude`].
+//! Typed neural-network items are namespace-only under `rstorch::typed::nn`;
+//! they add nothing to [`crate::typed::prelude`].
 //!
 //! The [`TypedModule`] derive is re-exported here for the same reason, so a
 //! crate depending only on `rstorch` reaches it as
