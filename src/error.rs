@@ -1,14 +1,14 @@
 //! The single error type for the crate.
 //!
-//! Design contract (exploration §4.6): one `thiserror` enum; every variant
+//! Design contract: one `thiserror` enum; every variant
 //! carries the operation name (`op`) where one exists and the offending
 //! values, so a failure is loud and self-describing without a backtrace.
 //!
-//! Fallibility is two-tier (exploration §3.1): every *named* method returns
+//! Fallibility is two-tier: every *named* method returns
 //! [`Result`]; operator sugar (`+`, `-`, `*`, `/`) panics with the identical
 //! structured message under `#[track_caller]`.
 //!
-//! Variant set ownership (implementation-plan §1.3): this initial set is
+//! Variant set ownership: this initial set is
 //! authored by T01; later additions are integrator-only appends. The enum is
 //! `#[non_exhaustive]` for that reason.
 
@@ -64,8 +64,8 @@ pub enum Error {
         rank: usize,
     },
 
-    /// Dtypes were incompatible. There is **no implicit dtype promotion**
-    /// (exploration §3.3): mixing dtypes is an error telling you to cast
+    /// Dtypes were incompatible. There is **no implicit dtype promotion**:
+    /// mixing dtypes is an error telling you to cast
     /// explicitly with `to_dtype`.
     #[error(
         "{op}: dtype mismatch: expected {expected}, got {got} (no implicit promotion; cast explicitly with to_dtype)"
@@ -117,8 +117,8 @@ pub enum Error {
     },
 
     /// The operation has no kernel for this device/dtype combination.
-    /// There are **no silent host round-trips or CPU fallbacks**
-    /// (exploration §4.5): a missing GPU kernel is this loud error.
+    /// There are **no silent host round-trips or CPU fallbacks**:
+    /// a missing GPU kernel is this loud error.
     #[error("{op}: unsupported on {device} for dtype {dtype}")]
     Unsupported {
         /// Public operation that failed.
@@ -132,7 +132,7 @@ pub enum Error {
     /// `backward()` was called on a tensor that carries no autograd graph
     /// (nothing in its history was traced), or `traced()` misuse was
     /// detected. A graph-less `backward()` is an error, **not** an empty
-    /// `Grads` (exploration §4.3).
+    /// `Grads`.
     #[error(
         "{op}: tensor is not traced (no autograd graph; did you forget Mode::TRAIN or Param::get?)"
     )]
@@ -143,7 +143,7 @@ pub enum Error {
 
     /// The optimizer visited a non-frozen parameter that has no gradient in
     /// the `Grads` it was given. This is the loud answer to a silently
-    /// untrained parameter (exploration §4.4): an untraced weight access is
+    /// untrained parameter: an untraced weight access is
     /// an error at the very next `step`, not silent non-training.
     #[error(
         "step: missing gradient for non-frozen parameter `{path}` (was it used under a recording Mode?)"

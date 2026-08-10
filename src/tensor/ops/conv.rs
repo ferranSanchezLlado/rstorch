@@ -3,14 +3,14 @@
 //!
 //! All three take an NCHW image (`[batch, channels, height, width]`) and
 //! **compute** their output spatial size from the window parameters — v3 has
-//! no const-generic `OUT_H`/`OUT_W` to keep in sync (exploration §4.1).
+//! no const-generic `OUT_H`/`OUT_W` to keep in sync.
 //! Kernel semantics (cross-correlation, NaN-propagating max pooling,
 //! `count_include_pad = true` average pooling) are documented on
 //! `backend::cpu::conv`.
 //!
 //! Each op computes its forward output through the backend `conv` entry point
 //! and then registers a backward closure with the frozen `record` seam. The
-//! closures capture the operands in **detached** form (exploration §4.3) and
+//! closures capture the operands in **detached** form and
 //! call the gradient kernels that live next to the forward ones.
 
 use super::{same_device, same_dtype};
@@ -97,7 +97,7 @@ impl Tensor {
         let out = Tensor::from_parts(storage, Layout::contiguous(geo.output_dims())?);
 
         // Detached captures: the closure must not hold an `Arc` back into the
-        // graph it is attached to (exploration §4.3).
+        // graph it is attached to.
         let saved_input = self.detach();
         let saved_weight = weight.detach();
         Ok(autograd::record(
@@ -477,11 +477,7 @@ mod tests {
 
     // ----- backward: finite differences ----------------------------------
     //
-    // Written against the single `testing::check_grad` harness. The
-    // implementation-plan §4 grid deferred T26's cases to milestone m4 on the
-    // assumption that T26 would not be merged by m2; it was, and these pass,
-    // so **T31** activates them as regression protection rather than leaving
-    // a merged op family unguarded.
+    // Written against the single `testing::check_grad` harness.
     //
     // `check_grad` needs a scalar-valued function, and reductions belong to
     // T23, so each case ends in a convolution with a one-element output —

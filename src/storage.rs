@@ -1,6 +1,6 @@
 //! Tensor storage: device-tagged, dtype-tagged element buffers.
 //!
-//! Storage is crate-private (exploration §4.5). Buffers are `Arc`-shared:
+//! Storage is crate-private. Buffers are `Arc`-shared:
 //! cloning a `Storage` is a refcount bump, which is what makes zero-copy
 //! views (`transpose`, `narrow`, `broadcast_to`) and detached captures
 //! cheap. Tensors are immutable values, so shared buffers are never

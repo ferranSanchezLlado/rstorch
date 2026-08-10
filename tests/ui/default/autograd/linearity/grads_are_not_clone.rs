@@ -1,4 +1,4 @@
-//! `Grads` is deliberately **not** `Clone` (exploration §5): duplicating a
+//! `Grads` is deliberately **not** `Clone`: duplicating a
 //! gradient value is the first half of "the same gradients applied twice", so
 //! it must not be expressible at all.
 

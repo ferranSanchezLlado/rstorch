@@ -378,7 +378,7 @@ impl Layout {
     }
 
     /// Attempt to view this layout as `new_shape` **without copying**
-    /// (PyTorch `reshape` semantics, exploration §4.2): returns
+    /// (PyTorch `reshape` semantics): returns
     /// `Some(layout)` when the elements of the new shape can be addressed
     /// by some stride assignment over the existing storage walk order —
     /// always true for contiguous layouts; true for permuted/narrowed

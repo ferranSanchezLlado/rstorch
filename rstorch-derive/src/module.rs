@@ -14,7 +14,7 @@ use crate::shared::{self, FieldKind};
 /// as named by the `skip` parser's error message.
 const ATTR: &str = "module";
 
-/// Primitive scalar / small-type whitelist (exploration §4.4). Fields of
+/// Primitive scalar / small-type whitelist. Fields of
 /// these types are configuration, not parameters, and are silently skipped.
 /// Any type *not* on this list (and not `Param`/`Option<Param>`/`Tensor`) is
 /// treated as a child module so it must implement `Module`.

@@ -1,5 +1,4 @@
-//! Operator sugar: the panicking tier of the two-tier fallibility policy
-//! (exploration §3.1/§4.2).
+//! Operator sugar: the panicking tier of the two-tier fallibility policy.
 //!
 //! Every named method returns [`Result`](crate::Result). The `std::ops`
 //! spellings — `a + b`, `a - b`, `a * b`, `a / b`, plus the `tensor <op>

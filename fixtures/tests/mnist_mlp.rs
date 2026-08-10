@@ -1,4 +1,4 @@
-//! **The m3 acceptance fixture** (exploration §4.7, implementation-plan §3):
+//! **The m3 acceptance fixture**:
 //! the flagship loop — an MLP over an MNIST split, trained end to end through
 //! `DataLoader` + `Adam`, with the loss going down and the accuracy going up.
 //!
@@ -7,7 +7,7 @@
 //! and nothing else. Every step below therefore has to be expressible in the
 //! public vocabulary. What it pins:
 //!
-//! - The `#[derive(Module)]` + `Forward` model of exploration §4.7 —
+//! - The `#[derive(Module)]` + `Forward` model —
 //!   `Linear`/`Dropout`/`Linear` with a `relu` between — reaches
 //!   `Adam::step(&mut model, loss.backward()?)` with no glue types.
 //! - `MnistDataset` with [`MnistLayout::Flat`] drops straight into
@@ -162,7 +162,7 @@ fn splits(device: &Device) -> Result<(MnistDataset, MnistDataset)> {
 }
 
 // ---------------------------------------------------------------------------
-// The model: exploration §4.7, verbatim in shape.
+// The model, verbatim in shape.
 // ---------------------------------------------------------------------------
 
 /// The flagship MLP: `784 → 128 → 10` in the design's example, `100 → 64 → 10`
@@ -216,7 +216,7 @@ type Batch = (Tensor, Tensor);
 /// Train one epoch and return the mean cross-entropy over its batches.
 ///
 /// `step` is a closure rather than an `&mut impl Optimizer` because there is
-/// no `Optimizer` trait (exploration §4.4: every optimizer is a concrete
+/// no `Optimizer` trait (every optimizer is a concrete
 /// type), which is exactly what a generic training helper has to work around.
 /// The body is otherwise the design's four lines: forward under
 /// [`Mode::TRAIN`], `cross_entropy`, `backward`, `step` — no `zero_grad`,

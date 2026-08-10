@@ -1,6 +1,6 @@
 //! The first-hour surface: `use rstorch::prelude::*;`.
 //!
-//! Exposes the eleven-item vocabulary of exploration §4.7. Edits here are
+//! Exposes the crate's core vocabulary. Edits here are
 //! **append-only** re-exports: later tasks add their public types (the
 //! `nn` layers, `Sgd`/`Adam`, `DataLoader`, `#[derive(Module)]`) without
 //! reordering or removing.
@@ -15,8 +15,8 @@ pub use crate::nn::{Dropout, Gelu, Linear, Relu};
 // The normalization layers (T42).
 pub use crate::nn::{BatchNorm2d, LayerNorm, RMSNorm};
 
-// The optimizers of the first-hour loop (exploration §4.7 spells
-// `Adam::new(1e-3)` under a bare `use rstorch::prelude::*`). The parameter-group
+// The optimizers of the first-hour loop, so that `Adam::new(1e-3)` works
+// under a bare `use rstorch::prelude::*`. The parameter-group
 // builder types and the `schedule` functions stay behind `rstorch::optim::` —
 // they belong to hour two.
 pub use crate::optim::{Adam, AdamW, Sgd};

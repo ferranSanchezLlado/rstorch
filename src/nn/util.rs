@@ -1,4 +1,4 @@
-//! Model-level utilities (exploration §4.4): visitor-based helpers that
+//! Model-level utilities: visitor-based helpers that
 //! operate on any `&dyn Module`.
 //!
 //! **Contract file** (T01²/T40). T01 provides the read-only walks that
@@ -173,7 +173,7 @@ pub fn to_device(module: &mut dyn Module, device: &Device) -> Result<()> {
 }
 
 /// Cast every **floating-point** parameter and buffer of `module` to `dtype`
-/// (exploration §4.4: constructors initialize F32, convert after).
+/// (constructors initialize F32, convert after).
 ///
 /// Integer and boolean leaves are left untouched, as in PyTorch: an `I64`
 /// index buffer or a `Bool` mask is structure, not precision, and casting it
@@ -226,7 +226,7 @@ fn invalid(op: &'static str, msg: String) -> Error {
 /// - `f` reports one. The error is returned unchanged: the underlying op's
 ///   error is already loud and names the op that could not convert.
 /// - The module emits the same path twice, so two distinct leaves collide.
-///   A tied parameter is owned once and visited once (exploration §4.4), so a
+///   A tied parameter is owned once and visited once, so a
 ///   collision is a `Module` implementation bug; rejecting it keeps one leaf
 ///   from silently overwriting the other's value on the way back in.
 fn mapped(

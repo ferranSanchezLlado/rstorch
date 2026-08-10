@@ -1,5 +1,5 @@
 //! Data pipeline: the batch-level `Dataset` trait, `DataLoader`, and the
-//! provided dataset types (exploration §4.6).
+//! provided dataset types.
 //!
 //! A dataset yields **batches**, not items ([`Dataset`]), and [`DataLoader`]
 //! is the only thing that decides which item positions go into which batch:

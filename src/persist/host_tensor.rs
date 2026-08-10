@@ -5,7 +5,7 @@
 //! bridges live tensors to and from `HostTensor`s; this module never touches a
 //! live tensor, storage, or layout. Keeping the two
 //! apart means the on-disk format can evolve without a tensor-core change and
-//! vice-versa (exploration §4.6).
+//! vice-versa.
 
 use crate::dtype::DType;
 use crate::error::{Error, Result};

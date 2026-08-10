@@ -1,4 +1,4 @@
-//! **The m1 acceptance fixture** (exploration §10, implementation-plan §3):
+//! **The m1 acceptance fixture**:
 //! the tensor op surface exercised end to end from *outside* the crate.
 //!
 //! This file is deliberately a downstream consumer. It imports nothing but
@@ -373,7 +373,7 @@ fn operator_sugar_panics_with_the_same_message() {
 // ---------------------------------------------------------------------------
 
 /// A dense layer + activation + cross-entropy-shaped read-out, written the
-/// way the flagship loop (exploration §4.7) writes it, minus the `nn` types
+/// way the flagship loop writes it, minus the `nn` types
 /// that arrive in wave 4. This is the m1 acceptance example: if this reads
 /// naturally, the op surface has done its job.
 #[test]

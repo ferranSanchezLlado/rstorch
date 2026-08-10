@@ -1,9 +1,9 @@
 //! Crate-private backend layer: the [`BackendOps`] trait, the op-family
 //! enums, the borrowed [`View`] passed to kernels, and the single dispatch
-//! point ([`dispatch::backend`]). No public surface here (exploration §4.5);
+//! point ([`dispatch::backend`]). No public surface here;
 //! the public face of a backend is the [`Device`](crate::Device) enum.
 //!
-//! # Design (exploration §4.5)
+//! # Design
 //!
 //! - **Coarse, enum-routed entry points.** Adding an element-wise op is a
 //!   new [`BinaryOp`]/[`UnaryOp`] variant plus kernel cases; the trait does
@@ -17,8 +17,8 @@
 //!   contract. A backend that cannot honor the contract for a dtype returns
 //!   [`Error::Unsupported`](crate::Error::Unsupported).
 //!
-//! # Asynchronous result semantics (exploration §4.5 — a first-class
-//! requirement, not an optimization)
+//! # Asynchronous result semantics (a first-class requirement, not an
+//! optimization)
 //!
 //! The methods below are specified as **device-ordered**, not
 //! synchronous. A returned [`Storage`] may denote a computation still in
@@ -117,7 +117,7 @@ pub(crate) enum UnaryOp {
     Relu,
     /// Gaussian error linear unit. **Exact** GELU
     /// (`0.5·x·(1+erf(x/√2))`), not the tanh approximation
-    /// (exploration §3.1 familiar-semantics contract).
+    /// (the familiar-semantics contract).
     Gelu,
     /// `exp(x)`.
     Exp,
@@ -217,7 +217,7 @@ pub(crate) struct Conv2dParams {
     pub(crate) dilation: (usize, usize),
 }
 
-/// Fused kernels (exploration §10 epoch 3): softmax, layernorm, and the
+/// Fused kernels: softmax, layernorm, and the
 /// optimizer updates that reclaim v2's fixed per-parameter allocation
 /// hotspot. Optional — [`BackendOps::fused`] returns
 /// [`Error::Unsupported`](crate::Error::Unsupported) until T48 implements a
@@ -270,7 +270,7 @@ pub(crate) enum FusedOp {
 /// device-side region copy through the existing entry points would add one
 /// crate-private `copy_into` primitive at that point (T61) — a lock-free,
 /// non-semver change, since this trait is crate-private — rather than a host
-/// round-trip, which the no-silent-fallback policy (exploration §4.5)
+/// round-trip, which the no-silent-fallback policy
 /// forbids.
 pub(crate) trait BackendOps: Send + Sync {
     /// Upload a host buffer, producing device storage. For CPU this wraps
@@ -337,7 +337,7 @@ pub(crate) trait BackendOps: Send + Sync {
 
     /// Reduce `x` along `axis` (pre-resolved to `[0, rank)`), dropping that
     /// axis. Accumulates in [`Element::Acc`](crate::dtype::Element::Acc).
-    /// The empty-reduction policy (exploration §3.1) is enforced by the op
+    /// The empty-reduction policy is enforced by the op
     /// layer before calling.
     fn reduce(&self, op: ReduceOp, x: View<'_>, axis: usize) -> Result<Storage>;
 
@@ -405,7 +405,7 @@ pub(crate) trait BackendOps: Send + Sync {
 /// entry point to its per-family kernel module (`cpu::host`, `cpu::elementwise`,
 /// `cpu::reduce`, `cpu::matmul`, `cpu::index`, `cpu::conv`, `cpu::fused`).
 /// The delegations are frozen by T01; the kernel-module bodies were filled by
-/// the wave-2/3 kernel tasks (implementation-plan §1.3, footnote ³).
+/// the wave-2/3 kernel tasks (footnote ³).
 pub(crate) struct CpuBackend;
 
 impl BackendOps for CpuBackend {
@@ -491,7 +491,7 @@ impl BackendOps for CpuBackend {
     }
 }
 
-/// The single dispatch point (exploration §4.5): every tensor op routes
+/// The single dispatch point: every tensor op routes
 /// through here to obtain the backend for its device, then calls one coarse
 /// [`BackendOps`] entry point. Backends are zero-sized and long-lived, so a
 /// `&'static` reference is handed back.

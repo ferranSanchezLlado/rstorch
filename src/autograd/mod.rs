@@ -1,5 +1,5 @@
-//! Autograd: tracing is data flow, gradients are a linear value
-//! (exploration §4.3).
+//! Autograd: tracing is data flow, gradients are a linear value.
+//!
 //!
 //! **Contract module** (T01) + **engine** (T30). T01 defined the autograd
 //! *types* and the *seams* the rest of the crate codes against; T30 filled the
@@ -43,7 +43,7 @@
 //!   otherwise recurse once per node; [`Node`]'s `Drop` moves the parents onto
 //!   a worklist instead.
 //!
-//! # The detached-output capture rule (exploration §4.3)
+//! # The detached-output capture rule
 //!
 //! A backward closure may capture the op's **output only in detached form**
 //! (a fresh `Inner` that shares storage but has `node: None`), built *before*
@@ -201,7 +201,7 @@ pub(crate) fn make_leaf(value: Tensor, key: GradKey) -> Tensor {
     Tensor::from_parts_traced(value.storage().clone(), value.layout().clone(), node)
 }
 
-/// Turn `t` into a traced leaf for grad-wrt-input (exploration §4.3):
+/// Turn `t` into a traced leaf for grad-wrt-input:
 /// `let xt = x.traced(); let y = f(&xt)?; let g = y.backward()?;
 /// g.wrt_input(&xt)`. The **returned** binding must be the one used in the
 /// computation *and* in the lookup.
@@ -254,7 +254,7 @@ pub(crate) fn traced(t: &Tensor) -> Result<Tensor> {
 /// # Errors
 ///
 /// [`Error::NotTraced`] (`op: "backward"`) if `t` carries no graph. A
-/// graph-less backward is loud, never an empty [`Grads`] (exploration §4.3).
+/// graph-less backward is loud, never an empty [`Grads`].
 /// Whatever a backward closure's tensor ops report propagates out of here
 /// unchanged, naming the op that failed: a backend failure during the backward
 /// pass is that error, never a silently missing gradient that resurfaces as a
@@ -459,7 +459,7 @@ fn merge_accumulated<K: std::hash::Hash + Eq>(
 }
 
 /// The result of [`Tensor::backward`](crate::Tensor::backward): the
-/// gradients, as a **linear** value (exploration §4.3, §5).
+/// gradients, as a **linear** value (§5).
 ///
 /// `Grads` is deliberately **not `Clone`** and is `#[must_use]`: the
 /// optimizer consumes it by move (`opt.step(&mut model, grads)`), so applying
@@ -641,7 +641,7 @@ impl Grads {
             .ok_or(Error::NotTraced { op: "wrt" })
     }
 
-    /// The gradient with respect to a traced input (exploration §4.3).
+    /// The gradient with respect to a traced input.
     /// `input` must be the tensor returned by
     /// [`Tensor::traced`](crate::Tensor::traced) **and** the one used in the
     /// computation.

@@ -1,10 +1,10 @@
 //! The table-driven backend conformance harness: one op × dtype table, run
-//! against the CPU reference (exploration §4.5, implementation-plan §4 T19).
+//! against the CPU reference.
 //!
 //! CPU is *the* reference implementation. Every other backend is validated
 //! against it by this one suite rather than by a per-backend pile of
 //! bespoke tests, so adding backend #5 costs "one module + a conformance
-//! run" (exploration §7) instead of a new test corpus.
+//! run" instead of a new test corpus.
 //!
 //! # How it works
 //!

@@ -422,7 +422,7 @@ pub(crate) fn check_suffix(op: &'static str, x: &Tensor, normalized: &Shape) -> 
 
 /// A `shape` tensor filled with `value`, F32 on `device` — how every parameter and
 /// buffer here is initialized (constructors build F32; `nn::to_dtype` converts
-/// afterwards, exploration §4.4).
+/// afterwards).
 fn filled(shape: impl Into<Shape>, value: f64, device: &Device) -> Result<Tensor> {
     Tensor::full(shape, value, DType::F32, device)
 }

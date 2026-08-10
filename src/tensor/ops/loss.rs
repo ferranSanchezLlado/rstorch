@@ -4,14 +4,13 @@
 //! spelling — and [`mse_loss`](Tensor::mse_loss).
 //!
 //! Both return a **rank-0 scalar** and both reduce by the **mean**: there is
-//! no `Reduction` enum and no options struct (exploration §4.2 — one spelling
-//! per operation). A caller who wants the sum multiplies the mean back up;
+//! no `Reduction` enum and no options struct — one spelling per operation. A caller who wants the sum multiplies the mean back up;
 //! a caller who wants the per-element losses composes them from the op
 //! surface directly.
 //!
 //! # Labels are tensors, and they stay on-device
 //!
-//! `cross_entropy(&logits, &labels_i64)` is one path (exploration §4.2): the
+//! `cross_entropy(&logits, &labels_i64)` is one path: the
 //! labels are an ordinary [`I64`](crate::DType::I64) tensor on the logits'
 //! device, the ignore mask is built on-device by comparison, and nothing here
 //! reads an element back to the host — not even the count of unmasked rows,
@@ -45,7 +44,7 @@
 //! That is one pass over the logits instead of a scatter-add graph, and it is
 //! exact at the `-inf` boundary where `exp(log_softmax(x))` is a clean `0`.
 //! Every tensor the closures capture is detached (the detached-output capture
-//! rule, exploration §4.3); the labels are integral and take no gradient, so
+//! rule); the labels are integral and take no gradient, so
 //! only the float input is listed as a graph input.
 
 use super::{require_dtype, same_device, same_dtype};

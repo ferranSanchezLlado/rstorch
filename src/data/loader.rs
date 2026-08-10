@@ -1,4 +1,4 @@
-//! [`DataLoader`]: the one loader (exploration §4.6) — order and batching, and
+//! [`DataLoader`]: the one loader — order and batching, and
 //! nothing else.
 //!
 //! v2 shipped `DataLoader` *and* `StaticDataLoader`, three collators in two
@@ -14,7 +14,7 @@ use crate::rng::Rng;
 
 /// Batches a [`Dataset`] in order, or in a seeded shuffled order.
 ///
-/// The single loader of exploration §4.6. It owns three decisions — batch
+/// The crate's one loader. It owns three decisions — batch
 /// size, order, and what to do with a short final batch — and delegates
 /// everything about *what a batch is* to the dataset.
 ///

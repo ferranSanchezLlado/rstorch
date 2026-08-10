@@ -1,4 +1,4 @@
-//! [`Mode`] — two orthogonal axes in one `Copy` value (exploration §4.4).
+//! [`Mode`] — two orthogonal axes in one `Copy` value.
 //!
 //! `Mode` carries **layer behavior** (Train vs Eval — dropout on/off,
 //! BatchNorm batch-stats vs running-stats) and **recording** (whether
@@ -31,7 +31,7 @@ impl Mode {
     };
 
     /// Eval behavior **and** no recording (inference retains no
-    /// activations — the memory win of exploration §4.3).
+    /// activations, which is the memory win).
     pub const EVAL: Mode = Mode {
         training: false,
         record: false,

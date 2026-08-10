@@ -2,7 +2,7 @@
 //! each, the normalizations `softmax`/`log_softmax`, and the index reductions
 //! `argmax`/`argmin`.
 //!
-//! # Three spellings, one meaning (exploration §4.2)
+//! # Three spellings, one meaning
 //!
 //! Every value reduction comes as `op(axis)` (the axis is reduced away and
 //! **dropped**), `op_keepdim(axis)` (the axis stays at size 1, so the result
@@ -10,7 +10,7 @@
 //! a rank-0 scalar). Axes are `isize` with negative indexing, so `-1` is
 //! always the last axis.
 //!
-//! # Empty-reduction policy (exploration §3.1)
+//! # Empty-reduction policy
 //!
 //! Reducing an axis of size 0 has an answer only where the op has an identity
 //! element. The rule here is one line:
@@ -53,7 +53,7 @@
 //!
 //! The `max`/`min` backward captures the **detached** input and output, while
 //! fused softmax captures its **detached** output `y` (the detached-output
-//! capture rule, exploration §4.3). Each is built before the traced output is
+//! capture rule). Each is built before the traced output is
 //! assembled. The extrema `NaN` rule is stated in full on `route_to_extrema`.
 
 use crate::autograd::{BackwardFn, record};

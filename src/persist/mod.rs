@@ -9,7 +9,7 @@
 //! or its layout. The crate's checkpoint runtime bridges tensors
 //! to and from `HostTensor`s and drives the transactional swaps; this module
 //! owns the fallible, on-disk half. Keeping the two apart lets the
-//! file format and the tensor core evolve independently (exploration §4.6).
+//! file format and the tensor core evolve independently.
 //!
 //! # What lives here
 //!

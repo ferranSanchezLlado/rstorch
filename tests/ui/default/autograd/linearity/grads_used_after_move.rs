@@ -1,4 +1,4 @@
-//! Every `Grads` consumer takes it **by move** (exploration §4.3/§5), so
+//! Every `Grads` consumer takes it **by move**, so
 //! applying one gradient value twice — the optimizer-step bug PyTorch cannot
 //! see — is a borrow-checker error instead.
 

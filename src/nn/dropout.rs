@@ -1,5 +1,5 @@
-//! [`Dropout`] — inverted dropout over a layer-owned [`Rng`] stream
-//! (exploration §4.4).
+//! [`Dropout`] — inverted dropout over a layer-owned [`Rng`] stream.
+//!
 //!
 //! Two design points, both consequences of the crate having **no ambient
 //! state**:

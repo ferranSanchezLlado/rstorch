@@ -1,9 +1,8 @@
 //! Raw TinyShakespeare loading: download, cache, and text access.
 //!
-//! This module is `Tensor`- and tokenizer-free (implementation-plan §4,
-//! T15): it only downloads and returns the corpus as a `String`. Tokenizing
-//! it into causal-LM windows is the job of the `Dataset` wrappers (T46) built
-//! on the [`crate::text`] tokenizers.
+//! This module is `Tensor`- and tokenizer-free: it only downloads and returns
+//! the corpus as a `String`. Tokenizing it into causal-LM windows is the job of
+//! the `Dataset` wrappers built on the [`crate::text`] tokenizers.
 
 use super::{DatasetHub, DatasetResource};
 use crate::error::Result;

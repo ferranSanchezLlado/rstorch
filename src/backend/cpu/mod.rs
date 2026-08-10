@@ -1,12 +1,10 @@
 //! CPU backend: the reference implementation every other backend is
 //! conformance-tested against.
 //!
-//! Per-family kernel modules (ownership per implementation-plan §3):
-//! `host` (T10a), `elementwise` (T10b), `reduce`/`matmul` (T11),
-//! `index` (T25), `conv` (T26), `fused` (T48). T10b additionally owns
-//! this file and `backend/parallel.rs` (the rayon switch). `acc` holds the
-//! wide-accumulator traits every one of those kernel families shares, and
-//! `dispatch` the single runtime-dtype dispatch they all route through.
+//! One module per kernel family: `host`, `elementwise`, `reduce`, `matmul`,
+//! `index`, `conv`, and `fused`. `acc` holds the wide-accumulator traits every
+//! one of those families shares, and `dispatch` the single runtime-dtype
+//! dispatch they all route through; `backend/parallel.rs` is the rayon switch.
 
 use crate::backend::View;
 use crate::storage::{CpuStorage, Storage};

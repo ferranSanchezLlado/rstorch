@@ -142,7 +142,7 @@ jobs:
         run: cargo install cargo-public-api --version 0.52.0 --locked
       - name: Diff dynamic and typed surfaces
         run: |
-          test "$(shasum -a 256 src/prelude.rs | cut -d ' ' -f 1)" = d51c608f4a8e8f83e78572374b70c401f12b37c532c22056139b7847b9abcbea
+          test "$(shasum -a 256 src/prelude.rs | cut -d ' ' -f 1)" = ecbfded981065c3fb2128c70363f981ece33bcfaeaaa48878bcb74aa3b93c3b9
           cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features > /tmp/dynamic-default.txt
           diff -u docs/restart-v3/public-api-baseline.txt /tmp/dynamic-default.txt
           diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-default.txt /tmp/dynamic-default.txt

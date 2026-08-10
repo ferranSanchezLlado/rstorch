@@ -1,5 +1,5 @@
 //! Indexing ops: the epoch-1/2 vocabulary behind embeddings, KV caches, and
-//! label lookups (exploration §4.2 "indexing set").
+//! label lookups (the "indexing set").
 //!
 //! Two indexed reads, each with its scatter-accumulate backward:
 //!

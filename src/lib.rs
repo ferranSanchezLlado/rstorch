@@ -3,10 +3,6 @@
 //! A safer PyTorch-inspired deep learning library: one concrete tensor type
 //! with zero generic parameters, and linear gradients.
 //!
-//! This crate is being rebuilt from zero on the `restart-v3` branch. The
-//! approved design lives in `docs/restart-v3/exploration.md`; the task
-//! breakdown in `docs/restart-v3/implementation-plan.md`.
-//!
 //! The first-hour surface is re-exported at the crate root and, together
 //! with the `nn`/`optim`/`data` types, through [`prelude`]:
 //!

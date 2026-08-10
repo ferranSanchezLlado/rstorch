@@ -1,4 +1,4 @@
-//! Runtime shapes. Shapes are data, not types (exploration §2): a
+//! Runtime shapes. Shapes are data, not types: a
 //! [`Shape`] is a list of dimension sizes, axes are `isize` with negative
 //! indexing, and every shape check is a loud structured error at runtime.
 

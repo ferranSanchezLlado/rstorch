@@ -1,4 +1,4 @@
-//! Parameter/buffer visitors with dotted paths (exploration §4.4).
+//! Parameter/buffer visitors with dotted paths.
 //!
 //! [`Module::visit`](crate::nn::Module::visit) and
 //! [`visit_mut`](crate::nn::Module::visit_mut) walk a module tree, calling
@@ -11,7 +11,7 @@
 //! module. These path semantics are the on-disk `state_dict` key format, so
 //! they are frozen here (a §9 risk item).
 //!
-//! **Params vs buffers** (exploration §4.4 whitelist): a `Param` is trainable
+//! **Params vs buffers**: a `Param` is trainable
 //! and optimizer-visited; a `Tensor` buffer is non-trainable persistent state
 //! (running statistics). Both are moved by `nn::to_device`/`to_dtype` and both
 //! land in `state_dict` (so a checkpoint reconstructs a model, as PyTorch
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn derived_vec_fields_keep_their_field_segment() {
-        // The frozen path format (this module's docs, exploration §4.4) is
+        // The frozen path format (this module's docs) is
         // `blocks.3.attn.qkv.weight`: the field segment, then the index. The
         // derive originally emitted only the index (`0.qkv.weight`), so two
         // `Vec` fields in one module collided on identical paths. T40 found
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn a_tied_parameter_is_visited_exactly_once() {
-        // Weight tying, the sanctioned way (exploration §4.4): the parent owns
+        // Weight tying, the sanctioned way: the parent owns
         // the one `Param` and writes both uses inline. The visitor therefore
         // sees it once — so the optimizer cannot double-step it — while the
         // autograd engine still accumulates both contributions under its one

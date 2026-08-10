@@ -19,7 +19,7 @@
 //! the same value back to the gradient kernels, so the two can never
 //! disagree.
 //!
-//! # Semantics (PyTorch-familiar, exploration §3.1)
+//! # Semantics (PyTorch-familiar)
 //!
 //! - `Conv2d` is a **cross-correlation** (no kernel flip), like PyTorch's.
 //!   Bias is not a kernel operand: the op layer adds it as a broadcast add.

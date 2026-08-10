@@ -1,4 +1,4 @@
-//! [`Param`] — a trainable tensor with stable identity (exploration §4.3).
+//! [`Param`] — a trainable tensor with stable identity.
 //!
 //! **Contract file** (T01²/T40). T01 authors the linear-identity API and its
 //! core behavior (get/set/freeze — the crux of the design's safety claims);
@@ -28,7 +28,7 @@ pub struct Param {
     leaf: Tensor,
     /// Stable gradient identity (see the type docs).
     key: GradKey,
-    /// Per-parameter freeze flag (exploration §4.3): explicit, not a `Mode`
+    /// Per-parameter freeze flag: explicit, not a `Mode`
     /// side effect. A frozen param never traces and is skipped by the
     /// optimizer's completeness check.
     frozen: bool,
@@ -115,7 +115,7 @@ impl Param {
 }
 
 // The `Param: !Clone` and step-by-move linearity guarantees are covered by the
-// pinned-toolchain compile-fail suite T30 owns (exploration §6).
+// pinned-toolchain compile-fail suite T30 owns.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,7 +148,7 @@ mod tests {
         ));
     }
 
-    // ---- the two off-diagonal modes (exploration §4.4) --------------------
+    // ---- the two off-diagonal modes --------------------
 
     #[test]
     fn eval_recorded_still_produces_gradients() {

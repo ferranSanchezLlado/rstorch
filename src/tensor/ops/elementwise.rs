@@ -2,7 +2,7 @@
 //! spellings), `maximum`/`minimum`, the unary math family, comparisons to
 //! [`Bool`](crate::DType::Bool), `masked_fill` and `where_cond`.
 //!
-//! Every op here follows the same three-step shape (exploration §4.2/§4.5):
+//! Every op here follows the same three-step shape:
 //!
 //! 1. **Validate** device and dtype in the op layer — there is no implicit
 //!    promotion and no silent device hop, so mixing either is a structured
@@ -20,8 +20,8 @@
 //!   is exactly the transpose of `Layout::broadcast_to`.
 //! - Output-dependent formulas (`exp`, `sqrt`, `tanh`, `sigmoid`, `div`,
 //!   `gelu`) capture the op's output in **detached** form, built before the
-//!   traced output is assembled (the detached-output capture rule,
-//!   exploration §4.3) — capturing the traced output would create an `Arc`
+//!   traced output is assembled (the detached-output capture rule) —
+//!   capturing the traced output would create an `Arc`
 //!   cycle through the closure.
 //! - Comparisons produce [`Bool`](crate::DType::Bool) and are therefore not
 //!   differentiable: they do not go through the record seam at all. For the
@@ -352,7 +352,7 @@ impl Tensor {
     }
 
     /// **Exact** Gaussian error linear unit, `0.5·x·(1 + erf(x/√2))` — not the
-    /// tanh approximation (the familiar-semantics contract, exploration §3.1).
+    /// tanh approximation (the familiar-semantics contract).
     ///
     /// # Errors
     /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
