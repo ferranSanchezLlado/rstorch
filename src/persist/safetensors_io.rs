@@ -258,241 +258,132 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
     Ok((metadata, buffer))
 }
 
-/// Detect duplicates before serde_json's HashMap representation can collapse
-/// them. Scanning every object also rejects duplicate tensor-info fields.
+/// Reject a header whose objects contain duplicate keys, before
+/// `serde_json`'s map representation can collapse them.
+///
+/// A header that two JSON parsers read differently is a header we refuse: the
+/// reader that decides shapes and the reader that decides bytes must agree.
+/// `serde_json` does the lexing (escapes, surrogate pairs, malformed
+/// brackets, trailing data); the visitor below adds the two rules it does not
+/// enforce for us — no repeated key in any object, and a nesting bound.
 fn reject_duplicate_json_keys(header: &[u8]) -> Result<()> {
-    JsonScanner {
-        input: header,
-        at: 0,
-        depth: 0,
-    }
-    .scan()
+    serde_json::from_slice::<Checked>(header)
+        .map(|_| ())
+        .map_err(|e| Error::Persistence {
+            msg: format!("invalid safetensors JSON header: {e}"),
+        })
 }
 
-// Ordinary safetensors headers use only a few levels. The scanner is a
-// recursive descent, so bounding nesting as it descends keeps it away from the
-// call-stack limits even when the header itself is close to the byte limit.
+/// Ordinary safetensors headers use only a few levels. The visitor recurses
+/// with `serde_json`, so bounding nesting as it descends keeps both away from
+/// the call-stack limit even for a header close to the byte limit.
 const MAX_JSON_NESTING: usize = 32;
 
-struct JsonScanner<'a> {
-    input: &'a [u8],
-    at: usize,
-    /// How many `{`/`[` levels the scanner is currently inside.
+/// A JSON value deserialized only for its side effects: it keeps no data, and
+/// exists so that every object in the header is visited and checked.
+struct Checked;
+
+impl<'de> serde::Deserialize<'de> for Checked {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_any(Descent { depth: 0 })
+    }
+}
+
+/// The visitor proper, carrying how many `{`/`[` levels it is already inside.
+#[derive(Clone, Copy)]
+struct Descent {
     depth: usize,
 }
 
-impl JsonScanner<'_> {
-    fn scan(mut self) -> Result<()> {
-        self.value()?;
-        self.ws();
-        if self.at != self.input.len() {
-            return self.invalid("trailing JSON data");
-        }
-        Ok(())
+impl<'de> serde::de::Visitor<'de> for Descent {
+    type Value = Checked;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
     }
 
-    fn value(&mut self) -> Result<()> {
-        self.ws();
-        match self.peek() {
-            Some(b'{') => self.nested(Self::object),
-            Some(b'[') => self.nested(Self::array),
-            Some(b'"') => self.string().map(|_| ()),
-            Some(_) => {
-                let start = self.at;
-                while let Some(ch) = self.peek() {
-                    if ch.is_ascii_whitespace() || matches!(ch, b',' | b']' | b'}') {
-                        break;
-                    }
-                    self.at += 1;
-                }
-                if self.at == start {
-                    self.invalid("expected JSON value")
-                } else {
-                    Ok(())
-                }
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Checked, A::Error> {
+        let inner = self.descend::<A::Error>()?;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate safetensors header field {key:?}"
+                )));
             }
-            None => self.invalid("expected JSON value"),
+            map.next_value_seed(inner)?;
         }
+        Ok(Checked)
     }
 
-    /// Descend into one `{`/`[` level, refusing to go past
-    /// [`MAX_JSON_NESTING`]. A header may claim any depth it likes; this is
-    /// what keeps the recursion here bounded regardless.
-    fn nested(&mut self, parse: fn(&mut Self) -> Result<()>) -> Result<()> {
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Checked, A::Error> {
+        let inner = self.descend::<A::Error>()?;
+        while seq.next_element_seed(inner)?.is_some() {}
+        Ok(Checked)
+    }
+
+    // Scalars carry nothing to check.
+    fn visit_bool<E>(self, _: bool) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_i64<E>(self, _: i64) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_u64<E>(self, _: u64) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_f64<E>(self, _: f64) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_str<E>(self, _: &str) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_unit<E>(self) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_none<E>(self) -> std::result::Result<Checked, E> {
+        Ok(Checked)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(
+        self,
+        d: D,
+    ) -> std::result::Result<Checked, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl Descent {
+    /// The visitor for one level further in, or the nesting error.
+    fn descend<E: serde::de::Error>(&self) -> std::result::Result<Descent, E> {
         if self.depth == MAX_JSON_NESTING {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "safetensors JSON nesting exceeds limit {MAX_JSON_NESTING} at byte {}",
-                    self.at
-                ),
-            });
+            return Err(E::custom(format!(
+                "safetensors JSON nesting exceeds limit {MAX_JSON_NESTING}"
+            )));
         }
-        self.depth += 1;
-        let result = parse(self);
-        self.depth -= 1;
-        result
-    }
-
-    fn object(&mut self) -> Result<()> {
-        self.at += 1;
-        let mut keys = std::collections::BTreeSet::new();
-        self.ws();
-        if self.take(b'}') {
-            return Ok(());
-        }
-        loop {
-            self.ws();
-            let key = self.string()?;
-            if !keys.insert(key.clone()) {
-                return Err(Error::Persistence {
-                    msg: format!("duplicate safetensors header field {key:?}"),
-                });
-            }
-            self.ws();
-            if !self.take(b':') {
-                return self.invalid("expected `:` after object key");
-            }
-            self.value()?;
-            self.ws();
-            if self.take(b'}') {
-                return Ok(());
-            }
-            if !self.take(b',') {
-                return self.invalid("expected `,` or `}` in object");
-            }
-        }
-    }
-
-    fn array(&mut self) -> Result<()> {
-        self.at += 1;
-        self.ws();
-        if self.take(b']') {
-            return Ok(());
-        }
-        loop {
-            self.value()?;
-            self.ws();
-            if self.take(b']') {
-                return Ok(());
-            }
-            if !self.take(b',') {
-                return self.invalid("expected `,` or `]` in array");
-            }
-        }
-    }
-
-    fn string(&mut self) -> Result<String> {
-        if !self.take(b'"') {
-            return self.invalid("expected JSON string");
-        }
-        let mut out = String::new();
-        loop {
-            let start = self.at;
-            while let Some(ch) = self.peek() {
-                if ch == b'"' || ch == b'\\' || ch < 0x20 {
-                    break;
-                }
-                self.at += 1;
-            }
-            let raw = std::str::from_utf8(&self.input[start..self.at]).map_err(|_| {
-                Error::Persistence {
-                    msg: "safetensors header contains invalid UTF-8".to_string(),
-                }
-            })?;
-            out.push_str(raw);
-            match self.peek() {
-                Some(b'"') => {
-                    self.at += 1;
-                    return Ok(out);
-                }
-                Some(b'\\') => {
-                    self.at += 1;
-                    let escape = self.next().ok_or_else(|| Error::Persistence {
-                        msg: "unterminated JSON escape".to_string(),
-                    })?;
-                    match escape {
-                        b'"' => out.push('"'),
-                        b'\\' => out.push('\\'),
-                        b'/' => out.push('/'),
-                        b'b' => out.push('\u{08}'),
-                        b'f' => out.push('\u{0c}'),
-                        b'n' => out.push('\n'),
-                        b'r' => out.push('\r'),
-                        b't' => out.push('\t'),
-                        b'u' => out.push(self.unicode_escape()?),
-                        _ => return self.invalid("invalid JSON escape"),
-                    }
-                }
-                _ => return self.invalid("unterminated JSON string"),
-            }
-        }
-    }
-
-    fn unicode_escape(&mut self) -> Result<char> {
-        let first = self.hex4()?;
-        let scalar = if (0xd800..=0xdbff).contains(&first) {
-            if self.next() != Some(b'\\') || self.next() != Some(b'u') {
-                return self.invalid("unpaired JSON surrogate");
-            }
-            let second = self.hex4()?;
-            if !(0xdc00..=0xdfff).contains(&second) {
-                return self.invalid("unpaired JSON surrogate");
-            }
-            0x10000 + ((first as u32 - 0xd800) << 10) + (second as u32 - 0xdc00)
-        } else {
-            first as u32
-        };
-        char::from_u32(scalar).ok_or_else(|| Error::Persistence {
-            msg: "invalid JSON Unicode escape".to_string(),
+        Ok(Descent {
+            depth: self.depth + 1,
         })
     }
+}
 
-    fn hex4(&mut self) -> Result<u16> {
-        let mut value = 0u16;
-        for _ in 0..4 {
-            let digit = self.next().and_then(|ch| (ch as char).to_digit(16));
-            value = value
-                .checked_mul(16)
-                .and_then(|v| digit.and_then(|d| v.checked_add(d as u16)))
-                .ok_or_else(|| Error::Persistence {
-                    msg: "invalid JSON Unicode escape".to_string(),
-                })?;
-        }
-        Ok(value)
-    }
+/// `Descent` is its own seed, so a nested value inherits the running depth.
+impl<'de> serde::de::DeserializeSeed<'de> for Descent {
+    type Value = Checked;
 
-    fn ws(&mut self) {
-        while self.peek().is_some_and(|ch| ch.is_ascii_whitespace()) {
-            self.at += 1;
-        }
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.input.get(self.at).copied()
-    }
-
-    fn next(&mut self) -> Option<u8> {
-        let value = self.peek()?;
-        self.at += 1;
-        Some(value)
-    }
-
-    fn take(&mut self, expected: u8) -> bool {
-        if self.peek() == Some(expected) {
-            self.at += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn invalid<T>(&self, message: &str) -> Result<T> {
-        Err(Error::Persistence {
-            msg: format!(
-                "invalid safetensors JSON header at byte {}: {message}",
-                self.at
-            ),
-        })
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<Checked, D::Error> {
+        deserializer.deserialize_any(self)
     }
 }
 
