@@ -43,8 +43,14 @@
 //! is. Generic-over-optimizer code is not a
 //! first-hour need, and a sixth public trait would cost the design's
 //! five-public-traits claim; a caller who wants to switch optimizers at runtime
-//! writes an enum over the two. The shared machinery is crate-private instead,
-//! so the two cannot drift.
+//! writes an enum over the two.
+//!
+//! Internally the two *are* one implementation: each is a crate-private
+//! `Engine` over a crate-private `Rule` naming the only things they differ in —
+//! an update formula, the buffers it carries, and the scalars a checkpoint
+//! holds. Everything else, this module's guarantees included, is written once.
+//! That trait is not exported and cannot be named or implemented from outside,
+//! so it is machinery rather than a sixth trait in the public vocabulary.
 //!
 //! # Parameter groups
 //!
