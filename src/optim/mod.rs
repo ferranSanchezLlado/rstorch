@@ -106,9 +106,9 @@
 //! # Cost
 //!
 //! An update is written in the public op vocabulary, so each parameter costs a
-//! handful of small tensor allocations per step. That was a measured hotspot in
-//! v2 at MLP scale; the fix is a fused backend kernel behind the same public
-//! surface, not a different API here.
+//! handful of small tensor allocations per step — a measured hotspot at MLP
+//! scale. The fix is a fused backend kernel behind the same public surface,
+//! not a different API here.
 //!
 //! # Reduced precision
 //!
