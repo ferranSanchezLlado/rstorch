@@ -80,10 +80,21 @@ impl GradKey {
 }
 
 /// A backward closure: given the cotangent (upstream gradient) of the op's
-/// output, produce the cotangent contribution for each input in order
-/// (`None` where an input needs no gradient). `Send + Sync` so the immutable
-/// graph is shareable across threads (`backward` is a pure function over it).
-pub(crate) type BackwardFn = Box<dyn Fn(&Tensor) -> Vec<Option<Tensor>> + Send + Sync>;
+/// output, produce the cotangent contribution for each input in order.
+///
+/// The two ways of "no tensor here" are deliberately distinct:
+///
+/// - `None` in the vector means *this input legitimately receives no
+///   gradient* — an integer index operand, a boolean mask, the non-selected
+///   side of `max`. It is a fact about the derivative, not a failure.
+/// - `Err` means the backward computation itself failed (an unsupported
+///   kernel, an allocation failure). It aborts [`backward`] and surfaces to
+///   the caller unchanged, so a backend error never masquerades as a missing
+///   gradient.
+///
+/// `Send + Sync` so the immutable graph is shareable across threads
+/// (`backward` is a pure function over it).
+pub(crate) type BackwardFn = Box<dyn Fn(&Tensor) -> Result<Vec<Option<Tensor>>> + Send + Sync>;
 
 /// A node in the autograd graph. Immutable once built; shared via
 /// `Arc<Node>` from every [`Tensor`] that participates in the computation.
@@ -244,10 +255,10 @@ pub(crate) fn traced(t: &Tensor) -> Result<Tensor> {
 ///
 /// [`Error::NotTraced`] (`op: "backward"`) if `t` carries no graph. A
 /// graph-less backward is loud, never an empty [`Grads`] (exploration §4.3).
-/// Whatever a backward closure's tensor ops report surfaces as a *missing*
-/// contribution rather than an error, because [`BackwardFn`] yields
-/// `Option<Tensor>`; only the engine's own cotangent accumulation and seed
-/// construction can fail here.
+/// Whatever a backward closure's tensor ops report propagates out of here
+/// unchanged, naming the op that failed: a backend failure during the backward
+/// pass is that error, never a silently missing gradient that resurfaces as a
+/// misleading [`Error::MissingGrad`] at the next `step`.
 pub(crate) fn backward(t: &Tensor) -> Result<Grads> {
     let root = t
         .node()
@@ -278,7 +289,7 @@ pub(crate) fn backward(t: &Tensor) -> Result<Grads> {
             continue;
         };
         let cotangent = cotangent.finish()?;
-        for (parent, contribution) in node.inputs.iter().zip(backward(&cotangent)) {
+        for (parent, contribution) in node.inputs.iter().zip(backward(&cotangent)?) {
             let (Some(parent), Some(contribution)) = (parent, contribution) else {
                 continue;
             };
@@ -1193,7 +1204,7 @@ mod tests {
                 op: "identity",
                 key: None,
                 inputs: vec![Some(head)],
-                backward: Some(Box::new(|g: &Tensor| vec![Some(g.clone())])),
+                backward: Some(Box::new(|g: &Tensor| Ok(vec![Some(g.clone())]))),
             });
         }
         let tensor =

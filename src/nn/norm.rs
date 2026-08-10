@@ -230,9 +230,9 @@ fn fused_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Res
         affine_dims: weight.dims().to_vec(),
         width: width as f64,
     };
-    let backward: BackwardFn = Box::new(move |g| match backward_state.grad(g) {
-        Ok((dx, dweight, dbias)) => vec![Some(dx), Some(dweight), Some(dbias)],
-        Err(_) => vec![None, None, None],
+    let backward: BackwardFn = Box::new(move |g| {
+        let (dx, dweight, dbias) = backward_state.grad(g)?;
+        Ok(vec![Some(dx), Some(dweight), Some(dbias)])
     });
     Ok(autograd::record(OP, out, &[x, weight, bias], backward))
 }

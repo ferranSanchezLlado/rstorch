@@ -13,6 +13,7 @@
 //! closures capture the operands in **detached** form (exploration §4.3) and
 //! call the gradient kernels that live next to the forward ones.
 
+use super::{same_device, same_dtype};
 use crate::autograd;
 use crate::backend::conv_geometry::Conv2dGeometry;
 use crate::backend::{Conv2dParams, ConvOp, dispatch};
@@ -71,20 +72,8 @@ impl Tensor {
         padding: (usize, usize),
         dilation: (usize, usize),
     ) -> Result<Tensor> {
-        if self.device() != weight.device() {
-            return Err(Error::DeviceMismatch {
-                op: "conv2d",
-                expected: self.device(),
-                got: weight.device(),
-            });
-        }
-        if self.dtype() != weight.dtype() {
-            return Err(Error::DTypeMismatch {
-                op: "conv2d",
-                expected: self.dtype(),
-                got: weight.dtype(),
-            });
-        }
+        same_device("conv2d", self, weight)?;
+        same_dtype("conv2d", self, weight)?;
         let weight_dims = weight.dims();
         if weight_dims.len() != 4 {
             return Err(Error::RankMismatch {
@@ -117,24 +106,23 @@ impl Tensor {
             &[self, weight],
             Box::new(move |g| {
                 let backend = dispatch::backend(g.device());
-                vec![
-                    from_kernel(
-                        backend.conv(
-                            ConvOp::Conv2dInputGrad,
-                            &[g.view(), saved_weight.view(), saved_input.view()],
-                            &params,
-                        ),
-                        geo.input_dims(),
+                let input_grad = from_kernel(
+                    backend.conv(
+                        ConvOp::Conv2dInputGrad,
+                        &[g.view(), saved_weight.view(), saved_input.view()],
+                        &params,
                     ),
-                    from_kernel(
-                        backend.conv(
-                            ConvOp::Conv2dWeightGrad,
-                            &[g.view(), saved_input.view(), saved_weight.view()],
-                            &params,
-                        ),
-                        geo.weight_dims(),
+                    geo.input_dims(),
+                )?;
+                let weight_grad = from_kernel(
+                    backend.conv(
+                        ConvOp::Conv2dWeightGrad,
+                        &[g.view(), saved_input.view(), saved_weight.view()],
+                        &params,
                     ),
-                ]
+                    geo.weight_dims(),
+                )?;
+                Ok(vec![Some(input_grad), Some(weight_grad)])
             }),
         ))
     }
@@ -186,14 +174,14 @@ impl Tensor {
             out,
             &[self],
             Box::new(move |g| {
-                vec![from_kernel(
+                Ok(vec![Some(from_kernel(
                     dispatch::backend(g.device()).conv(
                         ConvOp::MaxPool2dBackward,
                         &[g.view(), saved_input.view()],
                         &params,
                     ),
                     geo.input_dims(),
-                )]
+                )?)])
             }),
         ))
     }
@@ -239,14 +227,14 @@ impl Tensor {
             out,
             &[self],
             Box::new(move |g| {
-                vec![from_kernel(
+                Ok(vec![Some(from_kernel(
                     dispatch::backend(g.device()).conv(
                         ConvOp::AvgPool2dBackward,
                         &[g.view(), saved_input.view()],
                         &params,
                     ),
                     geo.input_dims(),
-                )]
+                )?)])
             }),
         ))
     }
@@ -274,18 +262,9 @@ impl Tensor {
     }
 }
 
-/// Turn a gradient-kernel result into the optional cotangent the backward
-/// seam expects.
-///
-/// The seam is infallible (a `BackwardFn` yields `Option<Tensor>`, not
-/// `Result`), so a kernel failure becomes "no gradient for this input". The
-/// only reachable failures are a non-CPU cotangent — the forward pass would
-/// have failed there first — and a layout allocation whose element count the
-/// forward output already proved fits.
-fn from_kernel(storage: Result<crate::storage::Storage>, dims: [usize; 4]) -> Option<Tensor> {
-    let storage = storage.ok()?;
-    let layout = Layout::contiguous(dims).ok()?;
-    Some(Tensor::from_parts(storage, layout))
+/// Describe a gradient kernel's output with the NCHW geometry it belongs to.
+fn from_kernel(storage: Result<crate::storage::Storage>, dims: [usize; 4]) -> Result<Tensor> {
+    Ok(Tensor::from_parts(storage?, Layout::contiguous(dims)?))
 }
 
 #[cfg(test)]

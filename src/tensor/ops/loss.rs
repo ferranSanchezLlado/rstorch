@@ -48,27 +48,11 @@
 //! rule, exploration §4.3); the labels are integral and take no gradient, so
 //! only the float input is listed as a graph input.
 
+use super::{require_dtype, same_device, same_dtype};
 use crate::autograd::{self, BackwardFn};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::tensor::Tensor;
-
-/// Re-label the index error `gather` raises for an out-of-range class label
-/// with the loss method the caller actually used — the offending value came
-/// from `targets`, not from an index the user handed to `gather`.
-fn relabel(op: &'static str, e: Error) -> Error {
-    match e {
-        Error::IndexOutOfBounds {
-            index, axis, size, ..
-        } => Error::IndexOutOfBounds {
-            op,
-            index,
-            axis,
-            size,
-        },
-        other => other,
-    }
-}
 
 /// Validate the logits of a classification loss: a float `[rows, classes]`
 /// matrix with at least one class. Returns `(rows, classes)`.
@@ -105,20 +89,8 @@ fn check_logits(op: &'static str, logits: &Tensor) -> Result<(usize, usize)> {
 /// Validate the labels: a 1-D [`I64`](DType::I64) tensor of one label per
 /// logits row, on the logits' device.
 fn check_targets(op: &'static str, logits: &Tensor, targets: &Tensor, rows: usize) -> Result<()> {
-    if targets.dtype() != DType::I64 {
-        return Err(Error::DTypeMismatch {
-            op,
-            expected: DType::I64,
-            got: targets.dtype(),
-        });
-    }
-    if targets.device() != logits.device() {
-        return Err(Error::DeviceMismatch {
-            op,
-            expected: logits.device(),
-            got: targets.device(),
-        });
-    }
+    require_dtype(op, targets, DType::I64)?;
+    same_device(op, logits, targets)?;
     match targets.dims() {
         &[n] if n == rows => Ok(()),
         &[_] => Err(Error::ShapeMismatch {
@@ -227,7 +199,10 @@ fn cross_entropy_impl(
         None => labels,
     };
 
-    let nll = logp.gather(1, &safe).map_err(|e| relabel(op, e))?.neg()?;
+    // An out-of-range class label surfaces from `gather`; the offending value
+    // came from `targets`, not from an index the user handed to `gather`, so
+    // the error is re-labelled with the loss method the caller used.
+    let nll = logp.gather(1, &safe).map_err(|e| e.with_op(op))?.neg()?;
     let accumulation_dtype = dtype.accumulation_dtype();
     let reduced = accumulation_dtype != dtype;
     let nll = if reduced {
@@ -260,7 +235,7 @@ fn cross_entropy_impl(
         divisor,
         classes,
     };
-    let backward: BackwardFn = Box::new(move |g| vec![bwd.grad(g).ok()]);
+    let backward: BackwardFn = Box::new(move |g| Ok(vec![Some(bwd.grad(g)?)]));
     Ok(autograd::record(op, out, &[logits], backward))
 }
 
@@ -384,20 +359,8 @@ impl Tensor {
                 dtype: self.dtype(),
             });
         }
-        if self.dtype() != target.dtype() {
-            return Err(Error::DTypeMismatch {
-                op: OP,
-                expected: self.dtype(),
-                got: target.dtype(),
-            });
-        }
-        if self.device() != target.device() {
-            return Err(Error::DeviceMismatch {
-                op: OP,
-                expected: self.device(),
-                got: target.device(),
-            });
-        }
+        same_dtype(OP, self, target)?;
+        same_device(OP, self, target)?;
         if self.dims() != target.dims() {
             return Err(Error::ShapeMismatch {
                 op: OP,
@@ -419,12 +382,11 @@ impl Tensor {
         let out = diff.mul(&diff)?.mean_all()?;
 
         let scale = 2.0 / n as f64;
-        let backward: BackwardFn = Box::new(move |g| match mse_grad(&diff, scale, g) {
-            Ok(d) => {
-                let neg = d.neg().ok();
-                vec![Some(d), neg]
-            }
-            Err(_) => vec![None, None],
+        // `d(pred)` and `d(target)` are exact negatives of one another.
+        let backward: BackwardFn = Box::new(move |g| {
+            let d = mse_grad(&diff, scale, g)?;
+            let neg = d.neg()?;
+            Ok(vec![Some(d), Some(neg)])
         });
         Ok(autograd::record(OP, out, &[self, target], backward))
     }

@@ -1,7 +1,6 @@
 use super::{
     BroadcastOutput, ConcatOutput, DynamicOutput, InsertAxisOutput, RemoveAxisOutput,
-    ReplaceAxisOutput, ReshapeOutput, StackOutput, TransposeOutput, dynamic, relabel_error_op,
-    wrap,
+    ReplaceAxisOutput, ReshapeOutput, StackOutput, TransposeOutput, dynamic, wrap,
 };
 use crate::typed::const_check::{assert_broadcast, assert_reshape_numel, assert_squeezable};
 use crate::typed::device::validate_binding;
@@ -113,7 +112,7 @@ macro_rules! impl_existing_axis_ops {
                 ) -> Result<<Self as DynamicOutput>::Output> {
                     let tensor = dynamic(self, "transpose_dyn")?
                         .transpose(a, b)
-                        .map_err(|error| relabel_error_op("transpose_dyn", error))?;
+                        .map_err(|error| error.with_op("transpose_dyn"))?;
                     wrap(self, tensor, "transpose_dyn")
                 }
 
@@ -135,7 +134,7 @@ macro_rules! impl_existing_axis_ops {
                 pub fn squeeze_dyn(&self, axis: isize) -> Result<Tensor> {
                     dynamic(self, "squeeze_dyn")?
                         .squeeze(axis)
-                        .map_err(|error| relabel_error_op("squeeze_dyn", error))
+                        .map_err(|error| error.with_op("squeeze_dyn"))
                 }
 
                 /// Narrows a compile-time axis and erases that axis marker.
@@ -160,7 +159,7 @@ macro_rules! impl_existing_axis_ops {
                 ) -> Result<<Self as DynamicOutput>::Output> {
                     let tensor = dynamic(self, "narrow_dyn")?
                         .narrow(axis, start, len)
-                        .map_err(|error| relabel_error_op("narrow_dyn", error))?;
+                        .map_err(|error| error.with_op("narrow_dyn"))?;
                     wrap(self, tensor, "narrow_dyn")
                 }
 
@@ -216,7 +215,7 @@ macro_rules! impl_rank_increasing_ops {
                 pub fn unsqueeze_dyn(&self, axis: isize) -> Result<Tensor> {
                     dynamic(self, "unsqueeze_dyn")?
                         .unsqueeze(axis)
-                        .map_err(|error| relabel_error_op("unsqueeze_dyn", error))
+                        .map_err(|error| error.with_op("unsqueeze_dyn"))
                 }
 
                 /// Stacks homogeneous typed tensors at a compile-time axis.

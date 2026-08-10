@@ -199,9 +199,62 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Rename the operation this error blames, keeping everything else.
+    ///
+    /// An inner layer names an error after whatever it knows: a kernel reports
+    /// the op *family* (`"reduce"`, `"add"`), and a composed implementation
+    /// reports the primitive it happened to call (`gather` inside a loss).
+    /// The public seam rewrites that to the method the user actually called.
+    ///
+    /// The match is deliberately exhaustive — no `_` arm — so that adding a
+    /// variant to this `#[non_exhaustive]` enum is a compile error here rather
+    /// than a silently mis-labelled error at every seam.
+    pub(crate) fn with_op(mut self, op: &'static str) -> Error {
+        match &mut self {
+            Error::ShapeMismatch { op: slot, .. }
+            | Error::RankMismatch { op: slot, .. }
+            | Error::InvalidAxis { op: slot, .. }
+            | Error::DTypeMismatch { op: slot, .. }
+            | Error::DeviceMismatch { op: slot, .. }
+            | Error::ReshapeMismatch { op: slot, .. }
+            | Error::IndexOutOfBounds { op: slot, .. }
+            | Error::Unsupported { op: slot, .. }
+            | Error::NotTraced { op: slot }
+            | Error::InvalidArg { op: slot, .. }
+            | Error::Backend { op: slot, .. } => *slot = op,
+            // No operation name to rewrite.
+            Error::MissingGrad { .. }
+            | Error::Data { .. }
+            | Error::Tokenizer { .. }
+            | Error::Persistence { .. }
+            | Error::Io(_) => {}
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_op_renames_the_operation() {
+        let e = Error::Unsupported {
+            op: "reduce",
+            device: Device::Cpu,
+            dtype: DType::Bool,
+        }
+        .with_op("sum");
+        assert_eq!(e.to_string(), "sum: unsupported on cpu for dtype bool");
+
+        // Variants without an `op` pass through untouched.
+        let e = Error::MissingGrad {
+            path: "fc1.weight".to_string(),
+        }
+        .with_op("sum");
+        assert!(matches!(e, Error::MissingGrad { path } if path == "fc1.weight"));
+    }
 
     #[test]
     fn messages_carry_op_and_values() {

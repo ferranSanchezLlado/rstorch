@@ -478,16 +478,11 @@ impl Tensor {
         let layout = Layout::contiguous(self.shape().clone())?;
         let out = Tensor::from_parts(storage, layout);
         let src = self.device();
-        // The backward seam is infallible (`BackwardFn` yields
-        // `Option<Tensor>`, not `Result`), so a failed move back becomes "no
-        // gradient for this input". Moving a cotangent to the device its
-        // forward input already lived on can only fail if that device itself
-        // is gone, which the forward pass would have failed on first.
         Ok(autograd::record(
             "to_device",
             out,
             &[self],
-            Box::new(move |g| vec![g.to_device(&src).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.to_device(&src)?)])),
         ))
     }
 
@@ -506,7 +501,7 @@ impl Tensor {
             "to_dtype",
             out,
             &[self],
-            Box::new(move |g| vec![g.to_dtype(src).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.to_dtype(src)?)])),
         ))
     }
 
@@ -524,7 +519,7 @@ impl Tensor {
             "contiguous",
             out,
             &[self],
-            Box::new(move |g| vec![Some(g.clone())]),
+            Box::new(move |g| Ok(vec![Some(g.clone())])),
         ))
     }
 

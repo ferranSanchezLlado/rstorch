@@ -40,6 +40,7 @@
 //! capture rule of exploration §4.3 is satisfied trivially and no `Arc` cycle
 //! through the output node can form.
 
+use super::{same_device, same_dtype};
 use crate::autograd::record;
 use crate::backend::dispatch;
 use crate::error::{Error, Result};
@@ -127,20 +128,8 @@ impl Tensor {
     /// # Ok::<(), rstorch::Error>(())
     /// ```
     pub fn matmul(&self, rhs: &Tensor) -> Result<Tensor> {
-        if self.device() != rhs.device() {
-            return Err(Error::DeviceMismatch {
-                op: "matmul",
-                expected: self.device(),
-                got: rhs.device(),
-            });
-        }
-        if self.dtype() != rhs.dtype() {
-            return Err(Error::DTypeMismatch {
-                op: "matmul",
-                expected: self.dtype(),
-                got: rhs.dtype(),
-            });
-        }
+        same_device("matmul", self, rhs)?;
+        same_dtype("matmul", self, rhs)?;
         let layout = Layout::contiguous(output_shape(self, rhs)?)?;
         let backend = dispatch::backend(self.device());
         let storage = if layout.num_elements() == 0 {
@@ -161,9 +150,9 @@ impl Tensor {
                 // `sum_to` folds the batch axes this operand did not have (or
                 // held at 1) back down, which is the transpose of the forward
                 // broadcast.
-                let da = || -> Result<Tensor> { g.matmul(&b.transpose(-2, -1)?)?.sum_to(&a_dims) };
-                let db = || -> Result<Tensor> { a.transpose(-2, -1)?.matmul(g)?.sum_to(&b_dims) };
-                vec![da().ok(), db().ok()]
+                let da = g.matmul(&b.transpose(-2, -1)?)?.sum_to(&a_dims)?;
+                let db = a.transpose(-2, -1)?.matmul(g)?.sum_to(&b_dims)?;
+                Ok(vec![Some(da), Some(db)])
             }),
         ))
     }
