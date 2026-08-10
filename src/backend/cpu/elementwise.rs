@@ -1,5 +1,5 @@
 //! Element-wise CPU kernels: the strided + broadcast-aware iteration
-//! engine (the largest chunk of new tensor-core work, exploration §3.2)
+//! engine (the largest chunk of new tensor-core work)
 //! and the binary/unary/compare/where/masked-fill families built on it.
 //!
 //! Signatures frozen by T01; **T10b** fills the bodies. The design:

@@ -1,7 +1,7 @@
 //! Shape and view operations (T21): `reshape`, `transpose`, `permute`,
 //! `squeeze`, `unsqueeze`, `narrow`, `broadcast_to`, `cat`, `stack`.
 //!
-//! # Views and contiguity (exploration §4.2)
+//! # Views and contiguity
 //!
 //! `transpose`, `permute`, `squeeze`, `unsqueeze`, `narrow` and
 //! `broadcast_to` are **always zero-copy**: they re-describe the same storage
@@ -32,7 +32,7 @@
 //!
 //! No backward closure captures a tensor: they close over dimensions, axis
 //! indices, the dtype and the device only, which trivially satisfies the
-//! detached-output capture rule (exploration §4.3).
+//! detached-output capture rule.
 
 use super::{same_device, same_dtype, same_rank};
 use crate::autograd::record;

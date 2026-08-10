@@ -1,5 +1,5 @@
 //! The [`Tensor`] type and its op surface: one concrete tensor, one spelling
-//! per operation (exploration §4.1–4.2).
+//! per operation.
 //!
 //! **Contract file** (T01²/T20). T01 defines [`Tensor`]/[`Inner`], the
 //! accessors, the crate-internal plumbing (`from_parts`, `view`), and the
@@ -36,7 +36,7 @@ pub(crate) struct Inner {
 }
 
 /// The one and only tensor type: an immutable value with **zero generic
-/// parameters** (exploration §4.1). `Clone` is an `Arc` bump; `Send + Sync`
+/// parameters**. `Clone` is an `Arc` bump; `Send + Sync`
 /// because its `Inner` body is immutable and its parts are `Send + Sync`.
 ///
 /// Shapes, dtype, and device are runtime data. Rank assumptions are made
@@ -206,8 +206,8 @@ impl Tensor {
         self.detach_shallow()
     }
 
-    /// Internal shallow detach used by the detached-output capture rule
-    /// (exploration §4.3): a fresh `Inner` sharing storage, `node: None`,
+    /// Internal shallow detach used by the detached-output capture rule:
+    /// a fresh `Inner` sharing storage, `node: None`,
     /// built before the traced output is assembled. A backward closure that
     /// needs the op's output value (sigmoid/tanh/softmax) captures *this* form
     /// so the closure never holds an `Arc` back to its own output node.
@@ -644,7 +644,7 @@ impl Tensor {
     }
 }
 
-// `Tensor` must be `Send + Sync` (exploration §4.1). This fails to compile if
+// `Tensor` must be `Send + Sync`. This fails to compile if
 // any field of `Inner` ever loses those bounds.
 const _: () = {
     fn assert_send_sync<T: Send + Sync>() {}

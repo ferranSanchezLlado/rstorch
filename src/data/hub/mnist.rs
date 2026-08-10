@@ -1,6 +1,6 @@
 //! Raw MNIST loading: download, cache, and IDX parsing into plain `Vec`s.
 //!
-//! This module is `Tensor`-free (implementation-plan §4, T15). It yields
+//! This module is `Tensor`-free (T15). It yields
 //! normalized `f32` pixel vectors and `u8` labels; turning those into batched
 //! tensors is the job of the `Dataset` wrappers (T46).
 

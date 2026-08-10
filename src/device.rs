@@ -1,5 +1,5 @@
-//! The [`Device`] enum — the entire public face of the backend layer
-//! (exploration §4.5). There is no public backend trait; adding a backend
+//! The [`Device`] enum — the entire public face of the backend layer.
+//! There is no public backend trait; adding a backend
 //! is a crate-internal change with no semver event.
 
 /// Where a tensor's storage lives and where its kernels run.

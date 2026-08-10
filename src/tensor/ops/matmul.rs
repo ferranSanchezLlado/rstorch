@@ -15,7 +15,7 @@
 //! straight to `BackendOps::matmul`. A transposed, narrowed or broadcast
 //! operand is never materialized first — the kernel walks strides — which is
 //! what makes `x.matmul(&w.get(mode).transpose(-2, -1)?)` (the
-//! `Linear`/weight-tying spelling of exploration §4.4) allocation-free on the
+//! `Linear`/weight-tying spelling) allocation-free on the
 //! operand side. Inner products accumulate in the wide
 //! [`Acc`](crate::dtype::Element::Acc) type per the backend contract, so an
 //! `f16` matmul sums in `f32` and narrows exactly once.
@@ -37,7 +37,7 @@
 //!
 //! The closure captures the two **inputs** in detached form (they are what
 //! the formulas need); it never captures the output, so the detached-output
-//! capture rule of exploration §4.3 is satisfied trivially and no `Arc` cycle
+//! capture rule is satisfied trivially and no `Arc` cycle
 //! through the output node can form.
 
 use super::{same_device, same_dtype};

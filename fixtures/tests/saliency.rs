@@ -1,6 +1,5 @@
-//! **The m2 acceptance fixture** (exploration §4.3/§10, implementation-plan
-//! §3): gradients as a linear value, and gradient-with-respect-to-*input* done
-//! the way the design says to do it.
+//! **The m2 acceptance fixture**: gradients as a linear value, and
+//! gradient-with-respect-to-*input* done the way the design says to do it.
 //!
 //! Like every fixture this file is a downstream consumer — it imports nothing
 //! but `rstorch::prelude::*`, so each step below has to be expressible in the
@@ -105,7 +104,7 @@ fn saliency_map_of_a_class_score() -> Result<()> {
     let model = Scorer::new(&dev)?;
     let x = Tensor::from_vec(vec![0.9f32, -0.4, 0.2, 1.1], [1, 4], &dev)?;
 
-    // The three-line recipe of exploration §4.3.
+    // The three-line recipe.
     let xt = x.traced()?;
     let score = class_score(&model.logits(&xt, Mode::EVAL.recorded())?, 2)?;
     let grads = score.backward()?;

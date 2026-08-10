@@ -365,7 +365,7 @@ fn analytic_a_fully_masked_row_is_zeros_not_nan() {
 #[test]
 fn analytic_empty_reduction_policy() {
     // `sum` has an identity, so it returns it; nothing else does, so nothing
-    // else guesses. (`src/tensor/ops/reduce.rs`, exploration §3.1.)
+    // else guesses. (`src/tensor/ops/reduce.rs`.)
     let empty = Tensor::zeros([2, 0], rstorch::DType::F32, &CPU).unwrap();
 
     let summed = empty.sum(1).unwrap();
@@ -773,7 +773,7 @@ enum TorchOnEmpty {
 #[test]
 fn reference_empty_reduction_pins_both_policies() {
     // This case does not assert parity: rstorch's empty-reduction policy is a
-    // *deliberate* departure (exploration §3.1) — `sum` returns the identity
+    // *deliberate* departure — `sum` returns the identity
     // and everything else refuses, rather than returning NaN or an empty
     // tensor. What it asserts is both sides at once, so neither can drift
     // unnoticed.

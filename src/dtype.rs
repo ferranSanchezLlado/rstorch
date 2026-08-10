@@ -1,10 +1,10 @@
 //! Runtime dtypes and the sealed [`Element`] trait.
 //!
-//! Dtype is runtime data (exploration §4.1): [`DType`] is a plain enum, and
+//! Dtype is runtime data: [`DType`] is a plain enum, and
 //! the only public generic in the tensor math surface is `T: Element` on
 //! `from_vec` / `to_vec` / `to_scalar`.
 //!
-//! Dtype scope (exploration §4.2): epoch-1 kernels implement `F32`, `I64`,
+//! Dtype scope: epoch-1 kernels implement `F32`, `I64`,
 //! `Bool`; `F16`/`BF16` arrive in the dedicated precision epoch (T60) under
 //! the `Acc` contract; `F64` follows demand. All six [`Element`] impls exist
 //! from the start so signatures never change.

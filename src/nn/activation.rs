@@ -1,4 +1,4 @@
-//! Activation layers: [`Relu`] and [`Gelu`] (exploration §4.4).
+//! Activation layers: [`Relu`] and [`Gelu`].
 //!
 //! These are unit structs, not functions, for one reason: [`Sequential`] stores
 //! `Forward + Module` values, so an activation has to *be* a layer to sit in a

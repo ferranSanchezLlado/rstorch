@@ -1,7 +1,7 @@
 //! Dataset hub: download, caching, checksum verification, and parsing for
 //! the bundled datasets (MNIST, TinyShakespeare).
 //!
-//! This is the **raw** layer (implementation-plan §4, task T15): it produces
+//! This is the **raw** layer (task T15): it produces
 //! plain `Vec`s and small metadata structs and has **no `Tensor`
 //! dependency**. The [`crate::data`] `Dataset` wrappers that turn these into
 //! trainable batches are layered on top separately (task T46).

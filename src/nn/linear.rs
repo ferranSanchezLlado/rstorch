@@ -1,4 +1,4 @@
-//! [`Linear`] — the fully connected affine layer (exploration §4.4).
+//! [`Linear`] — the fully connected affine layer.
 //!
 //! The weight is stored `[out_features, in_features]`, PyTorch's orientation,
 //! and the forward pass transposes it *as a view*
@@ -35,7 +35,7 @@ use crate::tensor::Tensor;
 /// nonlinearity — `U(-√(6/fan_in), √(6/fan_in))`, `fan_in = in_features` — and
 /// the bias starts at zero. Constructors always produce
 /// [`F32`](crate::DType::F32) parameters; convert afterwards with
-/// [`nn::to_dtype`](crate::nn::to_dtype) (exploration §4.4).
+/// [`nn::to_dtype`](crate::nn::to_dtype).
 ///
 /// This is *not* bug-compatible with PyTorch's `nn.Linear`, whose default is
 /// `kaiming_uniform_(a=√5)` — a bound of `1/√fan_in`, some 2.4× smaller — with

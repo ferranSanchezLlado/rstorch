@@ -1,7 +1,7 @@
 //! Neural-network modules: the [`Module`]/[`Forward`] traits, [`Param`],
 //! [`Mode`], the parameter [`Visitor`]s, the model-level utilities
 //! ([`state_dict`]/[`load_state_dict`]/[`to_device`]/[`to_dtype`]),
-//! [`Sequential`], and (from wave 4 on) the layer zoo (exploration §4.4).
+//! [`Sequential`], and (from wave 4 on) the layer zoo.
 //!
 //! Five public traits exist in the entire library; two of them —
 //! [`Module`] and [`Forward`] — live here. Both are object-safe.
@@ -91,14 +91,14 @@ pub(crate) use norm::{
 };
 pub use param::Param;
 pub use sequential::Sequential;
-// Model-level utilities exposed flat (exploration §4.4: `nn::to_device`).
+// Model-level utilities exposed flat (`nn::to_device`).
 pub use util::{load_state_dict, num_params, state_dict, to_device, to_dtype};
 pub use visit::{Visitor, VisitorMut};
 
 use crate::error::Result;
 use crate::tensor::Tensor;
 
-/// A module is anything with parameters to visit (exploration §4.4).
+/// A module is anything with parameters to visit.
 ///
 /// The two methods are symmetric — read-only and mutable walks over the
 /// module's own [`Param`]s and child modules, emitting dotted parameter

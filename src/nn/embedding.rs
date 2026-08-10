@@ -7,7 +7,7 @@
 //! reason the backward scatters instead of assigning).
 //!
 //! Ids are ordinary on-device [`I64`](crate::DType::I64) tensors of any rank
-//! (exploration §4.2: `Bool` and `I64` are ordinary dtypes) — a `[batch, seq]`
+//! (`Bool` and `I64` are ordinary dtypes) — a `[batch, seq]`
 //! id batch yields `[batch, seq, embedding_dim]` without the caller ever
 //! flattening or naming a rank.
 
@@ -144,7 +144,7 @@ impl Embedding {
     }
 
     /// The table parameter — the handle for weight tying (the parent module
-    /// reads it for the output head, exploration §4.4) and for
+    /// reads it for the output head) and for
     /// [`Grads::wrt`](crate::Grads::wrt).
     pub fn weight(&self) -> &Param {
         &self.weight
