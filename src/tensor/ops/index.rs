@@ -608,9 +608,8 @@ mod tests {
     // ------------------------------------------------------------------
     // Backward — finite differences.
     //
-    // T25 landed before T23's reductions were on its branch, so `check_grad`'s
-    // required scalar was obtained by selecting a single output element.
-    // **T31** composes these with a *weighted* `sum_all` instead. A one-hot
+    // `check_grad` requires a scalar, obtained here with a *weighted*
+    // `sum_all`. A one-hot
     // selection does catch a scatter that overwrites (the dropped contribution
     // is missing from the total), but it reaches one gathered element out of
     // however many the index names, and an *unweighted* sum hands every

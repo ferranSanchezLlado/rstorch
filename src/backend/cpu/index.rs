@@ -1,6 +1,6 @@
 //! Indexing CPU kernels.
 //!
-//! Signatures frozen by T01; **T25** fills the bodies. Semantics on
+//! Semantics on
 //! [`BackendOps`](crate::backend::BackendOps): index values are bounds
 //! checked ([`Error::IndexOutOfBounds`](crate::Error)), never UB;
 //! `scatter_add` accumulates in `Acc`.

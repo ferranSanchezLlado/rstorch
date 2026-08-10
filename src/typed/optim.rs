@@ -9,7 +9,7 @@
 //! constructing a fresh optimizer or explicitly restored with the matching
 //! `load_*_state` function; it is never retained behind stale model markers.
 //!
-//! Typed modules must obey [`Module`]'s CT40 stable-walk contract. The adapter
+//! Typed modules must obey [`Module`]'s stable-walk contract. The adapter
 //! compares repeated typed read-only walks before delegation; an implementation
 //! whose paths vary between calls violates that safe semantic contract and no
 //! finite preflight can make its future walks predictable.

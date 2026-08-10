@@ -39,7 +39,7 @@
 //!
 //! Today the only backend is CPU, so the shipped test is the self-check
 //! (CPU vs CPU): it proves the whole table is runnable and exactly matched
-//! on the reference. T61 reuses `run` unchanged for Metal.
+//! on the reference. A new backend reuses `run` unchanged.
 
 use crate::backend::{
     ArgReduceOp, BackendOps, BinaryOp, CmpOp, Conv2dParams, ConvOp, FusedOp, ReduceOp, UnaryOp,
@@ -2747,7 +2747,7 @@ mod tests {
 
     /// The self-check: the reference backend against itself. It proves the
     /// whole table is *runnable* (no malformed rows, no hard errors) and
-    /// exactly matched, which is what T61 will diff Metal against.
+    /// exactly matched, which is what another backend is diffed against.
     #[test]
     fn cpu_is_conformant_with_itself() {
         let report = run_device(Device::Cpu);

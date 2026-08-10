@@ -9,7 +9,7 @@
 //! structured message under `#[track_caller]`.
 //!
 //! Variant set ownership: this initial set is
-//! authored by T01; later additions are integrator-only appends. The enum is
+//! deliberately small; later additions are appends. The enum is
 //! `#[non_exhaustive]` for that reason.
 
 use crate::device::Device;

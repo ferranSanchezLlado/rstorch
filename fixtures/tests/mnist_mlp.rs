@@ -49,7 +49,7 @@
 //!   makes either meaningful is the asserted starting point: the untrained net
 //!   scores `0.105` at a loss of `2.363`, so the floors are not reachable
 //!   without training.
-//! - No assertion here is a performance claim. T47 measured these CPU kernels
+//! - No assertion here is a performance claim. The benches measure these CPU kernels
 //!   at 4–15× slower than v2; this fixture would pass just as green once that
 //!   is fixed. It gates *correctness of the assembled stack*, nothing else.
 

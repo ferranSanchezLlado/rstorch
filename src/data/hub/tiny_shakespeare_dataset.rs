@@ -1,7 +1,7 @@
 //! TinyShakespeare as a batch-level [`Dataset`] of causal-LM windows: the
-//! tensor-side wrapper over T15's raw [`TinyShakespeare`] corpus.
+//! tensor-side wrapper over the raw [`TinyShakespeare`] corpus.
 //!
-//! T15 downloads and verifies one text file; this module tokenizes it once with
+//! The hub downloads and verifies one text file; this module tokenizes it once with
 //! a [`CharTokenizer`], uploads the ids as a single `[tokens]` `I64` tensor, and
 //! turns a batch of positions into the `(inputs, targets)` pair a decoder-only
 //! LM trains on: `targets` is `inputs` shifted one token left, so predicting

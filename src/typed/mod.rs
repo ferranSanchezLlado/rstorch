@@ -222,7 +222,7 @@ impl<P: Placement> fmt::Debug for DeviceCtx<P> {
 /// Compile-time metadata shared by all typed rank wrappers.
 ///
 /// The trait is sealed. Runtime boundary methods are inherent methods added by
-/// CT20, not trait methods, so leaf owner modules can implement them without
+/// inherent methods, not trait methods, so leaf owner modules can implement them without
 /// editing this contract file.
 pub trait TypedTensor: sealed::TypedTensor + Sized {
     /// Exact Rust element type carried by the tensor.
@@ -313,7 +313,7 @@ macro_rules! define_typed_tensors {
     };
 }
 
-// CT10 invokes this same table when generating rank metadata and complete
+// The wrappers invoke this same table when generating rank metadata and complete
 // associated-output implementations. Rank eight is the hard typed ceiling.
 macro_rules! typed_rank_table {
     ($callback:ident) => {

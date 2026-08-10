@@ -1,10 +1,8 @@
 //! Test utilities shared across the crate and the fixture suite.
 //!
-//! [`check_grad`] is the **single** finite-difference gradient harness:
-//! every W3 op family writes its backward tests as
-//! cases against this one signature, so no task invents its own FD checker.
-//! T01 froze the signature, **T30** filled it, and **T31** activated the
-//! op-family cases that had been dormant while `record` was a no-op.
+//! [`check_grad`] is the **single** finite-difference gradient harness: every
+//! op family writes its backward tests as cases against this one signature,
+//! so no module invents its own FD checker.
 
 use crate::backend::dispatch;
 use crate::dtype::DType;

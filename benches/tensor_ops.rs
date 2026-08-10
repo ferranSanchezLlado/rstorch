@@ -10,8 +10,8 @@
 //! so sizes can be compared directly.
 //!
 //! The two v2 groups that waited on their owning tasks are now present:
-//! `layernorm` (`nn::LayerNorm`, T42) and the `cross_entropy` case of the
-//! softmax family (the loss ops, T27). End-to-end training cost for the same
+//! `layernorm` (`nn::LayerNorm`) and the `cross_entropy` case of the
+//! softmax family (the loss ops). End-to-end training cost for the same
 //! layers lives in `benches/training.rs`; the cases here isolate them.
 
 use std::hint::black_box;

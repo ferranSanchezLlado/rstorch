@@ -1,6 +1,6 @@
 #![cfg(feature = "typed")]
 
-//! CT50: downstream typed MLP training and resume over an offline MNIST-like split.
+//! Downstream typed MLP training and resume over an offline MNIST-like split.
 
 use std::path::PathBuf;
 

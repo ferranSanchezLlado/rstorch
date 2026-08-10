@@ -1,4 +1,4 @@
-//! Public-surface tests for the ported tokenizers (task T14).
+//! Public-surface tests for the ported tokenizers.
 //!
 //! Mirrors the v2 `tests/tokenizers.rs` acceptance tests adapted to the
 //! fallible encode/decode surface, plus the new 16.13 fallibility cases

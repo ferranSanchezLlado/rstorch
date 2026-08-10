@@ -1,9 +1,6 @@
 //! Autograd: tracing is data flow, gradients are a linear value.
 //!
-//!
-//! **Contract module** (T01) + **engine** (T30). T01 defined the autograd
-//! *types* and the *seams* the rest of the crate codes against; T30 filled the
-//! bodies without changing a signature:
+//! The types and the *seams* the rest of the crate codes against:
 //!
 //! - [`record`] — the seam every differentiable op calls to (maybe) wrap its
 //!   forward output in a graph node. Op tasks never touch [`Node`] internals —

@@ -1,14 +1,14 @@
 //! The [`Tensor`] type and its op surface: one concrete tensor, one spelling
 //! per operation.
 //!
-//! **Contract file** (T01²/T20). T01 defines [`Tensor`]/[`Inner`], the
-//! accessors, the crate-internal plumbing (`from_parts`, `view`), and the
-//! autograd delegation ([`traced`](Tensor::traced)/[`backward`](Tensor::backward)).
-//! T20 adds the constructors and host-transfer/movement bodies, plus the
-//! crate-internal broadcast-gradient reducer `Tensor::sum_to`, which every
-//! binary/broadcast/reduction backward funnels through; the op families
-//! (T21–T27) add methods in `tensor/ops/*` behind the frozen
-//! [`record`](crate::autograd) seam. No signature here changes after T01.
+//! This file holds [`Tensor`]/[`Inner`], the accessors, the crate-internal
+//! plumbing (`from_parts`, `view`), the autograd delegation
+//! ([`traced`](Tensor::traced)/[`backward`](Tensor::backward)), the
+//! constructors and host-transfer/movement bodies, and the crate-internal
+//! broadcast-gradient reducer `Tensor::sum_to`, which every
+//! binary/broadcast/reduction backward funnels through. The op families add
+//! their methods in `tensor/ops/*` behind the
+//! [`record`](crate::autograd) seam.
 
 mod fmt;
 pub(crate) mod ops;
@@ -60,7 +60,7 @@ impl Tensor {
     }
 
     /// Build a tensor from parts **with** an autograd node (used by the
-    /// [`record`](crate::autograd::record) engine, T30).
+    /// [`record`](crate::autograd::record) engine).
     pub(crate) fn from_parts_traced(
         storage: Storage,
         layout: Layout,
@@ -174,7 +174,7 @@ impl Tensor {
         Error::RankMismatch { op, expected, got }
     }
 
-    // ---- autograd (delegated to the engine; T30 fills the bodies) --------
+    // ---- autograd (delegated to the engine) ------------------------------
 
     /// Turn this tensor into a traced leaf for grad-wrt-input (exploration
     /// §4.3). The **returned** binding must be used in both the computation
@@ -215,7 +215,7 @@ impl Tensor {
         Tensor::from_parts(self.0.storage.clone(), self.0.layout.clone())
     }
 
-    // ---- constructors (T20 fills the bodies) -----------------------------
+    // ---- constructors ----------------------------------------------------
 
     /// A tensor of zeros.
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: &Device) -> Result<Tensor> {
@@ -333,7 +333,7 @@ impl Tensor {
         Ok(Tensor::from_parts(storage, layout))
     }
 
-    /// A 1-D range `[start, end)` stepped by `step` (T20 is the sole owner of
+    /// A 1-D range `[start, end)` stepped by `step` (the sole owner of
     /// `arange`; the indexing set builds on it).
     ///
     /// `step` must be non-zero and every bound finite
@@ -409,7 +409,7 @@ impl Tensor {
         Ok(Tensor::from_parts(storage, layout))
     }
 
-    // ---- host transfer / movement (T20 fills the bodies) -----------------
+    // ---- host transfer / movement ----------------------------------------
 
     /// Copy the tensor's elements to a host `Vec` in row-major order (a host
     /// boundary: synchronizes the backend). Dtype must be `T`, else
@@ -468,7 +468,7 @@ impl Tensor {
 
     /// Move to `device`. A differentiable op: the backward pass moves the
     /// cotangent back to the source device. `cpu→cpu` is the identity (and,
-    /// currently, the only reachable case — accelerator backends land in T61).
+    /// currently, the only reachable case for now).
     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
         if self.device() == *device {
             return Ok(self.clone());
@@ -577,7 +577,7 @@ impl Tensor {
     /// go through the `record` seam, because it exists to be called *inside*
     /// backward closures, on an already-computed cotangent. Do not use it on a
     /// forward path — gradients would silently stop there. (Forward code wants
-    /// T23's `sum`/`sum_keepdim`.)
+    /// `sum`/`sum_keepdim`.)
     pub(crate) fn sum_to(&self, target_dims: &[usize]) -> Result<Tensor> {
         let src = self.dims();
         let mismatch = || Error::ShapeMismatch {
@@ -670,7 +670,7 @@ mod tests {
     }
 
     /// Re-view `t` through `layout` over the same storage. The only way to
-    /// build a non-contiguous `Tensor` before T21 lands the public view ops.
+    /// build a non-contiguous `Tensor` without the public view ops.
     fn re_view(t: &Tensor, layout: Layout) -> Tensor {
         Tensor::from_parts(t.storage().clone(), layout)
     }
@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(b.to_vec::<bool>().unwrap(), vec![false, false]);
 
         // f16/bf16/f64 tensors can be *built* even though their kernels are
-        // deferred (T60): the six Element impls exist from the start.
+        // deferred: the six Element impls exist from the start.
         let h = Tensor::full([2], 1.0, DType::F16, &CPU).unwrap();
         assert_eq!(h.dtype(), DType::F16);
         assert_eq!(
@@ -836,7 +836,7 @@ mod tests {
         let a = Tensor::arange(3.0, 0.0, -1.0, DType::F32, &CPU).unwrap();
         assert_eq!(a.to_vec::<f32>().unwrap(), vec![3.0, 2.0, 1.0]);
 
-        // I64 is the indexing dtype the T25 utilities build on.
+        // I64 is the indexing dtype the index utilities build on.
         let a = Tensor::arange(0.0, 4.0, 1.0, DType::I64, &CPU).unwrap();
         assert_eq!(a.dtype(), DType::I64);
         assert_eq!(a.to_vec::<i64>().unwrap(), vec![0, 1, 2, 3]);
@@ -1150,7 +1150,7 @@ mod tests {
         assert_eq!(shallow.layout(), d.layout());
 
         // An untraced tensor detaches to an equivalent untraced tensor; the
-        // node-dropping half of the contract cannot be exercised until T30
+        // node-dropping half of the contract cannot be exercised until the engine
         // makes `record`/`make_leaf` build real nodes.
         assert!(t.detach().node().is_none());
     }

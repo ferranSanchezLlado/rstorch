@@ -30,7 +30,7 @@
 //! made v2's Metal path train slower than CPU. The CPU backend is trivially
 //! synchronous and satisfies the contract vacuously.
 
-// T19: the table-driven op × dtype harness that validates any backend
+// The table-driven op × dtype harness that validates any backend
 // against the CPU reference (`conformance::run_device`). Test-only: its sole
 // caller is the Metal backend's conformance test, so it is not compiled into
 // release builds.
@@ -40,7 +40,7 @@ pub(crate) mod conv_geometry;
 pub(crate) mod cpu;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) mod metal;
-// T10b: the parallelism switch. Always compiled — the `rayon` feature is
+// The parallelism switch. Always compiled — the `rayon` feature is
 // consulted *inside* it, so a kernel writes one loop body and never carries a
 // `#[cfg]` arm of its own (see the module docs for why that matters).
 pub(crate) mod parallel;
@@ -220,7 +220,7 @@ pub(crate) struct Conv2dParams {
 /// Fused kernels: softmax, layernorm, and the
 /// optimizer updates that reclaim v2's fixed per-parameter allocation
 /// hotspot. Optional — [`BackendOps::fused`] returns
-/// [`Error::Unsupported`](crate::Error::Unsupported) until T48 implements a
+/// [`Error::Unsupported`](crate::Error::Unsupported) until it is implemented for a
 /// given variant, and the op layer composes the unfused form (the only
 /// sanctioned fallback: same device, no host round-trip).
 ///
@@ -262,13 +262,13 @@ pub(crate) enum FusedOp {
 ///
 /// # Ops composed in the op layer, not here (so the trait does not grow)
 ///
-/// `cat`/`stack` (T21) are **not** trait entry points: they allocate a
+/// `cat`/`stack` are **not** trait entry points: they allocate a
 /// contiguous output ([`full`](BackendOps::full)) and assemble it from
 /// [`narrow`](crate::layout::Layout::narrow) views of the inputs via
 /// per-region [`copy_strided`](BackendOps::copy_strided). On CPU this is
 /// exact and allocation-minimal. A future GPU backend that cannot express a
 /// device-side region copy through the existing entry points would add one
-/// crate-private `copy_into` primitive at that point (T61) — a lock-free,
+/// crate-private `copy_into` primitive at that point — a lock-free,
 /// non-semver change, since this trait is crate-private — rather than a host
 /// round-trip, which the no-silent-fallback policy
 /// forbids.
@@ -404,8 +404,6 @@ pub(crate) trait BackendOps: Send + Sync {
 /// The CPU reference backend: a zero-sized dispatcher that delegates each
 /// entry point to its per-family kernel module (`cpu::host`, `cpu::elementwise`,
 /// `cpu::reduce`, `cpu::matmul`, `cpu::index`, `cpu::conv`, `cpu::fused`).
-/// The delegations are frozen by T01; the kernel-module bodies were filled by
-/// the wave-2/3 kernel tasks (footnote ³).
 pub(crate) struct CpuBackend;
 
 impl BackendOps for CpuBackend {

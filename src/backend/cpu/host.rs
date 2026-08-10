@@ -1,7 +1,7 @@
 //! Host-boundary CPU kernels: transfer, contiguous materialization,
 //! fills, and dtype casts.
 //!
-//! Signatures frozen by T01; **T10a** fills the bodies. Semantics are
+//! Semantics are
 //! specified on [`BackendOps`](crate::backend::BackendOps) — these are the
 //! delegation targets of `CpuBackend`.
 

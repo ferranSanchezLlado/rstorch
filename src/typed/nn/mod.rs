@@ -166,7 +166,7 @@ pub trait Module {
 /// construct-plus-checked-load, preserving the runtime parameter's stable
 /// gradient identity, cached leaf, and freeze state within each model.
 ///
-/// CT41 supplies the value-preserving constructors and accessors. Those
+/// The value-preserving constructors and accessors. Those
 /// accessors return `T`, never a mutable runtime parameter or tensor.
 pub struct TypedParam<T>
 where
@@ -191,7 +191,7 @@ pub struct TypedBuffer<T: TypedTensor> {
 
 /// A read-only visitor over typed parameters and persistent buffers.
 ///
-/// CT41 adds the `param`, `buffer`, and `module` entry points. Construction and
+/// The `param`, `buffer`, and `module` entry points. Construction and
 /// the erased sink remain crate-private so safe public code cannot obtain a
 /// runtime parameter or mutable runtime tensor from a typed leaf.
 pub struct TypedVisitor<'a> {
@@ -314,7 +314,7 @@ struct StateEntry {
 /// Walks `model` twice and returns the first state dict only if both walks
 /// produced the same paths.
 ///
-/// CT40 requires stable repeated read-only walks. `typed::optim` and
+/// Stable repeated read-only walks. `typed::optim` and
 /// `typed::persist` both preflight a model this way before handing it to the
 /// runtime adapter, so the walk-comparison lives here once.
 pub(in crate::typed) fn stable_state<M: Module + ?Sized>(
@@ -336,7 +336,7 @@ pub(in crate::typed) fn stable_state<M: Module + ?Sized>(
 /// The only seam through which runtime optimizers and persistence code may
 /// temporarily view a typed tree as a runtime module.
 ///
-/// CT41 implements the runtime trait privately. The adapter borrows the typed
+/// The runtime trait is implemented privately. The adapter borrows the typed
 /// module mutably for its entire lifetime and must not escape the dedicated
 /// typed wrapper that created it. It does not alter the runtime operation's
 /// failure or rollback semantics.

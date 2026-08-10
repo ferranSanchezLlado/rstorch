@@ -1,4 +1,4 @@
-//! Convolution and pooling ops (**T26**): [`Tensor::conv2d`],
+//! Convolution and pooling ops: [`Tensor::conv2d`],
 //! [`Tensor::max_pool2d`], [`Tensor::avg_pool2d`].
 //!
 //! All three take an NCHW image (`[batch, channels, height, width]`) and
@@ -480,7 +480,7 @@ mod tests {
     // Written against the single `testing::check_grad` harness.
     //
     // `check_grad` needs a scalar-valued function, and reductions belong to
-    // T23, so each case ends in a convolution with a one-element output —
+    // so each case ends in a convolution with a one-element output —
     // that final convolution *is* the weighted readout.
 
     /// A `[1, 1, h, w]` kernel with pairwise-distinct weights, collapsing a

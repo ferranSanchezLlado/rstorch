@@ -10,7 +10,7 @@
 //! map against a caller-declared **schema** (expected path → dtype + dims)
 //! under a [`LoadOptions`] policy, and either fails wholesale or hands back a
 //! [`StagedTensors`] value in which *every* expected tensor is present and
-//! shape/dtype-checked. The caller (the `nn`/`optim` runtime, T40/T44) then
+//! shape/dtype-checked. The caller (the `nn`/`optim` runtime) then
 //! performs the actual, infallible swaps from that staged value — the
 //! "commit through no-fail swaps only after all staging succeeds" step.
 

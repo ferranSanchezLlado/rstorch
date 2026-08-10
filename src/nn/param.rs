@@ -1,10 +1,8 @@
 //! [`Param`] — a trainable tensor with stable identity.
 //!
-//! **Contract file** (T01²/T40). T01 authors the linear-identity API and its
-//! core behavior (get/set/freeze — the crux of the design's safety claims);
-//! T40 owns the surrounding module runtime (`state_dict`, replication, etc.,
-//! in [`util`](crate::nn) and the layer crates). No signature here changes
-//! after T01.
+//! The linear-identity API here — get/set/freeze — is the crux of the
+//! design's safety claims. The surrounding module runtime (`state_dict`,
+//! replication) lives in [`util`](crate::nn) and the layer modules.
 
 use crate::autograd::{self, GradKey};
 use crate::nn::Mode;
@@ -115,7 +113,7 @@ impl Param {
 }
 
 // The `Param: !Clone` and step-by-move linearity guarantees are covered by the
-// pinned-toolchain compile-fail suite T30 owns.
+// pinned-toolchain compile-fail suite.
 #[cfg(test)]
 mod tests {
     use super::*;

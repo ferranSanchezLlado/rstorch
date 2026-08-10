@@ -1,4 +1,4 @@
-//! MNIST as a batch-level [`Dataset`]: the tensor-side wrapper over T15's raw
+//! MNIST as a batch-level [`Dataset`]: the tensor-side wrapper over the raw
 //! [`Mnist`] parse.
 //!
 //! The split is uploaded **once** — one `[items, ...]` `F32` pixel tensor and
@@ -127,7 +127,7 @@ impl MnistDataset {
 
         let mut pixels = Vec::with_capacity(raw.len().saturating_mul(per_image));
         for image in raw.images() {
-            // Unreachable through T15's validating IDX parser, which produces
+            // Unreachable through the validating IDX parser, which produces
             // exact `rows * cols` chunks; kept so a future raw-layer change
             // fails loudly instead of silently mis-shaping the split.
             if image.len() != per_image {
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(ds.targets().dims(), &[2]);
         assert_eq!(ds.targets().dtype(), DType::I64);
         assert_eq!(ds.targets().to_vec::<i64>().unwrap(), vec![1, 2]);
-        // T15's parse already scaled pixels into [0, 1]; the wrapper keeps them.
+        // The parse already scaled pixels into [0, 1]; the wrapper keeps them.
         let first = ds.inputs().to_vec::<f32>().unwrap();
         assert_eq!(first[0], 0.0);
         assert_eq!(first[7], 1.0);

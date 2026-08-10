@@ -1,4 +1,4 @@
-//! Shape and view operations (T21): `reshape`, `transpose`, `permute`,
+//! Shape and view operations: `reshape`, `transpose`, `permute`,
 //! `squeeze`, `unsqueeze`, `narrow`, `broadcast_to`, `cat`, `stack`.
 //!
 //! # Views and contiguity
@@ -1253,10 +1253,10 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Backward: finite-difference cases against the single `check_grad`
-    // harness, activated by **T31** now that T30's engine is live.
+    // harness.
     //
     // `check_grad` needs a scalar-valued `f`, and the reduction ops that
-    // would supply one live in T23 (not in this task's layer). Every case
+    // would supply one live in the reduction layer. Every case
     // therefore scalarizes with `pick`, which selects one output element
     // using only this file's own ops. `check_grad` perturbs *every* input
     // element, so the full gradient tensor is still checked — against a

@@ -47,7 +47,7 @@ impl Forward for Relu {
 /// The **exact** Gaussian error linear unit `x · Φ(x)` as a layer
 /// ([`Tensor::gelu`]).
 ///
-/// Exact, not the `tanh` approximation: the distinction is asserted in the T31
+/// Exact, not the `tanh` approximation: the distinction is asserted in the
 /// numerics suite, and this layer is a thin wrapper over the same op, so it
 /// inherits it.
 ///

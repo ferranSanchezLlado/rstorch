@@ -439,7 +439,7 @@ pub fn state_dict<M: Module + ?Sized>(module: &M) -> Result<TypedStateDict> {
 }
 
 impl TypedStateDict {
-    /// CT47's read-only leaf-kind query; it exposes no runtime leaf or value.
+    /// The read-only leaf-kind query; it exposes no runtime leaf or value.
     pub(crate) fn is_param_path(&self, path: &str) -> bool {
         self.entries
             .get(path)

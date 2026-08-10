@@ -1,4 +1,4 @@
-//! Matrix multiplication (T24): the 2-D case and the batched case, with
+//! Matrix multiplication: the 2-D case and the batched case, with
 //! NumPy/PyTorch broadcasting over the leading batch axes.
 //!
 //! One spelling, one entry point: [`Tensor::matmul`]. The **trailing two
@@ -414,12 +414,11 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Backward: finite-difference cases against the single `check_grad`
-    // harness, activated by **T31** now that T30's engine is live.
+    // harness.
     //
-    // `check_grad` wants a scalar-valued `f`, and the reductions that would
-    // supply one live in T23 (a sibling task, not this layer). Every case
-    // therefore scalarizes with `pick`, selecting one output element with
-    // T21's view ops; since `check_grad` perturbs *every* input element the
+    // `check_grad` wants a scalar-valued `f`, so every case scalarizes with
+    // `pick`, selecting one output element with the view ops; since
+    // `check_grad` perturbs *every* input element the
     // full gradient tensor is still checked, against a one-hot cotangent.
     // ------------------------------------------------------------------
 

@@ -1,5 +1,5 @@
 //! Apple Metal backend: ordinal-scoped shared contexts and ordered async
-//! command encoding. Kernel implementations are extended in T61b.
+//! command encoding.
 
 use std::collections::HashMap;
 use std::ffi::c_void;

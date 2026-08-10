@@ -1,7 +1,6 @@
 //! Strided layouts: how a tensor's logical shape maps onto its storage.
 //!
-//! **Contract file** (T01/T02). The struct and every signature here are
-//! frozen; the bodies are the ported v2 layout math plus the
+//! The bodies are the ported v2 layout math plus the
 //! permute/narrow/broadcast-stride rules. The doc comment on each method is
 //! its normative semantics, and is what the property tests check against.
 //!

@@ -677,7 +677,7 @@ mod tests {
     }
 
     /// Re-view `x` through `layout` over the same storage — the only way to
-    /// build a non-contiguous tensor before T21's public view ops land.
+    /// build a non-contiguous tensor without the public view ops.
     fn re_view(x: &Tensor, layout: Layout) -> Tensor {
         Tensor::from_parts(x.storage().clone(), layout)
     }
@@ -792,7 +792,7 @@ mod tests {
     }
 
     /// `extremum_backward` is a pure function over already-detached operands,
-    /// so unlike the closures it lives inside it can be driven before T30's
+    /// so unlike the closures it lives inside it can be driven without the
     /// engine exists. Ties and broadcast reduction are the parts worth
     /// pinning down early.
     #[test]
@@ -1084,9 +1084,7 @@ mod tests {
     // ------------------------------------------------------------------
     // Backward — finite differences against the single `check_grad` harness.
     //
-    // `check_grad` requires `f` to produce a **scalar**. T22 was written
-    // before T23's reductions existed, so every case below used to be a
-    // single-element tensor; **T31** widened them to multi-element shapes and
+    // `check_grad` requires `f` to produce a **scalar**, so every case
     // scalarizes with the weighted sum `wsum`.
     //
     // The weighting is load-bearing. A one-element input cannot distinguish a

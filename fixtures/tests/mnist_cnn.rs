@@ -3,7 +3,7 @@
 //!
 //! The split is a small seeded 5x7 stroke-font problem encoded as real IDX
 //! bytes. It therefore exercises the MNIST parser, `MnistLayout::Nchw`, device
-//! batching, `conv2d` and `max_pool2d`, real autograd through both T26 kernels,
+//! batching, `conv2d` and `max_pool2d`, real autograd through both kernels,
 //! and an optimizer update. It is intentionally synthetic rather than a
 //! downloaded copy of MNIST so the test is deterministic and network-free.
 

@@ -2,8 +2,8 @@
 //!
 //! Each case in `tests/ui/default/nn/derive/*.rs` is a program that must
 //! **fail** to compile, and its diagnostics must match the adjacent
-//! `.stderr` fixture. Together they pin the *loud-by-default* rule of
-//! exploration §4.4 at the compiler level:
+//! `.stderr` fixture. Together they pin the *loud-by-default* rule at the
+//! compiler level:
 //!
 //! - `non_module_field` — an unrecognized, non-`#[module(skip)]` field is a
 //!   child module, so a non-`Module` type is a compile error.
