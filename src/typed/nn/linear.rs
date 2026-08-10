@@ -99,6 +99,24 @@ impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> Linear<IN
         Ok(Self { weight, bias })
     }
 
+    /// Seals an exact pair of typed leaves, whose values the caller chose.
+    ///
+    /// `MultiHeadAttention` needs this: its four projections are structurally
+    /// `Linear<EMBED, EMBED, ..>`, but their initial values must stay the
+    /// Xavier-uniform weights of the runtime attention layer they are read
+    /// from — `√(6 / (in + out))`, not the Kaiming-uniform `√(6 / in)` that
+    /// [`new`](Self::new) inherits from [`crate::nn::Linear`]. For a square
+    /// projection those differ by a factor of `√2`.
+    pub(super) fn from_typed_leaves(
+        weight: Tensor2<OUT, IN, E, P>,
+        bias: Option<Tensor1<OUT, E, P>>,
+    ) -> Result<Self> {
+        Ok(Self {
+            weight: TypedParam::new(weight)?,
+            bias: bias.map(TypedParam::new).transpose()?,
+        })
+    }
+
     /// Removes the bias without changing the weight or any RNG stream.
     #[must_use]
     pub fn without_bias(mut self) -> Self {

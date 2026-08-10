@@ -1,4 +1,4 @@
-use super::{Mode, Module, ToDType, ToDevice, TypedParam, TypedVisitor, TypedVisitorMut};
+use super::{Linear, Mode, ToDType, ToDevice};
 use crate::nn::{merge_heads, split_heads};
 use crate::typed::device::validate_binding;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
@@ -243,95 +243,80 @@ pub fn scaled_dot_product_attention<
     )
 }
 
-struct Projection<const EMBED: usize, E: FloatElement, P: Placement> {
-    weight: TypedParam<crate::typed::Tensor2<EMBED, EMBED, E, P>>,
-    bias: Option<TypedParam<crate::typed::Tensor1<EMBED, E, P>>>,
+/// Reads one `[EMBED, EMBED]` projection out of a runtime attention layer's
+/// own state.
+///
+/// Deliberately not [`Linear::new`]: the two initializations genuinely differ.
+/// [`crate::nn::MultiHeadAttention`] draws Xavier-uniform weights on
+/// `U(-a, a)`, `a = √(6 / (in + out))`, while [`crate::nn::Linear`] draws
+/// Kaiming-uniform, `a = √(6 / in)` — for a square projection a factor of `√2`
+/// wider. Building from the runtime layer's state keeps this layer's initial
+/// distribution exactly the one it has always had, and keeps its RNG draw
+/// identical to the runtime sibling's.
+fn projection_from_runtime_state<const EMBED: usize, E: FloatElement, P: Placement>(
+    prefix: &str,
+    state: &BTreeMap<String, Tensor>,
+    ctx: &DeviceCtx<P>,
+) -> Result<Linear<EMBED, EMBED, E, P>> {
+    let missing = |path: &str| Error::InvalidArg {
+        op: "typed::nn::MultiHeadAttention::new",
+        msg: format!("runtime attention state omitted {path}"),
+    };
+    let weight_path = format!("{prefix}.weight");
+    let weight = state
+        .get(&weight_path)
+        .ok_or_else(|| missing(&weight_path))?
+        .to_dtype(E::DTYPE)?;
+    let weight = crate::typed::Tensor2::try_from_dynamic(weight, ctx)?;
+    let bias_path = format!("{prefix}.bias");
+    let bias = state
+        .get(&bias_path)
+        .map(|value| {
+            value
+                .to_dtype(E::DTYPE)
+                .and_then(|value| crate::typed::Tensor1::try_from_dynamic(value, ctx))
+        })
+        .transpose()?;
+    Linear::from_typed_leaves(weight, bias)
 }
 
-impl<const EMBED: usize, E: FloatElement, P: Placement> Projection<EMBED, E, P> {
-    fn from_runtime_state(
-        prefix: &str,
-        state: &BTreeMap<String, Tensor>,
-        ctx: &DeviceCtx<P>,
-    ) -> Result<Self> {
-        let missing = |path: &str| Error::InvalidArg {
-            op: "typed::nn::MultiHeadAttention::new",
-            msg: format!("runtime attention state omitted {path}"),
-        };
-        let weight_path = format!("{prefix}.weight");
-        let weight = state
-            .get(&weight_path)
-            .ok_or_else(|| missing(&weight_path))?
-            .to_dtype(E::DTYPE)?;
-        let weight = TypedParam::new(crate::typed::Tensor2::try_from_dynamic(weight, ctx)?)?;
-        let bias_path = format!("{prefix}.bias");
-        let bias = state
-            .get(&bias_path)
-            .map(|value| {
-                value
-                    .to_dtype(E::DTYPE)
-                    .and_then(|value| crate::typed::Tensor1::try_from_dynamic(value, ctx))
-                    .and_then(TypedParam::new)
-            })
-            .transpose()?;
-        Ok(Self { weight, bias })
-    }
-
-    fn apply<I>(&self, input: &I, mode: Mode) -> Result<Tensor>
-    where
-        I: TypedTensor<Elem = E, Placement = P>,
-    {
-        let weight = self.weight.get(mode)?;
-        same_binding(input, &weight, "typed::nn::MultiHeadAttention::project")?;
-        let output = input
-            .dynamic()
-            .matmul(&weight.dynamic().transpose(-2, -1)?)?;
-        match &self.bias {
-            Some(bias) => output.add(bias.get(mode)?.dynamic()),
-            None => Ok(output),
-        }
-    }
-
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("weight", &self.weight);
-        if let Some(bias) = &self.bias {
-            visitor.param("bias", bias);
-        }
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("weight", &mut self.weight);
-        if let Some(bias) = &mut self.bias {
-            visitor.param("bias", bias);
-        }
-    }
-
-    fn move_to<Q: Placement>(self, target: &DeviceCtx<Q>) -> Result<Projection<EMBED, E, Q>> {
-        Ok(Projection {
-            weight: self.weight.to_device(target)?,
-            bias: self.bias.map(|value| value.to_device(target)).transpose()?,
-        })
-    }
-
-    fn cast_to<F: FloatElement>(self) -> Result<Projection<EMBED, F, P>> {
-        Ok(Projection {
-            weight: self.weight.to_dtype()?,
-            bias: self.bias.map(TypedParam::to_dtype).transpose()?,
-        })
+/// Applies one projection to an input of any typed attention rank.
+///
+/// [`Linear`]'s own [`super::Forward`] cannot serve here: it is implemented
+/// per input rank with a *typed* output, whereas the head split that follows
+/// needs the bare runtime tensor, and it takes `&mut self`, whereas every
+/// projection entry point on this layer takes `&self`.
+fn apply_projection<const EMBED: usize, E: FloatElement, P: Placement, I>(
+    projection: &Linear<EMBED, EMBED, E, P>,
+    input: &I,
+    mode: Mode,
+) -> Result<Tensor>
+where
+    I: TypedTensor<Elem = E, Placement = P>,
+{
+    let weight = projection.weight().get(mode)?;
+    same_binding(input, &weight, "typed::nn::MultiHeadAttention::project")?;
+    let output = input
+        .dynamic()
+        .matmul(&weight.dynamic().transpose(-2, -1)?)?;
+    match projection.bias() {
+        Some(bias) => output.add(bias.get(mode)?.dynamic()),
+        None => Ok(output),
     }
 }
 
 /// Typed multi-head attention with static embedding and head configuration.
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct MultiHeadAttention<
     const EMBED: usize,
     const HEADS: usize,
     E: FloatElement = f32,
     P: Placement = crate::typed::Cpu,
 > {
-    q_proj: Projection<EMBED, E, P>,
-    k_proj: Projection<EMBED, E, P>,
-    v_proj: Projection<EMBED, E, P>,
-    out_proj: Projection<EMBED, E, P>,
+    q_proj: Linear<EMBED, EMBED, E, P>,
+    k_proj: Linear<EMBED, EMBED, E, P>,
+    v_proj: Linear<EMBED, EMBED, E, P>,
+    out_proj: Linear<EMBED, EMBED, E, P>,
 }
 
 impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
@@ -367,10 +352,10 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
         };
         let state = crate::nn::state_dict(&runtime);
         Ok(Self {
-            q_proj: Projection::from_runtime_state("q_proj", &state, ctx)?,
-            k_proj: Projection::from_runtime_state("k_proj", &state, ctx)?,
-            v_proj: Projection::from_runtime_state("v_proj", &state, ctx)?,
-            out_proj: Projection::from_runtime_state("out_proj", &state, ctx)?,
+            q_proj: projection_from_runtime_state("q_proj", &state, ctx)?,
+            k_proj: projection_from_runtime_state("k_proj", &state, ctx)?,
+            v_proj: projection_from_runtime_state("v_proj", &state, ctx)?,
+            out_proj: projection_from_runtime_state("out_proj", &state, ctx)?,
         })
     }
 
@@ -391,7 +376,7 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
 
     fn project<I>(
         &self,
-        projection: &Projection<EMBED, E, P>,
+        projection: &Linear<EMBED, EMBED, E, P>,
         input: &I,
         mode: Mode,
     ) -> Result<I::Context>
@@ -403,7 +388,7 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
             assert_input_width(I::MARKERS, EMBED);
         }
         check_input_width(input.dynamic(), EMBED)?;
-        let projected = projection.apply(input, mode)?;
+        let projected = apply_projection(projection, input, mode)?;
         checked_wrap(
             split_heads(&projected, HEADS, self.head_dim())?,
             Arc::clone(input.binding()),
@@ -473,7 +458,7 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
         }
         let merged = merge_heads(context.dynamic(), EMBED)?;
         let merged = checked_wrap::<C::Output>(merged, Arc::clone(context.binding()), OP)?;
-        let output = self.out_proj.apply(&merged, mode)?;
+        let output = apply_projection(&self.out_proj, &merged, mode)?;
         checked_wrap(output, Arc::clone(context.binding()), OP)
     }
 
@@ -582,64 +567,16 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     }
 }
 
-impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement> Module
-    for MultiHeadAttention<EMBED, HEADS, E, P>
-{
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        for (name, projection) in [
-            ("q_proj", &self.q_proj),
-            ("k_proj", &self.k_proj),
-            ("v_proj", &self.v_proj),
-            ("out_proj", &self.out_proj),
-        ] {
-            let saved = ProjectionModule(projection);
-            visitor.module(name, &saved);
-        }
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.module("q_proj", &mut ProjectionModuleMut(&mut self.q_proj));
-        visitor.module("k_proj", &mut ProjectionModuleMut(&mut self.k_proj));
-        visitor.module("v_proj", &mut ProjectionModuleMut(&mut self.v_proj));
-        visitor.module("out_proj", &mut ProjectionModuleMut(&mut self.out_proj));
-    }
-}
-
-struct ProjectionModule<'a, const EMBED: usize, E: FloatElement, P: Placement>(
-    &'a Projection<EMBED, E, P>,
-);
-impl<const EMBED: usize, E: FloatElement, P: Placement> Module
-    for ProjectionModule<'_, EMBED, E, P>
-{
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        self.0.visit(visitor);
-    }
-    fn visit_mut(&mut self, _visitor: &mut TypedVisitorMut<'_>) {}
-}
-struct ProjectionModuleMut<'a, const EMBED: usize, E: FloatElement, P: Placement>(
-    &'a mut Projection<EMBED, E, P>,
-);
-impl<const EMBED: usize, E: FloatElement, P: Placement> Module
-    for ProjectionModuleMut<'_, EMBED, E, P>
-{
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        self.0.visit(visitor);
-    }
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        self.0.visit_mut(visitor);
-    }
-}
-
 impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement, Q: Placement>
     ToDevice<Q> for MultiHeadAttention<EMBED, HEADS, E, P>
 {
     type Output = MultiHeadAttention<EMBED, HEADS, E, Q>;
     fn to_device(self, target: &DeviceCtx<Q>) -> Result<Self::Output> {
         Ok(MultiHeadAttention {
-            q_proj: self.q_proj.move_to(target)?,
-            k_proj: self.k_proj.move_to(target)?,
-            v_proj: self.v_proj.move_to(target)?,
-            out_proj: self.out_proj.move_to(target)?,
+            q_proj: self.q_proj.to_device(target)?,
+            k_proj: self.k_proj.to_device(target)?,
+            v_proj: self.v_proj.to_device(target)?,
+            out_proj: self.out_proj.to_device(target)?,
         })
     }
 }
@@ -650,10 +587,10 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement, F: F
     type Output = MultiHeadAttention<EMBED, HEADS, F, P>;
     fn to_dtype(self) -> Result<Self::Output> {
         Ok(MultiHeadAttention {
-            q_proj: self.q_proj.cast_to()?,
-            k_proj: self.k_proj.cast_to()?,
-            v_proj: self.v_proj.cast_to()?,
-            out_proj: self.out_proj.cast_to()?,
+            q_proj: self.q_proj.to_dtype()?,
+            k_proj: self.k_proj.to_dtype()?,
+            v_proj: self.v_proj.to_dtype()?,
+            out_proj: self.out_proj.to_dtype()?,
         })
     }
 }
