@@ -38,6 +38,7 @@
 //!   so an `f16` embedding gradient with thousands of repeated rows does not
 //!   saturate (the v2 sum-saturation bug, fixed by contract).
 
+use super::cpu_storage;
 use super::host::{Walk, dense_offset};
 use crate::backend::View;
 use crate::backend::cpu::acc::NumAcc;
@@ -48,7 +49,6 @@ use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::{CpuStorage, Storage};
-use super::cpu_storage;
 
 // ---------------------------------------------------------------------------
 // Shared plumbing

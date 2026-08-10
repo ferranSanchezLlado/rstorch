@@ -32,6 +32,10 @@ half = "2"
 rayon = { version = "1", optional = true }
 rstorch-derive = { version = "0.3.0", path = "rstorch-derive" }
 safetensors = "0.8"
+# The safetensors header is JSON; `serde_json` parses it (and already builds,
+# as a `safetensors` dependency) instead of a hand-rolled scanner here.
+serde = "1"
+serde_json = "1"
 thiserror = "2"
 flate2 = { version = "1", optional = true }
 ureq = { version = "2", optional = true }

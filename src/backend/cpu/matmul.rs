@@ -43,6 +43,7 @@
 //! around, and `both_loop_orders_are_bitwise_identical_to_the_naive_nest`
 //! pins it.
 
+use super::cpu_storage;
 use crate::backend::View;
 use crate::backend::cpu::acc::NumAcc;
 use crate::backend::cpu::dispatch::{CpuElement, dispatch_numeric};
@@ -50,7 +51,6 @@ use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::storage::Storage;
-use super::cpu_storage;
 
 /// The resolved matmul geometry: batch shape (already broadcast), matrix
 /// dims, and per-operand leading-batch strides padded to the batch rank.
@@ -497,10 +497,10 @@ pub(crate) fn matmul(lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::CpuStorage;
     use crate::backend::View;
     use crate::layout::Layout;
     use crate::shape::Shape;
+    use crate::storage::CpuStorage;
     use std::sync::Arc;
 
     fn f32_storage(data: Vec<f32>) -> Storage {
