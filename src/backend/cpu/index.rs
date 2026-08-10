@@ -48,30 +48,11 @@ use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::{CpuStorage, Storage};
+use super::cpu_storage;
 
 // ---------------------------------------------------------------------------
 // Shared plumbing
 // ---------------------------------------------------------------------------
-
-/// Borrow the [`CpuStorage`] behind a CPU view, or report the op as
-/// unsupported on a non-CPU device (a Metal view never reaches a CPU kernel
-/// in practice; this keeps the match total without an `unimplemented!`).
-// `op` is only read by the `metal`-gated arm; on a CPU-only build it is unused.
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(unused_variables)
-)]
-fn cpu_storage<'a>(x: View<'a>, op: &'static str) -> Result<&'a CpuStorage> {
-    match x.storage() {
-        Storage::Cpu(s) => Ok(s),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        Storage::Metal(_) => Err(Error::Unsupported {
-            op,
-            device: x.device(),
-            dtype: x.dtype(),
-        }),
-    }
-}
 
 /// Row-major place values for `dims`: `place[a]` is the product of every
 /// dimension to the right of axis `a` (1 for the innermost axis).
@@ -126,7 +107,7 @@ fn resolved_indices(
     size: usize,
     op: &'static str,
 ) -> Result<Vec<usize>> {
-    let cpu = cpu_storage(indices, op)?;
+    let cpu = cpu_storage(indices);
     let data = match cpu {
         CpuStorage::I64(v) => v.as_slice(),
         other => {
@@ -265,7 +246,7 @@ pub(crate) fn index_select(x: View<'_>, axis: usize, indices: View<'_>) -> Resul
     let strides = layout.strides();
     let offset = layout.offset();
 
-    let values = cpu_storage(x, OP)?;
+    let values = cpu_storage(x);
     Ok(dispatch_all!(x.dtype(), E => {
         E::storage(index_select_generic(
             E::slice(values), strides, offset, &out_dims, axis, &picks,
@@ -333,7 +314,7 @@ pub(crate) fn gather(x: View<'_>, axis: usize, indices: View<'_>) -> Result<Stor
     let out_dims = idx_layout.dims();
     let strides = layout.strides();
     let offset = layout.offset();
-    let values = cpu_storage(x, OP)?;
+    let values = cpu_storage(x);
     Ok(dispatch_all!(x.dtype(), E => {
         E::storage(gather_generic(
             E::slice(values), strides, offset, out_dims, axis, &picks,
@@ -590,8 +571,8 @@ pub(crate) fn index_add(
         });
     }
 
-    let x_cpu = cpu_storage(x, OP)?;
-    let src_cpu = cpu_storage(src, OP)?;
+    let x_cpu = cpu_storage(x);
+    let src_cpu = cpu_storage(src);
     dispatch_acc(
         OP,
         x.device(),
@@ -647,8 +628,8 @@ pub(crate) fn scatter_add(
 
     let picks = resolved_indices(indices, axis, x_layout.dims()[axis], OP)?;
 
-    let x_cpu = cpu_storage(x, OP)?;
-    let src_cpu = cpu_storage(src, OP)?;
+    let x_cpu = cpu_storage(x);
+    let src_cpu = cpu_storage(src);
     dispatch_acc(
         OP,
         x.device(),

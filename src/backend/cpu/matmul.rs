@@ -49,7 +49,8 @@ use crate::backend::cpu::dispatch::{CpuElement, dispatch_numeric};
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
-use crate::storage::{CpuStorage, Storage};
+use crate::storage::Storage;
+use super::cpu_storage;
 
 /// The resolved matmul geometry: batch shape (already broadcast), matrix
 /// dims, and per-operand leading-batch strides padded to the batch rank.
@@ -472,8 +473,8 @@ pub(crate) fn matmul(lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
         });
     }
     let plan = plan(lhs.layout(), rhs.layout())?;
-    let lhs_cpu = cpu_storage(lhs, "matmul")?;
-    let rhs_cpu = cpu_storage(rhs, "matmul")?;
+    let lhs_cpu = cpu_storage(lhs);
+    let rhs_cpu = cpu_storage(rhs);
     // F32 is the one dtype with dedicated stride-specialized kernels, so it is
     // taken before the dispatch rather than inside it: which of the three runs
     // is a property of the plan, not of the element type.
@@ -493,28 +494,10 @@ pub(crate) fn matmul(lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
     })
 }
 
-/// Borrow the [`CpuStorage`] behind a CPU view, or report the op as
-/// unsupported on a non-CPU device.
-// `op` is only read by the `metal`-gated arm; on a CPU-only build it is unused.
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(unused_variables)
-)]
-fn cpu_storage<'a>(x: View<'a>, op: &'static str) -> Result<&'a CpuStorage> {
-    match x.storage() {
-        Storage::Cpu(s) => Ok(s),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        Storage::Metal(_) => Err(Error::Unsupported {
-            op,
-            device: x.device(),
-            dtype: x.dtype(),
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::CpuStorage;
     use crate::backend::View;
     use crate::layout::Layout;
     use crate::shape::Shape;

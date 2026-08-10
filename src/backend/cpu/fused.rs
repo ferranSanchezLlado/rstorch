@@ -11,7 +11,8 @@ use crate::backend::{FusedOp, View};
 use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
-use crate::storage::{CpuStorage, Storage};
+use crate::storage::Storage;
+use super::cpu_storage;
 
 /// See [`BackendOps::fused`](crate::backend::BackendOps::fused).
 ///
@@ -48,12 +49,9 @@ fn sgd_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         });
     }
 
-    let param = cpu_storage(OP, inputs[0])?;
-    let grad = cpu_storage(OP, inputs[1])?;
-    let velocity = inputs
-        .get(2)
-        .map(|view| cpu_storage(OP, *view))
-        .transpose()?;
+    let param = cpu_storage(inputs[0]);
+    let grad = cpu_storage(inputs[1]);
+    let velocity = inputs.get(2).map(|view| cpu_storage(*view));
     dispatch_float!(inputs[0].dtype(), E => {
         // The guard above rejects a velocity operand under zero momentum, so
         // whenever one is supplied the step returns a velocity as well.
@@ -163,10 +161,10 @@ fn adam_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         unreachable!("arity validated")
     };
     validate_adam_scalars(OP, scalars, inputs[0].dtype())?;
-    let param = cpu_storage(OP, inputs[0])?;
-    let grad = cpu_storage(OP, inputs[1])?;
-    let first = cpu_storage(OP, inputs[2])?;
-    let second = cpu_storage(OP, inputs[3])?;
+    let param = cpu_storage(inputs[0]);
+    let grad = cpu_storage(inputs[1]);
+    let first = cpu_storage(inputs[2]);
+    let second = cpu_storage(inputs[3]);
 
     dispatch_float!(inputs[0].dtype(), E => {
         let (param, first, second) = adam_generic::<E>(
@@ -290,7 +288,7 @@ fn softmax(inputs: &[View<'_>], scalars: &[f64]) -> Result<Storage> {
     require_float(OP, x)?;
     validate_view(OP, x)?;
 
-    let values = cpu_storage(OP, x)?;
+    let values = cpu_storage(x);
     if x.dtype() == DType::F32 && x.layout().is_contiguous() {
         // The one dtype with a dedicated flat-slice kernel.
         return Ok(f32::storage(softmax_contiguous_f32(
@@ -477,9 +475,9 @@ fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
     };
 
     let [x_values, weight_values, bias_values] = [
-        cpu_storage(OP, *x)?,
-        cpu_storage(OP, *weight)?,
-        cpu_storage(OP, *bias)?,
+        cpu_storage(*x),
+        cpu_storage(*weight),
+        cpu_storage(*bias),
     ];
     let (output, stats) = dispatch_float!(x.dtype(), E => {
         let (output, stats) = layer_norm_generic::<E>(
@@ -556,10 +554,10 @@ fn layer_norm_backward_input(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec
     }
 
     let [g_values, xhat_values, inv_std_values, weight_values] = [
-        cpu_storage(OP, *g)?,
-        cpu_storage(OP, *xhat)?,
-        cpu_storage(OP, *inv_std)?,
-        cpu_storage(OP, *weight)?,
+        cpu_storage(*g),
+        cpu_storage(*xhat),
+        cpu_storage(*inv_std),
+        cpu_storage(*weight),
     ];
     let output = dispatch_float!(g.dtype(), E => {
         E::storage(layer_norm_backward_input_generic::<E>(
@@ -1031,25 +1029,10 @@ fn validate_view(op: &'static str, view: View<'_>) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(unused_variables)
-)]
-fn cpu_storage<'a>(op: &'static str, view: View<'a>) -> Result<&'a CpuStorage> {
-    match view.storage() {
-        Storage::Cpu(storage) => Ok(storage),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        Storage::Metal(_) => Err(Error::Unsupported {
-            op,
-            device: view.device(),
-            dtype: view.dtype(),
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::CpuStorage;
     use std::sync::Arc;
 
     fn storage(values: Vec<f32>) -> Storage {
