@@ -13,21 +13,7 @@ use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::storage::{CpuStorage, Storage};
-
-/// Extract the [`CpuStorage`] backing a view.
-///
-/// The CPU backend only ever receives CPU-resident views (the dispatcher
-/// routes each device to its own backend), so a non-CPU storage here is an
-/// internal contract violation and panics rather than returning an error.
-fn cpu_storage<'a>(x: &View<'a>) -> &'a CpuStorage {
-    match x.storage() {
-        Storage::Cpu(s) => s,
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        Storage::Metal(_) => {
-            unreachable!("CPU backend received non-CPU storage; dispatcher invariant violated")
-        }
-    }
-}
+use super::cpu_storage;
 
 /// Incremental row-major odometer over `dims`, carrying one running storage
 /// index per *lane*.
@@ -257,7 +243,7 @@ impl Materialize for CopyOwned {
 /// [`transfer_out`] passes [`ShareOrCopy`], [`copy_strided`] and [`cast`] pass
 /// [`CopyOwned`].
 fn materialize(x: View<'_>, how: impl Materialize) -> CpuStorage {
-    let storage = cpu_storage(&x);
+    let storage = cpu_storage(x);
     let layout = x.layout();
     dispatch_all!(x.dtype(), E => {
         E::from_buffer(how.buffer(E::buffer(storage), layout))
@@ -318,7 +304,7 @@ pub(crate) fn copy_into(src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -
         });
     }
     let src_layout = src.layout();
-    let src = cpu_storage(&src);
+    let src = cpu_storage(src);
     let dst = match dst {
         Storage::Cpu(dst) => dst,
         #[cfg(all(feature = "metal", target_os = "macos"))]

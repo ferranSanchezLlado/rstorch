@@ -19,7 +19,8 @@ use crate::dtype::Element;
 use crate::error::Result;
 use crate::layout::Layout;
 use crate::shape::Shape;
-use crate::storage::{CpuStorage, Storage};
+use crate::storage::Storage;
+use super::cpu_storage;
 
 /// Enumerate the storage indices of the `axis` line through `x` whose other
 /// coordinates are fixed by `outer` (a row-major index into the shape with
@@ -166,7 +167,7 @@ pub(crate) fn reduce(op: ReduceOp, x: View<'_>, axis: usize) -> Result<Storage> 
         axis < layout.rank(),
         "reduce: axis pre-resolved by op layer"
     );
-    let cpu = cpu_storage(x, "reduce")?;
+    let cpu = cpu_storage(x);
     dispatch_numeric!(x.dtype(), "reduce", x.device(), E => {
         Ok(E::storage(reduce_generic(op, E::slice(cpu), layout, axis)))
     })
@@ -179,36 +180,17 @@ pub(crate) fn arg_reduce(op: ArgReduceOp, x: View<'_>, axis: usize) -> Result<St
         axis < layout.rank(),
         "arg_reduce: axis pre-resolved by op layer"
     );
-    let cpu = cpu_storage(x, "arg_reduce")?;
+    let cpu = cpu_storage(x);
     dispatch_numeric!(x.dtype(), "arg_reduce", x.device(), E => {
         // The positions are `I64` whatever the input dtype was.
         Ok(i64::storage(arg_reduce_generic(op, E::slice(cpu), layout, axis)))
     })
 }
 
-/// Borrow the [`CpuStorage`] behind a CPU view, or report the op as
-/// unsupported on a non-CPU device (a Metal view never reaches a CPU kernel
-/// in practice; this keeps the match total without an `unimplemented!`).
-// `op` is only read by the `metal`-gated arm; on a CPU-only build it is unused.
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(unused_variables)
-)]
-fn cpu_storage<'a>(x: View<'a>, op: &'static str) -> Result<&'a CpuStorage> {
-    match x.storage() {
-        Storage::Cpu(s) => Ok(s),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        Storage::Metal(_) => Err(Error::Unsupported {
-            op,
-            device: x.device(),
-            dtype: x.dtype(),
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::CpuStorage;
     use crate::backend::View;
     use crate::dtype::DType;
     use crate::error::Error;

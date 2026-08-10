@@ -48,7 +48,8 @@ use crate::dtype::Element;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
-use crate::storage::{CpuStorage, Storage};
+use crate::storage::Storage;
+use super::cpu_storage;
 
 /// The storage index of logical element `(a, b, c, d)` of a rank-4 view.
 fn idx4(layout: &Layout, a: usize, b: usize, c: usize, d: usize) -> usize {
@@ -59,25 +60,6 @@ fn idx4(layout: &Layout, a: usize, b: usize, c: usize, d: usize) -> usize {
 // ---------------------------------------------------------------------------
 // Dtype dispatch
 // ---------------------------------------------------------------------------
-
-/// Borrow the [`CpuStorage`] behind a CPU view, or report the op as
-/// unsupported on a non-CPU device (no silent host round-trip).
-// `op` is only read by the `metal`-gated arm; on a CPU-only build it is unused.
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(unused_variables)
-)]
-fn cpu_storage<'a>(op: &'static str, x: View<'a>) -> Result<&'a CpuStorage> {
-    match x.storage() {
-        Storage::Cpu(s) => Ok(s),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        Storage::Metal(_) => Err(Error::Unsupported {
-            op,
-            device: x.device(),
-            dtype: x.dtype(),
-        }),
-    }
-}
 
 /// Guard that a two-operand kernel's operands share a dtype, so the single
 /// [`dispatch_numeric!`] that follows addresses both of them.
@@ -109,8 +91,8 @@ pub(crate) fn conv(op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Re
             )?;
             require_same_dtype("conv2d", input, weight)?;
             let (a, b) = (
-                cpu_storage("conv2d", input)?,
-                cpu_storage("conv2d", weight)?,
+                cpu_storage(input),
+                cpu_storage(weight),
             );
             dispatch_numeric!(input.dtype(), "conv2d", input.device(), E => {
                 Ok(E::storage(conv2d_forward_generic(
@@ -125,7 +107,7 @@ pub(crate) fn conv(op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Re
         ConvOp::MaxPool2d => {
             let [input] = operands("max_pool2d", inputs)?;
             let geo = Conv2dGeometry::pool("max_pool2d", input.layout().dims(), params)?;
-            let a = cpu_storage("max_pool2d", input)?;
+            let a = cpu_storage(input);
             dispatch_numeric!(input.dtype(), "max_pool2d", input.device(), E => {
                 Ok(E::storage(max_pool2d_forward_generic(
                     E::slice(a),
@@ -137,7 +119,7 @@ pub(crate) fn conv(op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Re
         ConvOp::AvgPool2d => {
             let [input] = operands("avg_pool2d", inputs)?;
             let geo = Conv2dGeometry::pool("avg_pool2d", input.layout().dims(), params)?;
-            let a = cpu_storage("avg_pool2d", input)?;
+            let a = cpu_storage(input);
             dispatch_numeric!(input.dtype(), "avg_pool2d", input.device(), E => {
                 Ok(E::storage(avg_pool2d_forward_generic(
                     E::slice(a),
@@ -211,7 +193,7 @@ pub(crate) fn conv2d_input_grad(
     expect_dims(geo.op, grad.layout(), geo.output_dims())?;
     expect_dims(geo.op, weight.layout(), geo.weight_dims())?;
     require_same_dtype(geo.op, grad, weight)?;
-    let (a, b) = (cpu_storage(geo.op, grad)?, cpu_storage(geo.op, weight)?);
+    let (a, b) = (cpu_storage(grad), cpu_storage(weight));
     dispatch_numeric!(grad.dtype(), geo.op, grad.device(), E => {
         Ok(E::storage(conv2d_input_grad_generic(
             E::slice(a),
@@ -234,7 +216,7 @@ pub(crate) fn conv2d_weight_grad(
     expect_dims(geo.op, grad.layout(), geo.output_dims())?;
     expect_dims(geo.op, input.layout(), geo.input_dims())?;
     require_same_dtype(geo.op, grad, input)?;
-    let (a, b) = (cpu_storage(geo.op, grad)?, cpu_storage(geo.op, input)?);
+    let (a, b) = (cpu_storage(grad), cpu_storage(input));
     dispatch_numeric!(grad.dtype(), geo.op, grad.device(), E => {
         Ok(E::storage(conv2d_weight_grad_generic(
             E::slice(a),
@@ -257,7 +239,7 @@ pub(crate) fn max_pool2d_backward(
     expect_dims(geo.op, grad.layout(), geo.output_dims())?;
     expect_dims(geo.op, input.layout(), geo.input_dims())?;
     require_same_dtype(geo.op, grad, input)?;
-    let (a, b) = (cpu_storage(geo.op, grad)?, cpu_storage(geo.op, input)?);
+    let (a, b) = (cpu_storage(grad), cpu_storage(input));
     dispatch_numeric!(grad.dtype(), geo.op, grad.device(), E => {
         Ok(E::storage(max_pool2d_backward_generic(
             E::slice(a),
@@ -274,7 +256,7 @@ pub(crate) fn max_pool2d_backward(
 /// (`count_include_pad = true`). Independent of the forward input values.
 pub(crate) fn avg_pool2d_backward(grad: View<'_>, geo: &Conv2dGeometry) -> Result<Storage> {
     expect_dims(geo.op, grad.layout(), geo.output_dims())?;
-    let a = cpu_storage(geo.op, grad)?;
+    let a = cpu_storage(grad);
     dispatch_numeric!(grad.dtype(), geo.op, grad.device(), E => {
         Ok(E::storage(avg_pool2d_backward_generic(
             E::slice(a),
@@ -717,6 +699,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::CpuStorage;
     use crate::dtype::DType;
     use std::sync::Arc;
 
