@@ -5,7 +5,7 @@
 //! `from_vec` / `to_vec` / `to_scalar`.
 //!
 //! Dtype scope: epoch-1 kernels implement `F32`, `I64`,
-//! `Bool`; `F16`/`BF16` arrive in the dedicated precision epoch (T60) under
+//! `Bool`; `F16`/`BF16` arrive in the dedicated precision epoch under
 //! the `Acc` contract; `F64` follows demand. All six [`Element`] impls exist
 //! from the start so signatures never change.
 
@@ -89,7 +89,7 @@ mod sealed {
     /// [`Element`](super::Element) is what lets the frozen `T: Element`
     /// signatures (`from_vec`/`to_vec`/`to_scalar`) reach the conversion
     /// while `Element`'s own bound list — and therefore the public API —
-    /// stays exactly as T01 froze it: `Sealed` is unnameable downstream, so
+    /// is deliberate: `Sealed` is unnameable downstream, so
     /// nothing crate-private becomes reachable, and neither `HostConv` nor
     /// `CpuStorage` appears in the public interface.
     // `private_bounds` fires because `Sealed` is *reachable* at `pub`

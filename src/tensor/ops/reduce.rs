@@ -1,4 +1,4 @@
-//! Reductions (T23): `sum`/`mean`/`max`/`min`/`var`/`std` in three spellings
+//! Reductions: `sum`/`mean`/`max`/`min`/`var`/`std` in three spellings
 //! each, the normalizations `softmax`/`log_softmax`, and the index reductions
 //! `argmax`/`argmin`.
 //!
@@ -195,7 +195,7 @@ fn spread(
 /// `x` and `out` are the **detached** input and output; both are re-viewed
 /// with the reduced axis present so they broadcast against each other.
 ///
-/// # NaN lines (T31 decision, resolving T23's open question)
+/// # NaN lines
 ///
 /// The forward **propagates** NaN: a line containing a NaN reduces to NaN
 /// (`backend::cpu::reduce`). That makes the tie count degenerate here —
@@ -820,7 +820,7 @@ mod tests {
     }
 
     /// Re-view `x` through `layout` — the way this file's tests build
-    /// non-contiguous inputs without depending on more than T21.
+    /// non-contiguous inputs without the public view ops.
     fn re_view(x: &Tensor, layout: Layout) -> Tensor {
         Tensor::from_parts(x.storage().clone(), layout)
     }
@@ -1474,13 +1474,13 @@ mod tests {
         assert_eq!(v(&routed), vec![0.0, 10.0, 0.0, 3.0, 3.0, 0.0]);
     }
 
-    /// Pins the T31 NaN decision documented on `route_to_extrema`: the
+    /// Pins the NaN decision documented on `route_to_extrema`: the
     /// forward propagates NaN, so the backward does too — the *whole* line
     /// goes NaN, and the lines beside it are untouched.
     #[test]
     fn a_nan_line_propagates_nan_through_the_max_backward() {
         // Row 0 is clean, row 1 holds a NaN, row 2 is all NaN (the 0/0 case
-        // T23 flagged: nothing compares equal to the NaN extremum).
+        // Nothing compares equal to the NaN extremum).
         let x = t(
             &[
                 1.0,
@@ -1523,8 +1523,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Backward: finite differences against the single `check_grad` harness,
-    // activated by **T31** now that T30's engine is live.
+    // Backward: finite differences against the single `check_grad` harness.
     // ------------------------------------------------------------------
 
     const EPS: f64 = 1e-3;

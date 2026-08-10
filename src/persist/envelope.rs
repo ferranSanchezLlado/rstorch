@@ -14,8 +14,8 @@
 //!
 //! The magic is independent of any internal epoch number, and the reader is
 //! permanent for every shipped major version (16.14 WS2). Section *values* are
-//! opaque strings here — the `optim`/`nn` layers decide their own encoding
-//! (T40/T44); the envelope only guarantees they round-trip verbatim.
+//! opaque strings here — the `optim`/`nn` layers decide their own encoding;
+//! the envelope only guarantees they round-trip verbatim.
 
 use crate::error::{Error, Result};
 use crate::persist::host_tensor::HostTensor;

@@ -1,5 +1,5 @@
 //! Type aliases defeat the syntactic token match and fail loudly
-//! (exploration §4.4). Classification matches on the type *as written*, so a
+//! Classification matches on the type *as written*, so a
 //! `type Weights = Param;` field is NOT recognized as a `Param`; it falls to
 //! the loud default (child module) and, because `Param` is not a `Module`,
 //! produces a `Module`-not-satisfied compile error. Spell `Param` out.

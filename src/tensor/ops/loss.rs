@@ -1,4 +1,4 @@
-//! Losses (T27): [`cross_entropy`](Tensor::cross_entropy) over `I64` class
+//! Losses: [`cross_entropy`](Tensor::cross_entropy) over `I64` class
 //! labels — with the padding-aware
 //! [`cross_entropy_ignore_index`](Tensor::cross_entropy_ignore_index)
 //! spelling — and [`mse_loss`](Tensor::mse_loss).
@@ -22,7 +22,7 @@
 //!
 //! - **Masked classes.** A `-inf` logit (a forbidden vocabulary entry) has
 //!   probability zero and receives no gradient, because the loss is built on
-//!   T23's mask-aware [`log_softmax`](Tensor::log_softmax) rather than on
+//!   the mask-aware [`log_softmax`](Tensor::log_softmax) rather than on
 //!   `ln(softmax(x))`. A row that is entirely `-inf` yields `+inf`, not `NaN`.
 //! - **Masked rows.** `cross_entropy_ignore_index` drops the rows whose label
 //!   equals the sentinel (padding positions in a packed batch) from both the
@@ -667,8 +667,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Backward: finite differences against the single `check_grad` harness,
-    // activated by **T31** now that T30's engine is live.
+    // Backward: finite differences against the single `check_grad` harness.
     // ------------------------------------------------------------------
 
     const EPS: f64 = 1e-3;

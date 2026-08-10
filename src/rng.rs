@@ -1,10 +1,9 @@
-//! Explicit, seedable, splittable random number generation (exploration
-//! §4.4). No global seed, no ambient state: stochastic constructors take
+//! Explicit, seedable, splittable random number generation. No global seed
+//! and no ambient state: stochastic constructors take
 //! `&mut Rng`, and RNG state is checkpointed alongside optimizer state for
 //! resumable training.
 //!
-//! **Contract file** (T01), bodies filled by **T12**. The generator is the
-//! post-16.2 `SmallRng` ported from v2: a `u64` register seeded through
+//! The generator is the post-16.2 `SmallRng` ported from v2: a `u64` register seeded through
 //! splitmix64, advanced by an LCG whose output word is scrambled into the
 //! returned `u64`. The original untested LCG from v0.x is deliberately **not**
 //! carried forward.
@@ -23,7 +22,7 @@ fn splitmix64(seed: u64) -> u64 {
 ///
 /// Determinism is a contract: a given seed reproduces an exact sequence, and
 /// [`state`](Rng::state)/[`from_state`](Rng::from_state) round-trips resume it
-/// bit-for-bit (gated by T12's determinism fixture).
+/// bit-for-bit (gated by the determinism fixture below).
 #[derive(Clone, Debug)]
 pub struct Rng {
     /// The full generator state (splitmix64 register). One `u64` is the
@@ -34,7 +33,7 @@ pub struct Rng {
 impl Rng {
     /// Create a generator seeded from `seed` (mixed through splitmix64 so
     /// even low-entropy seeds like `0` and `1` produce well-separated
-    /// streams). T12 fills the body.
+    /// streams).
     pub fn seed(seed: u64) -> Rng {
         Rng {
             state: splitmix64(seed),
@@ -170,7 +169,7 @@ mod tests {
         }
     }
 
-    // ---- determinism fixture (T12 gate) ---------------------------------
+    // ---- determinism fixture ------------------------------------------
 
     /// Fixed seed reproduces an exact word sequence. These golden values pin
     /// the ported splitmix64-seeded generator; any change to the algorithm

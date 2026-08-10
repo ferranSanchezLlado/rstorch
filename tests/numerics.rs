@@ -1,11 +1,11 @@
-//! Numerics suite (**T31**) — the checks that are about *values*, not about
+//! Numerics suite — the checks that are about *values*, not about
 //! whether an op compiles.
 //!
 //! Three kinds of test live here, and the distinction between them is the
 //! point of the file:
 //!
 //! 1. **Tied weights under finite differences.** One [`Param`] feeding two
-//!    paths must have its cotangents *accumulated*, not overwritten. T30's
+//!    paths must have its cotangents *accumulated*, not overwritten. The engine's
 //!    engine claims this through its per-`Param` cached leaf; here it is
 //!    verified independently, against finite differences and against the
 //!    sum of the two single-path gradients.

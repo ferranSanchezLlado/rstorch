@@ -1,9 +1,6 @@
 //! Autograd: tracing is data flow, gradients are a linear value.
 //!
-//!
-//! **Contract module** (T01) + **engine** (T30). T01 defined the autograd
-//! *types* and the *seams* the rest of the crate codes against; T30 filled the
-//! bodies without changing a signature:
+//! The types and the *seams* the rest of the crate codes against:
 //!
 //! - [`record`] — the seam every differentiable op calls to (maybe) wrap its
 //!   forward output in a graph node. Op tasks never touch [`Node`] internals —
@@ -472,24 +469,6 @@ pub struct Grads {
 }
 
 impl Grads {
-    /// Build from a key→gradient map. Test-only: the engine constructs
-    /// `Grads` directly from its already-accumulated map.
-    #[cfg(test)]
-    pub(crate) fn from_pairs(grads: HashMap<GradKey, Tensor>) -> Grads {
-        Grads {
-            grads: grads
-                .into_iter()
-                .map(|(key, value)| (key, Accumulated::from_tensor(value)))
-                .collect(),
-        }
-    }
-
-    /// Remove and return the gradient for `key` in the parameter's own dtype.
-    #[cfg(test)]
-    pub(crate) fn take(&mut self, key: GradKey) -> Result<Option<Tensor>> {
-        self.grads.remove(&key).map(Accumulated::finish).transpose()
-    }
-
     /// Remove and return the gradient for `key` in its **accumulation** dtype
     /// (the optimizer drain path).
     ///
@@ -508,13 +487,6 @@ impl Grads {
             .remove(&key)
             .map(|accumulated| accumulated.wide())
             .transpose()
-    }
-
-    /// Whether a gradient is present for `key`. Test-only: the optimizer
-    /// drain path uses [`Grads::take`], which reports absence itself.
-    #[cfg(test)]
-    pub(crate) fn contains(&self, key: GradKey) -> bool {
-        self.grads.contains_key(&key)
     }
 
     /// Number of gradient entries.
@@ -673,6 +645,35 @@ impl Grads {
                   returned must be the one used in the computation"
                     .to_string(),
             })
+    }
+}
+
+/// Reaching inside `Grads` from the test suites.
+///
+/// These are `#[cfg(test)]` and live in their own block so the production
+/// `impl Grads` above reads as the API a caller actually has: the engine builds
+/// `Grads` from its own accumulated map and the optimizer drains it through
+/// [`Grads::take_wide`], so none of these three exist outside tests.
+#[cfg(test)]
+impl Grads {
+    /// Build from a key→gradient map.
+    pub(crate) fn from_pairs(grads: HashMap<GradKey, Tensor>) -> Grads {
+        Grads {
+            grads: grads
+                .into_iter()
+                .map(|(key, value)| (key, Accumulated::from_tensor(value)))
+                .collect(),
+        }
+    }
+
+    /// Remove and return the gradient for `key` in the parameter's own dtype.
+    pub(crate) fn take(&mut self, key: GradKey) -> Result<Option<Tensor>> {
+        self.grads.remove(&key).map(Accumulated::finish).transpose()
+    }
+
+    /// Whether a gradient is present for `key`.
+    pub(crate) fn contains(&self, key: GradKey) -> bool {
+        self.grads.contains_key(&key)
     }
 }
 

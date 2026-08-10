@@ -1,5 +1,5 @@
 //! [`Display`](std::fmt::Display) and [`Debug`](std::fmt::Debug) for
-//! [`Tensor`] (T18): a shape/dtype/device summary plus truncated values.
+//! [`Tensor`]: a shape/dtype/device summary plus truncated values.
 //!
 //! Printing a tensor is a **host boundary** — the values are read with
 //! `to_vec`, which synchronizes the backend and copies the whole logical

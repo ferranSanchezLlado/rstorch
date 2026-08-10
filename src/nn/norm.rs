@@ -910,7 +910,7 @@ mod tests {
     }
 
     /// Install explicit values into a module's leaves by path — the sanctioned
-    /// way to give a norm layer non-default parameters (T40 `load_state_dict`).
+    /// way to give a norm layer non-default parameters (`load_state_dict`).
     fn load(module: &mut dyn Module, values: &[(&str, Tensor)]) {
         let state: BTreeMap<String, Tensor> = values
             .iter()
@@ -1920,7 +1920,7 @@ mod tests {
     fn a_device_move_carries_the_running_statistics() {
         // Buffers are structure, not just precision: a moved model must keep
         // its running statistics, or its eval branch silently changes meaning.
-        // (Only `Device::Cpu` exists until T61, so this is a round trip.)
+        // (Only `Device::Cpu` exists in a default build, so this is a round trip.)
         let mut bn = BatchNorm2d::new(2, &CPU).unwrap();
         bn.forward(&bn_input(), Mode::TRAIN).unwrap();
         let want = v(&bn.forward(&bn_input(), Mode::EVAL).unwrap());

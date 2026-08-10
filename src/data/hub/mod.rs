@@ -1,10 +1,9 @@
 //! Dataset hub: download, caching, checksum verification, and parsing for
 //! the bundled datasets (MNIST, TinyShakespeare).
 //!
-//! This is the **raw** layer (task T15): it produces
-//! plain `Vec`s and small metadata structs and has **no `Tensor`
-//! dependency**. The [`crate::data`] `Dataset` wrappers that turn these into
-//! trainable batches are layered on top separately (task T46).
+//! This is the **raw** layer: it produces plain `Vec`s and small metadata
+//! structs and has **no `Tensor` dependency**. The [`crate::data`] `Dataset`
+//! wrappers that turn these into trainable batches are layered on top.
 //!
 //! ## Feature gating
 //!
@@ -39,7 +38,7 @@ pub mod tiny_shakespeare_dataset;
 pub use mnist::{Mnist, MnistSplit, RawImages};
 pub use tiny_shakespeare::{TINY_SHAKESPEARE, TinyShakespeare};
 
-// The `Dataset` wrappers over the raw layer above (T46).
+// The `Dataset` wrappers over the raw layer above.
 pub use mnist_dataset::{MnistDataset, MnistLayout};
 pub use tiny_shakespeare_dataset::TinyShakespeareDataset;
 

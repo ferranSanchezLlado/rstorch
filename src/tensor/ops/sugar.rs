@@ -114,7 +114,7 @@ mod tests {
     }
 
     /// The `Display` text of a failing op (`Tensor` has no `Debug` until
-    /// T18, so `unwrap_err` is not available here).
+    /// so `unwrap_err` is not available here).
     fn err_text(r: crate::Result<Tensor>) -> String {
         match r {
             Ok(_) => panic!("expected the op to fail"),

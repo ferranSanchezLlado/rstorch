@@ -1,6 +1,6 @@
 //! Convolution/pooling CPU kernels.
 //!
-//! Signature frozen by T01; **T26** fills the body. Per-variant input
+//! Per-variant input
 //! contracts on [`ConvOp`](crate::backend::ConvOp); geometry in
 //! [`Conv2dParams`](crate::backend::Conv2dParams); accumulation in `Acc`.
 //!

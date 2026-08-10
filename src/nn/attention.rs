@@ -35,7 +35,7 @@
 //! projects only the *new* token, concatenates the result onto its cached
 //! keys and values, and calls [`scaled_dot_product_attention`] directly — no
 //! re-projection of the prefix, and no cache type inside this layer (the
-//! cache is T52's).
+//! cache lives with the transformer model).
 
 use crate::device::Device;
 use crate::dtype::DType;
@@ -241,7 +241,7 @@ pub(crate) fn merge_heads(context: &Tensor, embed_dim: usize) -> Result<Tensor> 
 
 /// One affine projection: `x @ weightᵀ + bias`.
 ///
-/// The crate-private stand-in for `nn::Linear` (T41 owns that file, and the
+/// The crate-private stand-in for `nn::Linear` (the
 /// two tasks are parallel). The field names — `weight` shaped
 /// `[out_features, in_features]`, optional `bias` shaped `[out_features]` —
 /// are deliberately PyTorch's, so the `state_dict` paths this emits
@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn a_fully_masked_row_is_zero_rather_than_nan() {
-        // The degenerate case T23's softmax is built to survive: a query with
+        // The degenerate case softmax is built to survive: a query with
         // no visible key at all. It must not poison the batch.
         let mask = Tensor::from_vec(vec![true, true, false, false], [2, 2], &CPU).unwrap();
         let out = scaled_dot_product_attention(&t(&[2, 3]), &t(&[2, 3]), &t(&[2, 3]), Some(&mask))
@@ -1129,7 +1129,7 @@ mod tests {
 
     #[test]
     fn every_parameter_receives_a_gradient() {
-        // The completeness property T44's optimizer will enforce: with biases
+        // The completeness property the optimizer enforces: with biases
         // on and several heads, all eight leaves are reached.
         let attn = mha(6, 3);
         let loss = attn
@@ -1155,7 +1155,7 @@ mod tests {
 
     #[test]
     fn the_layer_trains_under_plain_gradient_descent() {
-        // End to end, without T44's optimizer: 60 hand-written SGD steps over
+        // End to end, without an optimizer: 60 hand-written SGD steps over
         // every visited parameter must drive a real objective down. This is the
         // property all the gradient algebra exists for, and the one a
         // sign error or a mis-scaled head would break while every shape test

@@ -14,10 +14,10 @@
 //! # Ok::<(), rstorch::Error>(())
 //! ```
 
-// `#[derive(Module)]` (the `rstorch-derive` crate, T13) generates paths
+// `#[derive(Module)]` (the `rstorch-derive` crate) generates paths
 // rooted at `::rstorch`; this alias lets that expansion resolve when the
 // derive is used *inside* this crate (the layer zoo from wave 4 on) exactly
-// as it does downstream. Sanctioned by the T13 brief.
+// as it does downstream.
 extern crate self as rstorch;
 
 // ---- public namespaces (types also re-exported flat below) --------------

@@ -1,10 +1,9 @@
 //! Model-level utilities: visitor-based helpers that
 //! operate on any `&dyn Module`.
 //!
-//! **Contract file** (T01²/T40). T01 provides the read-only walks that
-//! cannot reasonably differ ([`num_params`], [`state_dict`]); **T40** fills
-//! the mutating conversions ([`load_state_dict`], [`to_device`],
-//! [`to_dtype`]) once the tensor movement ops exist. Signatures frozen.
+//! Two halves: the read-only walks ([`num_params`], [`state_dict`]) and the
+//! mutating conversions ([`load_state_dict`], [`to_device`], [`to_dtype`]),
+//! which validate the whole walk before swapping anything.
 //!
 //! `state_dict` uses an in-memory [`BTreeMap<String, Tensor>`] — the
 //! representation behind the sanctioned replication path (construct +

@@ -1,4 +1,4 @@
-//! Loud rule (exploration §4.4): a field whose type is not on the whitelist
+//! Loud rule: a field whose type is not on the whitelist
 //! (`Param`/`Option<Param>`/`Tensor`/`Option<Tensor>`/primitives) and is not
 //! marked `#[module(skip)]` defaults to child-module recursion. If that type
 //! does not implement `Module`, this is a compile error — the exact bug class

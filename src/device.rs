@@ -15,7 +15,7 @@ pub enum Device {
     /// training path until an accelerator backend passes its perf gate.
     Cpu,
     /// Apple Metal GPU, identified by device ordinal. Experimental until
-    /// the T61 conformance + performance gate passes.
+    /// its conformance and performance gates pass.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(usize),
 }
@@ -24,7 +24,7 @@ impl Device {
     /// The best device available at runtime.
     ///
     /// Returns [`Device::Cpu`] until an accelerator backend is promoted
-    /// past its performance gate (T61): a device that would train slower
+    /// past its performance gate: a device that would train slower
     /// than CPU is not "best", whatever the marketing says.
     pub fn best_available() -> Device {
         Device::Cpu

@@ -102,7 +102,7 @@ use crate::tensor::Tensor;
 ///
 /// The two methods are symmetric — read-only and mutable walks over the
 /// module's own [`Param`]s and child modules, emitting dotted parameter
-/// paths. `#[derive(Module)]` (the `rstorch-derive` crate, T13) writes both;
+/// paths. `#[derive(Module)]` (the `rstorch-derive` crate) writes both;
 /// the derive is **loud by default** — every non-whitelisted field must be a
 /// child `Module` or bear `#[module(skip)]`, so a silently unvisited (and
 /// therefore untrained) parameter is a compile error.

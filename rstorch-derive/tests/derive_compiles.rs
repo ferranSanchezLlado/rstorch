@@ -1,10 +1,10 @@
 //! Compile-success ("expansion") tests: `#[derive(Module)]` produces a valid
 //! `rstorch::nn::Module` impl for every supported field shape, checked against
-//! the *real* frozen T01 contracts (trait, visitor method names/signatures,
+//! the *real* contracts (trait, visitor method names/signatures,
 //! object-safe `&dyn Module` coercion).
 //!
 //! These deliberately do not *run* the walk: every `Tensor` constructor is a
-//! T20 `todo!()`, so no `Param`/`Tensor` value can be built yet. The behavior
+//! `todo!()`, so no `Param`/`Tensor` value can be built yet. The behavior
 //! that can be verified now — that the generated code type-checks against the
 //! contracts — is verified here; the token-level path/leaf choices are unit-
 //! tested in `rstorch-derive`'s `module` module.

@@ -1,6 +1,6 @@
 //! Matmul CPU kernel.
 //!
-//! Signature frozen by T01; **T11** fills the body — ported v2 loops
+//! Ported v2 loops
 //! adapted to the `Element::Acc` contract, batched over leading dims.
 //! Semantics on [`BackendOps`](crate::backend::BackendOps).
 //!

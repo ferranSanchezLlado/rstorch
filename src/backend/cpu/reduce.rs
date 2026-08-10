@@ -1,8 +1,7 @@
 //! Reduction CPU kernels.
 //!
-//! Signatures frozen by T01; **T11** fills the bodies — ported v2 loops
-//! **adapted to the `Element::Acc` contract** (v2's native paths
-//! accumulate in dtype; do not port verbatim). Semantics on
+//! Ported v2 loops **adapted to the `Element::Acc` contract** (v2's native
+//! paths accumulate in dtype). Semantics on
 //! [`BackendOps`](crate::backend::BackendOps).
 //!
 //! Every reduction walks the source view stride-aware (it never assumes a

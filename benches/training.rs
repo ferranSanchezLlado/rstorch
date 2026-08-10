@@ -14,7 +14,7 @@
 //! - **Shapes are runtime values**, so v2's const-generic model types collapse
 //!   into plain structs over `Tensor`. The workload — the same op sequence at
 //!   the same sizes — is unchanged.
-//! - **`DecoderOnlyTransformer` does not exist yet** (`models/` is T52), so the
+//! - **`DecoderOnlyTransformer` does not exist yet**, so the
 //!   tiny model v2 benched is spelled out here at the identical config: vocab
 //!   6, seq 3, embed 4, 2 heads of dim 2, FFN 8, 2 layers, batch 2, pre-norm
 //!   blocks with GELU, learned position embeddings and an untied LM head.
@@ -26,12 +26,12 @@
 //! - **`no_grad()` is a `Mode`.** `Mode::EVAL` records nothing (`Param::get`
 //!   hands back the plain value), which is what `forward_no_grad` measures;
 //!   `Mode::TRAIN` records.
-//! - **Conv/pooling have no `nn` layers yet** (T26 shipped the tensor ops),
+//! - **Conv/pooling have no `nn` layers yet** (only the tensor ops),
 //!   so `conv_pool` drives `Tensor::conv2d`/`max_pool2d`/`avg_pool2d` with a
 //!   `Param` weight and a broadcast bias add — exactly what v2's `Conv2d`
 //!   layer did internally.
 //! - **`backend_step` is gone.** v3 has one device (`Device::Cpu`) until the
-//!   T61 gate; a one-lane backend comparison measures nothing.
+//!   backend gate; a one-lane backend comparison measures nothing.
 //! - **`reduce_all` is new** (see [`bench_reduce_all`]).
 //!
 //! Inputs are deterministic (a seeded `rstorch::Rng`) and never touch disk or
@@ -463,7 +463,7 @@ fn bench_conv_pool(c: &mut Criterion) {
 /// Two element counts, because the answer can differ: at 262144 elements the
 /// first fold does almost all the work and later folds are geometrically
 /// smaller, while at 1024 elements per-launch overhead is the whole cost. This
-/// group exists to give T48/T53 a number instead of an argument.
+/// group exists to give the fused-kernel work a number instead of an argument.
 fn bench_reduce_all(c: &mut Criterion) {
     let mut group = c.benchmark_group("reduce_all");
 

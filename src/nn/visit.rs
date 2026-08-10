@@ -4,7 +4,7 @@
 //! [`visit_mut`](crate::nn::Module::visit_mut) walk a module tree, calling
 //! into a [`Visitor`]/[`VisitorMut`] which threads a dotted path prefix
 //! (`fc1.weight`, `blocks.3.attn.qkv.weight`) and forwards each leaf to a
-//! single sink. `#[derive(Module)]` (T13) generates the walk: one method
+//! single sink. `#[derive(Module)]` generates the walk: one method
 //! call per field — [`param`](Visitor::param) for a [`Param`],
 //! [`buffer`](Visitor::buffer) for a whitelisted `Tensor` buffer (e.g.
 //! BatchNorm `running_mean`), and [`module`](Visitor::module) for a child
@@ -53,7 +53,7 @@ pub(crate) enum Leaf<'a> {
 
 /// The mutable counterpart of [`Leaf`], destructured by the mutable-walk
 /// consumers (`nn::load_state_dict`/`to_device`/`to_dtype`, and the optimizer
-/// step in T44).
+/// step).
 pub(crate) enum LeafMut<'a> {
     Param(&'a mut Param),
     Buffer(&'a mut Tensor),
@@ -302,9 +302,9 @@ mod tests {
         // The frozen path format (this module's docs) is
         // `blocks.3.attn.qkv.weight`: the field segment, then the index. The
         // derive originally emitted only the index (`0.qkv.weight`), so two
-        // `Vec` fields in one module collided on identical paths. T40 found
+        // `Vec` fields in one module collided on identical paths. That was found
         // it and wrote this case; the integrator fixed `rstorch-derive`
-        // (T13's file) so it now passes.
+        // in the derive, so it now passes.
         let paths: Vec<_> = walk(&net(false, 2)).into_iter().map(|(p, _)| p).collect();
         assert!(
             paths.contains(&"blocks.1.qkv.weight".to_string()),
