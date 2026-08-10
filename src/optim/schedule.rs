@@ -1,4 +1,4 @@
-//! Learning-rate schedules as **plain `f64` functions** (exploration §4.4).
+//! Learning-rate schedules as **plain `f64` functions**.
 //!
 //! A schedule is not a trait, an object, or a piece of optimizer state: it is
 //! arithmetic on the step count, and the optimizer learns about it through
