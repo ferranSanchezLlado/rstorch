@@ -1,12 +1,12 @@
 //! Optimizers: [`Sgd`], [`Adam`]/[`AdamW`], path-predicate parameter groups,
-//! per-parameter step clocks (exploration §4.4).
+//! per-parameter step clocks.
 //!
 //! # There is no `zero_grad`
 //!
 //! `step` **consumes** the [`Grads`](crate::Grads) by move. Gradients are a
 //! return value, not state hanging off the parameters, so there is nothing to
 //! zero and applying the same gradients twice is a compile error rather than
-//! silent double-counting (exploration §4.3, §5). Micro-batch accumulation and
+//! silent double-counting. Micro-batch accumulation and
 //! clipping are explicit linear pipelines on the `Grads` itself
 //! (`acc = acc.merge(step)?`, `grads.clip_norm(1.0)?`).
 //!
@@ -39,8 +39,8 @@
 //!
 //! # There is no `Optimizer` trait
 //!
-//! [`Sgd`] and [`Adam`] are concrete types (exploration §4.1: "every layer and
-//! every optimizer are concrete types"). Generic-over-optimizer code is not a
+//! [`Sgd`] and [`Adam`] are concrete types — every layer and every optimizer
+//! is. Generic-over-optimizer code is not a
 //! first-hour need, and a sixth public trait would cost the design's
 //! five-public-traits claim; a caller who wants to switch optimizers at runtime
 //! writes an enum over the two. The shared machinery is crate-private instead,
@@ -78,7 +78,7 @@
 //!
 //! # State persistence
 //!
-//! `save_state`/`load_state` ride T17's versioned
+//! `save_state`/`load_state` ride the versioned
 //! [`Envelope`](crate::persist::Envelope): moment buffers as ordinary
 //! safetensors tensors under an `optim.` key namespace, hyperparameters and
 //! step clocks as an opaque `optimizer` section. Groups are *not* saved — they
@@ -88,11 +88,11 @@
 //! and checks every buffer against the parameter it belongs to before it
 //! replaces any of the optimizer's own state.
 //!
-//! **Scope.** This layer owns *optimizer* state. It deliberately does not decide
-//! the model-level checkpoint surface — which
-//! sections a full checkpoint carries, how `config` + weights reconstruct a
-//! model, or where the [`Rng`](crate::Rng) section is written. Those are one
-//! decision (T52's), and inventing half of it here would be the wrong half.
+//! **Scope.** This layer owns *optimizer* state. It deliberately does not
+//! decide the model-level checkpoint surface — which sections a full checkpoint
+//! carries, how `config` + weights reconstruct a model, or where the
+//! [`Rng`](crate::Rng) section is written. Those are one decision, and
+//! inventing half of it here would be the wrong half.
 //! What this module guarantees is that an optimizer's state can be written into
 //! an envelope that already holds a model's tensors, and read back out of one,
 //! without the two colliding: model keys and `optim.*` keys share a file.
@@ -102,7 +102,7 @@
 //! An update is written in the public op vocabulary, so each parameter costs a
 //! handful of small tensor allocations per step. That was a measured hotspot in
 //! v2 at MLP scale; the fix is a fused backend kernel behind the same public
-//! surface (T48), not a different API here.
+//! surface, not a different API here.
 //!
 //! # Reduced precision
 //!

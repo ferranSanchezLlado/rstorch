@@ -1,10 +1,13 @@
-//! The machinery both optimizers share: path-predicate parameter groups and
-//! the two-pass parameter walk that makes the `MissingGrad` check loud.
+//! The machinery both optimizers share: path-predicate parameter groups, the
+//! parameter walk that makes the `MissingGrad` check loud, and the step
+//! skeleton around each optimizer's update formula.
 //!
 //! `Sgd` and `Adam` differ only in their per-parameter update formula and their
 //! moment state; everything around it — resolving hyperparameters for a dotted
-//! path, validating the gradient set, and swapping values — lives here so both
-//! behave identically.
+//! path, validating the gradient set, advancing step clocks, widening and
+//! narrowing values, and swapping them in — lives here so both behave
+//! identically. What each optimizer supplies is two closures: a scalar range
+//! check and the formula itself (see [`step`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,7 +29,7 @@ pub(crate) type PathPredicate = Box<dyn Fn(&str) -> bool + Send + Sync>;
 /// `set_lr`, a builder call made after the group — still reach it.
 type Override<H> = Box<dyn Fn(H) -> H + Send + Sync>;
 
-/// Base hyperparameters plus path-predicate overrides (exploration §4.4).
+/// Base hyperparameters plus path-predicate overrides.
 ///
 /// The first predicate that matches a path wins; a path no predicate matches
 /// gets the base hyperparameters unchanged.
@@ -88,14 +91,34 @@ impl<H: Clone> Groups<H> {
     }
 }
 
+/// One parameter's optimizer state: its own step clock plus whatever moment
+/// buffers the optimizer keeps (SGD's optional velocity, Adam's `m`/`v` pair).
+///
+/// The clock lives out here rather than inside each optimizer's buffers so that
+/// advancing it, persisting it and reporting it are written once.
+pub(crate) struct ParamState<B> {
+    pub(crate) clock: u64,
+    pub(crate) buffers: B,
+}
+
+/// An optimizer's per-parameter state, keyed by gradient identity rather than
+/// by path: a parameter that moves in the module tree keeps its own moments.
+pub(crate) type States<B> = HashMap<GradKey, ParamState<B>>;
+
+/// The number of updates `param` has had from an optimizer holding `state`, and
+/// `0` for one it has never updated.
+pub(crate) fn param_steps<B>(state: &States<B>, param: &Param) -> u64 {
+    state.get(&param.grad_key()).map_or(0, |entry| entry.clock)
+}
+
 /// The validation walk both optimizers run *before* the first `Param::set`,
 /// where `kind` names the optimizer ("SGD"/"Adam") in the clock rejection.
 ///
-/// For every non-frozen parameter, in walk order: its step clock — read by
-/// `clock_of`, `None` for a parameter this optimizer has never updated — must
-/// have room for one more update, and `check`, the optimizer's own scalar range
-/// check, must accept the hyperparameters resolved for that path together with
-/// the clock value the step would give it.
+/// For every non-frozen parameter, in walk order: its step clock — absent from
+/// `state` for a parameter this optimizer has never updated — must have room
+/// for one more update, and `check`, the optimizer's own scalar range check,
+/// must accept the hyperparameters resolved for that path together with the
+/// clock value the step would give it.
 ///
 /// Hyperparameters are range-checked here, before a single `Param::set`. The
 /// kernel checks them too, but it runs once per parameter *during* the mutating
@@ -109,12 +132,12 @@ impl<H: Clone> Groups<H> {
 /// parameter that carries it is visited *after* the one whose scalars were
 /// refused. Which of the two a caller sees is observable, so the order is part
 /// of the contract rather than an accident.
-pub(crate) fn prepass<H: Clone>(
+fn prepass<H: Clone, B>(
     kind: &'static str,
     model: &dyn Module,
     groups: &Groups<H>,
-    clock_of: impl Fn(&Param) -> Option<u64>,
-    mut check: impl FnMut(&str, &Param, H, u64) -> Result<()>,
+    state: &States<B>,
+    mut check: impl FnMut(&Param, H, u64) -> Result<()>,
 ) -> Result<()> {
     let mut exhausted = None;
     let mut invalid = None;
@@ -125,7 +148,7 @@ pub(crate) fn prepass<H: Clone>(
         if param.is_frozen() {
             return;
         }
-        let clock = clock_of(param);
+        let clock = state.get(&param.grad_key()).map(|entry| entry.clock);
         if clock.is_some_and(|clock| clock.checked_add(1).is_none()) {
             exhausted.get_or_insert_with(|| path.to_string());
             return;
@@ -133,7 +156,7 @@ pub(crate) fn prepass<H: Clone>(
         if invalid.is_some() {
             return;
         }
-        if let Err(error) = check(path, param, groups.resolve(path), clock.unwrap_or(0) + 1) {
+        if let Err(error) = check(param, groups.resolve(path), clock.unwrap_or(0) + 1) {
             invalid = Some(error);
         }
     });
@@ -161,7 +184,7 @@ pub(crate) fn prepass<H: Clone>(
 ///    parameter may be visited twice. The first violation is returned and
 ///    *nothing* has been modified — in particular a non-frozen parameter with
 ///    no gradient is [`Error::MissingGrad`] naming its path, never a silent
-///    skip (exploration §4.4).
+///    skip.
 /// 2. **Check the mutable walk reaches exactly the same parameters** — a dry
 ///    pass that touches no value. A hand-written `Module` whose `visit_mut`
 ///    forgets a leaf would otherwise leave that parameter silently untrained,
@@ -175,7 +198,7 @@ pub(crate) fn prepass<H: Clone>(
 /// Frozen parameters are skipped legitimately, because freezing is explicit.
 /// Gradient entries for anything the walk does not reach (a traced input, a
 /// parameter of another model) are dropped with `grads`.
-pub(crate) fn apply(
+fn apply(
     op: &'static str,
     model: &mut dyn Module,
     grads: Grads,
@@ -341,6 +364,94 @@ pub(crate) fn apply(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Everything one parameter's update formula is handed, with the parts that are
+/// the same for both optimizers already done.
+pub(crate) struct Update<'a, H, B> {
+    /// The hyperparameters in force for this parameter's path — the same values
+    /// the pre-pass range-checked.
+    pub(crate) hyper: H,
+    /// The parameter's current value, widened to its accumulation dtype.
+    pub(crate) weights: Tensor,
+    /// The gradient, in the same (wide) dtype as `weights`.
+    pub(crate) grad: Tensor,
+    /// This parameter's buffers as the last update left them, or `None` for a
+    /// parameter this optimizer has never updated.
+    pub(crate) previous: Option<&'a B>,
+    /// This parameter's **own** step count once this update lands: `1` for a
+    /// first update, whatever the optimizer's global `steps` says.
+    pub(crate) clock: u64,
+}
+
+/// One optimizer step: everything `Sgd::step` and `Adam::step` do around their
+/// update formula, with `kind` naming the optimizer ("SGD"/"Adam") in errors.
+///
+/// The order is the contract [`optim`](super)'s module docs state normatively,
+/// so it is written once:
+///
+/// 1. the global step clock must have room for one more update;
+/// 2. [`prepass`] validates every parameter's clock and hyperparameters before
+///    the first `Param::set`;
+/// 3. [`apply`] runs the three-pass walk, and for each parameter this function
+///    advances the clock, widens the value and the gradient to the accumulation
+///    dtype, calls `update` for the new value and buffers, narrows the value
+///    back to the parameter's own dtype and records the new state;
+/// 4. `steps` advances only once the whole walk has succeeded, so a rejected
+///    step leaves the schedule and the model agreeing about how far the run got.
+///
+/// `check` is the optimizer's scalar range check, run per parameter in step 2
+/// against the same hyperparameters and clock `update` will see in step 3.
+#[allow(clippy::too_many_arguments)] // The optimizer's three state fields have
+// to arrive separately: they are borrowed disjointly out of `&mut self`.
+pub(crate) fn step<H: Clone, B>(
+    kind: &'static str,
+    model: &mut dyn Module,
+    grads: Grads,
+    groups: &Groups<H>,
+    steps: &mut u64,
+    state: &mut States<B>,
+    check: impl FnMut(&Param, H, u64) -> Result<()>,
+    mut update: impl FnMut(Update<'_, H, B>) -> Result<(Tensor, B)>,
+) -> Result<()> {
+    let next_steps = steps.checked_add(1).ok_or_else(|| Error::InvalidArg {
+        op: "step",
+        msg: format!("{kind} global step clock cannot be advanced past u64::MAX"),
+    })?;
+    // Clocks and hyperparameters are checked before any `Param::set`; see
+    // `prepass` for why the kernel's own range check is too late.
+    prepass(kind, model, groups, state, check)?;
+    apply("step", model, grads, |path, param, grad| {
+        let dtype = param.value().dtype();
+        // Wide arithmetic: an f16/bf16 parameter's moments are kept in f32 and
+        // the replacement value is narrowed back exactly once, at the end.
+        let acc = dtype.accumulation_dtype();
+        let previous = state.get(&param.grad_key());
+        let clock = match previous {
+            Some(entry) => entry
+                .clock
+                .checked_add(1)
+                .ok_or_else(|| Error::InvalidArg {
+                    op: "step",
+                    msg: format!(
+                        "{kind} step clock for parameter `{path}` cannot be advanced past u64::MAX"
+                    ),
+                })?,
+            None => 1,
+        };
+        let (next, buffers) = update(Update {
+            hyper: groups.resolve(path),
+            weights: param.value().to_dtype(acc)?,
+            grad: grad.to_dtype(acc)?,
+            previous: previous.map(|entry| &entry.buffers),
+            clock,
+        })?;
+        param.set(next.to_dtype(dtype)?)?;
+        state.insert(param.grad_key(), ParamState { clock, buffers });
+        Ok(())
+    })?;
+    *steps = next_steps;
+    Ok(())
 }
 
 /// Re-attach the `count` storages a fused optimizer kernel returned to tensors

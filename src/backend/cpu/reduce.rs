@@ -198,7 +198,7 @@ fn cpu_storage<'a>(x: View<'a>, op: &'static str) -> Result<&'a CpuStorage> {
     match x.storage() {
         Storage::Cpu(s) => Ok(s),
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        Storage::Metal(_) => Err(Error::Unsupported {
+        Storage::Metal(_) => Err(crate::error::Error::Unsupported {
             op,
             device: x.device(),
             dtype: x.dtype(),

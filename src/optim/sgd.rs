@@ -1,16 +1,14 @@
 //! [`Sgd`] — stochastic gradient descent with momentum and weight decay.
 
-use std::collections::HashMap;
-
-use crate::autograd::{GradKey, Grads};
+use crate::autograd::Grads;
 use crate::backend::{FusedOp, dispatch};
 use crate::error::{Error, Result};
 use crate::nn::{Module, Param};
 use crate::persist::Envelope;
 use crate::tensor::Tensor;
 
-use super::engine::{self, Groups};
-use super::state::{self, OutgoingParam};
+use super::engine::{self, Groups, States, Update};
+use super::state;
 
 /// The `kind` tag in a saved state section.
 const KIND: &str = "sgd";
@@ -66,10 +64,77 @@ impl SgdGroup {
     }
 }
 
-/// Per-parameter state: its own step clock and (with momentum) its velocity.
-struct SgdState {
-    clock: u64,
-    velocity: Option<Tensor>,
+/// SGD's per-parameter buffers: its velocity, which only a momentum run keeps.
+/// The step clock that rides alongside is `engine::ParamState`'s.
+type Velocity = Option<Tensor>;
+
+/// SGD's update for one parameter — the formula in [`Sgd`]'s docs, and the only
+/// thing this optimizer contributes to `engine::step`'s skeleton.
+///
+/// A backend with a fused `SgdStep` kernel runs it in one pass; where there is
+/// none the same arithmetic is spelled out in the public op vocabulary, which is
+/// the definition the two agree on. `weights` and `grad` arrive already widened
+/// to the accumulation dtype, and the value returned is narrowed back by the
+/// caller. SGD does not read its step clock: it has no bias correction.
+fn sgd_update(base_lr: f64, update: Update<'_, SgdGroup, Velocity>) -> Result<(Tensor, Velocity)> {
+    let Update {
+        hyper,
+        weights,
+        grad,
+        previous,
+        clock: _,
+    } = update;
+    let previous_velocity = previous.cloned().flatten();
+    let scalars = [base_lr * hyper.lr_scale, hyper.momentum, hyper.weight_decay];
+    let mut inputs = vec![weights.view(), grad.view()];
+    if hyper.momentum != 0.0
+        && let Some(velocity) = &previous_velocity
+    {
+        inputs.push(velocity.view());
+    }
+
+    match dispatch::backend(weights.device()).fused(FusedOp::SgdStep, &inputs, &scalars) {
+        Ok(outputs) => {
+            let mut outputs = engine::fused_outputs(
+                "SGD",
+                outputs,
+                if hyper.momentum == 0.0 { 1 } else { 2 },
+                &weights,
+            )?;
+            let next = outputs.remove(0);
+            let velocity = if hyper.momentum == 0.0 {
+                previous_velocity
+            } else {
+                Some(outputs.remove(0))
+            };
+            Ok((next, velocity))
+        }
+        Err(Error::Unsupported { .. }) => {
+            let mut g = grad;
+            if hyper.weight_decay != 0.0 {
+                g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
+            }
+            let direction = if hyper.momentum == 0.0 {
+                g
+            } else {
+                // PyTorch's initialization: the first velocity *is* the
+                // gradient, so a momentum run and a plain run take the same
+                // first step.
+                match &previous_velocity {
+                    Some(previous) => previous.mul_scalar(hyper.momentum)?.add(&g)?,
+                    None => g,
+                }
+            };
+            let velocity = if hyper.momentum == 0.0 {
+                previous_velocity
+            } else {
+                Some(direction.clone())
+            };
+            let next = weights.sub(&direction.mul_scalar(scalars[0])?)?;
+            Ok((next, velocity))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Stochastic gradient descent.
@@ -115,7 +180,7 @@ struct SgdState {
 pub struct Sgd {
     lr: f64,
     groups: Groups<SgdGroup>,
-    state: HashMap<GradKey, SgdState>,
+    state: States<Velocity>,
     steps: u64,
 }
 
@@ -129,7 +194,7 @@ impl Sgd {
                 momentum: 0.0,
                 weight_decay: 0.0,
             }),
-            state: HashMap::new(),
+            state: States::new(),
             steps: 0,
         }
     }
@@ -202,121 +267,25 @@ impl Sgd {
     ///   [`Error::InvalidArg`](crate::Error::InvalidArg) if a parameter is not a
     ///   float tensor or the module visits one parameter twice.
     pub fn step(&mut self, model: &mut dyn Module, grads: Grads) -> Result<()> {
-        let Sgd {
-            lr,
-            groups,
-            state,
-            steps,
-        } = self;
-        let next_steps = steps.checked_add(1).ok_or_else(|| Error::InvalidArg {
-            op: "step",
-            msg: "SGD global step clock cannot be advanced past u64::MAX".to_string(),
-        })?;
-        let base_lr = *lr;
-        // Clocks and hyperparameters are checked before any `Param::set`; see
-        // `engine::prepass` for why the kernel's own range check is too late.
-        engine::prepass(
+        let base_lr = self.lr;
+        engine::step(
             "SGD",
             model,
-            groups,
-            |param| state.get(&param.grad_key()).map(|entry| entry.clock),
-            |_path, param, hyper, _next_clock| {
-                let acc = param.value().dtype().accumulation_dtype();
+            grads,
+            &self.groups,
+            &mut self.steps,
+            &mut self.state,
+            |param, hyper: SgdGroup, _clock| {
                 crate::backend::cpu::fused::validate_sgd_scalars(
                     "step",
                     base_lr * hyper.lr_scale,
                     hyper.momentum,
                     hyper.weight_decay,
-                    acc,
+                    param.value().dtype().accumulation_dtype(),
                 )
             },
-        )?;
-        engine::apply("step", model, grads, |path, param, grad| {
-            let hyper = groups.resolve(path);
-            let dtype = param.value().dtype();
-            let acc = dtype.accumulation_dtype();
-            let weights = param.value().to_dtype(acc)?;
-            let grad = grad.to_dtype(acc)?;
-            let previous = state.get(&param.grad_key());
-            let next_clock = match previous {
-                Some(entry) => entry
-                    .clock
-                    .checked_add(1)
-                    .ok_or_else(|| Error::InvalidArg {
-                        op: "step",
-                        msg: format!(
-                            "SGD step clock for parameter `{path}` cannot be advanced past u64::MAX"
-                        ),
-                    })?,
-                None => 1,
-            };
-            let previous_velocity = previous.and_then(|entry| entry.velocity.clone());
-            let scalars = [base_lr * hyper.lr_scale, hyper.momentum, hyper.weight_decay];
-            let mut inputs = vec![weights.view(), grad.view()];
-            if hyper.momentum != 0.0
-                && let Some(velocity) = &previous_velocity
-            {
-                inputs.push(velocity.view());
-            }
-
-            let (next, next_velocity) = match dispatch::backend(weights.device()).fused(
-                FusedOp::SgdStep,
-                &inputs,
-                &scalars,
-            ) {
-                Ok(outputs) => {
-                    let mut outputs = engine::fused_outputs(
-                        "SGD",
-                        outputs,
-                        if hyper.momentum == 0.0 { 1 } else { 2 },
-                        &weights,
-                    )?;
-                    let next = outputs.remove(0);
-                    let velocity = if hyper.momentum == 0.0 {
-                        previous_velocity
-                    } else {
-                        Some(outputs.remove(0))
-                    };
-                    (next, velocity)
-                }
-                Err(Error::Unsupported { .. }) => {
-                    let mut g = grad;
-                    if hyper.weight_decay != 0.0 {
-                        g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
-                    }
-                    let direction = if hyper.momentum == 0.0 {
-                        g
-                    } else {
-                        // PyTorch's initialization: the first velocity *is* the
-                        // gradient, so a momentum run and a plain run take the same
-                        // first step.
-                        match &previous_velocity {
-                            Some(previous) => previous.mul_scalar(hyper.momentum)?.add(&g)?,
-                            None => g,
-                        }
-                    };
-                    let velocity = if hyper.momentum == 0.0 {
-                        previous_velocity
-                    } else {
-                        Some(direction.clone())
-                    };
-                    let next = weights.sub(&direction.mul_scalar(scalars[0])?)?;
-                    (next, velocity)
-                }
-                Err(error) => return Err(error),
-            };
-            param.set(next.to_dtype(dtype)?)?;
-            state.insert(
-                param.grad_key(),
-                SgdState {
-                    clock: next_clock,
-                    velocity: next_velocity,
-                },
-            );
-            Ok(())
-        })?;
-        *steps = next_steps;
-        Ok(())
+            |update| sgd_update(base_lr, update),
+        )
     }
 
     /// Write this optimizer's state (hyperparameters, per-parameter step clocks
@@ -331,23 +300,7 @@ impl Sgd {
     /// carries optimizer state, or if a host transfer fails.
     pub fn save_state(&self, model: &dyn Module, envelope: &mut Envelope) -> Result<()> {
         let base = *self.groups.base();
-        let paths = engine::param_paths(model);
-        let outgoing: Vec<OutgoingParam<'_>> = paths
-            .iter()
-            .filter_map(|(path, key)| {
-                let entry = self.state.get(key)?;
-                Some(OutgoingParam {
-                    path,
-                    clock: entry.clock,
-                    buffers: entry
-                        .velocity
-                        .iter()
-                        .map(|v| ("velocity", v))
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-        state::save(
+        state::store(
             envelope,
             KIND,
             &[
@@ -356,7 +309,9 @@ impl Sgd {
                 ("weight_decay", base.weight_decay),
             ],
             self.steps,
-            &outgoing,
+            model,
+            &self.state,
+            |velocity| velocity.iter().map(|v| ("velocity", v)).collect(),
         )
     }
 
@@ -379,12 +334,8 @@ impl Sgd {
         let incoming = state::load(envelope, KIND)?;
         incoming.expect_hypers(&HYPERS)?;
         let saved_momentum = incoming.hyper("momentum")?;
-        let values = engine::param_values(model);
-        let keys: HashMap<String, GradKey> = engine::param_paths(model).into_iter().collect();
-
-        let mut restored = HashMap::new();
-        for (path, saved) in incoming.params() {
-            let (key, value) = state::locate(&keys, &values, path)?;
+        let groups = &self.groups;
+        let restored = state::restore(model, &incoming, |path, saved, value| {
             let mut velocity = None;
             for (name, host) in &saved.buffers {
                 match name.as_str() {
@@ -405,9 +356,9 @@ impl Sgd {
             // base comes from the file.
             let saved_base = SgdGroup {
                 momentum: saved_momentum,
-                ..*self.groups.base()
+                ..*groups.base()
             };
-            let effective = self.groups.resolve_with_base(saved_base, path);
+            let effective = groups.resolve_with_base(saved_base, path);
             if velocity.is_none() && effective.momentum != 0.0 && saved.clock > 0 {
                 return Err(Error::Persistence {
                     msg: format!(
@@ -418,14 +369,8 @@ impl Sgd {
                     ),
                 });
             }
-            restored.insert(
-                key,
-                SgdState {
-                    clock: saved.clock,
-                    velocity,
-                },
-            );
-        }
+            Ok(velocity)
+        })?;
 
         self.lr = incoming.hyper("lr")?;
         self.groups.base_mut().momentum = incoming.hyper("momentum")?;
@@ -444,9 +389,7 @@ impl Sgd {
     ///
     /// `0` for a parameter this optimizer has never updated.
     pub fn param_steps(&self, param: &Param) -> u64 {
-        self.state
-            .get(&param.grad_key())
-            .map_or(0, |entry| entry.clock)
+        engine::param_steps(&self.state, param)
     }
 }
 
@@ -455,40 +398,19 @@ mod tests {
     use super::*;
     use crate::nn::Mode;
     use crate::optim::schedule;
-    use crate::optim::testkit::{Affine, Net, Solo, close, scalar, tmpdir, values};
-    use crate::persist::Limits;
+    use crate::optim::testkit::{
+        Net, REGRESSION_XS, Solo, TestOptimizer,
+        assert_an_exhausted_clock_outranks_an_invalid_hyperparameter,
+        assert_converges_on_a_tiny_regression, assert_every_rejection_is_atomic,
+        assert_next_step_is_refused, assert_state_round_trips, close, impl_test_optimizer,
+        with_clocks,
+    };
+
+    impl_test_optimizer!(Sgd);
 
     /// One update of `model` under `opt`, panicking on anything but success.
     fn step(opt: &mut Sgd, model: &mut Net) {
-        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
-        opt.step(model, loss.backward().unwrap()).unwrap();
-    }
-
-    fn with_clocks(envelope: &Envelope, steps: u64, clocks: u64) -> Envelope {
-        let mut rewritten = Envelope::new();
-        let section = envelope
-            .section("optimizer")
-            .unwrap()
-            .lines()
-            .map(|line| {
-                if line.starts_with("steps=") {
-                    format!("steps={steps}")
-                } else if let Some((key, _)) = line.split_once('=')
-                    && key.starts_with("clock.")
-                {
-                    format!("{key}={clocks}")
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        rewritten.set_section("optimizer", section).unwrap();
-        for (key, tensor) in envelope.tensors() {
-            rewritten.insert_tensor(key.clone(), tensor.clone());
-        }
-        rewritten
+        opt.step_once(model);
     }
 
     #[test]
@@ -631,22 +553,11 @@ mod tests {
 
     #[test]
     fn converges_on_a_tiny_regression() {
-        let xs = [-1.0f32, 0.0, 1.0, 2.0];
-        let mut model = Affine::zeros();
         let mut opt = Sgd::new(0.1).momentum(0.5);
-
-        let first = scalar(&model.loss(&xs, Mode::TRAIN).unwrap());
-        let mut latest = first;
-        for _ in 0..400 {
-            let loss = model.loss(&xs, Mode::TRAIN).unwrap();
-            opt.step(&mut model, loss.backward().unwrap()).unwrap();
-            latest = scalar(&model.loss(&xs, Mode::TRAIN).unwrap());
-        }
-        assert!(latest < first, "loss rose: {first} -> {latest}");
-        assert!(latest < 1e-4, "did not converge: {latest}");
-        // It found the line: y = 3x + 2.
-        close(f64::from(values(model.weight.value())[0]), 3.0, 1e-2);
-        close(f64::from(values(model.bias.value())[0]), 2.0, 1e-2);
+        assert_converges_on_a_tiny_regression(400, |model| {
+            let loss = model.loss(&REGRESSION_XS, Mode::TRAIN).unwrap();
+            opt.step(model, loss.backward().unwrap()).unwrap();
+        });
     }
 
     // ---- the loudness gate ------------------------------------------------
@@ -673,93 +584,16 @@ mod tests {
         assert_eq!(opt.steps(), 0);
     }
 
-    /// Seed a momentum run with two updates, let `derail` arrange a rejection,
-    /// and assert the step `attempt` is then refused moved nothing at all: not
-    /// a parameter, not a velocity buffer, not a clock.
-    fn rejected_step_changes_nothing(
-        derail: impl FnOnce(&mut Sgd, &mut Net),
-        attempt: impl FnOnce(&mut Sgd, &mut Net) -> Error,
-    ) {
-        let mut model = Net::ones();
-        let mut opt = Sgd::new(0.1).momentum(0.9).weight_decay(0.01);
-        for _ in 0..2 {
-            step(&mut opt, &mut model);
-        }
-        derail(&mut opt, &mut model);
-        // Velocities and per-parameter clocks both ride in the envelope, so one
-        // comparison covers every piece of optimizer state there is.
-        let params = model.snapshot();
-        let mut before = Envelope::new();
-        opt.save_state(&model, &mut before).unwrap();
-
-        let err = attempt(&mut opt, &mut model);
-
-        let mut after = Envelope::new();
-        opt.save_state(&model, &mut after).unwrap();
-        assert_eq!(model.snapshot(), params, "{err}");
-        assert_eq!(after, before, "{err}");
-        assert_eq!(opt.steps(), 2, "{err}");
-    }
-
-    /// Every rejection this layer can diagnose is raised before the first
-    /// `Param::set`, as `optim`'s module docs state normatively.
     #[test]
     fn a_rejected_step_leaves_parameters_velocities_and_clocks_untouched() {
-        // A missing gradient (the untraced-weight bug)…
-        rejected_step_changes_nothing(
-            |_, _| {},
-            |opt, model| {
-                let loss = model.untraced_head_bias_loss(Mode::TRAIN).unwrap();
-                opt.step(model, loss.backward().unwrap()).unwrap_err()
-            },
-        );
-        // …a per-parameter step clock with no room left…
-        rejected_step_changes_nothing(
-            |opt, model| {
-                opt.state
-                    .get_mut(&model.head.bias.grad_key())
-                    .unwrap()
-                    .clock = u64::MAX;
-            },
-            |opt, model| {
-                let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
-                opt.step(model, loss.backward().unwrap()).unwrap_err()
-            },
-        );
-        // …and an out-of-range hyperparameter.
-        rejected_step_changes_nothing(
-            |opt, _| opt.set_lr(-1.0),
-            |opt, model| {
-                let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
-                opt.step(model, loss.backward().unwrap()).unwrap_err()
-            },
-        );
+        assert_every_rejection_is_atomic(|| Sgd::new(0.1).momentum(0.9).weight_decay(0.01));
     }
 
-    /// The pre-pass's two bailouts are *ordered*, and which one a caller sees is
-    /// observable: an exhausted clock outranks an out-of-range hyperparameter
-    /// even though the walk meets the bad hyperparameter first (`trunk.weight`
-    /// leads, `head.bias` trails), because the whole walk runs before either is
-    /// reported.
     #[test]
     fn an_exhausted_clock_outranks_an_invalid_hyperparameter() {
-        let mut model = Net::ones();
-        let mut opt = Sgd::new(0.1).momentum(0.9);
-        step(&mut opt, &mut model);
-        // Invalid for every parameter, including the first one visited…
-        opt.set_lr(-1.0);
-        // …but the last one visited has no clock left.
-        opt.state
-            .get_mut(&model.head.bias.grad_key())
-            .unwrap()
-            .clock = u64::MAX;
-
-        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
-        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("SGD step clock for parameter `head.bias`"),
-            "{err}"
+        assert_an_exhausted_clock_outranks_an_invalid_hyperparameter(
+            Sgd::new(0.1).momentum(0.9),
+            "SGD",
         );
     }
 
@@ -788,40 +622,11 @@ mod tests {
 
     #[test]
     fn state_round_trips_through_an_envelope_and_a_resumed_run_matches() {
-        let dir = tmpdir("sgd-state");
-        let path = dir.join("run.rstorch");
-
-        // The reference: six uninterrupted steps.
-        let mut reference_model = Net::ones();
-        let mut reference = Sgd::new(0.1).momentum(0.9).weight_decay(0.01);
-        for _ in 0..6 {
-            step(&mut reference, &mut reference_model);
-        }
-
-        // The resumed run: three steps, a checkpoint, then three more with a
-        // freshly built optimizer.
-        let mut model = Net::ones();
-        let mut opt = Sgd::new(0.1).momentum(0.9).weight_decay(0.01);
-        for _ in 0..3 {
-            step(&mut opt, &mut model);
-        }
-        let mut envelope = Envelope::new();
-        opt.save_state(&model, &mut envelope).unwrap();
-        envelope.save(&path, &Limits::defaults()).unwrap();
-
-        let loaded = Envelope::load(&path, &Limits::defaults()).unwrap();
-        // Built with deliberately wrong hyperparameters: the checkpoint's win.
-        let mut resumed = Sgd::new(999.0);
-        resumed.load_state(&model, &loaded).unwrap();
-        close(resumed.lr(), 0.1, 1e-12);
-        assert_eq!(resumed.steps(), 3);
-        assert_eq!(resumed.param_steps(&model.trunk.weight), 3);
-        for _ in 0..3 {
-            step(&mut resumed, &mut model);
-        }
-
-        assert_eq!(model.snapshot(), reference_model.snapshot());
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert_state_round_trips(
+            "sgd-state",
+            || Sgd::new(0.1).momentum(0.9).weight_decay(0.01),
+            Sgd::new(999.0),
+        );
     }
 
     /// The "a momentum run always writes a velocity" integrity check must use
@@ -921,17 +726,7 @@ mod tests {
         step(&mut opt, &mut model);
         assert_eq!(opt.param_steps(&model.trunk.weight), u64::MAX);
 
-        let model_before_rejection = model.snapshot();
-        let mut state_before_rejection = Envelope::new();
-        opt.save_state(&model, &mut state_before_rejection).unwrap();
-        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
-        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
-        assert!(matches!(err, Error::InvalidArg { op: "step", .. }), "{err}");
-        assert!(err.to_string().contains("parameter `"), "{err}");
-        assert_eq!(model.snapshot(), model_before_rejection);
-        let mut state_after_rejection = Envelope::new();
-        opt.save_state(&model, &mut state_after_rejection).unwrap();
-        assert_eq!(state_after_rejection, state_before_rejection);
+        assert_next_step_is_refused(&mut opt, &mut model, "parameter `");
     }
 
     #[test]
@@ -940,18 +735,8 @@ mod tests {
         let mut opt = Sgd::new(0.1).momentum(0.9);
         step(&mut opt, &mut model);
         opt.steps = u64::MAX;
-        let model_before = model.snapshot();
-        let mut state_before = Envelope::new();
-        opt.save_state(&model, &mut state_before).unwrap();
 
-        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
-        let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
-        assert!(matches!(err, Error::InvalidArg { op: "step", .. }), "{err}");
-        assert!(err.to_string().contains("SGD global step clock"), "{err}");
-        assert_eq!(model.snapshot(), model_before);
-        let mut state_after = Envelope::new();
-        opt.save_state(&model, &mut state_after).unwrap();
-        assert_eq!(state_after, state_before);
+        assert_next_step_is_refused(&mut opt, &mut model, "SGD global step clock");
     }
 
     #[test]

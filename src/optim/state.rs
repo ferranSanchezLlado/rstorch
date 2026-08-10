@@ -1,4 +1,4 @@
-//! Optimizer-state persistence through T17's versioned
+//! Optimizer-state persistence through the versioned
 //! [`Envelope`](crate::persist::Envelope).
 //!
 //! An optimizer's state is two things: a handful of scalar hyperparameters plus
@@ -30,12 +30,15 @@
 //! are closures; a resumed run reconstructs them by building the optimizer the
 //! same way. Only the base hyperparameters, the clocks and the moments persist.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use crate::autograd::GradKey;
 use crate::error::{Error, Result};
+use crate::nn::Module;
 use crate::persist::{Envelope, HostTensor};
 use crate::tensor::Tensor;
 
+use super::engine::{self, ParamState, States};
 use crate::checkpoint::{from_host_tensor, to_host_tensor};
 
 /// The envelope section name (the one `persist` documents for this purpose).
@@ -64,7 +67,7 @@ pub(crate) struct OutgoingParam<'a> {
 /// was — the caller can fix the problem and save the same envelope again
 /// (whereas a half-written one would then trip the "already carries optimizer
 /// state" guard above and look like a different bug).
-pub(crate) fn save(
+fn save(
     envelope: &mut Envelope,
     kind: &'static str,
     hypers: &[(&'static str, f64)],
@@ -142,6 +145,36 @@ pub(crate) fn save(
         envelope.insert_tensor(key, tensor);
     }
     envelope.set_section(SECTION, text)
+}
+
+/// Write a whole optimizer's state into `envelope`, keyed by `model`'s dotted
+/// paths — what `Sgd::save_state` and `Adam::save_state` both are.
+///
+/// `buffers_of` names each optimizer's moment buffers (`velocity`, or `m`/`v`);
+/// a parameter this optimizer has never updated is simply absent, so a resumed
+/// run treats its next update as a first one.
+pub(crate) fn store<B>(
+    envelope: &mut Envelope,
+    kind: &'static str,
+    hypers: &[(&'static str, f64)],
+    steps: u64,
+    model: &dyn Module,
+    state: &States<B>,
+    buffers_of: impl Fn(&B) -> Vec<(&'static str, &Tensor)>,
+) -> Result<()> {
+    let paths = engine::param_paths(model);
+    let outgoing: Vec<OutgoingParam<'_>> = paths
+        .iter()
+        .filter_map(|(path, key)| {
+            let entry = state.get(key)?;
+            Some(OutgoingParam {
+                path,
+                clock: entry.clock,
+                buffers: buffers_of(&entry.buffers),
+            })
+        })
+        .collect();
+    save(envelope, kind, hypers, steps, &outgoing)
 }
 
 /// One parameter's state on the way in.
@@ -324,17 +357,50 @@ pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
     })
 }
 
+/// Rebuild a whole optimizer's per-parameter state from `incoming`, resolving
+/// each saved path against `model` — the half of `load_state` that is the same
+/// for both optimizers.
+///
+/// `buffers` decodes one parameter's moment buffers, and is handed that
+/// parameter's own value tensor to check them against (see [`restore_buffer`]).
+/// It is also where an optimizer's own integrity rules live: SGD refuses a
+/// momentum run with no velocity, Adam refuses half a moment pair.
+///
+/// Nothing of the optimizer's state is touched here. The caller replaces its
+/// state with the returned map only once **every** parameter has decoded, which
+/// is what makes a load all-or-nothing.
+pub(crate) fn restore<B>(
+    model: &dyn Module,
+    incoming: &Incoming,
+    mut buffers: impl FnMut(&str, &IncomingParam, &Tensor) -> Result<B>,
+) -> Result<States<B>> {
+    let values = engine::param_values(model);
+    let keys: HashMap<String, GradKey> = engine::param_paths(model).into_iter().collect();
+    let mut restored = HashMap::new();
+    for (path, saved) in incoming.params() {
+        let (key, value) = locate(&keys, &values, path)?;
+        restored.insert(
+            key,
+            ParamState {
+                clock: saved.clock,
+                buffers: buffers(path, saved, value)?,
+            },
+        );
+    }
+    Ok(restored)
+}
+
 /// Resolve a saved path against the target model, yielding the state key to
 /// file it under and the parameter value to validate buffers against.
 ///
 /// A path the model does not have means the checkpoint belongs to a different
 /// model — reported rather than ignored, because silently dropping a moment
 /// buffer changes the trajectory of a resumed run.
-pub(crate) fn locate<'a>(
-    keys: &std::collections::HashMap<String, crate::autograd::GradKey>,
-    values: &'a std::collections::HashMap<String, Tensor>,
+fn locate<'a>(
+    keys: &HashMap<String, GradKey>,
+    values: &'a HashMap<String, Tensor>,
     path: &str,
-) -> Result<(crate::autograd::GradKey, &'a Tensor)> {
+) -> Result<(GradKey, &'a Tensor)> {
     match (keys.get(path), values.get(path)) {
         (Some(key), Some(value)) => Ok((*key, value)),
         _ => Err(Error::Persistence {
