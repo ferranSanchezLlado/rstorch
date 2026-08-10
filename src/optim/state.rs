@@ -38,7 +38,7 @@ use crate::nn::Module;
 use crate::persist::{Envelope, HostTensor};
 use crate::tensor::Tensor;
 
-use super::engine::{self, ParamState, States};
+use super::engine::{self, Decode, Groups, ParamState, Rule, States};
 use crate::checkpoint::{from_host_tensor, to_host_tensor};
 
 /// The envelope section name (the one `persist` documents for this purpose).
@@ -148,19 +148,16 @@ fn save(
 }
 
 /// Write a whole optimizer's state into `envelope`, keyed by `model`'s dotted
-/// paths — what `Sgd::save_state` and `Adam::save_state` both are.
+/// paths — what `Engine::save` is.
 ///
-/// `buffers_of` names each optimizer's moment buffers (`velocity`, or `m`/`v`);
-/// a parameter this optimizer has never updated is simply absent, so a resumed
+/// A parameter this optimizer has never updated is simply absent, so a resumed
 /// run treats its next update as a first one.
-pub(crate) fn store<B>(
+pub(crate) fn store<R: Rule>(
     envelope: &mut Envelope,
-    kind: &'static str,
     hypers: &[(&'static str, f64)],
     steps: u64,
     model: &dyn Module,
-    state: &States<B>,
-    buffers_of: impl Fn(&B) -> Vec<(&'static str, &Tensor)>,
+    state: &States<R::Buffers>,
 ) -> Result<()> {
     let paths = engine::param_paths(model);
     let outgoing: Vec<OutgoingParam<'_>> = paths
@@ -170,11 +167,11 @@ pub(crate) fn store<B>(
             Some(OutgoingParam {
                 path,
                 clock: entry.clock,
-                buffers: buffers_of(&entry.buffers),
+                buffers: R::buffers(&entry.buffers),
             })
         })
         .collect();
-    save(envelope, kind, hypers, steps, &outgoing)
+    save(envelope, R::KIND, hypers, steps, &outgoing)
 }
 
 /// One parameter's state on the way in.
@@ -358,22 +355,18 @@ pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
 }
 
 /// Rebuild a whole optimizer's per-parameter state from `incoming`, resolving
-/// each saved path against `model` — the half of `load_state` that is the same
-/// for both optimizers.
-///
-/// `buffers` decodes one parameter's moment buffers, and is handed that
-/// parameter's own value tensor to check them against (see [`restore_buffer`]).
-/// It is also where an optimizer's own integrity rules live: SGD refuses a
-/// momentum run with no velocity, Adam refuses half a moment pair.
+/// each saved path against `model` — the half of `Engine::load` that walks the
+/// file, with [`Rule::decode`] doing each parameter's own buffers.
 ///
 /// Nothing of the optimizer's state is touched here. The caller replaces its
 /// state with the returned map only once **every** parameter has decoded, which
 /// is what makes a load all-or-nothing.
-pub(crate) fn restore<B>(
+pub(crate) fn restore<R: Rule>(
     model: &dyn Module,
     incoming: &Incoming,
-    mut buffers: impl FnMut(&str, &IncomingParam, &Tensor) -> Result<B>,
-) -> Result<States<B>> {
+    rule: &R,
+    groups: &Groups<R::Hyper>,
+) -> Result<States<R::Buffers>> {
     let values = engine::param_values(model);
     let keys: HashMap<String, GradKey> = engine::param_paths(model).into_iter().collect();
     let mut restored = HashMap::new();
@@ -383,7 +376,13 @@ pub(crate) fn restore<B>(
             key,
             ParamState {
                 clock: saved.clock,
-                buffers: buffers(path, saved, value)?,
+                buffers: rule.decode(Decode {
+                    path,
+                    saved,
+                    value,
+                    incoming,
+                    groups,
+                })?,
             },
         );
     }

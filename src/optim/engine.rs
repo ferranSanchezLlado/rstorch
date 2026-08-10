@@ -2,12 +2,13 @@
 //! parameter walk that makes the `MissingGrad` check loud, and the step
 //! skeleton around each optimizer's update formula.
 //!
-//! `Sgd` and `Adam` differ only in their per-parameter update formula and their
-//! moment state; everything around it — resolving hyperparameters for a dotted
-//! path, validating the gradient set, advancing step clocks, widening and
-//! narrowing values, and swapping them in — lives here so both behave
-//! identically. What each optimizer supplies is two closures: a scalar range
-//! check and the formula itself (see [`step`]).
+//! `Sgd` and `Adam` differ only in their per-parameter update formula, the
+//! moment state that formula keeps, and the scalars a checkpoint carries.
+//! Everything around it — resolving hyperparameters for a dotted path,
+//! validating the gradient set, advancing step clocks, widening and narrowing
+//! values, swapping them in, and writing the whole lot into an envelope — is
+//! [`Engine`], so the two cannot drift. What each optimizer supplies is one
+//! [`Rule`] impl.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,8 +17,65 @@ use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::nn::visit::{Leaf, LeafMut, visit_all, visit_all_mut};
 use crate::nn::{Module, Param};
+use crate::persist::Envelope;
 use crate::storage::Storage;
 use crate::tensor::Tensor;
+
+use super::state::{self, Incoming, IncomingParam};
+
+/// One optimizer, reduced to what only it can supply: the shape of a parameter
+/// group, the buffers it carries between updates, its two formulas, and the
+/// scalars it persists.
+///
+/// A rule value holds an optimizer's *non*-group configuration (Adam's
+/// `decoupled` flag); the base learning rate, the groups, the buffers and the
+/// clocks are [`Engine`]'s, because they are the same for both.
+pub(crate) trait Rule: Copy {
+    /// One parameter group's hyperparameters
+    /// ([`SgdGroup`](crate::optim::SgdGroup), [`AdamGroup`](crate::optim::AdamGroup)).
+    type Hyper: Copy;
+    /// What one parameter carries between updates (SGD's optional velocity,
+    /// Adam's `m`/`v` pair).
+    type Buffers;
+
+    /// How this optimizer names itself in an error message ("SGD"/"Adam").
+    const NAME: &'static str;
+    /// The `kind` tag of a saved state section ("sgd"/"adam").
+    const KIND: &'static str;
+    /// Exactly the hyperparameter names a checkpoint carries, `lr` included.
+    const HYPERS: &'static [&'static str];
+
+    /// This group's learning-rate multiplier. The effective rate is always
+    /// `optimizer lr × scale`, which is what keeps `set_lr` and the schedules
+    /// moving every group together — so the engine, not the rule, applies it.
+    fn lr_scale(hyper: &Self::Hyper) -> f64;
+
+    /// Reject out-of-range scalars for one parameter, given the effective
+    /// learning rate and the step clock this parameter's update will use.
+    fn check(&self, param: &Param, hyper: Self::Hyper, lr: f64, clock: u64) -> Result<()>;
+
+    /// The update formula for one parameter: the new value and the buffers to
+    /// carry forward.
+    fn update(&self, update: Update<'_, Self>) -> Result<(Tensor, Self::Buffers)>;
+
+    /// The hyperparameters this optimizer persists beyond `lr`, which the
+    /// engine writes itself.
+    fn hypers(&self, base: Self::Hyper) -> Vec<(&'static str, f64)>;
+
+    /// One parameter's buffers under the names [`decode`](Rule::decode) reads
+    /// them back by.
+    fn buffers(buffers: &Self::Buffers) -> Vec<(&'static str, &Tensor)>;
+
+    /// Take a checkpoint's hyperparameters, rejecting a file this optimizer
+    /// cannot resume. Called on a *copy* of the optimizer's configuration, so a
+    /// rejection here has changed nothing.
+    fn adopt(&mut self, base: &mut Self::Hyper, incoming: &Incoming) -> Result<()>;
+
+    /// Rebuild one parameter's buffers from a checkpoint. This is also where an
+    /// optimizer's own integrity rules live: SGD refuses a momentum run with no
+    /// velocity, Adam refuses half a moment pair.
+    fn decode(&self, decode: Decode<'_, Self>) -> Result<Self::Buffers>;
+}
 
 /// A parameter-path predicate: given a dotted visitor path
 /// (`blocks.3.attn.qkv.weight`), does this group apply?
@@ -92,9 +150,9 @@ impl<H: Clone> Groups<H> {
 }
 
 /// One parameter's optimizer state: its own step clock plus whatever moment
-/// buffers the optimizer keeps (SGD's optional velocity, Adam's `m`/`v` pair).
+/// buffers the rule keeps.
 ///
-/// The clock lives out here rather than inside each optimizer's buffers so that
+/// The clock lives out here rather than inside each rule's buffers so that
 /// advancing it, persisting it and reporting it are written once.
 pub(crate) struct ParamState<B> {
     pub(crate) clock: u64,
@@ -105,73 +163,282 @@ pub(crate) struct ParamState<B> {
 /// by path: a parameter that moves in the module tree keeps its own moments.
 pub(crate) type States<B> = HashMap<GradKey, ParamState<B>>;
 
-/// The number of updates `param` has had from an optimizer holding `state`, and
-/// `0` for one it has never updated.
-pub(crate) fn param_steps<B>(state: &States<B>, param: &Param) -> u64 {
-    state.get(&param.grad_key()).map_or(0, |entry| entry.clock)
+/// Everything one parameter's update formula is handed, with the parts that are
+/// the same for both optimizers already done.
+pub(crate) struct Update<'a, R: Rule> {
+    /// The hyperparameters in force for this parameter's path — the same values
+    /// the pre-pass range-checked.
+    pub(crate) hyper: R::Hyper,
+    /// The effective learning rate: the optimizer's base rate times this
+    /// group's [`lr_scale`](Rule::lr_scale).
+    pub(crate) lr: f64,
+    /// The parameter's current value, widened to its accumulation dtype.
+    pub(crate) weights: Tensor,
+    /// The gradient, in the same (wide) dtype as `weights`.
+    pub(crate) grad: Tensor,
+    /// This parameter's buffers as the last update left them, or `None` for a
+    /// parameter this optimizer has never updated.
+    pub(crate) previous: Option<&'a R::Buffers>,
+    /// This parameter's **own** step count once this update lands: `1` for a
+    /// first update, whatever the optimizer's global `steps` says.
+    pub(crate) clock: u64,
 }
 
-/// The validation walk both optimizers run *before* the first `Param::set`,
-/// where `kind` names the optimizer ("SGD"/"Adam") in the clock rejection.
-///
-/// For every non-frozen parameter, in walk order: its step clock — absent from
-/// `state` for a parameter this optimizer has never updated — must have room
-/// for one more update, and `check`, the optimizer's own scalar range check,
-/// must accept the hyperparameters resolved for that path together with the
-/// clock value the step would give it.
-///
-/// Hyperparameters are range-checked here, before a single `Param::set`. The
-/// kernel checks them too, but it runs once per parameter *during* the mutating
-/// walk, so an out-of-range value in a group that matches only some parameters
-/// would stop the step half-applied — with the already-updated parameters'
-/// clocks advanced and `steps` not, which no retry can repair. `optim`'s module
-/// docs promise the opposite.
-///
-/// An exhausted clock outranks an invalid hyperparameter, and the whole walk
-/// runs before either is reported: a clock rejection wins even when the
-/// parameter that carries it is visited *after* the one whose scalars were
-/// refused. Which of the two a caller sees is observable, so the order is part
-/// of the contract rather than an accident.
-fn prepass<H: Clone, B>(
-    kind: &'static str,
-    model: &dyn Module,
-    groups: &Groups<H>,
-    state: &States<B>,
-    mut check: impl FnMut(&Param, H, u64) -> Result<()>,
-) -> Result<()> {
-    let mut exhausted = None;
-    let mut invalid = None;
-    visit_all(model, &mut |path, leaf| {
-        let Leaf::Param(param) = leaf else {
-            return;
-        };
-        if param.is_frozen() {
-            return;
+/// Everything one parameter's buffers are decoded from, on the way back in.
+pub(crate) struct Decode<'a, R: Rule> {
+    /// The dotted path the checkpoint filed this parameter under.
+    pub(crate) path: &'a str,
+    /// Its saved clock and its host-side buffers, by name.
+    pub(crate) saved: &'a IncomingParam,
+    /// The parameter itself, to check those buffers against.
+    pub(crate) value: &'a Tensor,
+    /// The whole incoming section, for a rule whose integrity check depends on
+    /// a saved hyperparameter.
+    pub(crate) incoming: &'a Incoming,
+    /// The optimizer's **current** groups: overrides are code and are never
+    /// persisted, so only a base can come from the file.
+    pub(crate) groups: &'a Groups<R::Hyper>,
+}
+
+/// One optimizer's whole state — base learning rate, the rule's own
+/// configuration, parameter groups, per-parameter buffers and step clocks, and
+/// the global step count — and the operations over it that `Sgd` and `Adam`
+/// share verbatim.
+pub(crate) struct Engine<R: Rule> {
+    lr: f64,
+    /// The rule's own configuration (Adam's `decoupled` flag): data the
+    /// optimizer owns outright, with no invariant here to protect.
+    pub(crate) rule: R,
+    groups: Groups<R::Hyper>,
+    state: States<R::Buffers>,
+    steps: u64,
+}
+
+impl<R: Rule> Engine<R> {
+    /// A fresh optimizer at learning rate `lr`, with `base` as the
+    /// hyperparameters of every unmatched path and no groups yet.
+    pub(crate) fn new(lr: f64, rule: R, base: R::Hyper) -> Engine<R> {
+        Engine {
+            lr,
+            rule,
+            groups: Groups::new(base),
+            state: States::new(),
+            steps: 0,
         }
-        let clock = state.get(&param.grad_key()).map(|entry| entry.clock);
-        if clock.is_some_and(|clock| clock.checked_add(1).is_none()) {
-            exhausted.get_or_insert_with(|| path.to_string());
-            return;
+    }
+
+    /// Mutate the base hyperparameters (the optimizer's builder methods).
+    pub(crate) fn base_mut(&mut self) -> &mut R::Hyper {
+        self.groups.base_mut()
+    }
+
+    /// Append a parameter group; the first matching predicate wins.
+    pub(crate) fn group(
+        &mut self,
+        predicate: impl Fn(&str) -> bool + Send + Sync + 'static,
+        configure: impl Fn(R::Hyper) -> R::Hyper + Send + Sync + 'static,
+    ) {
+        self.groups.push(predicate, configure);
+    }
+
+    /// The current base learning rate.
+    pub(crate) fn lr(&self) -> f64 {
+        self.lr
+    }
+
+    /// Set the base learning rate — the hook every schedule uses.
+    pub(crate) fn set_lr(&mut self, lr: f64) {
+        self.lr = lr;
+    }
+
+    /// How many times [`step`](Self::step) has **succeeded**.
+    pub(crate) fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// The number of updates `param` has had from this optimizer, and `0` for
+    /// one it has never updated.
+    pub(crate) fn param_steps(&self, param: &Param) -> u64 {
+        self.state
+            .get(&param.grad_key())
+            .map_or(0, |entry| entry.clock)
+    }
+
+    /// The validation walk both optimizers run *before* the first `Param::set`.
+    ///
+    /// For every non-frozen parameter, in walk order: its step clock — absent
+    /// for a parameter this optimizer has never updated — must have room for one
+    /// more update, and [`Rule::check`] must accept the hyperparameters resolved
+    /// for that path together with the clock value the step would give it.
+    ///
+    /// Hyperparameters are range-checked here, before a single `Param::set`. The
+    /// kernel checks them too, but it runs once per parameter *during* the
+    /// mutating walk, so an out-of-range value in a group that matches only some
+    /// parameters would stop the step half-applied — with the already-updated
+    /// parameters' clocks advanced and `steps` not, which no retry can repair.
+    /// `optim`'s module docs promise the opposite.
+    ///
+    /// An exhausted clock outranks an invalid hyperparameter, and the whole walk
+    /// runs before either is reported: a clock rejection wins even when the
+    /// parameter that carries it is visited *after* the one whose scalars were
+    /// refused. Which of the two a caller sees is observable, so the order is
+    /// part of the contract rather than an accident.
+    fn prepass(&self, model: &dyn Module) -> Result<()> {
+        let mut exhausted = None;
+        let mut invalid = None;
+        visit_all(model, &mut |path, leaf| {
+            let Leaf::Param(param) = leaf else {
+                return;
+            };
+            if param.is_frozen() {
+                return;
+            }
+            let clock = self.state.get(&param.grad_key()).map(|entry| entry.clock);
+            if clock.is_some_and(|clock| clock.checked_add(1).is_none()) {
+                exhausted.get_or_insert_with(|| path.to_string());
+                return;
+            }
+            if invalid.is_some() {
+                return;
+            }
+            let hyper = self.groups.resolve(path);
+            let lr = self.lr * R::lr_scale(&hyper);
+            if let Err(error) = self.rule.check(param, hyper, lr, clock.unwrap_or(0) + 1) {
+                invalid = Some(error);
+            }
+        });
+        if let Some(path) = exhausted {
+            return Err(Error::InvalidArg {
+                op: "step",
+                msg: format!(
+                    "{} step clock for parameter `{path}` cannot be advanced past u64::MAX",
+                    R::NAME
+                ),
+            });
         }
-        if invalid.is_some() {
-            return;
+        if let Some(error) = invalid {
+            return Err(error);
         }
-        if let Err(error) = check(param, groups.resolve(path), clock.unwrap_or(0) + 1) {
-            invalid = Some(error);
-        }
-    });
-    if let Some(path) = exhausted {
-        return Err(Error::InvalidArg {
+        Ok(())
+    }
+
+    /// One optimizer step over `model`, consuming `grads`.
+    ///
+    /// The order is the contract [`optim`](super)'s module docs state
+    /// normatively, so it is written once:
+    ///
+    /// 1. the global step clock must have room for one more update;
+    /// 2. [`prepass`](Self::prepass) validates every parameter's clock and
+    ///    hyperparameters before the first `Param::set`;
+    /// 3. [`apply`] runs the three-pass walk, and for each parameter this
+    ///    method advances the clock, widens the value and the gradient to the
+    ///    accumulation dtype, calls [`Rule::update`] for the new value and
+    ///    buffers, narrows the value back to the parameter's own dtype and
+    ///    records the new state;
+    /// 4. `steps` advances only once the whole walk has succeeded, so a rejected
+    ///    step leaves the schedule and the model agreeing about how far the run
+    ///    got.
+    pub(crate) fn step(&mut self, model: &mut dyn Module, grads: Grads) -> Result<()> {
+        let next_steps = self.steps.checked_add(1).ok_or_else(|| Error::InvalidArg {
             op: "step",
             msg: format!(
-                "{kind} step clock for parameter `{path}` cannot be advanced past u64::MAX"
+                "{} global step clock cannot be advanced past u64::MAX",
+                R::NAME
             ),
-        });
+        })?;
+        // Clocks and hyperparameters are checked before any `Param::set`; see
+        // `prepass` for why the kernel's own range check is too late.
+        self.prepass(model)?;
+
+        // Split the borrow: the walk below mutates `state` while reading the
+        // rule and the groups.
+        let Engine {
+            lr: base_lr,
+            rule,
+            groups,
+            state,
+            steps,
+        } = self;
+        apply("step", model, grads, |path, param, grad| {
+            let dtype = param.value().dtype();
+            // Wide arithmetic: an f16/bf16 parameter's moments are kept in f32
+            // and the replacement value is narrowed back exactly once, at the
+            // end.
+            let acc = dtype.accumulation_dtype();
+            let previous = state.get(&param.grad_key());
+            let clock = match previous {
+                Some(entry) => entry
+                    .clock
+                    .checked_add(1)
+                    .ok_or_else(|| Error::InvalidArg {
+                        op: "step",
+                        msg: format!(
+                            "{} step clock for parameter `{path}` cannot be advanced past u64::MAX",
+                            R::NAME
+                        ),
+                    })?,
+                None => 1,
+            };
+            let hyper = groups.resolve(path);
+            let (next, buffers) = rule.update(Update {
+                lr: *base_lr * R::lr_scale(&hyper),
+                hyper,
+                weights: param.value().to_dtype(acc)?,
+                grad: grad.to_dtype(acc)?,
+                previous: previous.map(|entry| &entry.buffers),
+                clock,
+            })?;
+            param.set(next.to_dtype(dtype)?)?;
+            state.insert(param.grad_key(), ParamState { clock, buffers });
+            Ok(())
+        })?;
+        *steps = next_steps;
+        Ok(())
     }
-    if let Some(error) = invalid {
-        return Err(error);
+
+    /// Write this optimizer's state into `envelope`, keyed by `model`'s dotted
+    /// paths. Groups are *not* saved: they are closures.
+    pub(crate) fn save(&self, model: &dyn Module, envelope: &mut Envelope) -> Result<()> {
+        let mut hypers = vec![("lr", self.lr)];
+        hypers.extend(self.rule.hypers(*self.groups.base()));
+        state::store::<R>(envelope, &hypers, self.steps, model, &self.state)
     }
-    Ok(())
+
+    /// Restore the state [`save`](Self::save) wrote, resolving paths against
+    /// `model`.
+    ///
+    /// All-or-nothing: the hyperparameters are adopted onto copies and every
+    /// buffer is decoded and checked against its parameter before *any* of this
+    /// optimizer's own state is replaced.
+    pub(crate) fn load(&mut self, model: &dyn Module, envelope: &Envelope) -> Result<()> {
+        let incoming = state::load(envelope, R::KIND)?;
+        incoming.expect_hypers(R::HYPERS)?;
+        let lr = incoming.hyper("lr")?;
+        let mut rule = self.rule;
+        let mut base = *self.groups.base();
+        rule.adopt(&mut base, &incoming)?;
+        let restored = state::restore(model, &incoming, &self.rule, &self.groups)?;
+
+        self.lr = lr;
+        self.rule = rule;
+        *self.groups.base_mut() = base;
+        self.steps = incoming.steps();
+        self.state = restored;
+        Ok(())
+    }
+}
+
+/// Clock pokes, so a test can reach an exhaustion an honest run would need 2⁶⁴
+/// updates to hit. Kept out of the impl above, which is the real surface.
+#[cfg(test)]
+impl<R: Rule> Engine<R> {
+    pub(crate) fn set_clock(&mut self, param: &Param, clock: u64) {
+        self.state.get_mut(&param.grad_key()).unwrap().clock = clock;
+    }
+
+    pub(crate) fn set_steps(&mut self, steps: u64) {
+        self.steps = steps;
+    }
 }
 
 /// Drive one optimizer step over `model`, consuming `grads`.
@@ -364,94 +631,6 @@ fn apply(
         Some(e) => Err(e),
         None => Ok(()),
     }
-}
-
-/// Everything one parameter's update formula is handed, with the parts that are
-/// the same for both optimizers already done.
-pub(crate) struct Update<'a, H, B> {
-    /// The hyperparameters in force for this parameter's path — the same values
-    /// the pre-pass range-checked.
-    pub(crate) hyper: H,
-    /// The parameter's current value, widened to its accumulation dtype.
-    pub(crate) weights: Tensor,
-    /// The gradient, in the same (wide) dtype as `weights`.
-    pub(crate) grad: Tensor,
-    /// This parameter's buffers as the last update left them, or `None` for a
-    /// parameter this optimizer has never updated.
-    pub(crate) previous: Option<&'a B>,
-    /// This parameter's **own** step count once this update lands: `1` for a
-    /// first update, whatever the optimizer's global `steps` says.
-    pub(crate) clock: u64,
-}
-
-/// One optimizer step: everything `Sgd::step` and `Adam::step` do around their
-/// update formula, with `kind` naming the optimizer ("SGD"/"Adam") in errors.
-///
-/// The order is the contract [`optim`](super)'s module docs state normatively,
-/// so it is written once:
-///
-/// 1. the global step clock must have room for one more update;
-/// 2. [`prepass`] validates every parameter's clock and hyperparameters before
-///    the first `Param::set`;
-/// 3. [`apply`] runs the three-pass walk, and for each parameter this function
-///    advances the clock, widens the value and the gradient to the accumulation
-///    dtype, calls `update` for the new value and buffers, narrows the value
-///    back to the parameter's own dtype and records the new state;
-/// 4. `steps` advances only once the whole walk has succeeded, so a rejected
-///    step leaves the schedule and the model agreeing about how far the run got.
-///
-/// `check` is the optimizer's scalar range check, run per parameter in step 2
-/// against the same hyperparameters and clock `update` will see in step 3.
-#[allow(clippy::too_many_arguments)] // The optimizer's three state fields have
-// to arrive separately: they are borrowed disjointly out of `&mut self`.
-pub(crate) fn step<H: Clone, B>(
-    kind: &'static str,
-    model: &mut dyn Module,
-    grads: Grads,
-    groups: &Groups<H>,
-    steps: &mut u64,
-    state: &mut States<B>,
-    check: impl FnMut(&Param, H, u64) -> Result<()>,
-    mut update: impl FnMut(Update<'_, H, B>) -> Result<(Tensor, B)>,
-) -> Result<()> {
-    let next_steps = steps.checked_add(1).ok_or_else(|| Error::InvalidArg {
-        op: "step",
-        msg: format!("{kind} global step clock cannot be advanced past u64::MAX"),
-    })?;
-    // Clocks and hyperparameters are checked before any `Param::set`; see
-    // `prepass` for why the kernel's own range check is too late.
-    prepass(kind, model, groups, state, check)?;
-    apply("step", model, grads, |path, param, grad| {
-        let dtype = param.value().dtype();
-        // Wide arithmetic: an f16/bf16 parameter's moments are kept in f32 and
-        // the replacement value is narrowed back exactly once, at the end.
-        let acc = dtype.accumulation_dtype();
-        let previous = state.get(&param.grad_key());
-        let clock = match previous {
-            Some(entry) => entry
-                .clock
-                .checked_add(1)
-                .ok_or_else(|| Error::InvalidArg {
-                    op: "step",
-                    msg: format!(
-                        "{kind} step clock for parameter `{path}` cannot be advanced past u64::MAX"
-                    ),
-                })?,
-            None => 1,
-        };
-        let (next, buffers) = update(Update {
-            hyper: groups.resolve(path),
-            weights: param.value().to_dtype(acc)?,
-            grad: grad.to_dtype(acc)?,
-            previous: previous.map(|entry| &entry.buffers),
-            clock,
-        })?;
-        param.set(next.to_dtype(dtype)?)?;
-        state.insert(param.grad_key(), ParamState { clock, buffers });
-        Ok(())
-    })?;
-    *steps = next_steps;
-    Ok(())
 }
 
 /// Re-attach the `count` storages a fused optimizer kernel returned to tensors

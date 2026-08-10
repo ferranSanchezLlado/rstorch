@@ -7,13 +7,8 @@ use crate::nn::{Module, Param};
 use crate::persist::Envelope;
 use crate::tensor::Tensor;
 
-use super::engine::{self, Groups, States, Update};
-use super::state;
-
-/// The `kind` tag in a saved state section — the same for both names, because
-/// they are the same optimizer.
-const KIND: &str = "adam";
-const HYPERS: [&str; 6] = ["lr", "beta1", "beta2", "eps", "weight_decay", "decoupled"];
+use super::engine::{self, Decode, Engine, Rule, Update};
+use super::state::{self, Incoming};
 
 /// The hyperparameters of one parameter group (or of the optimizer itself).
 ///
@@ -74,102 +69,188 @@ impl AdamGroup {
 
 /// Adam's per-parameter buffers: the two moment estimates. The step clock that
 /// rides alongside is `engine::ParamState`'s.
-struct Moments {
+pub(crate) struct Moments {
     m: Tensor,
     v: Tensor,
 }
 
-/// Adam's update for one parameter — the formula in [`Adam`]'s docs, and the
-/// only thing this optimizer contributes to `engine::step`'s skeleton.
-///
-/// A backend with a fused `AdamStep` kernel runs it in one pass; where there is
-/// none the same arithmetic is spelled out in the public op vocabulary, which is
-/// the definition the two agree on. `weights` and `grad` arrive already widened
-/// to the accumulation dtype, and the value returned is narrowed back by the
-/// caller. `decoupled` chooses where weight decay enters, which is the whole of
-/// the Adam/AdamW difference.
-fn adam_update(
-    base_lr: f64,
-    decoupled: bool,
-    update: Update<'_, AdamGroup, Moments>,
-) -> Result<(Tensor, Moments)> {
-    let Update {
-        hyper,
-        weights,
-        grad,
-        previous,
-        clock,
-    } = update;
-    let lr = base_lr * hyper.lr_scale;
-    let (previous_m, previous_v) = match previous {
-        Some(moments) => (moments.m.clone(), moments.v.clone()),
-        None => {
-            let zeros = Tensor::zeros(weights.dims(), weights.dtype(), &weights.device())?;
-            (zeros.clone(), zeros)
-        }
-    };
-    let scalars = kernel_scalars(base_lr, hyper, decoupled, clock);
-    let inputs = [
-        weights.view(),
-        grad.view(),
-        previous_m.view(),
-        previous_v.view(),
-    ];
+/// Adam as the shared [`Engine`] sees it. `decoupled` chooses where weight
+/// decay enters, which is the whole of the Adam/AdamW difference.
+#[derive(Clone, Copy)]
+pub(crate) struct AdamRule {
+    pub(crate) decoupled: bool,
+}
 
-    let [next, m, v] =
-        match dispatch::backend(weights.device()).fused(FusedOp::AdamStep, &inputs, &scalars) {
-            Ok(outputs) => {
-                let outputs = engine::fused_outputs("Adam", outputs, 3, &weights)?;
-                // `fused_outputs` validated the length as 3 and pushes exactly
-                // one tensor per output, so this cannot fail.
-                outputs
-                    .try_into()
-                    .unwrap_or_else(|_| unreachable!("fused Adam output count validated as 3"))
+impl Rule for AdamRule {
+    type Hyper = AdamGroup;
+    type Buffers = Moments;
+
+    const NAME: &'static str = "Adam";
+    /// The same tag for both names, because they are the same optimizer.
+    const KIND: &'static str = "adam";
+    const HYPERS: &'static [&'static str] =
+        &["lr", "beta1", "beta2", "eps", "weight_decay", "decoupled"];
+
+    fn lr_scale(hyper: &AdamGroup) -> f64 {
+        hyper.lr_scale
+    }
+
+    fn check(&self, param: &Param, hyper: AdamGroup, lr: f64, clock: u64) -> Result<()> {
+        // Exactly the scalars the step will hand the kernel for this parameter,
+        // including its own bias-correction clock.
+        let scalars = kernel_scalars(lr, hyper, self.decoupled, clock);
+        let acc = param.value().dtype().accumulation_dtype();
+        crate::backend::cpu::fused::validate_adam_scalars("step", &scalars, acc)
+    }
+
+    /// The formula in [`Adam`]'s docs.
+    ///
+    /// A backend with a fused `AdamStep` kernel runs it in one pass; where there
+    /// is none the same arithmetic is spelled out in the public op vocabulary,
+    /// which is the definition the two agree on. `weights` and `grad` arrive
+    /// already widened to the accumulation dtype, and the value returned is
+    /// narrowed back by the caller.
+    fn update(&self, update: Update<'_, Self>) -> Result<(Tensor, Moments)> {
+        let Update {
+            hyper,
+            lr,
+            weights,
+            grad,
+            previous,
+            clock,
+        } = update;
+        let decoupled = self.decoupled;
+        let (previous_m, previous_v) = match previous {
+            Some(moments) => (moments.m.clone(), moments.v.clone()),
+            None => {
+                let zeros = Tensor::zeros(weights.dims(), weights.dtype(), &weights.device())?;
+                (zeros.clone(), zeros)
             }
-            Err(Error::Unsupported { .. }) => {
-                let [
-                    _lr,
-                    _beta1,
-                    _beta2,
-                    _eps,
-                    _decay,
-                    correction1,
-                    correction2,
-                    _flag,
-                ] = scalars;
-                let mut g = grad;
-                if hyper.weight_decay != 0.0 && !decoupled {
-                    g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
-                }
-                let next_m = previous_m
-                    .mul_scalar(hyper.beta1)?
-                    .add(&g.mul_scalar(1.0 - hyper.beta1)?)?;
-                let next_v = previous_v
-                    .mul_scalar(hyper.beta2)?
-                    .add(&g.mul(&g)?.mul_scalar(1.0 - hyper.beta2)?)?;
-
-                let m_hat = next_m.div_scalar(correction1)?;
-                let v_hat = next_v.div_scalar(correction2)?;
-                let direction = m_hat.div(&v_hat.sqrt()?.add_scalar(hyper.eps)?)?;
-
-                let mut next = weights;
-                if hyper.weight_decay != 0.0 && decoupled {
-                    next = next.mul_scalar(1.0 - lr * hyper.weight_decay)?;
-                }
-                next = next.sub(&direction.mul_scalar(lr)?)?;
-                [next, next_m, next_v]
-            }
-            Err(error) => return Err(error),
         };
-    Ok((next, Moments { m, v }))
+        let scalars = kernel_scalars(lr, hyper, decoupled, clock);
+        let inputs = [
+            weights.view(),
+            grad.view(),
+            previous_m.view(),
+            previous_v.view(),
+        ];
+
+        let [next, m, v] =
+            match dispatch::backend(weights.device()).fused(FusedOp::AdamStep, &inputs, &scalars) {
+                Ok(outputs) => {
+                    let outputs = engine::fused_outputs(Self::NAME, outputs, 3, &weights)?;
+                    // `fused_outputs` validated the length as 3 and pushes
+                    // exactly one tensor per output, so this cannot fail.
+                    outputs
+                        .try_into()
+                        .unwrap_or_else(|_| unreachable!("fused Adam output count validated as 3"))
+                }
+                Err(Error::Unsupported { .. }) => {
+                    let [
+                        _lr,
+                        _beta1,
+                        _beta2,
+                        _eps,
+                        _decay,
+                        correction1,
+                        correction2,
+                        _flag,
+                    ] = scalars;
+                    let mut g = grad;
+                    if hyper.weight_decay != 0.0 && !decoupled {
+                        g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
+                    }
+                    let next_m = previous_m
+                        .mul_scalar(hyper.beta1)?
+                        .add(&g.mul_scalar(1.0 - hyper.beta1)?)?;
+                    let next_v = previous_v
+                        .mul_scalar(hyper.beta2)?
+                        .add(&g.mul(&g)?.mul_scalar(1.0 - hyper.beta2)?)?;
+
+                    let m_hat = next_m.div_scalar(correction1)?;
+                    let v_hat = next_v.div_scalar(correction2)?;
+                    let direction = m_hat.div(&v_hat.sqrt()?.add_scalar(hyper.eps)?)?;
+
+                    let mut next = weights;
+                    if hyper.weight_decay != 0.0 && decoupled {
+                        next = next.mul_scalar(1.0 - lr * hyper.weight_decay)?;
+                    }
+                    next = next.sub(&direction.mul_scalar(lr)?)?;
+                    [next, next_m, next_v]
+                }
+                Err(error) => return Err(error),
+            };
+        Ok((next, Moments { m, v }))
+    }
+
+    fn hypers(&self, base: AdamGroup) -> Vec<(&'static str, f64)> {
+        vec![
+            ("beta1", base.beta1),
+            ("beta2", base.beta2),
+            ("eps", base.eps),
+            ("weight_decay", base.weight_decay),
+            ("decoupled", f64::from(u8::from(self.decoupled))),
+        ]
+    }
+
+    fn buffers(moments: &Moments) -> Vec<(&'static str, &Tensor)> {
+        vec![("m", &moments.m), ("v", &moments.v)]
+    }
+
+    fn adopt(&mut self, base: &mut AdamGroup, incoming: &Incoming) -> Result<()> {
+        // A coupled-decay checkpoint and an AdamW are different algorithms, so
+        // that is a rejection rather than a silent reconfiguration.
+        let saved_decoupled = incoming.hyper("decoupled")? != 0.0;
+        if saved_decoupled != self.decoupled {
+            return Err(Error::Persistence {
+                msg: format!(
+                    "optimizer state has decoupled={saved_decoupled}, loaded into an \
+                     optimizer with decoupled={} (Adam and AdamW apply weight decay \
+                     differently; build the one the checkpoint was saved from)",
+                    self.decoupled
+                ),
+            });
+        }
+        base.beta1 = incoming.hyper("beta1")?;
+        base.beta2 = incoming.hyper("beta2")?;
+        base.eps = incoming.hyper("eps")?;
+        base.weight_decay = incoming.hyper("weight_decay")?;
+        Ok(())
+    }
+
+    fn decode(&self, decode: Decode<'_, Self>) -> Result<Moments> {
+        let Decode {
+            path, saved, value, ..
+        } = decode;
+        let mut m = None;
+        let mut v = None;
+        for (name, host) in &saved.buffers {
+            match name.as_str() {
+                "m" => m = Some(state::restore_buffer(host, value, path, name)?),
+                "v" => v = Some(state::restore_buffer(host, value, path, name)?),
+                other => return Err(state::unknown_buffer(Self::KIND, path, other)),
+            }
+        }
+        let missing = match (m, v) {
+            (Some(m), Some(v)) => return Ok(Moments { m, v }),
+            (None, _) => "m",
+            (_, None) => "v",
+        };
+        Err(Error::Persistence {
+            msg: format!(
+                "optimizer state for `{path}` is missing the `{missing}` moment \
+                 (Adam keeps both or neither)"
+            ),
+        })
+    }
 }
 
 /// The eight scalars the Adam kernel takes for one parameter, at that
-/// parameter's own step count `clock`.
+/// parameter's own step count `clock` and its group's effective `lr`.
 ///
 /// The pre-pass range-checks *exactly* these, so a step's validation and its
 /// arithmetic cannot disagree about what the kernel will be handed.
-fn kernel_scalars(base_lr: f64, hyper: AdamGroup, decoupled: bool, clock: u64) -> [f64; 8] {
+fn kernel_scalars(lr: f64, hyper: AdamGroup, decoupled: bool, clock: u64) -> [f64; 8] {
     // Each parameter's own clock, so a late joiner is bias-corrected as a first
     // update rather than as step `steps`.
     //
@@ -178,7 +259,7 @@ fn kernel_scalars(base_lr: f64, hyper: AdamGroup, decoupled: bool, clock: u64) -
     // larger `t` gives the same correction factor of 1.
     let t = clock.min(i32::MAX as u64) as i32;
     [
-        base_lr * hyper.lr_scale,
+        lr,
         hyper.beta1,
         hyper.beta2,
         hyper.eps,
@@ -244,11 +325,7 @@ fn kernel_scalars(base_lr: f64, hyper: AdamGroup, decoupled: bool, clock: u64) -
 /// # }
 /// ```
 pub struct Adam {
-    lr: f64,
-    decoupled: bool,
-    groups: Groups<AdamGroup>,
-    state: States<Moments>,
-    steps: u64,
+    pub(crate) engine: Engine<AdamRule>,
 }
 
 impl Adam {
@@ -256,24 +333,24 @@ impl Adam {
     /// (β = (0.9, 0.999), eps = 1e-8, no weight decay).
     pub fn new(lr: f64) -> Adam {
         Adam {
-            lr,
-            decoupled: false,
-            groups: Groups::new(AdamGroup {
-                lr_scale: 1.0,
-                beta1: 0.9,
-                beta2: 0.999,
-                eps: 1e-8,
-                weight_decay: 0.0,
-            }),
-            state: States::new(),
-            steps: 0,
+            engine: Engine::new(
+                lr,
+                AdamRule { decoupled: false },
+                AdamGroup {
+                    lr_scale: 1.0,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                    eps: 1e-8,
+                    weight_decay: 0.0,
+                },
+            ),
         }
     }
 
     /// Set the moment decay rates for every parameter (see [`AdamGroup`]).
     #[must_use]
     pub fn betas(mut self, beta1: f64, beta2: f64) -> Adam {
-        let base = self.groups.base_mut();
+        let base = self.engine.base_mut();
         base.beta1 = beta1;
         base.beta2 = beta2;
         self
@@ -282,7 +359,7 @@ impl Adam {
     /// Set the numerical-stability term for every parameter.
     #[must_use]
     pub fn eps(mut self, eps: f64) -> Adam {
-        self.groups.base_mut().eps = eps;
+        self.engine.base_mut().eps = eps;
         self
     }
 
@@ -290,7 +367,7 @@ impl Adam {
     /// decoupled is [`decoupled`](Adam::decoupled)'s business.
     #[must_use]
     pub fn weight_decay(mut self, weight_decay: f64) -> Adam {
-        self.groups.base_mut().weight_decay = weight_decay;
+        self.engine.base_mut().weight_decay = weight_decay;
         self
     }
 
@@ -298,13 +375,13 @@ impl Adam {
     /// parameter (AdamW), `false` folds it into the gradient (classic Adam).
     #[must_use]
     pub fn decoupled(mut self, decoupled: bool) -> Adam {
-        self.decoupled = decoupled;
+        self.engine.rule.decoupled = decoupled;
         self
     }
 
     /// Whether weight decay is decoupled (i.e. whether this is an AdamW).
     pub fn is_decoupled(&self) -> bool {
-        self.decoupled
+        self.engine.rule.decoupled
     }
 
     /// Declare a parameter group: parameters whose dotted path satisfies
@@ -321,13 +398,13 @@ impl Adam {
         predicate: impl Fn(&str) -> bool + Send + Sync + 'static,
         configure: impl Fn(AdamGroup) -> AdamGroup + Send + Sync + 'static,
     ) -> Adam {
-        self.groups.push(predicate, configure);
+        self.engine.group(predicate, configure);
         self
     }
 
     /// The current base learning rate.
     pub fn lr(&self) -> f64 {
-        self.lr
+        self.engine.lr()
     }
 
     /// Set the base learning rate — the hook every
@@ -335,7 +412,7 @@ impl Adam {
     /// [`lr_scale`](AdamGroup::lr_scale) factors apply on top, so a schedule
     /// moves every group together.
     pub fn set_lr(&mut self, lr: f64) {
-        self.lr = lr;
+        self.engine.set_lr(lr);
     }
 
     /// How many times [`step`](Adam::step) has **succeeded** (the argument the
@@ -343,7 +420,7 @@ impl Adam {
     /// untouched. Individual parameters may have taken fewer — see the
     /// per-parameter clocks in the type docs.
     pub fn steps(&self) -> u64 {
-        self.steps
+        self.engine.steps()
     }
 
     /// Apply one update to every non-frozen parameter of `model`, consuming
@@ -362,24 +439,7 @@ impl Adam {
     ///   [`Error::InvalidArg`](crate::Error::InvalidArg) if a parameter is not a
     ///   float tensor or the module visits one parameter twice.
     pub fn step(&mut self, model: &mut dyn Module, grads: Grads) -> Result<()> {
-        let base_lr = self.lr;
-        let decoupled = self.decoupled;
-        engine::step(
-            "Adam",
-            model,
-            grads,
-            &self.groups,
-            &mut self.steps,
-            &mut self.state,
-            |param, hyper: AdamGroup, clock| {
-                // Exactly the scalars the step will hand the kernel for this
-                // parameter, including its own bias-correction clock.
-                let scalars = kernel_scalars(base_lr, hyper, decoupled, clock);
-                let acc = param.value().dtype().accumulation_dtype();
-                crate::backend::cpu::fused::validate_adam_scalars("step", &scalars, acc)
-            },
-            |update| adam_update(base_lr, decoupled, update),
-        )
+        self.engine.step(model, grads)
     }
 
     /// Write this optimizer's state (hyperparameters, per-parameter step clocks
@@ -394,23 +454,7 @@ impl Adam {
     /// [`Error::Persistence`](crate::Error::Persistence) if `envelope` already
     /// carries optimizer state, or if a host transfer fails.
     pub fn save_state(&self, model: &dyn Module, envelope: &mut Envelope) -> Result<()> {
-        let base = *self.groups.base();
-        state::store(
-            envelope,
-            KIND,
-            &[
-                ("lr", self.lr),
-                ("beta1", base.beta1),
-                ("beta2", base.beta2),
-                ("eps", base.eps),
-                ("weight_decay", base.weight_decay),
-                ("decoupled", f64::from(u8::from(self.decoupled))),
-            ],
-            self.steps,
-            model,
-            &self.state,
-            |moments| vec![("m", &moments.m), ("v", &moments.v)],
-        )
+        self.engine.save(model, envelope)
     }
 
     /// Restore the state [`save_state`](Adam::save_state) wrote, resolving paths
@@ -429,53 +473,7 @@ impl Adam {
     /// AdamW are different algorithms, so that is a rejection rather than a
     /// silent reconfiguration.
     pub fn load_state(&mut self, model: &dyn Module, envelope: &Envelope) -> Result<()> {
-        let incoming = state::load(envelope, KIND)?;
-        incoming.expect_hypers(&HYPERS)?;
-        let saved_decoupled = incoming.hyper("decoupled")? != 0.0;
-        if saved_decoupled != self.decoupled {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "optimizer state has decoupled={saved_decoupled}, loaded into an \
-                     optimizer with decoupled={} (Adam and AdamW apply weight decay \
-                     differently; build the one the checkpoint was saved from)",
-                    self.decoupled
-                ),
-            });
-        }
-        let restored = state::restore(model, &incoming, |path, saved, value| {
-            let mut m = None;
-            let mut v = None;
-            for (name, host) in &saved.buffers {
-                match name.as_str() {
-                    "m" => m = Some(state::restore_buffer(host, value, path, name)?),
-                    "v" => v = Some(state::restore_buffer(host, value, path, name)?),
-                    other => return Err(state::unknown_buffer(KIND, path, other)),
-                }
-            }
-            let missing = match (m, v) {
-                (Some(m), Some(v)) => return Ok(Moments { m, v }),
-                (None, _) => "m",
-                (_, None) => "v",
-            };
-            Err(Error::Persistence {
-                msg: format!(
-                    "optimizer state for `{path}` is missing the `{missing}` moment \
-                     (Adam keeps both or neither)"
-                ),
-            })
-        })?;
-
-        self.lr = incoming.hyper("lr")?;
-        let (beta1, beta2) = (incoming.hyper("beta1")?, incoming.hyper("beta2")?);
-        let (eps, weight_decay) = (incoming.hyper("eps")?, incoming.hyper("weight_decay")?);
-        let base = self.groups.base_mut();
-        base.beta1 = beta1;
-        base.beta2 = beta2;
-        base.eps = eps;
-        base.weight_decay = weight_decay;
-        self.steps = incoming.steps();
-        self.state = restored;
-        Ok(())
+        self.engine.load(model, envelope)
     }
 
     /// The number of updates `param` has received from this optimizer — its
@@ -485,7 +483,7 @@ impl Adam {
     /// `0` for a parameter this optimizer has never updated (including one it
     /// has never seen).
     pub fn param_steps(&self, param: &Param) -> u64 {
-        engine::param_steps(&self.state, param)
+        self.engine.param_steps(param)
     }
 }
 
@@ -525,18 +523,15 @@ mod tests {
     use super::*;
     use crate::nn::Mode;
     use crate::optim::testkit::{
-        Net, REGRESSION_XS, Solo, TestOptimizer,
-        assert_an_exhausted_clock_outranks_an_invalid_hyperparameter,
+        Net, REGRESSION_XS, Solo, assert_an_exhausted_clock_outranks_an_invalid_hyperparameter,
         assert_converges_on_a_tiny_regression, assert_every_rejection_is_atomic,
-        assert_next_step_is_refused, assert_state_round_trips, close, impl_test_optimizer,
-        with_clocks,
+        assert_next_step_is_refused, assert_state_round_trips, close, with_clocks,
     };
-
-    impl_test_optimizer!(Adam);
 
     /// One update of `model` under `opt`, panicking on anything but success.
     fn step(opt: &mut Adam, model: &mut Net) {
-        opt.step_once(model);
+        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+        opt.step(model, loss.backward().unwrap()).unwrap();
     }
 
     #[test]
@@ -848,12 +843,12 @@ mod tests {
 
     #[test]
     fn a_rejected_step_leaves_parameters_moments_and_clocks_untouched() {
-        assert_every_rejection_is_atomic(|| AdamW::new(0.1, 0.01));
+        assert_every_rejection_is_atomic(|| AdamW::new(0.1, 0.01).engine);
     }
 
     #[test]
     fn an_exhausted_clock_outranks_an_invalid_hyperparameter() {
-        assert_an_exhausted_clock_outranks_an_invalid_hyperparameter(Adam::new(0.1), "Adam");
+        assert_an_exhausted_clock_outranks_an_invalid_hyperparameter(Adam::new(0.1).engine);
     }
 
     // ---- state persistence ----------------------------------------------
@@ -862,13 +857,13 @@ mod tests {
     fn state_round_trips_through_an_envelope_and_a_resumed_run_matches() {
         assert_state_round_trips(
             "adam-state",
-            || AdamW::new(0.1, 0.01).betas(0.8, 0.99).eps(1e-7),
+            || AdamW::new(0.1, 0.01).betas(0.8, 0.99).eps(1e-7).engine,
             // Deliberately wrong hyperparameters. The wrong decay coupling is
             // the one thing loading cannot fix (see
             // `a_coupled_checkpoint_will_not_load_into_an_adamw`), so the
             // resumed optimizer declares `decoupled` and lets the file do the
             // rest.
-            Adam::new(999.0).decoupled(true),
+            Adam::new(999.0).decoupled(true).engine,
         );
     }
 
@@ -902,7 +897,7 @@ mod tests {
         step(&mut opt, &mut model);
         assert_eq!(opt.param_steps(&model.trunk.weight), u64::MAX);
 
-        assert_next_step_is_refused(&mut opt, &mut model, "parameter `");
+        assert_next_step_is_refused(&mut opt.engine, &mut model, "parameter `");
     }
 
     #[test]
@@ -910,13 +905,13 @@ mod tests {
         let mut model = Net::ones();
         let mut opt = Adam::new(0.1);
         step(&mut opt, &mut model);
-        opt.set_clock(&model.trunk.weight, u64::MAX);
+        opt.engine.set_clock(&model.trunk.weight, u64::MAX);
         model.trunk.weight.freeze();
         step(&mut opt, &mut model);
         assert_eq!(opt.param_steps(&model.trunk.weight), u64::MAX);
         model.trunk.weight.unfreeze();
 
-        assert_next_step_is_refused(&mut opt, &mut model, "`trunk.weight`");
+        assert_next_step_is_refused(&mut opt.engine, &mut model, "`trunk.weight`");
     }
 
     #[test]

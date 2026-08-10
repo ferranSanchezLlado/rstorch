@@ -5,13 +5,14 @@
 //! group-predicate tests match on `bias` and `norm`, which is the standard
 //! transformer recipe the design calls out.
 
-use crate::autograd::Grads;
 use crate::device::Device;
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::nn::{Mode, Module, Param};
 use crate::persist::Envelope;
 use crate::tensor::Tensor;
+
+use super::engine::{Engine, Rule};
 
 pub(crate) const CPU: Device = Device::Cpu;
 
@@ -192,100 +193,41 @@ pub(crate) fn close(a: f64, b: f64, tol: f64) {
     assert!((a - b).abs() < tol, "{a} vs {b} (tolerance {tol})");
 }
 
-/// The slice of an optimizer's surface the shared assertions below drive.
-///
-/// [`Sgd`](crate::optim::Sgd) and [`Adam`](crate::optim::Adam) are deliberately
-/// unrelated concrete types — `optim`'s module docs explain why there is no
-/// `Optimizer` trait — and this does not change that: it is `#[cfg(test)]` and
-/// crate-private, and exists only so the contracts the two *share* (a rejected
-/// step changes nothing, a checkpoint resumes the same trajectory) can be
-/// written down once instead of copied into both test suites.
-pub(crate) trait TestOptimizer: Sized {
-    fn try_step(&mut self, model: &mut dyn Module, grads: Grads) -> Result<()>;
-    fn save(&self, model: &dyn Module, envelope: &mut Envelope) -> Result<()>;
-    fn load(&mut self, model: &dyn Module, envelope: &Envelope) -> Result<()>;
-    fn lr(&self) -> f64;
-    fn set_lr(&mut self, lr: f64);
-    fn steps(&self) -> u64;
-    fn param_steps(&self, param: &Param) -> u64;
-    /// Force `param`'s step clock, so a test can reach an exhaustion the
-    /// optimizer would otherwise need 2⁶⁴ updates to hit.
-    fn set_clock(&mut self, param: &Param, clock: u64);
-
-    /// One successful update of `model` under the unit-gradient loss.
-    fn step_once(&mut self, model: &mut Net) {
-        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
-        self.try_step(model, loss.backward().unwrap()).unwrap();
-    }
-
-    /// The error one update of `model` is refused with.
-    fn refuse(&mut self, model: &mut Net) -> Error {
-        let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
-        self.try_step(model, loss.backward().unwrap()).unwrap_err()
-    }
-
-    /// Every byte of this optimizer's state, as one value two snapshots can
-    /// compare: moment buffers and per-parameter clocks both ride in here.
-    fn checkpoint(&self, model: &dyn Module) -> Envelope {
-        let mut envelope = Envelope::new();
-        self.save(model, &mut envelope).unwrap();
-        envelope
-    }
+/// One successful update of `model` under the unit-gradient loss.
+pub(crate) fn step_once<R: Rule>(opt: &mut Engine<R>, model: &mut Net) {
+    let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+    opt.step(model, loss.backward().unwrap()).unwrap();
 }
 
-/// Plug `$optimizer` into [`TestOptimizer`].
-///
-/// The adapter is pure delegation and character-identical for both optimizers,
-/// because both spell these operations the same way on their own surface; only
-/// the type differs. Expanded inside each optimizer's `mod tests`, so the two
-/// field pokes reach private state.
-macro_rules! impl_test_optimizer {
-    ($optimizer:ty) => {
-        impl TestOptimizer for $optimizer {
-            fn try_step(&mut self, model: &mut dyn Module, grads: Grads) -> Result<()> {
-                self.step(model, grads)
-            }
-            fn save(&self, model: &dyn Module, envelope: &mut Envelope) -> Result<()> {
-                self.save_state(model, envelope)
-            }
-            fn load(&mut self, model: &dyn Module, envelope: &Envelope) -> Result<()> {
-                self.load_state(model, envelope)
-            }
-            fn lr(&self) -> f64 {
-                self.lr
-            }
-            fn set_lr(&mut self, lr: f64) {
-                self.lr = lr;
-            }
-            fn steps(&self) -> u64 {
-                self.steps
-            }
-            fn param_steps(&self, param: &Param) -> u64 {
-                engine::param_steps(&self.state, param)
-            }
-            fn set_clock(&mut self, param: &Param, clock: u64) {
-                self.state.get_mut(&param.grad_key()).unwrap().clock = clock;
-            }
-        }
-    };
+/// The error one update of `model` is refused with.
+fn refuse<R: Rule>(opt: &mut Engine<R>, model: &mut Net) -> Error {
+    let loss = model.unit_grad_loss(Mode::TRAIN).unwrap();
+    opt.step(model, loss.backward().unwrap()).unwrap_err()
 }
-pub(crate) use impl_test_optimizer;
+
+/// Every byte of an optimizer's state, as one value two snapshots can compare:
+/// moment buffers and per-parameter clocks both ride in here.
+fn checkpoint<R: Rule>(opt: &Engine<R>, model: &dyn Module) -> Envelope {
+    let mut envelope = Envelope::new();
+    opt.save(model, &mut envelope).unwrap();
+    envelope
+}
 
 /// The step `opt` is about to take must be refused with a message containing
 /// `expected`, and refusing it must leave the model and every byte of optimizer
 /// state exactly as they are.
-pub(crate) fn assert_next_step_is_refused<O: TestOptimizer>(
-    opt: &mut O,
+pub(crate) fn assert_next_step_is_refused<R: Rule>(
+    opt: &mut Engine<R>,
     model: &mut Net,
     expected: &str,
 ) {
     let params = model.snapshot();
-    let before = opt.checkpoint(model);
-    let err = opt.refuse(model);
+    let before = checkpoint(opt, model);
+    let err = refuse(opt, model);
     assert!(matches!(err, Error::InvalidArg { op: "step", .. }), "{err}");
     assert!(err.to_string().contains(expected), "{err}");
     assert_eq!(model.snapshot(), params, "{err}");
-    assert_eq!(opt.checkpoint(model), before, "{err}");
+    assert_eq!(checkpoint(opt, model), before, "{err}");
 }
 
 /// Every rejection this layer can diagnose is raised before the first
@@ -293,24 +235,24 @@ pub(crate) fn assert_next_step_is_refused<O: TestOptimizer>(
 /// `build()` with two updates, arrange each rejection in turn, and assert the
 /// refused step moved nothing at all — not a parameter, not a moment buffer,
 /// not a clock, not `steps`.
-pub(crate) fn assert_every_rejection_is_atomic<O: TestOptimizer>(build: impl Fn() -> O) {
-    fn check<O: TestOptimizer>(
-        mut opt: O,
-        derail: impl FnOnce(&mut O, &mut Net),
-        attempt: impl FnOnce(&mut O, &mut Net) -> Error,
+pub(crate) fn assert_every_rejection_is_atomic<R: Rule>(build: impl Fn() -> Engine<R>) {
+    fn check<R: Rule>(
+        mut opt: Engine<R>,
+        derail: impl FnOnce(&mut Engine<R>, &mut Net),
+        attempt: impl FnOnce(&mut Engine<R>, &mut Net) -> Error,
     ) {
         let mut model = Net::ones();
         for _ in 0..2 {
-            opt.step_once(&mut model);
+            step_once(&mut opt, &mut model);
         }
         derail(&mut opt, &mut model);
         let params = model.snapshot();
-        let before = opt.checkpoint(&model);
+        let before = checkpoint(&opt, &model);
 
         let err = attempt(&mut opt, &mut model);
 
         assert_eq!(model.snapshot(), params, "{err}");
-        assert_eq!(opt.checkpoint(&model), before, "{err}");
+        assert_eq!(checkpoint(&opt, &model), before, "{err}");
         assert_eq!(opt.steps(), 2, "{err}");
     }
 
@@ -320,44 +262,37 @@ pub(crate) fn assert_every_rejection_is_atomic<O: TestOptimizer>(build: impl Fn(
         |_, _| {},
         |opt, model| {
             let loss = model.untraced_head_bias_loss(Mode::TRAIN).unwrap();
-            opt.try_step(model, loss.backward().unwrap()).unwrap_err()
+            opt.step(model, loss.backward().unwrap()).unwrap_err()
         },
     );
     // …a per-parameter step clock with no room left…
     check(
         build(),
         |opt, model| opt.set_clock(&model.head.bias, u64::MAX),
-        |opt, model| opt.refuse(model),
+        refuse,
     );
     // …and an out-of-range hyperparameter.
-    check(
-        build(),
-        |opt, _| opt.set_lr(-1.0),
-        |opt, model| opt.refuse(model),
-    );
+    check(build(), |opt, _| opt.set_lr(-1.0), refuse);
 }
 
 /// The pre-pass's two bailouts are *ordered*, and which one a caller sees is
 /// observable: an exhausted clock outranks an out-of-range hyperparameter even
 /// though the walk meets the bad hyperparameter first (`trunk.weight` leads,
 /// `head.bias` trails), because the whole walk runs before either is reported.
-///
-/// `kind` is how the optimizer names itself in that message ("SGD"/"Adam").
-pub(crate) fn assert_an_exhausted_clock_outranks_an_invalid_hyperparameter<O: TestOptimizer>(
-    mut opt: O,
-    kind: &str,
+pub(crate) fn assert_an_exhausted_clock_outranks_an_invalid_hyperparameter<R: Rule>(
+    mut opt: Engine<R>,
 ) {
     let mut model = Net::ones();
-    opt.step_once(&mut model);
+    step_once(&mut opt, &mut model);
     // Invalid for every parameter, including the first one visited…
     opt.set_lr(-1.0);
     // …but the last one visited has no clock left.
     opt.set_clock(&model.head.bias, u64::MAX);
 
-    let err = opt.refuse(&mut model);
+    let err = refuse(&mut opt, &mut model);
     assert!(
         err.to_string()
-            .contains(&format!("{kind} step clock for parameter `head.bias`")),
+            .contains(&format!("{} step clock for parameter `head.bias`", R::NAME)),
         "{err}"
     );
 }
@@ -367,10 +302,10 @@ pub(crate) fn assert_an_exhausted_clock_outranks_an_invalid_hyperparameter<O: Te
 ///
 /// `resumed` is built with deliberately wrong hyperparameters, so the assertion
 /// also pins that the checkpoint's win. `tag` names the temp directory.
-pub(crate) fn assert_state_round_trips<O: TestOptimizer>(
+pub(crate) fn assert_state_round_trips<R: Rule>(
     tag: &str,
-    build: impl Fn() -> O,
-    mut resumed: O,
+    build: impl Fn() -> Engine<R>,
+    mut resumed: Engine<R>,
 ) {
     let dir = tmpdir(tag);
     let path = dir.join("run.rstorch");
@@ -379,16 +314,16 @@ pub(crate) fn assert_state_round_trips<O: TestOptimizer>(
     let mut reference_model = Net::ones();
     let mut reference = build();
     for _ in 0..6 {
-        reference.step_once(&mut reference_model);
+        step_once(&mut reference, &mut reference_model);
     }
 
     // The resumed run: three steps, a checkpoint, then three more.
     let mut model = Net::ones();
     let mut opt = build();
     for _ in 0..3 {
-        opt.step_once(&mut model);
+        step_once(&mut opt, &mut model);
     }
-    opt.checkpoint(&model)
+    checkpoint(&opt, &model)
         .save(&path, &crate::persist::Limits::defaults())
         .unwrap();
 
@@ -398,7 +333,7 @@ pub(crate) fn assert_state_round_trips<O: TestOptimizer>(
     assert_eq!(resumed.steps(), 3);
     assert_eq!(resumed.param_steps(&model.trunk.weight), 3);
     for _ in 0..3 {
-        resumed.step_once(&mut model);
+        step_once(&mut resumed, &mut model);
     }
 
     assert_eq!(model.snapshot(), reference_model.snapshot());
