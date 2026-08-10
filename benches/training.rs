@@ -4,35 +4,16 @@
 //! the same graph); Conv2d/pooling forward and backward at small image sizes;
 //! and a whole-tensor-reduction rank scan.
 //!
-//! Ported from the v2 `benches/training.rs` (api-reset2) to the v3 zero-generic
-//! public API. The v2 group ids are preserved verbatim (`transformer/forward`,
-//! `mlp/train_epoch_sgd/8x64x784`, …) so the numbers line up row-for-row with
-//! `docs/restart-v3/reference/v2-performance-baseline.md`.
+//! Group ids (`transformer/forward`, `mlp/train_epoch_sgd/8x64x784`, …) are
+//! stable across revisions so successive runs compare row for row.
 //!
-//! # What changed in the port, and why the numbers still compare
+//! Two things about the workload are worth knowing before reading a number:
 //!
-//! - **Shapes are runtime values**, so v2's const-generic model types collapse
-//!   into plain structs over `Tensor`. The workload — the same op sequence at
-//!   the same sizes — is unchanged.
-//! - **`DecoderOnlyTransformer` does not exist yet**, so the
-//!   tiny model v2 benched is spelled out here at the identical config: vocab
-//!   6, seq 3, embed 4, 2 heads of dim 2, FFN 8, 2 layers, batch 2, pre-norm
-//!   blocks with GELU, learned position embeddings and an untied LM head.
-//! - **There is no `zero_grad`.** `backward()` returns a [`Grads`] value that
-//!   `step` consumes, so every v2 `zero_grads(&model)` call disappears. That
-//!   removes one full parameter walk per iteration from the v2 training rows;
-//!   it is a design win, not a measurement trick, and it is called out in the
-//!   v3 baseline document.
-//! - **`no_grad()` is a `Mode`.** `Mode::EVAL` records nothing (`Param::get`
-//!   hands back the plain value), which is what `forward_no_grad` measures;
-//!   `Mode::TRAIN` records.
-//! - **Conv/pooling have no `nn` layers yet** (only the tensor ops),
-//!   so `conv_pool` drives `Tensor::conv2d`/`max_pool2d`/`avg_pool2d` with a
-//!   `Param` weight and a broadcast bias add — exactly what v2's `Conv2d`
-//!   layer did internally.
-//! - **`backend_step` is gone.** v3 has one device (`Device::Cpu`) until the
-//!   backend gate; a one-lane backend comparison measures nothing.
-//! - **`reduce_all` is new** (see [`bench_reduce_all`]).
+//! - **`forward_no_grad` measures [`Mode::EVAL`]**, which records nothing
+//!   (`Param::get` hands back the plain value); `Mode::TRAIN` records.
+//! - **There is no `zero_grad`** — `backward()` returns a [`Grads`] value that
+//!   `step` consumes — so the training rows carry one fewer parameter walk per
+//!   iteration than a framework that clears gradients in place.
 //!
 //! Inputs are deterministic (a seeded `rstorch::Rng`) and never touch disk or
 //! the network. Training benches mutate their model across iterations; that is

@@ -9,3 +9,6 @@ Cargo.lock
 /.test_cache
 /data
 .DS_Store
+# The design record and the milestone baseline snapshots: working material,
+# kept locally rather than carried in the history.
+/docs

@@ -1,12 +1,9 @@
 #![cfg(feature = "typed")]
-//! Compiles and runs every snippet in the typed migration guide
-//! (`docs/restart-v3/m5-baselines/typed-migration-guide.md`).
+//! The typed API's first-hour path, start to finish: bind a device context,
+//! construct typed tensors, build and run a module, then save and reload it.
 //!
-//! The guide is the first thing a new typed user reads, so a snippet that does
-//! not build is worse than no guide at all. This crate depends only on the
-//! `rstorch` public API, so passing here is evidence a downstream user can
-//! actually run the documented path. Keep the two in sync: if you change a
-//! snippet there, change it here.
+//! This crate depends only on the `rstorch` public API, so passing here is
+//! evidence a downstream user can actually walk the path in this order.
 use rstorch::typed::nn::{
     Forward, Linear, Mode, TypedBuffer, TypedModule, TypedParam, load_state_dict, state_dict,
 };

@@ -1,29 +1,15 @@
 //! `DataLoader` throughput over a full epoch, for both provided datasets.
 //!
-//! Ported from the v2 `benches/data_pipeline.rs` (api-reset2). The two v2
-//! benchmark ids (`dataloader/sequential_epoch/1024x64`,
-//! `dataloader/random_epoch/1024x64`) are preserved for the per-item dataset so
-//! the numbers line up with
-//! `docs/restart-v3/reference/v2-performance-baseline.md`.
+//! Both lanes are measured because they cost different things:
 //!
-//! # What changed in the port
-//!
-//! - v2 had a `Sampler` trait plus three collators in two batch-axis flavors.
-//!   v3 has one loader whose order is `new(ds, n)` / `.shuffle(seed)`, and the
-//!   dataset owns collation — so `SequentialSampler` becomes the default and
-//!   `RandomSampler::new(5)` becomes `.shuffle(5)`.
-//! - v2's `VecDataset<(Vec<f32>, usize)>` held host `Vec`s and the
-//!   `features::<64>()` collator built the batch tensor from them. v3's
-//!   [`VecDataset`] holds one `Tensor` per item and collates with
-//!   `Tensor::stack`, so the per-item lane now pays 32 tensor stacks per batch
-//!   instead of one host copy. That is the honest cost of the v3 design and the
-//!   reason [`TensorDataset`] exists; both lanes are measured.
-//! - The `tensor_*` lanes are **new**: one `index_select` per batch on the
-//!   whole split, which is the v3 idiom for data that already lives in tensors
-//!   (and what `fixtures/mnist_mlp.rs` uses).
-//! - The `collate` group is **new**: the two collation primitives isolated at
-//!   one batch's shape, each at two or three sizes so the epoch cost above can
-//!   be attributed instead of guessed. See [`bench_collate`].
+//! - The **per-item** lanes ([`VecDataset`]) hold one `Tensor` per item and
+//!   collate with `Tensor::stack`, so a batch pays one stack per item.
+//! - The **tensor** lanes ([`TensorDataset`]) are one `index_select` per batch
+//!   on the whole split — the idiom for data that already lives in tensors,
+//!   and what `fixtures/mnist_mlp.rs` uses.
+//! - The `collate` group isolates the two collation primitives at one batch's
+//!   shape so the epoch cost above can be attributed instead of guessed. See
+//!   [`bench_collate`].
 //!
 //! Inputs are deterministic (a seeded `rstorch::Rng`) and never touch disk or
 //! the network. Throughput is reported in samples per second over a full epoch.

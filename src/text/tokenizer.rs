@@ -1,22 +1,16 @@
 //! Character-level and byte-pair-encoding tokenizers.
 //!
-//! Ported from the v2 tree (`src/transformer/tokenizer.rs`) with the epoch
-//! 16.13 fallibility fix applied during the port
-//! (`docs/restart-v3/reference/restart-v2/epoch-16.13-data-transformer-and-device-flow.md`,
-//! Workstream 3):
+//! Tokenization here is **loud rather than lossy** — every way of losing
+//! information is an [`Error::Tokenizer`] instead of a silent substitution:
 //!
 //! - [`encode`](Tokenizer::encode) and [`decode`](Tokenizer::decode) return
-//!   [`Result`] instead of being infallible. Failures surface through the
-//!   frozen [`Error::Tokenizer`] variant.
-//! - Decoding is **strict UTF-8** by default. The v2 code used
-//!   `String::from_utf8_lossy`, silently replacing invalid byte sequences
-//!   with `U+FFFD`; that lossiness is the defect 16.13 recorded. Invalid
-//!   token ids and byte sequences that are not valid UTF-8 are now errors.
+//!   [`Result`]. An id that maps to nothing is an error.
+//! - Decoding is **strict UTF-8**: a byte sequence that is not valid UTF-8 is
+//!   an error, never a `U+FFFD` replacement.
 //! - [`BpeTokenizer::train`] **validates** the requested vocabulary size
 //!   rather than silently clamping it up to the byte-plus-specials floor.
 //!
-//! Token ids are plain `usize` values in this port; the semantic `TokenId`
-//! newtype from 16.13 is out of scope for this task and deferred.
+//! Token ids are plain `usize` values.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -34,10 +28,10 @@ fn tokenizer_error(msg: impl Into<String>) -> Error {
 
 /// A reversible mapping between text and integer token ids.
 ///
-/// Unlike the v2 trait, [`encode`](Self::encode) and [`decode`](Self::decode)
-/// are fallible: an id that maps to nothing, or a byte sequence that is not
-/// valid UTF-8, is reported through the crate [`Error`] rather
-/// than being silently substituted or lossily decoded.
+/// [`encode`](Self::encode) and [`decode`](Self::decode) are fallible: an id
+/// that maps to nothing, or a byte sequence that is not valid UTF-8, is
+/// reported through the crate [`Error`] rather than being silently
+/// substituted or lossily decoded.
 pub trait Tokenizer {
     /// Encodes text into token ids.
     ///
@@ -268,9 +262,8 @@ impl BpeTokenizer {
     /// # Errors
     ///
     /// Returns [`Error::Tokenizer`] if `target_vocab` is smaller than the
-    /// mandatory floor of 260 tokens (4 special tokens + 256 byte tokens).
-    /// The v2 code silently clamped small values up to this floor; 16.13
-    /// requires validation instead.
+    /// mandatory floor of 260 tokens (4 special tokens + 256 byte tokens) —
+    /// a request the vocabulary cannot honor is rejected, not clamped.
     pub fn train(corpus: &str, target_vocab: usize) -> Result<Self> {
         let floor = SPECIALS + BYTE_BASE;
         if target_vocab < floor {

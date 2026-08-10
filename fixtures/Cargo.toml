@@ -1,8 +1,5 @@
-# The downstream fixture crate (exploration §3.1 "first-hour usability as
-# the approval record"): depends only on the rstorch public API. Fixture
-# files live in tests/ as integration tests, one per activating task
-# (tensor_ops.rs → T19, saliency.rs → T30, mnist_mlp.rs → T50,
-# mnist_cnn.rs → T51, char_lm.rs → T52).
+# The downstream acceptance crate: depends only on the rstorch public API, so
+# its tests are evidence that a first-hour user can actually run these paths.
 [package]
 name = "fixtures"
 version.workspace = true

@@ -17,8 +17,7 @@
 //! `trybuild` compares compiler diagnostics byte-for-byte against the
 //! `.stderr` fixtures, and those diagnostics drift across `rustc` versions.
 //! The fixtures are therefore **pinned to one toolchain** (regenerate with
-//! `cargo +1.88 test -p rstorch-derive --test ui`, per
-//! `docs/restart-v3/reference/restart-v2/epoch-10.1-compile-time-test-standardization.md`).
+//! `cargo +1.88 test -p rstorch-derive --test ui`).
 //! To keep `cargo test` green on any other toolchain, the run is opt-in: set
 //! `RSTORCH_UI=1` to execute it. CI runs it on the pinned toolchain; the
 //! `TRYBUILD=overwrite` convention regenerates fixtures there.

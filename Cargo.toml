@@ -23,10 +23,6 @@ categories = ["science", "mathematics", "algorithms"]
 edition.workspace = true
 rust-version.workspace = true
 
-# Dependency policy (docs/restart-v3/exploration.md §3.1 "dependencies over
-# dogma"): this manifest is integrator-owned after T00; tasks other than
-# bench/fixture owners must not edit it. The full expected dependency set is
-# declared up front.
 [dependencies]
 half = "2"
 rayon = { version = "1", optional = true }
@@ -45,15 +41,11 @@ metal = { version = "0.33.0", optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
-# Reads the committed PyTorch reference vectors in `tests/numerics.rs` (T31).
-# Already in the lock file via `trybuild`; sanctioned by the integrator in
+# Reads the committed PyTorch reference vectors in `tests/numerics.rs`, in
 # place of a bespoke parser inside the test file.
 serde_json = "1"
 trybuild = "1"
 
-# Bench targets are owned by the bench tasks
-# (docs/restart-v3/implementation-plan.md §1.3, §3 grid): T28 owns
-# `tensor_ops`; T47 adds `training` and `data_pipeline`.
 [[bench]]
 name = "tensor_ops"
 harness = false
@@ -90,6 +82,5 @@ rayon = ["dep:rayon"]
 # It exists so a minutes-long big-model benchmark cannot be picked up by a plain
 # `cargo bench`.
 bench-resnet = []
-# Experimental until the T61 conformance + perf gate passes
-# (docs/restart-v3/implementation-plan.md §4 Wave 6).
+# Experimental until the conformance + perf gate passes.
 metal = ["dep:metal"]

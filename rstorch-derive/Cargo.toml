@@ -1,5 +1,3 @@
-# Crate owned by T13 (docs/restart-v3/implementation-plan.md §3): T13 adds
-# its own dependencies (syn/quote) and the derive implementation.
 [package]
 name = "rstorch-derive"
 version.workspace = true
@@ -18,8 +16,8 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 
-# Dev-dependency cycle (rstorch depends on rstorch-derive) is sanctioned by
-# the T13 brief: the derive's own tests need the frozen `nn` contracts, and
+# The dev-dependency cycle (rstorch depends on rstorch-derive) is deliberate:
+# the derive's own tests need the real `nn` contracts to expand against, and
 # `trybuild` drives the pinned-toolchain UI suite (see `tests/`).
 [dev-dependencies]
 rstorch = { path = ".." }
