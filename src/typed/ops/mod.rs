@@ -1,152 +1,70 @@
-//! Sealed output contracts and normative typed operation signatures.
+//! Typed operations and the sealed output contracts that name their results.
 //!
-//! Associated outputs avoid unstable generic const expressions. Their bounds
-//! identify an operation's output family; they do not by themselves prove
-//! every const-geometry relationship described below. Operation owners generate
-//! complete rank-table implementations and compile-test those relationships.
-//! In the signature inventory, notation such as `OutputTrait<Self, ...>` means
-//! the Rust type `<Self as OutputTrait<...>>::Output`; it is not a public alias.
+//! Associated outputs exist because generic const expressions are unstable: a
+//! trait bound is the only stable way to say "this op's output has one fewer
+//! axis than its input". Their bounds identify an operation's *output family*;
+//! they do not by themselves prove every const-geometry relationship. Each op
+//! family generates complete rank-table implementations and compile-tests those
+//! relationships (`tests/typed_ui.rs`, `tests/typed_rank_oracle.rs`).
 //!
-//! # Shape and views (CT21)
+//! The per-op signatures are on the methods themselves; what follows is the
+//! policy they share, which no individual signature states.
 //!
-//! CT21 provides the following inherent methods. `Target::Dims` is passed
-//! explicitly for reshape/broadcast because `DYN` values are runtime data.
-//! Const-axis methods exist only where their associated output is implemented;
-//! an invalid axis is therefore an ordinary trait error.
+//! # Static versus deferred checking
 //!
-//! ```text
-//! reshape<Target>(&self, dims: Target::Dims) -> Result<Target>
-//! transpose<const A: usize, const B: usize>(&self)
-//!     -> Result<TransposeOutput<Self, A, B>>
-//! squeeze<const AXIS: usize>(&self) -> Result<RemoveAxisOutput<Self, AXIS>>
-//! unsqueeze<const AXIS: usize>(&self)
-//!     -> Result<InsertAxisOutput<Self, AXIS, 1>>
-//! narrow<const AXIS: usize>(&self, start: usize, len: usize)
-//!     -> Result<ReplaceAxisOutput<Self, AXIS, DYN>>
-//! broadcast_to<Target>(&self, dims: Target::Dims) -> Result<Target>
-//! permute(&self, axes: &[isize]) -> Result<DynamicOutput<Self>>
-//! cat<const AXIS: usize>(tensors: &[&Self]) -> Result<ConcatOutput<Self, AXIS>>
-//! stack<const AXIS: usize>(tensors: &[&Self]) -> Result<StackOutput<Self, AXIS>>
-//! ```
+//! Const-axis methods exist only where their associated output is implemented,
+//! so an invalid axis is an ordinary trait error rather than a runtime one.
+//! Where two const markers are *related* rather than equal — a matmul
+//! contraction, conv channels, loss rows — the markers are independent generic
+//! constants so that a static marker paired with [`DYN`] still compiles; the
+//! relationship is then a body const assertion when both sides are known, and a
+//! runtime shape error when either is `DYN`.
 //!
-//! `reshape` is caller-targeted and checks numel. `broadcast_to` is the only
-//! implicit-broadcast preparation for strict elementwise operations. Runtime
-//! permutation and runtime-axis transpose/narrow return the same rank with all
-//! markers `DYN`; runtime-axis squeeze/unsqueeze return [`crate::Tensor`]
-//! because their output rank is selected at runtime. Those escape spellings are
-//! `transpose_dyn`, `narrow_dyn`, `squeeze_dyn`, and `unsqueeze_dyn`, with the
-//! same runtime arguments as the dynamic operation and `Result` outputs just
-//! described. Rank-increasing methods and `stack` exist only through rank 7;
-//! no such typed method exists on `Tensor8`.
+//! # Escaping to runtime axes
 //!
-//! # Elementwise (CT22)
+//! Every op whose axis can only be known at runtime has a `_dyn` spelling
+//! (`transpose_dyn`, `narrow_dyn`, `squeeze_dyn`, `unsqueeze_dyn`, and the
+//! reductions' `*_dyn`). Those that keep their rank return the same rank with
+//! every marker erased to `DYN`; those whose *rank* is selected at runtime
+//! (`squeeze_dyn`, `unsqueeze_dyn`) return a plain [`crate::Tensor`], because no
+//! typed wrapper can name a rank that is not yet known.
 //!
-//! Binary methods `add`, `sub`, `mul`, `div`, `maximum`, and `minimum` take
-//! `(&self, rhs: &Self) -> Result<Self>`. Comparisons `eq`, `ne`, `lt`, `le`,
-//! `gt`, and `ge` take the same receiver/argument and return
-//! `Result<BooleanOutput<Self>>`. Scalar methods `add_scalar`, `sub_scalar`,
-//! `mul_scalar`, and `div_scalar` take `(&self, value: f64) -> Result<Self>`.
-//! Shape-preserving unary methods are `neg`, `abs`, `exp`, `ln`, `sqrt`,
-//! `square`, `relu`, `gelu`, `tanh`, and `sigmoid`, each `(&self) -> Result<Self>`.
-//! `masked_fill(&self, mask: &BooleanOutput<Self>,
-//! value: f64) -> Result<Self>` and
-//! `where_cond(&self, on_true: &T, on_false: &T) -> Result<T>` require one exact
-//! typed shape, dtype, and placement. Matching `DYN` markers still require
-//! equal actual dimensions at runtime.
+//! Rank-increasing methods and `stack` exist only through rank 7 — there is no
+//! typed rank 9 to grow into.
 //!
-//! `Add`, `Sub`, `Mul`, and `Div` sugar is strict for all owned/borrowed
-//! combinations and scalar right-hand sides. Sugar panics with the named
-//! method's structured error; named methods never panic for runtime failures.
-//! There is no implicit typed broadcasting.
+//! # Strictness
 //!
-//! The exact element bounds are: `NumericElement` for arithmetic, scalar
-//! arithmetic, maximum/minimum, neg, abs, and square; `FloatElement` for relu,
-//! gelu, exp, ln, sqrt, tanh, and sigmoid; plain `Element` for comparisons,
-//! masked fill, and where. Masks are exactly `bool`.
+//! There is **no implicit typed broadcasting** and no vector promotion or batch
+//! broadcasting in `matmul`. `broadcast_to` is the only preparation step, and it
+//! is explicit. `reshape` and `broadcast_to` are caller-targeted: the caller
+//! names the output type and passes its dims, because `DYN` values are runtime
+//! data the type cannot carry. Matching `DYN` markers still require equal actual
+//! dimensions at runtime.
 //!
-//! # Reductions (CT23)
+//! Operator sugar (`Add`/`Sub`/`Mul`/`Div`) panics with the named method's
+//! structured error; the named methods themselves never panic for a runtime
+//! failure. Sugar is a convenience for code that has already established its
+//! shapes, not an alternative error-handling path.
 //!
-//! For each of `sum`, `mean`, `max`, `min`, `var`, and `std`:
+//! # Element bounds
 //!
-//! ```text
-//! op<const AXIS: usize>(&self) -> Result<RemoveAxisOutput<Self, AXIS>>
-//! op_keepdim<const AXIS: usize>(&self) -> Result<KeepDimOutput<Self, AXIS>>
-//! op_all(&self) -> Result<ScalarOutput<Self>>
-//! ```
+//! [`NumericElement`](super::NumericElement) for arithmetic and
+//! `sum`/`mean`/`min`/`max`/`argmin`/`argmax`/conv/pool;
+//! [`FloatElement`](super::FloatElement) for the transcendentals, activations,
+//! `var`/`std`/`softmax`/`log_softmax`, and every loss; plain [`Element`] for
+//! comparisons, `masked_fill`, and `where_cond`. Masks are exactly `bool`.
+//! `Bool` has no typed reduction.
 //!
-//! `softmax<const AXIS>` and `log_softmax<const AXIS>` preserve `Self`.
-//! `argmax<const AXIS>` and `argmin<const AXIS>` return `ArgOutput<Self, AXIS>`;
-//! keepdim variants return `ArgKeepDimOutput<Self, AXIS>`. Arg outputs retain
-//! placement and use `i64`. Runtime-axis escape spellings append `_dyn`, take
-//! `axis: isize`, and return an all-`DYN` wrapper of the known output rank (or
-//! `Self` for softmax). Every method returns `Result`.
-//! Sum, mean, min, max, argmin, and argmax require `NumericElement`; var, std,
-//! softmax, and log-softmax require `FloatElement`. Bool has no typed reduction.
+//! # Geometry preserved by each family
 //!
-//! # Matmul (CT24)
-//!
-//! `matmul<Rhs>(&self, rhs: &Rhs) -> Result<MatmulOutput<Self, Rhs>>` exists only
-//! for rank-2 by rank-2, rank-3 through rank-8 by unbatched rank-2 weight, and
-//! same-rank rank-3 through rank-8 with identical typed batch prefixes. The
-//! latter compares actual batch prefixes too. There is no vector promotion and
-//! no batch broadcasting. Known contraction mismatch is a body const failure;
-//! any `DYN` contraction mismatch is a runtime shape error.
-//! Both operands require the same `NumericElement` type and placement. Their
-//! contracted const markers are independent generic constants, so a static
-//! marker and `DYN` compile and defer their relationship to the method body.
-//!
-//! # Indexing (CT25)
-//!
-//! ```text
-//! Tensor1::<LEN, i64, P>::arange(start: i64, end: i64, ctx: &DeviceCtx<P>)
-//!     -> Result<Self>
-//! Tensor1::<LEN, i64, P>::from_indices(values: Vec<i64>, ctx: &DeviceCtx<P>)
-//!     -> Result<Self>
-//! index_select<const AXIS, const LEN>(&self, indices: &Tensor1<LEN, i64, P>)
-//!     -> Result<IndexSelectOutput<Self, AXIS, Tensor1<LEN, i64, P>>>
-//! gather<const AXIS, Indices>(&self, indices: &Indices)
-//!     -> Result<GatherOutput<Self, Indices>>
-//! Tensor2::<S, S, bool, P>::causal_mask(seq_len: usize, ctx: &DeviceCtx<P>)
-//!     -> Result<Self>
-//! ```
-//!
-//! Gather returns index geometry with source element type. Index rank/axis,
-//! dtype, and placement are static; index values and bounds remain runtime.
-//! A causal mask is square. `seq_len` is checked against static `S`, or retained
-//! as the actual size when `S == DYN`.
-//!
-//! # Convolution and pooling (CT26)
-//!
-//! ```text
-//! // self is Tensor4<BATCH, INPUT_CHANNELS, H, W, E, P>
-//! conv2d<const OUT, const WEIGHT_INPUT, const KH, const KW>(
-//!        &self, weight: &Tensor4<OUT, WEIGHT_INPUT, KH, KW, E, P>,
-//!        stride: (usize, usize), padding: (usize, usize),
-//!        dilation: (usize, usize)) -> Result<Conv2dOutput<Self, Weight>>
-//! max_pool2d(&self, kernel: (usize, usize), stride: (usize, usize),
-//!            padding: (usize, usize)) -> Result<Pool2dOutput<Self>>
-//! avg_pool2d(&self, kernel: (usize, usize), stride: (usize, usize),
-//!            padding: (usize, usize)) -> Result<Pool2dOutput<Self>>
-//! ```
-//!
-//! Inputs are NCHW rank 4. Conv retains batch and output-channel markers;
-//! pooling retains batch/channel markers; computed spatial axes are `DYN`.
-//! Known channel mismatch is a body const failure and `DYN` mismatch is runtime.
-//! `INPUT_CHANNELS` and `WEIGHT_INPUT` are independent consts so static-versus-
-//! `DYN` is accepted. Conv and pool require `NumericElement`; Bool is absent.
-//!
-//! # Losses (CT27)
-//!
-//! `mse_loss(&self, target: &Self) -> Result<Tensor0<E, P>>` is strict and
-//! never broadcasts. Rank-2 float logits provide
-//! `cross_entropy<const TARGET_ROWS>(&self,
-//! targets: &Tensor1<TARGET_ROWS, i64, P>)` and
-//! `cross_entropy_ignore_index<const TARGET_ROWS>(&self,
-//! targets: &Tensor1<TARGET_ROWS, i64, P>,
-//! ignore_index: i64)`, both returning `Result<Tensor0<E, P>>`. Known row
-//! mismatch is a body const failure; `DYN` rows defer to runtime.
-//! The logits row marker and `TARGET_ROWS` are independent. All losses require
-//! `FloatElement`.
+//! Reductions come in three spellings per op — const-axis (drops the axis),
+//! `_keepdim` (replaces it with 1), and `_all` (rank 0). `argmax`/`argmin`
+//! retain placement and produce `i64`. `gather` returns the *index* geometry
+//! with the *source* element type. Conv and pool are NCHW rank 4: conv retains
+//! the batch and output-channel markers, pooling retains batch and channel, and
+//! the computed spatial axes become `DYN`. A causal mask is square, its
+//! `seq_len` checked against a static marker or retained when that marker is
+//! `DYN`.
 
 use super::device::validate_binding;
 use super::sealed::TypedTensor as SealedTypedTensor;

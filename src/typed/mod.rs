@@ -17,101 +17,52 @@
 //! instead.
 //!
 //! A body-level assertion reports `E0080` when the generic method is
-//! monomorphized. `cargo check` is not guaranteed to instantiate it; CT12 must
-//! therefore run build-required UI cases as well as ordinary check-only cases.
-//! Allocation, backend support, device availability, index values, and all
-//! deferred relationships return structured [`crate::Error`] values.
+//! monomorphized. `cargo check` is not guaranteed to instantiate it, which is
+//! why the UI suite (`tests/typed_ui.rs`) runs build-required cases alongside
+//! check-only ones. Allocation, backend support, device availability, index
+//! values, and all deferred relationships return structured [`crate::Error`]
+//! values.
 //!
-//! # Placement contract (CT11)
+//! # Placement contract
 //!
-//! The following signatures and behavior are normative. CT11 defines their
-//! inherent implementations in `typed/device.rs`:
+//! A [`Placement`](crate::typed::Placement) marker is bound to a runtime
+//! [`Device`] through [`DeviceCtx`](crate::typed::DeviceCtx). The registry is process-lifetime and
+//! keyed by `TypeId::of::<P>()`. Binding the same marker/device pair is
+//! idempotent; binding a marker to a *different* device is
+//! [`Error::InvalidArg`], because a marker that silently re-pointed would make
+//! two tensors' types claim they are co-located when they are not. A binding is
+//! inserted only after `P`'s policy accepts it and availability is probed with
+//! `Tensor::zeros((), DType::F32, &device)`.
 //!
-//! ```text
-//! DeviceCtx::<P>::bind(device: Device) -> Result<DeviceCtx<P>>
-//! DeviceCtx::<P>::device(&self) -> Device
-//! DeviceCtx::<Cpu>::cpu() -> Result<DeviceCtx<Cpu>>
-//! ```
+//! Tensors retain the canonical `Arc` and operations compare its identity
+//! defensively, so a forged binding is caught rather than trusted. Re-labeling
+//! is zero-copy and succeeds only when both canonical bindings name the same
+//! runtime device.
 //!
-//! The registry is process-lifetime and keyed by `TypeId::of::<P>()`. Binding
-//! the same marker/device pair is idempotent; a different device is
-//! `Error::InvalidArg`. A binding is inserted only after `P`'s policy accepts
-//! it and availability is probed with
-//! `Tensor::zeros((), DType::F32, &device)`. Canonical binding identity
-//! corruption is also `Error::InvalidArg`. A future public device-validation
-//! seam may replace that probe only after a separately approved contract
-//! change. Tensors retain the canonical `Arc` and operations compare its
-//! identity defensively. Re-labeling is zero-copy and succeeds only when both
-//! canonical bindings name the same runtime device:
+//! # Tensor boundary
 //!
-//! ```text
-//! tensor.relabel<Q: Placement>(self, target: &DeviceCtx<Q>)
-//!     -> Result<WithPlacement<Self, Q>>
-//! ```
+//! Every constructor validates rank, each static marker, dtype, runtime device,
+//! and canonical binding before reaching a crate-private trusted wrap seam
+//! (`tensor::checked_wrap`). That seam is never public: there is no
+//! `Deref<Target = Tensor>` and no unchecked public constructor, so a wrapper's
+//! type is always a claim the crate has checked.
 //!
-//! # Tensor boundary (CT20)
+//! Erasure, re-entry, refinement, and relabeling all preserve storage and
+//! autograd identity — they are re-descriptions of the same tensor, never
+//! copies.
 //!
-//! CT20 generates these inherent methods for every rank in the rank table.
-//! `Dims` below is `[usize; RANK]`; `Target` must have the same rank, element,
-//! and placement where the signature says so. All constructors validate rank,
-//! every static marker, dtype, runtime device, and canonical binding before
-//! using a crate-private trusted wrap seam. That seam is never public.
+//! # Core and autograd
 //!
-//! ```text
-//! TensorR::from_vec(data: Vec<E>, dims: Dims, ctx: &DeviceCtx<P>)
-//!     -> Result<Self>
-//! TensorR::try_from_dynamic(tensor: Tensor, ctx: &DeviceCtx<P>)
-//!     -> Result<Self>
-//! tensor.as_dynamic(&self) -> &Tensor
-//! tensor.into_dynamic(self) -> Tensor
-//! tensor.dims(&self) -> Dims
-//! tensor.refine<Target>(self) -> Result<Target>
-//! tensor.relabel<Q: Placement>(self, target: &DeviceCtx<Q>)
-//!     -> Result<TensorSameShape<E, Q>>
-//! tensor.erase_shape(self) -> Result<DynamicOutput<Self>>
-//! ```
+//! `detach` is deliberately fallible even though the runtime detach cannot
+//! fail, so that every named typed operation has the same `Result` shape and
+//! callers never learn which ones happen to be infallible today.
+//! Shape-preserving methods return `Self`; movement and casts go through the
+//! associated output contracts in [`ops`](crate::typed::ops).
 //!
-//! `TensorSameShape<E, Q>` above denotes the concrete wrapper of the same rank
-//! and const markers, with only its placement changed to `Q`. Erasure, re-entry,
-//! refinement, and relabeling preserve storage and autograd identity.
-//! There is no `Deref<Target = Tensor>` and no unchecked public constructor.
-//!
-//! # Core and autograd (CT28)
-//!
-//! CT28 generates these inherent methods. `detach` is deliberately fallible,
-//! matching the rule that every named typed operation returns `Result` even
-//! though the current runtime detach cannot fail. Shape-preserving methods
-//! return `Self`; movement and casts use associated output contracts.
-//!
-//! ```text
-//! tensor.detach(&self) -> Result<Self>
-//! tensor.traced(&self) -> Result<Self>                 // float E only
-//! tensor.contiguous(&self) -> Result<Self>
-//! tensor.to_dtype<F: Element>(&self) -> Result<WithElement<Self, F>>
-//! tensor.to_device<Q: Placement>(&self, target: &DeviceCtx<Q>)
-//!     -> Result<WithPlacement<Self, Q>>
-//! tensor.to_vec(&self) -> Result<Vec<E>>
-//! tensor.to_scalar(&self) -> Result<E>
-//! tensor.item(&self) -> Result<f64>
-//! tensor.backward(&self) -> Result<Grads>              // float E only
-//!
-//! pub trait TypedGradsExt {
-//!     fn wrt_typed_input<T: TypedTensor>(&self, input: &T) -> Result<T>;
-//! }
-//! ```
-//!
-//! `TypedGradsExt` is implemented for [`crate::Grads`]; its unique method name
-//! avoids inherent-method overloading. It reuses the input's canonical binding
-//! and performs checked trusted wrapping without copying or changing graph
-//! identity.
-//!
-//! # Typed prelude
-//!
-//! CT31's typed prelude inventory is exactly `DYN`, `Cpu`, `DeviceCtx`,
-//! `Placement`, `TypedTensor`, `Tensor0` through `Tensor8`, `FloatElement`,
-//! `NumericElement`, `IndexElement`, and `TypedGradsExt`, plus `Metal` only
-//! where that type is available. Doc-hidden output helpers are never prelude
-//! exports.
+//! [`TypedGradsExt`](crate::typed::TypedGradsExt) is implemented for
+//! [`crate::Grads`]; its deliberately unique method name avoids
+//! inherent-method overloading. It reuses the input's canonical binding and
+//! wraps without copying or changing graph identity.
 
 use crate::{Device, Element, Error, Result, Tensor};
 use std::fmt;
