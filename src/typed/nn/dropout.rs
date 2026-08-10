@@ -1,4 +1,4 @@
-use super::{Forward, Mode, Module, ToDType, ToDevice, TypedVisitor, TypedVisitorMut};
+use super::{Forward, Mode, ToDType, ToDevice};
 use crate::nn::Forward as RuntimeForward;
 use crate::typed::tensor::checked_wrap;
 use crate::typed::{FloatElement, Placement, TypedTensor};
@@ -10,7 +10,12 @@ use std::sync::Arc;
 /// The adapter owns exactly the runtime layer's split RNG stream. It has no
 /// parameters or tensor buffers, and reads training behavior independently of
 /// recording through [`Mode`].
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Dropout {
+    // The runtime layer owns only an RNG stream and a probability, so the walk
+    // is empty; the derive is still what guarantees that a typed leaf added
+    // here later would have to be classified rather than silently skipped.
+    #[typed_module(skip)]
     runtime: crate::nn::Dropout,
 }
 
@@ -51,11 +56,6 @@ where
             "typed::nn::Dropout::forward",
         )
     }
-}
-
-impl Module for Dropout {
-    fn visit(&self, _visitor: &mut TypedVisitor<'_>) {}
-    fn visit_mut(&mut self, _visitor: &mut TypedVisitorMut<'_>) {}
 }
 
 impl<Q: Placement> ToDevice<Q> for Dropout {

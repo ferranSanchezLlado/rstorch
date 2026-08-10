@@ -1,4 +1,4 @@
-use super::{Forward, Mode, Module, ToDType, ToDevice, TypedVisitor, TypedVisitorMut};
+use super::{Forward, Mode, ToDType, ToDevice};
 use crate::Result;
 use crate::nn::Forward as RuntimeForward;
 use crate::typed::tensor::checked_wrap;
@@ -16,9 +16,11 @@ use std::sync::Arc;
 /// let x = Tensor1::<2, i64>::from_vec(vec![1, -1], [2], &ctx).unwrap();
 /// let _ = Relu.forward(&x, Mode::EVAL);
 /// ```
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Relu;
 
 /// A shape-preserving typed exact Gaussian error linear unit.
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Gelu;
 
 impl<T> Forward<T> for Relu
@@ -53,16 +55,6 @@ where
             "typed::nn::Gelu::forward",
         )
     }
-}
-
-impl Module for Relu {
-    fn visit(&self, _visitor: &mut TypedVisitor<'_>) {}
-    fn visit_mut(&mut self, _visitor: &mut TypedVisitorMut<'_>) {}
-}
-
-impl Module for Gelu {
-    fn visit(&self, _visitor: &mut TypedVisitor<'_>) {}
-    fn visit_mut(&mut self, _visitor: &mut TypedVisitorMut<'_>) {}
 }
 
 macro_rules! impl_stateless_layer {

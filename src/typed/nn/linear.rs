@@ -1,4 +1,4 @@
-use super::{Forward, Mode, Module, ToDType, ToDevice, TypedParam, TypedVisitor, TypedVisitorMut};
+use super::{Forward, Mode, ToDType, ToDevice, TypedParam};
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
 use crate::typed::tensor::checked_wrap;
 use crate::typed::{
@@ -56,6 +56,7 @@ use std::sync::Arc;
 /// let runtime = rstorch::nn::Linear::new(3, 2, &Device::Cpu, &mut Rng::seed(0)).unwrap();
 /// let _ = Linear::<3, 2>::from_runtime(runtime, &ctx);
 /// ```
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Linear<
     const IN: usize,
     const OUT: usize,
@@ -201,24 +202,6 @@ impl_linear_forward!(Tensor5, [D0, D1, D2, D3], INPUT);
 impl_linear_forward!(Tensor6, [D0, D1, D2, D3, D4], INPUT);
 impl_linear_forward!(Tensor7, [D0, D1, D2, D3, D4, D5], INPUT);
 impl_linear_forward!(Tensor8, [D0, D1, D2, D3, D4, D5, D6], INPUT);
-
-impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> Module
-    for Linear<IN, OUT, E, P>
-{
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("weight", &self.weight);
-        if let Some(bias) = &self.bias {
-            visitor.param("bias", bias);
-        }
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("weight", &mut self.weight);
-        if let Some(bias) = &mut self.bias {
-            visitor.param("bias", bias);
-        }
-    }
-}
 
 impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement, Q: Placement> ToDevice<Q>
     for Linear<IN, OUT, E, P>

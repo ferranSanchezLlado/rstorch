@@ -1,4 +1,4 @@
-use super::{Forward, Mode, Module, ToDType, ToDevice, TypedParam, TypedVisitor, TypedVisitorMut};
+use super::{Forward, Mode, ToDType, ToDevice, TypedParam};
 use crate::typed::device::validate_binding;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
 use crate::typed::tensor::checked_wrap;
@@ -49,6 +49,7 @@ embedding_inputs! {
 }
 
 /// A typed learned lookup table with a static vocabulary and row width.
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Embedding<
     const VOCAB: usize,
     const WIDTH: usize,
@@ -165,18 +166,6 @@ impl<const VOCAB: usize, const WIDTH: usize, E: FloatElement, P: Placement>
             Arc::clone(table.binding()),
             "typed::nn::Embedding::lookup",
         )
-    }
-}
-
-impl<const VOCAB: usize, const WIDTH: usize, E: FloatElement, P: Placement> Module
-    for Embedding<VOCAB, WIDTH, E, P>
-{
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("weight", &self.weight);
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("weight", &mut self.weight);
     }
 }
 
