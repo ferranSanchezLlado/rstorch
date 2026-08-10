@@ -1,17 +1,21 @@
-use super::{Forward, Mode, Module, ToDType, ToDevice, TypedVisitor, TypedVisitorMut};
+use super::{Forward, Mode, ToDType, ToDevice};
 use crate::nn::Forward as RuntimeForward;
-use crate::typed::{
-    FloatElement, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4, Tensor5, Tensor6,
-    Tensor7, Tensor8,
-};
+use crate::typed::tensor::checked_wrap;
+use crate::typed::{FloatElement, Placement, TypedTensor};
 use crate::{Result, Rng};
+use std::sync::Arc;
 
 /// A shape-preserving typed adapter over runtime inverted dropout.
 ///
 /// The adapter owns exactly the runtime layer's split RNG stream. It has no
 /// parameters or tensor buffers, and reads training behavior independently of
 /// recording through [`Mode`].
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Dropout {
+    // The runtime layer owns only an RNG stream and a probability, so the walk
+    // is empty; the derive is still what guarantees that a typed leaf added
+    // here later would have to be classified rather than silently skipped.
+    #[typed_module(skip)]
     runtime: crate::nn::Dropout,
 }
 
@@ -37,35 +41,21 @@ impl Dropout {
     }
 }
 
-macro_rules! impl_dropout_forward {
-    ($(($name:ident, $rank:literal, [$($dim:ident),*])),+ $(,)?) => {
-        $(
-            impl<$(const $dim: usize,)* E: FloatElement, P: Placement>
-                Forward<$name<$($dim,)* E, P>> for Dropout
-            {
-                type Output = $name<$($dim,)* E, P>;
+impl<T> Forward<T> for Dropout
+where
+    T: TypedTensor,
+    T::Elem: FloatElement,
+{
+    type Output = T;
 
-                fn forward(
-                    &mut self,
-                    input: &$name<$($dim,)* E, P>,
-                    mode: Mode,
-                ) -> Result<Self::Output> {
-                    let output = self.runtime.forward(input.as_dynamic(), mode)?;
-                    $name::try_from_dynamic(
-                        output,
-                        &super::linear::context_from(input, "typed::nn::Dropout::forward")?,
-                    )
-                }
-            }
-        )+
-    };
-}
-
-crate::typed::typed_rank_table!(impl_dropout_forward);
-
-impl Module for Dropout {
-    fn visit(&self, _visitor: &mut TypedVisitor<'_>) {}
-    fn visit_mut(&mut self, _visitor: &mut TypedVisitorMut<'_>) {}
+    fn forward(&mut self, input: &T, mode: Mode) -> Result<T> {
+        let output = RuntimeForward::forward(&mut self.runtime, input.dynamic(), mode)?;
+        checked_wrap(
+            output,
+            Arc::clone(input.binding()),
+            "typed::nn::Dropout::forward",
+        )
+    }
 }
 
 impl<Q: Placement> ToDevice<Q> for Dropout {

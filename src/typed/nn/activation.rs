@@ -1,10 +1,9 @@
-use super::{Forward, Mode, Module, ToDType, ToDevice, TypedVisitor, TypedVisitorMut};
+use super::{Forward, Mode, ToDType, ToDevice};
 use crate::Result;
 use crate::nn::Forward as RuntimeForward;
-use crate::typed::{
-    FloatElement, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4, Tensor5, Tensor6,
-    Tensor7, Tensor8,
-};
+use crate::typed::tensor::checked_wrap;
+use crate::typed::{FloatElement, Placement, TypedTensor};
+use std::sync::Arc;
 
 /// A shape-preserving typed rectified linear unit.
 ///
@@ -17,75 +16,46 @@ use crate::typed::{
 /// let x = Tensor1::<2, i64>::from_vec(vec![1, -1], [2], &ctx).unwrap();
 /// let _ = Relu.forward(&x, Mode::EVAL);
 /// ```
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Relu;
 
 /// A shape-preserving typed exact Gaussian error linear unit.
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Gelu;
 
-macro_rules! impl_activation_forward {
-    ($(($name:ident, $rank:literal, [$($dim:ident),*])),+ $(,)?) => {
-        $(
-            impl<$(const $dim: usize,)* E: FloatElement, P: Placement>
-                Forward<$name<$($dim,)* E, P>> for Relu
-            {
-                type Output = $name<$($dim,)* E, P>;
+impl<T> Forward<T> for Relu
+where
+    T: TypedTensor,
+    T::Elem: FloatElement,
+{
+    type Output = T;
 
-                fn forward(
-                    &mut self,
-                    input: &$name<$($dim,)* E, P>,
-                    mode: Mode,
-                ) -> Result<Self::Output> {
-                    let output = RuntimeForward::forward(
-                        &mut crate::nn::Relu,
-                        input.as_dynamic(),
-                        mode,
-                    )?;
-                    $name::try_from_dynamic(
-                        output,
-                        &super::linear::context_from(input, "typed::nn::Relu::forward")?,
-                    )
-                }
-            }
-
-            impl<$(const $dim: usize,)* E: FloatElement, P: Placement>
-                Forward<$name<$($dim,)* E, P>> for Gelu
-            {
-                type Output = $name<$($dim,)* E, P>;
-
-                fn forward(
-                    &mut self,
-                    input: &$name<$($dim,)* E, P>,
-                    mode: Mode,
-                ) -> Result<Self::Output> {
-                    let output = RuntimeForward::forward(
-                        &mut crate::nn::Gelu,
-                        input.as_dynamic(),
-                        mode,
-                    )?;
-                    $name::try_from_dynamic(
-                        output,
-                        &super::linear::context_from(input, "typed::nn::Gelu::forward")?,
-                    )
-                }
-            }
-        )+
-    };
+    fn forward(&mut self, input: &T, mode: Mode) -> Result<T> {
+        let output = RuntimeForward::forward(&mut crate::nn::Relu, input.dynamic(), mode)?;
+        checked_wrap(
+            output,
+            Arc::clone(input.binding()),
+            "typed::nn::Relu::forward",
+        )
+    }
 }
 
-crate::typed::typed_rank_table!(impl_activation_forward);
+impl<T> Forward<T> for Gelu
+where
+    T: TypedTensor,
+    T::Elem: FloatElement,
+{
+    type Output = T;
 
-macro_rules! impl_empty_module {
-    ($($ty:ty),+ $(,)?) => {
-        $(
-            impl Module for $ty {
-                fn visit(&self, _visitor: &mut TypedVisitor<'_>) {}
-                fn visit_mut(&mut self, _visitor: &mut TypedVisitorMut<'_>) {}
-            }
-        )+
-    };
+    fn forward(&mut self, input: &T, mode: Mode) -> Result<T> {
+        let output = RuntimeForward::forward(&mut crate::nn::Gelu, input.dynamic(), mode)?;
+        checked_wrap(
+            output,
+            Arc::clone(input.binding()),
+            "typed::nn::Gelu::forward",
+        )
+    }
 }
-
-impl_empty_module!(Relu, Gelu);
 
 macro_rules! impl_stateless_layer {
     ($($ty:ty),+ $(,)?) => {

@@ -5,10 +5,7 @@
 //! two axes and owns `weight` and `bias` parameters of shape `[3, 4]`.
 //! [`BatchNorm2d`] uses its channel count directly as a const marker.
 
-use super::{
-    Forward, Mode, Module, ToDType, ToDevice, TypedBuffer, TypedParam, TypedVisitor,
-    TypedVisitorMut,
-};
+use super::{Forward, Mode, ToDType, ToDevice, TypedBuffer, TypedParam};
 use crate::nn::{check_eps, check_momentum, check_normalized_shape, check_suffix};
 use crate::typed::device::validate_binding;
 use crate::typed::ops::{WithElement, WithPlacement};
@@ -83,6 +80,7 @@ where
 /// let input = Tensor2::<2, 3>::from_vec(vec![0.0; 6], [2, 3], &ctx).unwrap();
 /// let _ = norm.forward(&input, Mode::EVAL);
 /// ```
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct LayerNorm<S>
 where
     S: TypedTensor,
@@ -90,6 +88,7 @@ where
 {
     weight: TypedParam<S>,
     bias: TypedParam<S>,
+    #[typed_module(skip)]
     eps: f64,
 }
 
@@ -187,21 +186,6 @@ where
     }
 }
 
-impl<S> Module for LayerNorm<S>
-where
-    S: TypedTensor,
-    S::Elem: FloatElement,
-{
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("weight", &self.weight);
-        visitor.param("bias", &self.bias);
-    }
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("weight", &mut self.weight);
-        visitor.param("bias", &mut self.bias);
-    }
-}
-
 impl<S, Q> ToDevice<Q> for LayerNorm<S>
 where
     S: TypedTensor + WithPlacement<Q>,
@@ -248,12 +232,14 @@ where
 /// let input = Tensor3::<2, 3, 5>::from_vec(vec![0.0; 30], [2, 3, 5], &ctx).unwrap();
 /// let _ = norm.forward(&input, Mode::EVAL);
 /// ```
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct RMSNorm<S>
 where
     S: TypedTensor,
     S::Elem: FloatElement,
 {
     weight: TypedParam<S>,
+    #[typed_module(skip)]
     eps: f64,
 }
 
@@ -325,19 +311,6 @@ where
     }
 }
 
-impl<S> Module for RMSNorm<S>
-where
-    S: TypedTensor,
-    S::Elem: FloatElement,
-{
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("weight", &self.weight);
-    }
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("weight", &mut self.weight);
-    }
-}
-
 impl<S, Q> ToDevice<Q> for RMSNorm<S>
 where
     S: TypedTensor + WithPlacement<Q>,
@@ -383,12 +356,15 @@ where
 /// let input = Tensor4::<1, 2, 4, 4>::from_vec(vec![0.0; 32], [1, 2, 4, 4], &ctx).unwrap();
 /// let _ = norm.forward(&input, Mode::EVAL);
 /// ```
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct BatchNorm2d<const C: usize, E: FloatElement = f32, P: Placement = crate::typed::Cpu> {
     weight: TypedParam<Tensor1<C, E, P>>,
     bias: TypedParam<Tensor1<C, E, P>>,
     running_mean: TypedBuffer<Tensor1<C, E, P>>,
     running_var: TypedBuffer<Tensor1<C, E, P>>,
+    #[typed_module(skip)]
     eps: f64,
+    #[typed_module(skip)]
     momentum: f64,
 }
 
@@ -519,21 +495,6 @@ where
             self.running_var.set(next_var)?;
         }
         checked_wrap(output, Arc::clone(input.binding()), OP)
-    }
-}
-
-impl<const C: usize, E: FloatElement, P: Placement> Module for BatchNorm2d<C, E, P> {
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("weight", &self.weight);
-        visitor.param("bias", &self.bias);
-        visitor.buffer("running_mean", &self.running_mean);
-        visitor.buffer("running_var", &self.running_var);
-    }
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("weight", &mut self.weight);
-        visitor.param("bias", &mut self.bias);
-        visitor.buffer("running_mean", &mut self.running_mean);
-        visitor.buffer("running_var", &mut self.running_var);
     }
 }
 

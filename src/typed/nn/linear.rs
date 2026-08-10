@@ -1,7 +1,9 @@
-use super::{Forward, Mode, Module, ToDType, ToDevice, TypedParam, TypedVisitor, TypedVisitorMut};
+use super::{Forward, Mode, ToDType, ToDevice, TypedParam};
+use crate::typed::sealed::TypedTensor as SealedTypedTensor;
+use crate::typed::tensor::checked_wrap;
 use crate::typed::{
     DYN, DeviceCtx, FloatElement, NumericElement, Placement, Tensor1, Tensor2, Tensor3, Tensor4,
-    Tensor5, Tensor6, Tensor7, Tensor8, TypedTensor,
+    Tensor5, Tensor6, Tensor7, Tensor8,
 };
 use crate::{DType, Error, Result, Rng};
 use std::sync::Arc;
@@ -54,6 +56,7 @@ use std::sync::Arc;
 /// let runtime = rstorch::nn::Linear::new(3, 2, &Device::Cpu, &mut Rng::seed(0)).unwrap();
 /// let _ = Linear::<3, 2>::from_runtime(runtime, &ctx);
 /// ```
+#[derive(rstorch::typed::nn::TypedModule)]
 pub struct Linear<
     const IN: usize,
     const OUT: usize,
@@ -94,6 +97,24 @@ impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> Linear<IN
         let weight = TypedParam::new(weight)?;
         let bias = bias.map(TypedParam::new).transpose()?;
         Ok(Self { weight, bias })
+    }
+
+    /// Seals an exact pair of typed leaves, whose values the caller chose.
+    ///
+    /// `MultiHeadAttention` needs this: its four projections are structurally
+    /// `Linear<EMBED, EMBED, ..>`, but their initial values must stay the
+    /// Xavier-uniform weights of the runtime attention layer they are read
+    /// from — `√(6 / (in + out))`, not the Kaiming-uniform `√(6 / in)` that
+    /// [`new`](Self::new) inherits from [`crate::nn::Linear`]. For a square
+    /// projection those differ by a factor of `√2`.
+    pub(super) fn from_typed_leaves(
+        weight: Tensor2<OUT, IN, E, P>,
+        bias: Option<Tensor1<OUT, E, P>>,
+    ) -> Result<Self> {
+        Ok(Self {
+            weight: TypedParam::new(weight)?,
+            bias: bias.map(TypedParam::new).transpose()?,
+        })
     }
 
     /// Removes the bias without changing the weight or any RNG stream.
@@ -147,17 +168,6 @@ fn validate_marker(marker: usize, actual: usize, name: &str, op: &'static str) -
     Ok(())
 }
 
-pub(super) fn context_from<T: TypedTensor>(
-    input: &T,
-    op: &'static str,
-) -> Result<DeviceCtx<T::Placement>> {
-    crate::typed::device::validate_binding::<T::Placement>(input.binding(), op)?;
-    Ok(DeviceCtx {
-        binding: Arc::clone(input.binding()),
-        marker: std::marker::PhantomData,
-    })
-}
-
 macro_rules! impl_linear_forward {
     ($name:ident, [$($leading:ident),+], $input:ident) => {
         impl<
@@ -191,9 +201,10 @@ macro_rules! impl_linear_forward {
                     None => Ok(output),
                     Some(bias) => {
                         let dynamic = output.as_dynamic().add(bias.get(mode)?.as_dynamic())?;
-                        Self::Output::try_from_dynamic(
+                        checked_wrap(
                             dynamic,
-                            &context_from(input, "typed::nn::Linear::forward")?,
+                            Arc::clone(input.binding()),
+                            "typed::nn::Linear::forward",
                         )
                     }
                 }
@@ -209,24 +220,6 @@ impl_linear_forward!(Tensor5, [D0, D1, D2, D3], INPUT);
 impl_linear_forward!(Tensor6, [D0, D1, D2, D3, D4], INPUT);
 impl_linear_forward!(Tensor7, [D0, D1, D2, D3, D4, D5], INPUT);
 impl_linear_forward!(Tensor8, [D0, D1, D2, D3, D4, D5, D6], INPUT);
-
-impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> Module
-    for Linear<IN, OUT, E, P>
-{
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("weight", &self.weight);
-        if let Some(bias) = &self.bias {
-            visitor.param("bias", bias);
-        }
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("weight", &mut self.weight);
-        if let Some(bias) = &mut self.bias {
-            visitor.param("bias", bias);
-        }
-    }
-}
 
 impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement, Q: Placement> ToDevice<Q>
     for Linear<IN, OUT, E, P>
