@@ -1,7 +1,9 @@
 use super::{Forward, Mode, Module, ToDType, ToDevice, TypedParam, TypedVisitor, TypedVisitorMut};
+use crate::typed::sealed::TypedTensor as SealedTypedTensor;
+use crate::typed::tensor::checked_wrap;
 use crate::typed::{
     DYN, DeviceCtx, FloatElement, NumericElement, Placement, Tensor1, Tensor2, Tensor3, Tensor4,
-    Tensor5, Tensor6, Tensor7, Tensor8, TypedTensor,
+    Tensor5, Tensor6, Tensor7, Tensor8,
 };
 use crate::{DType, Error, Result, Rng};
 use std::sync::Arc;
@@ -147,17 +149,6 @@ fn validate_marker(marker: usize, actual: usize, name: &str, op: &'static str) -
     Ok(())
 }
 
-pub(super) fn context_from<T: TypedTensor>(
-    input: &T,
-    op: &'static str,
-) -> Result<DeviceCtx<T::Placement>> {
-    crate::typed::device::validate_binding::<T::Placement>(input.binding(), op)?;
-    Ok(DeviceCtx {
-        binding: Arc::clone(input.binding()),
-        marker: std::marker::PhantomData,
-    })
-}
-
 macro_rules! impl_linear_forward {
     ($name:ident, [$($leading:ident),+], $input:ident) => {
         impl<
@@ -191,9 +182,10 @@ macro_rules! impl_linear_forward {
                     None => Ok(output),
                     Some(bias) => {
                         let dynamic = output.as_dynamic().add(bias.get(mode)?.as_dynamic())?;
-                        Self::Output::try_from_dynamic(
+                        checked_wrap(
                             dynamic,
-                            &context_from(input, "typed::nn::Linear::forward")?,
+                            Arc::clone(input.binding()),
+                            "typed::nn::Linear::forward",
                         )
                     }
                 }
