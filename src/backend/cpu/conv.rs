@@ -40,6 +40,7 @@
 //! the requested output shape and geometry explicit without exposing this
 //! module's [`Conv2dGeometry`] through the backend contract.
 
+use super::cpu_storage;
 use crate::backend::conv_geometry::Conv2dGeometry;
 use crate::backend::cpu::acc::NumAcc;
 use crate::backend::cpu::dispatch::{CpuElement, dispatch_numeric};
@@ -49,7 +50,6 @@ use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::Storage;
-use super::cpu_storage;
 
 /// The storage index of logical element `(a, b, c, d)` of a rank-4 view.
 fn idx4(layout: &Layout, a: usize, b: usize, c: usize, d: usize) -> usize {
@@ -90,10 +90,7 @@ pub(crate) fn conv(op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Re
                 params,
             )?;
             require_same_dtype("conv2d", input, weight)?;
-            let (a, b) = (
-                cpu_storage(input),
-                cpu_storage(weight),
-            );
+            let (a, b) = (cpu_storage(input), cpu_storage(weight));
             dispatch_numeric!(input.dtype(), "conv2d", input.device(), E => {
                 Ok(E::storage(conv2d_forward_generic(
                     E::slice(a),
@@ -699,8 +696,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::CpuStorage;
     use crate::dtype::DType;
+    use crate::storage::CpuStorage;
     use std::sync::Arc;
 
     const IDENTITY: Conv2dParams = Conv2dParams {

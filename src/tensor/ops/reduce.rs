@@ -273,7 +273,15 @@ fn axis_reduce(
         }
         ReduceOp::Mean => {
             let scale = 1.0 / src_dims[axis] as f64;
-            Box::new(move |g| Ok(vec![Some(spread(g, axis, keepdim, &src_dims, Some(scale))?)]))
+            Box::new(move |g| {
+                Ok(vec![Some(spread(
+                    g,
+                    axis,
+                    keepdim,
+                    &src_dims,
+                    Some(scale),
+                )?)])
+            })
         }
         ReduceOp::Max | ReduceOp::Min => {
             let xd = x.detach();

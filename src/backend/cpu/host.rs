@@ -7,13 +7,13 @@
 
 use std::sync::Arc;
 
+use super::cpu_storage;
 use crate::backend::View;
 use crate::backend::cpu::dispatch::{CpuElement, dispatch_all};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::storage::{CpuStorage, Storage};
-use super::cpu_storage;
 
 /// Incremental row-major odometer over `dims`, carrying one running storage
 /// index per *lane*.

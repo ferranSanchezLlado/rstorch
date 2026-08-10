@@ -12,6 +12,7 @@
 //! sum-saturation bug). The reduced axis is dropped from the result shape;
 //! the op layer re-inserts it for the `_keepdim` spellings.
 
+use super::cpu_storage;
 use crate::backend::cpu::acc::NumAcc;
 use crate::backend::cpu::dispatch::{CpuElement, dispatch_numeric};
 use crate::backend::{ArgReduceOp, ReduceOp, View};
@@ -20,7 +21,6 @@ use crate::error::Result;
 use crate::layout::Layout;
 use crate::shape::Shape;
 use crate::storage::Storage;
-use super::cpu_storage;
 
 /// Enumerate the storage indices of the `axis` line through `x` whose other
 /// coordinates are fixed by `outer` (a row-major index into the shape with
@@ -190,11 +190,11 @@ pub(crate) fn arg_reduce(op: ArgReduceOp, x: View<'_>, axis: usize) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::CpuStorage;
     use crate::backend::View;
     use crate::dtype::DType;
     use crate::error::Error;
     use crate::layout::Layout;
+    use crate::storage::CpuStorage;
     use std::sync::Arc;
 
     // ----- helpers ------------------------------------------------------

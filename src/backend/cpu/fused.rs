@@ -5,6 +5,7 @@
 //! Optimizer variants use the multi-output encoding documented on
 //! [`BackendOps::fused`](crate::backend::BackendOps::fused).
 
+use super::cpu_storage;
 use crate::backend::cpu::acc::{FloatAcc, NumAcc};
 use crate::backend::cpu::dispatch::{CpuElement, CpuFloat, dispatch_float};
 use crate::backend::{FusedOp, View};
@@ -12,7 +13,6 @@ use crate::dtype::{DType, Element};
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::storage::Storage;
-use super::cpu_storage;
 
 /// See [`BackendOps::fused`](crate::backend::BackendOps::fused).
 ///
@@ -474,11 +474,8 @@ fn layer_norm(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         }
     };
 
-    let [x_values, weight_values, bias_values] = [
-        cpu_storage(*x),
-        cpu_storage(*weight),
-        cpu_storage(*bias),
-    ];
+    let [x_values, weight_values, bias_values] =
+        [cpu_storage(*x), cpu_storage(*weight), cpu_storage(*bias)];
     let (output, stats) = dispatch_float!(x.dtype(), E => {
         let (output, stats) = layer_norm_generic::<E>(
             E::slice(x_values),
