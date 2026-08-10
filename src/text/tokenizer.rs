@@ -187,7 +187,7 @@ impl CharTokenizer {
     ///
     /// Returns [`Error::Tokenizer`] if an id is not a
     /// special token and does not map to a character in the vocabulary. This
-    /// is the strict replacement for v2's silent skip.
+    /// is an error rather than a silently skipped token.
     pub fn decode(&self, ids: &[usize]) -> Result<String> {
         let mut out = String::new();
         for &id in ids {
@@ -341,8 +341,8 @@ impl Tokenizer for BpeTokenizer {
             };
             bytes.extend_from_slice(piece);
         }
-        // Strict UTF-8: v2 used `String::from_utf8_lossy`, which is the defect
-        // recorded by 16.13. Invalid byte sequences are now an error.
+        // Strict UTF-8: an invalid byte sequence is an error, never a
+        // `U+FFFD` replacement.
         String::from_utf8(bytes).map_err(|err| {
             tokenizer_error(format!(
                 "decoded bytes are not valid UTF-8 at offset {}",
@@ -423,8 +423,6 @@ fn apply_pair_merge(symbols: &[usize], pair: (usize, usize), merged_id: usize) -
 mod tests {
     use super::*;
 
-    // ---- ported v2 tests (adapted to the fallible surface) --------------
-
     #[test]
     fn char_tokenizer_round_trips_with_special_tokens() {
         let tokenizer = CharTokenizer::from_text("hello");
@@ -478,8 +476,6 @@ mod tests {
         assert_eq!(tokenizer.bos_id(), None);
         assert_eq!(tokenizer.eos_id(), None);
     }
-
-    // ---- new fallibility tests (16.13 WS3) ------------------------------
 
     #[test]
     fn char_unknown_char_encodes_to_unk_and_decodes_to_question_mark() {

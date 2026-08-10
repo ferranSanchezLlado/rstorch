@@ -28,8 +28,8 @@
 //! # Numerics
 //!
 //! - Accumulation happens in the wide [`Acc`](crate::dtype::Element::Acc)
-//!   type inside the kernel, with a single cast at output (the fix for the v2
-//!   f16 sum-saturation bug).
+//!   type inside the kernel, with a single cast at output, so a long `f16`
+//!   sum cannot saturate to infinity on its way to an in-range total.
 //! - `var`/`std` use **`correction = 1`** (Bessel's correction), PyTorch's
 //!   default, and are float-only.
 //! - `softmax`/`log_softmax` use the standard max-shifted formulas, so a row

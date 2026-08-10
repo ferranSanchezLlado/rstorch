@@ -36,7 +36,7 @@
 //!   [`Acc`](crate::dtype::Element::Acc) buffer from the base tensor,
 //!   accumulate every contribution there, and narrow exactly once at output —
 //!   so an `f16` embedding gradient with thousands of repeated rows does not
-//!   saturate (the v2 sum-saturation bug, fixed by contract).
+//!   saturate.
 
 use super::cpu_storage;
 use super::host::{Walk, dense_offset};

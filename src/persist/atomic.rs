@@ -1,4 +1,4 @@
-//! Atomic temp-and-rename saves (16.14 WS4).
+//! Atomic temp-and-rename saves.
 //!
 //! A naive `File::create(path)` truncates an existing valid artifact the
 //! instant it opens — a crash mid-write then leaves a corrupt file where a

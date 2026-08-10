@@ -21,9 +21,8 @@
 //! re-exported flat).
 //!
 //! Every mutating helper validates the whole walk before it swaps anything
-//! (the in-memory sibling of [`persist::stage`](crate::persist::stage), 16.14
-//! WS5), so a rejected load or a failed conversion leaves the model exactly as
-//! it was.
+//! (the in-memory sibling of [`persist::stage`](crate::persist::stage)), so a
+//! rejected load or a failed conversion leaves the model exactly as it was.
 
 use crate::device::Device;
 use crate::dtype::DType;

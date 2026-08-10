@@ -1,16 +1,14 @@
 //! Matmul CPU kernel.
 //!
-//! Ported v2 loops
-//! adapted to the `Element::Acc` contract, batched over leading dims.
-//! Semantics on [`BackendOps`](crate::backend::BackendOps).
+//! Accumulation follows the `Element::Acc` contract, batched over leading
+//! dims. Semantics on [`BackendOps`](crate::backend::BackendOps).
 //!
 //! Both operands are rank ≥ 2. The trailing two axes are the matrix axes
 //! (`[..., m, k]` × `[..., k, n]` → `[..., m, n]`); the leading axes are
 //! batch dims that broadcast against each other under NumPy/PyTorch rules
 //! (right-aligned; a size-1 batch axis repeats). Inner products accumulate in
 //! the wide [`Acc`](crate::dtype::Element::Acc) type and cast back to the
-//! element type exactly once per output element — the implemented fix for the
-//! v2 native paths, which accumulated in dtype. The walk is stride-aware, so
+//! element type exactly once per output element. The walk is stride-aware, so
 //! transposed / narrowed / broadcast operand views are handled directly with
 //! no pre-materialization.
 //!
@@ -18,8 +16,8 @@
 //!
 //! A naive `i` → `j` → `p` nest makes the innermost step
 //! `rhs[rhs_col + p * rhs_k_stride]`, striding `rhs` by `n` per multiply. That
-//! is v2's hotspot 1 (~1.2 G MAC/s at 1024²), so the order is instead picked
-//! from the `rhs` strides:
+//! the dominant cost at 1024², so the order is instead picked from the `rhs`
+//! strides:
 //!
 //! - **`rhs_n_stride == 1`** (row-major `rhs`, the plain `a @ b` case) —
 //!   `i` → `p` → `j`, accumulating output rows against consecutive `rhs`

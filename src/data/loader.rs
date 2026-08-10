@@ -1,12 +1,10 @@
 //! [`DataLoader`]: the one loader — order and batching, and
 //! nothing else.
 //!
-//! v2 shipped `DataLoader` *and* `StaticDataLoader`, three collators in two
-//! batch-axis flavors, eight batch aliases and a `Sampler` trait, because a
-//! batch's shape was part of its type. Here the batch is whatever the
-//! [`Dataset`] says it is, so the loader's entire job is choosing item
-//! positions and grouping them: `new(ds, 64)`, optionally `.shuffle(seed)`,
-//! then [`batches`](DataLoader::batches).
+//! There is no `Sampler` trait and no family of collators: the batch is
+//! whatever the [`Dataset`] says it is, so the loader's entire job is choosing
+//! item positions and grouping them. `new(ds, 64)`, optionally
+//! `.shuffle(seed)`, then [`batches`](DataLoader::batches).
 
 use crate::data::dataset::Dataset;
 use crate::error::Result;
@@ -233,8 +231,7 @@ impl<D: Dataset> DataLoader<D> {
 ///
 /// The golden-ratio multiple decorrelates neighboring epochs before
 /// [`Rng::seed`] diffuses the result through splitmix64, so epoch 0 and epoch
-/// 1 are unrelated streams rather than one stream a step apart. Ported from
-/// v2's sampler, which needed the same property.
+/// 1 are unrelated streams rather than one stream a step apart.
 fn epoch_seed(seed: u64, epoch: u64) -> u64 {
     seed ^ epoch.wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }

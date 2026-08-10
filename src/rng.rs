@@ -3,10 +3,10 @@
 //! `&mut Rng`, and RNG state is checkpointed alongside optimizer state for
 //! resumable training.
 //!
-//! The generator is the post-16.2 `SmallRng` ported from v2: a `u64` register seeded through
-//! splitmix64, advanced by an LCG whose output word is scrambled into the
-//! returned `u64`. The original untested LCG from v0.x is deliberately **not**
-//! carried forward.
+//! The generator is a `u64` register seeded through splitmix64, advanced by an
+//! LCG whose output word is scrambled into the returned `u64`. The scrambling
+//! is the point: a bare LCG's low bits are notoriously non-random, and the
+//! statistical tests below are what pin that down.
 
 /// The splitmix64 mixing function used to diffuse a raw seed (or a raw draw,
 /// when splitting) into a well-separated `u64` register. Low-entropy inputs
@@ -108,8 +108,6 @@ impl Rng {
 mod tests {
     use super::Rng;
 
-    // ---- ported v2 tests (adapted to the frozen `Rng` API) --------------
-
     #[test]
     fn nearby_seeds_produce_different_streams() {
         let mut a = Rng::seed(1);
@@ -172,8 +170,8 @@ mod tests {
     // ---- determinism fixture ------------------------------------------
 
     /// Fixed seed reproduces an exact word sequence. These golden values pin
-    /// the ported splitmix64-seeded generator; any change to the algorithm
-    /// (a checkpoint-incompatible change) must fail here loudly.
+    /// the generator; any change to the algorithm is checkpoint-incompatible
+    /// and must fail here loudly.
     #[test]
     fn fixed_seed_reproduces_exact_sequence() {
         let mut rng = Rng::seed(0x00C0_FFEE);

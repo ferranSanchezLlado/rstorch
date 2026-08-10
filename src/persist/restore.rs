@@ -1,4 +1,4 @@
-//! Staged, all-or-nothing restore surface (16.14 WS5).
+//! Staged, all-or-nothing restore surface.
 //!
 //! Loading a checkpoint into a live model must be transactional: if *any*
 //! parameter fails to match, the model, optimizer, RNG, and caches must be

@@ -1,4 +1,4 @@
-//! A minimal versioned checkpoint envelope (16.14 WS2).
+//! A minimal versioned checkpoint envelope.
 //!
 //! A full training checkpoint is more than a bag of tensors: it also carries
 //! model **config**, **optimizer** hyperparameters/step clocks, and **RNG**
@@ -13,7 +13,7 @@
 //!   version and reject unknown families/majors loudly.
 //!
 //! The magic is independent of any internal epoch number, and the reader is
-//! permanent for every shipped major version (16.14 WS2). Section *values* are
+//! permanent for every shipped major version. Section *values* are
 //! opaque strings here — the `optim`/`nn` layers decide their own encoding;
 //! the envelope only guarantees they round-trip verbatim.
 

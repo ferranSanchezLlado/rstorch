@@ -81,7 +81,7 @@ impl DatasetHub {
 
     /// The default cache location.
     ///
-    /// Resolution order (keeping v2's convention): the `RSTORCH_DATA`
+    /// Resolution order: the `RSTORCH_DATA`
     /// environment variable, then `$HOME/.cache/rstorch`, then the
     /// project-local `data/` directory (which is git-ignored).
     pub fn default_cache() -> Self {

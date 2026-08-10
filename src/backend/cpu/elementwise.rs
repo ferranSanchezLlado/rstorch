@@ -13,8 +13,7 @@
 //! - **A contiguous fast path.** When *every* input view is
 //!   [`is_contiguous`](crate::layout::Layout::is_contiguous), the cursor is
 //!   the identity map, so the kernel drops it entirely and zips flat slices
-//!   instead (adapted from the v2 `backend/cpu.rs` contiguous loops). The
-//!   layout decision is made **once per call**, outside the loop: `dense`
+//!   instead. The layout decision is made **once per call**, outside the loop: `dense`
 //!   turns a view into a `&[E]`, and the `map1_dense`/`map2_dense`/
 //!   `map3_dense` drivers walk it with equal-length iterators, so the
 //!   per-element work is the arithmetic alone — no layout match and no bounds

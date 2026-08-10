@@ -1,14 +1,12 @@
 //! Reduction CPU kernels.
 //!
-//! Ported v2 loops **adapted to the `Element::Acc` contract** (v2's native
-//! paths accumulate in dtype). Semantics on
-//! [`BackendOps`](crate::backend::BackendOps).
+//! Semantics on [`BackendOps`](crate::backend::BackendOps).
 //!
 //! Every reduction walks the source view stride-aware (it never assumes a
 //! contiguous buffer), accumulates in the wide
 //! [`Acc`](crate::dtype::Element::Acc) type, and casts back to the element
-//! type exactly once at output (the implemented fix for the v2 f16
-//! sum-saturation bug). The reduced axis is dropped from the result shape;
+//! type exactly once at output, so a long `f16` sum cannot saturate to
+//! infinity on its way to an in-range total. The reduced axis is dropped from the result shape;
 //! the op layer re-inserts it for the `_keepdim` spellings.
 
 use super::cpu_storage;

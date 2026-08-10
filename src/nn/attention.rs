@@ -9,13 +9,13 @@
 //!
 //! - a stored mask has to be rebuilt (and cached, and invalidated) whenever
 //!   the sequence length changes, which is exactly what generation does on
-//!   every step — v2 kept a `Mutex<Option<(usize, Mask)>>` for this and still
-//!   could not express a padding mask without a host round-trip;
+//!   every step, and the cache is shared mutable state in what is otherwise
+//!   an immutable forward;
 //! - a mask *argument* is a plain [`Bool`](crate::DType::Bool) tensor, so
 //!   combining a causal mask with a padding mask is ordinary tensor
 //!   arithmetic in the caller: `causal.where_cond(&causal, &padding)?` is
 //!   their boolean "or" (blocked if either blocks) in one on-device kernel,
-//!   where v2 needed a host round-trip and a nested loop.
+//!   with no host round-trip.
 //!
 //! `true` in a mask means **blocked** ([`Tensor::causal_mask`]'s polarity):
 //! masked positions are filled with `-inf` *before* the softmax, so they

@@ -109,9 +109,10 @@ mod sealed {
 /// # The `Acc` wide-accumulation contract
 ///
 /// `Acc` is the type kernels **must** accumulate in for reductions, matmul
-/// inner products, and broadcast-reducing backward passes (exploration
-/// §3.1, the implemented fix for the v2 f16 sum-saturation bug): for
-/// `f16`/`bf16`, `Acc = f32`; every other element accumulates as itself.
+/// inner products, and broadcast-reducing backward passes: for `f16`/`bf16`,
+/// `Acc = f32`; every other element accumulates as itself. Accumulating a
+/// long f16 sum in f16 saturates to infinity long before the true total is
+/// out of range, which is the failure this contract exists to prevent.
 /// Counts (e.g. `mean` divisors) are computed in `Acc` as well; the result
 /// is cast back to `Self` exactly once at output.
 pub trait Element: sealed::Sealed + Copy + Send + Sync + std::fmt::Debug + 'static {

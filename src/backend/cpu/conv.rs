@@ -29,7 +29,7 @@
 //! - `AvgPool2d` divides by the **full window area** (`kernel_h · kernel_w`),
 //!   i.e. PyTorch's `count_include_pad = true` default; positions that fall
 //!   in the zero padding contribute `0` to the sum but still count in the
-//!   divisor. (v2 divided by the valid-position count; v3 follows PyTorch.)
+//!   divisor.
 //! - Pooling ignores `dilation`, per
 //!   [`Conv2dParams`](crate::backend::Conv2dParams).
 //!

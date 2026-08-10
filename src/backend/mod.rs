@@ -27,7 +27,7 @@
 //! boundaries** — [`transfer_out`](BackendOps::transfer_out) (and the
 //! `to_vec`/`to_scalar`/`item` tensor methods built on it). This is what
 //! lets a GPU backend batch command-buffer encoding and defer the sync that
-//! made v2's Metal path train slower than CPU. The CPU backend is trivially
+//! would otherwise make a GPU path train slower than CPU. The CPU backend is trivially
 //! synchronous and satisfies the contract vacuously.
 
 // The table-driven op × dtype harness that validates any backend
@@ -218,7 +218,7 @@ pub(crate) struct Conv2dParams {
 }
 
 /// Fused kernels: softmax, layernorm, and the
-/// optimizer updates that reclaim v2's fixed per-parameter allocation
+/// optimizer updates that reclaim the fixed per-parameter allocation
 /// hotspot. Optional — [`BackendOps::fused`] returns
 /// [`Error::Unsupported`](crate::Error::Unsupported) until it is implemented for a
 /// given variant, and the op layer composes the unfused form (the only

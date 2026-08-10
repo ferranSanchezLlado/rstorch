@@ -1,4 +1,4 @@
-//! Reader limits and load policies for untrusted files (16.14 WS3).
+//! Reader limits and load policies for untrusted files.
 //!
 //! Persistence readers must never trust a file's self-declared sizes: a
 //! hostile or corrupt file can claim a petabyte tensor to make the reader
@@ -6,7 +6,7 @@
 //! enforces *before* allocating, and [`LoadOptions`] pairs them with the
 //! path-matching policies for the staged restore [`stage`](crate::persist::stage).
 //!
-//! Loading policies are expressed with enums, not booleans (16.14 WS1): a
+//! Loading policies are expressed with enums, not booleans: a
 //! call site reads `MissingPolicy::Allow` far more clearly than `true`.
 
 /// What to do when the file is **missing** a tensor the target expects.
@@ -31,11 +31,11 @@ pub enum UnexpectedPolicy {
 ///
 /// Every field is a hard upper bound the reader checks against the file's
 /// self-declared sizes **before** allocating the corresponding buffer.
-/// Defaults mirror the v2 limits and are intentionally generous enough for
+/// Defaults are intentionally generous enough for
 /// real models yet finite. Writers validate against the *same* limits (the
 /// writer-side check in [`save_safetensors`](crate::persist::save_safetensors))
 /// so the library can never write a file its own default reader would reject
-/// (16.14 WS3: symmetric limits).
+/// (the reader and the writer enforce the same limits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Maximum bytes of safetensors JSON header (metadata section).
@@ -47,7 +47,7 @@ pub struct Limits {
     /// Maximum bytes of any single tensor's data.
     pub max_tensor_bytes: u64,
     /// Maximum bytes summed across *all* tensor data (the total allocation
-    /// budget, 16.14 WS3).
+    /// budget).
     pub max_total_bytes: u64,
     /// Maximum length in bytes of any tensor name / path string.
     pub max_string_bytes: u64,

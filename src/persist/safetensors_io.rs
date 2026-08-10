@@ -1,5 +1,5 @@
 //! safetensors read/write for maps of [`HostTensor`]s, with symmetric,
-//! allocate-last limit enforcement (16.14 WS2/WS3).
+//! allocate-last limit enforcement.
 //!
 //! Writing goes through the crate's [atomic](crate::persist) save path, and
 //! the writer checks the **same** [`Limits`] the reader enforces, so the

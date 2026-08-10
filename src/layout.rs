@@ -1,8 +1,7 @@
 //! Strided layouts: how a tensor's logical shape maps onto its storage.
 //!
-//! The bodies are the ported v2 layout math plus the
-//! permute/narrow/broadcast-stride rules. The doc comment on each method is
-//! its normative semantics, and is what the property tests check against.
+//! The doc comment on each method is its normative semantics, and is what the
+//! property tests check against.
 //!
 //! Conventions:
 //! - Row-major (C order): the last axis is the fastest-varying one in a
@@ -155,7 +154,8 @@ impl Layout {
     /// Whether this layout is exactly the canonical contiguous layout:
     /// offset 0 and row-major strides (computed right-to-left with unit
     /// innermost stride). Size-1 axes must still carry the canonical
-    /// stride for `true` (v2 rule, kept for byte-identical interchange).
+    /// stride for `true`, so the predicate matches what a file format's
+    /// contiguity check will say about the same buffer.
     pub(crate) fn is_contiguous(&self) -> bool {
         if self.offset != 0 {
             return false;

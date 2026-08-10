@@ -1,5 +1,5 @@
 //! The parallelism switch: a thin façade over slice iteration that becomes a
-//! rayon parallel iterator (ported from the v2 `backend/parallel.rs`).
+//! rayon parallel iterator.
 //!
 //! # Why this module is always compiled
 //!
