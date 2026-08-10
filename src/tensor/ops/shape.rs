@@ -34,6 +34,7 @@
 //! indices, the dtype and the device only, which trivially satisfies the
 //! detached-output capture rule (exploration §4.3).
 
+use super::{same_device, same_dtype, same_rank};
 use crate::autograd::record;
 use crate::backend::dispatch;
 use crate::device::Device;
@@ -182,28 +183,9 @@ fn pad_with_zeros(
 /// Shared operand validation for [`Tensor::cat`]/[`Tensor::stack`]: dtype,
 /// device and rank must match `first` exactly.
 fn check_operand(op: &'static str, first: &Tensor, other: &Tensor) -> Result<()> {
-    if other.dtype() != first.dtype() {
-        return Err(Error::DTypeMismatch {
-            op,
-            expected: first.dtype(),
-            got: other.dtype(),
-        });
-    }
-    if other.device() != first.device() {
-        return Err(Error::DeviceMismatch {
-            op,
-            expected: first.device(),
-            got: other.device(),
-        });
-    }
-    if other.rank() != first.rank() {
-        return Err(Error::RankMismatch {
-            op,
-            expected: first.rank(),
-            got: other.rank(),
-        });
-    }
-    Ok(())
+    same_dtype(op, first, other)?;
+    same_device(op, first, other)?;
+    same_rank(op, first, other)
 }
 
 /// The first tensor of a `cat`/`stack` operand list, or a loud error for an
@@ -272,7 +254,7 @@ impl Tensor {
             "reshape",
             out,
             &[self],
-            Box::new(move |g| vec![g.reshape(src_dims.clone()).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.reshape(src_dims.clone())?)])),
         ))
     }
 
@@ -299,7 +281,7 @@ impl Tensor {
             out,
             &[self],
             // A transposition is its own inverse.
-            Box::new(move |g| vec![g.transpose(lhs as isize, rhs as isize).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.transpose(lhs as isize, rhs as isize)?)])),
         ))
     }
 
@@ -344,7 +326,7 @@ impl Tensor {
             "permute",
             out,
             &[self],
-            Box::new(move |g| vec![g.permute(&inverse).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.permute(&inverse)?)])),
         ))
     }
 
@@ -365,7 +347,7 @@ impl Tensor {
             "squeeze",
             out,
             &[self],
-            Box::new(move |g| vec![g.unsqueeze(ax as isize).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.unsqueeze(ax as isize)?)])),
         ))
     }
 
@@ -391,7 +373,7 @@ impl Tensor {
             "unsqueeze",
             out,
             &[self],
-            Box::new(move |g| vec![g.squeeze(ax as isize).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.squeeze(ax as isize)?)])),
         ))
     }
 
@@ -421,7 +403,9 @@ impl Tensor {
             out,
             &[self],
             Box::new(move |g| {
-                vec![pad_with_zeros(g, ax, start, size, &src_dims, dtype, &device).ok()]
+                Ok(vec![Some(pad_with_zeros(
+                    g, ax, start, size, &src_dims, dtype, &device,
+                )?)])
             }),
         ))
     }
@@ -452,7 +436,7 @@ impl Tensor {
             out,
             &[self],
             // The transpose of a broadcast is a sum over the axes it expanded.
-            Box::new(move |g| vec![g.sum_to(&src_dims).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.sum_to(&src_dims)?)])),
         ))
     }
 
@@ -520,10 +504,10 @@ impl Tensor {
                 let mut start = 0usize;
                 let mut grads = Vec::with_capacity(sizes.len());
                 for &size in &sizes {
-                    grads.push(g.narrow(ax as isize, start, size).ok());
+                    grads.push(Some(g.narrow(ax as isize, start, size)?));
                     start += size;
                 }
-                grads
+                Ok(grads)
             }),
         ))
     }
@@ -576,9 +560,8 @@ impl Tensor {
             Box::new(move |g| {
                 (0..count)
                     .map(|i| {
-                        g.narrow(ax as isize, i, 1)
-                            .and_then(|slice| slice.squeeze(ax as isize))
-                            .ok()
+                        let slice = g.narrow(ax as isize, i, 1)?;
+                        Ok(Some(slice.squeeze(ax as isize)?))
                     })
                     .collect()
             }),

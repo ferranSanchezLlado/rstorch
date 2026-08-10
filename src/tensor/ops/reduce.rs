@@ -67,16 +67,6 @@ use crate::tensor::Tensor;
 // Shared plumbing
 // ---------------------------------------------------------------------------
 
-/// Re-label a backend error with the public method the caller used: the
-/// kernels name their errors after the family (`"reduce"`/`"arg_reduce"`),
-/// while the user called `sum`, `max`, `argmin`, ...
-fn relabel(op: &'static str, e: Error) -> Error {
-    match e {
-        Error::Unsupported { device, dtype, .. } => Error::Unsupported { op, device, dtype },
-        other => other,
-    }
-}
-
 /// The empty-reduction policy for the axis spellings: only `sum` has an
 /// identity element, so every other op refuses a size-0 axis.
 fn require_non_empty(op: &'static str, x: &Tensor, axis: usize) -> Result<()> {
@@ -152,6 +142,9 @@ fn out_dims(dims: &[usize], axis: usize, keepdim: bool) -> Vec<usize> {
 
 /// The untraced forward of one axis reduction: dispatch once, then describe
 /// the (contiguous) kernel output with the reduced shape.
+///
+/// The kernels name their errors after the family (`"reduce"`), while the
+/// user called `sum`, `max`, `mean`, ... — hence the `with_op` at the seam.
 fn reduce_values(
     op: &'static str,
     kind: ReduceOp,
@@ -161,7 +154,7 @@ fn reduce_values(
 ) -> Result<Tensor> {
     let storage = dispatch::backend(x.device())
         .reduce(kind, x.view(), axis)
-        .map_err(|e| relabel(op, e))?;
+        .map_err(|e| e.with_op(op))?;
     let layout = Layout::contiguous(out_dims(x.dims(), axis, keepdim))?;
     Ok(Tensor::from_parts(storage, layout))
 }
@@ -275,15 +268,17 @@ fn axis_reduce(
     let out = reduce_values(op, kind, x, axis, keepdim)?;
     let src_dims = x.dims().to_vec();
     let backward: BackwardFn = match kind {
-        ReduceOp::Sum => Box::new(move |g| vec![spread(g, axis, keepdim, &src_dims, None).ok()]),
+        ReduceOp::Sum => {
+            Box::new(move |g| Ok(vec![Some(spread(g, axis, keepdim, &src_dims, None)?)]))
+        }
         ReduceOp::Mean => {
             let scale = 1.0 / src_dims[axis] as f64;
-            Box::new(move |g| vec![spread(g, axis, keepdim, &src_dims, Some(scale)).ok()])
+            Box::new(move |g| Ok(vec![Some(spread(g, axis, keepdim, &src_dims, Some(scale))?)]))
         }
         ReduceOp::Max | ReduceOp::Min => {
             let xd = x.detach();
             let od = out.detach();
-            Box::new(move |g| vec![route_to_extrema(g, &xd, &od, axis, keepdim).ok()])
+            Box::new(move |g| Ok(vec![Some(route_to_extrema(g, &xd, &od, axis, keepdim)?)]))
         }
     };
     Ok(record(op, out, &[x], backward))
@@ -386,48 +381,6 @@ fn composed_softmax(op: &'static str, x: &Tensor, axis: usize) -> Result<Tensor>
     e.div(&denom)
 }
 
-/// Relabel every backend error carrying an operation name at the public seam.
-fn relabel_fused_softmax(e: Error) -> Error {
-    const OP: &str = "softmax";
-    match e {
-        Error::ShapeMismatch { lhs, rhs, .. } => Error::ShapeMismatch { op: OP, lhs, rhs },
-        Error::RankMismatch { expected, got, .. } => Error::RankMismatch {
-            op: OP,
-            expected,
-            got,
-        },
-        Error::InvalidAxis { axis, rank, .. } => Error::InvalidAxis { op: OP, axis, rank },
-        Error::DTypeMismatch { expected, got, .. } => Error::DTypeMismatch {
-            op: OP,
-            expected,
-            got,
-        },
-        Error::DeviceMismatch { expected, got, .. } => Error::DeviceMismatch {
-            op: OP,
-            expected,
-            got,
-        },
-        Error::ReshapeMismatch { from, to, .. } => Error::ReshapeMismatch { op: OP, from, to },
-        Error::IndexOutOfBounds {
-            index, axis, size, ..
-        } => Error::IndexOutOfBounds {
-            op: OP,
-            index,
-            axis,
-            size,
-        },
-        Error::Unsupported { device, dtype, .. } => Error::Unsupported {
-            op: OP,
-            device,
-            dtype,
-        },
-        Error::NotTraced { .. } => Error::NotTraced { op: OP },
-        Error::InvalidArg { msg, .. } => Error::InvalidArg { op: OP, msg },
-        Error::Backend { msg, .. } => Error::Backend { op: OP, msg },
-        other => other,
-    }
-}
-
 /// Attempt the fused contract only for its initial production scope. `None`
 /// means the caller must run the composed implementation unchanged.
 fn try_fused_softmax(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
@@ -439,7 +392,7 @@ fn try_fused_softmax(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
     {
         Ok(outputs) => outputs,
         Err(Error::Unsupported { .. }) => return Ok(None),
-        Err(e) => return Err(relabel_fused_softmax(e)),
+        Err(e) => return Err(e.with_op("softmax")),
     };
     if outputs.len() != 1 {
         return Err(Error::Backend {
@@ -475,7 +428,7 @@ fn arg_reduce(
     require_non_empty(op, x, ax)?;
     let storage = dispatch::backend(x.device())
         .arg_reduce(kind, x.view(), ax)
-        .map_err(|e| relabel(op, e))?;
+        .map_err(|e| e.with_op(op))?;
     let layout = Layout::contiguous(out_dims(x.dims(), ax, keepdim))?;
     Ok(Tensor::from_parts(storage, layout))
 }
@@ -753,7 +706,7 @@ impl Tensor {
             OP,
             out,
             &[self],
-            Box::new(move |g| vec![softmax_backward(g, &y, ax).ok()]),
+            Box::new(move |g| Ok(vec![Some(softmax_backward(g, &y, ax)?)])),
         ))
     }
 

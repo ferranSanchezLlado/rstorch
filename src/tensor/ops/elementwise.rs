@@ -6,7 +6,7 @@
 //!
 //! 1. **Validate** device and dtype in the op layer — there is no implicit
 //!    promotion and no silent device hop, so mixing either is a structured
-//!    [`Error`] naming the public method.
+//!    [`Error`](crate::Error) naming the public method.
 //! 2. **Broadcast in the layout**, never in a kernel: the operands are
 //!    right-aligned with `Shape::broadcast_with` and re-viewed at the common
 //!    shape with `Layout::broadcast_to` (stride-0 axes), so the backend always
@@ -28,10 +28,11 @@
 //!   same reason the [`Bool`](crate::DType::Bool) operand of `masked_fill`
 //!   and `where_cond` is not listed as a graph input.
 
+use super::{require_dtype, same_device, same_dtype};
 use crate::autograd;
 use crate::backend::{BinaryOp, CmpOp, UnaryOp, View, dispatch};
 use crate::dtype::DType;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::layout::Layout;
 use crate::tensor::Tensor;
 
@@ -42,43 +43,6 @@ const INV_SQRT_2PI: f64 = 0.5 * std::f64::consts::FRAC_2_SQRT_PI * std::f64::con
 // ---------------------------------------------------------------------------
 // Shared plumbing
 // ---------------------------------------------------------------------------
-
-/// Both operands must live on the same device; there are no implicit
-/// transfers.
-fn same_device(op: &'static str, lhs: &Tensor, rhs: &Tensor) -> Result<()> {
-    if lhs.device() != rhs.device() {
-        return Err(Error::DeviceMismatch {
-            op,
-            expected: lhs.device(),
-            got: rhs.device(),
-        });
-    }
-    Ok(())
-}
-
-/// Both operands must share a dtype; there is no implicit promotion.
-fn same_dtype(op: &'static str, lhs: &Tensor, rhs: &Tensor) -> Result<()> {
-    if lhs.dtype() != rhs.dtype() {
-        return Err(Error::DTypeMismatch {
-            op,
-            expected: lhs.dtype(),
-            got: rhs.dtype(),
-        });
-    }
-    Ok(())
-}
-
-/// The operand must be a [`Bool`](DType::Bool) mask/condition.
-fn require_bool(op: &'static str, t: &Tensor) -> Result<()> {
-    if t.dtype() != DType::Bool {
-        return Err(Error::DTypeMismatch {
-            op,
-            expected: DType::Bool,
-            got: t.dtype(),
-        });
-    }
-    Ok(())
-}
 
 /// The untraced forward of a broadcasting binary op.
 fn binary_forward(op: &'static str, kind: BinaryOp, lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
@@ -95,20 +59,13 @@ fn binary_forward(op: &'static str, kind: BinaryOp, lhs: &Tensor, rhs: &Tensor) 
     Ok(Tensor::from_parts(storage, Layout::contiguous(out_shape)?))
 }
 
-/// Re-label a backend error with the public method the user called.
+/// The untraced forward of a scalar binary op (`x <op> scalar`). The scalar
+/// broadcasts trivially, so the output keeps `x`'s shape.
 ///
 /// Kernels name their errors after the op *family* — every `BinaryOp::Add`
 /// call reports `"add"`, whichever spelling reached it — so the scalar entry
-/// points rewrite the name. Everywhere else the two already coincide.
-fn relabel(op: &'static str, e: Error) -> Error {
-    match e {
-        Error::Unsupported { device, dtype, .. } => Error::Unsupported { op, device, dtype },
-        other => other,
-    }
-}
-
-/// The untraced forward of a scalar binary op (`x <op> scalar`). The scalar
-/// broadcasts trivially, so the output keeps `x`'s shape.
+/// points rewrite the name with `Error::with_op`. Everywhere else the two
+/// already coincide.
 fn binary_scalar_forward(
     op: &'static str,
     kind: BinaryOp,
@@ -117,7 +74,7 @@ fn binary_scalar_forward(
 ) -> Result<Tensor> {
     let storage = dispatch::backend(x.device())
         .binary_scalar(kind, x.view(), scalar)
-        .map_err(|e| relabel(op, e))?;
+        .map_err(|e| e.with_op(op))?;
     Ok(Tensor::from_parts(
         storage,
         Layout::contiguous(x.shape().clone())?,
@@ -166,6 +123,9 @@ fn extremum_side(g: &Tensor, win: &Tensor, tie: &Tensor, dims: &[usize]) -> Resu
 }
 
 /// The whole `maximum`/`minimum` backward, over the detached operands.
+///
+/// Both operands always receive a gradient — zero where they lose, half where
+/// they tie — so neither slot is ever a legitimate `None`.
 fn extremum_backward(
     g: &Tensor,
     a: &Tensor,
@@ -173,7 +133,7 @@ fn extremum_backward(
     a_dims: &[usize],
     b_dims: &[usize],
     is_max: bool,
-) -> Vec<Option<Tensor>> {
+) -> Result<Vec<Option<Tensor>>> {
     let side = |wins: Result<Tensor>, dims: &[usize]| -> Result<Tensor> {
         let tie = a.eq(b)?;
         extremum_side(g, &wins?, &tie, dims)
@@ -183,7 +143,10 @@ fn extremum_backward(
     } else {
         (a.lt(b), b.lt(a))
     };
-    vec![side(a_wins, a_dims).ok(), side(b_wins, b_dims).ok()]
+    Ok(vec![
+        Some(side(a_wins, a_dims)?),
+        Some(side(b_wins, b_dims)?),
+    ])
 }
 
 impl Tensor {
@@ -192,10 +155,11 @@ impl Tensor {
     /// Element-wise sum, broadcasting `self` and `rhs` to their common shape.
     ///
     /// # Errors
-    /// [`Error::DeviceMismatch`] / [`Error::DTypeMismatch`] when the operands
+    /// [`Error::DeviceMismatch`](crate::Error::DeviceMismatch) /
+    /// [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) when the operands
     /// disagree (no implicit transfer, no implicit promotion),
-    /// [`Error::ShapeMismatch`] when the shapes do not broadcast, and
-    /// [`Error::Unsupported`] on a dtype without arithmetic (e.g.
+    /// [`Error::ShapeMismatch`](crate::Error::ShapeMismatch) when the shapes do not broadcast, and
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a dtype without arithmetic (e.g.
     /// [`Bool`](crate::DType::Bool)).
     pub fn add(&self, rhs: &Tensor) -> Result<Tensor> {
         let out = binary_forward("add", BinaryOp::Add, self, rhs)?;
@@ -204,7 +168,7 @@ impl Tensor {
             "add",
             out,
             &[self, rhs],
-            Box::new(move |g| vec![g.sum_to(&ld).ok(), g.sum_to(&rd).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.sum_to(&ld)?), Some(g.sum_to(&rd)?)])),
         ))
     }
 
@@ -219,7 +183,7 @@ impl Tensor {
             "sub",
             out,
             &[self, rhs],
-            Box::new(move |g| vec![g.sum_to(&ld).ok(), g.neg().and_then(|n| n.sum_to(&rd)).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.sum_to(&ld)?), Some(g.neg()?.sum_to(&rd)?)])),
         ))
     }
 
@@ -236,10 +200,10 @@ impl Tensor {
             out,
             &[self, rhs],
             Box::new(move |g| {
-                vec![
-                    g.mul(&b).and_then(|t| t.sum_to(&ld)).ok(),
-                    g.mul(&a).and_then(|t| t.sum_to(&rd)).ok(),
-                ]
+                Ok(vec![
+                    Some(g.mul(&b)?.sum_to(&ld)?),
+                    Some(g.mul(&a)?.sum_to(&rd)?),
+                ])
             }),
         ))
     }
@@ -262,14 +226,10 @@ impl Tensor {
             out,
             &[self, rhs],
             Box::new(move |g| {
-                vec![
-                    g.div(&b).and_then(|t| t.sum_to(&ld)).ok(),
-                    g.mul(&out_d)
-                        .and_then(|t| t.div(&b))
-                        .and_then(|t| t.neg())
-                        .and_then(|t| t.sum_to(&rd))
-                        .ok(),
-                ]
+                Ok(vec![
+                    Some(g.div(&b)?.sum_to(&ld)?),
+                    Some(g.mul(&out_d)?.div(&b)?.neg()?.sum_to(&rd)?),
+                ])
             }),
         ))
     }
@@ -277,14 +237,14 @@ impl Tensor {
     /// Add a scalar to every element (narrowed to this tensor's dtype).
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on a dtype without arithmetic.
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a dtype without arithmetic.
     pub fn add_scalar(&self, scalar: f64) -> Result<Tensor> {
         let out = binary_scalar_forward("add_scalar", BinaryOp::Add, self, scalar)?;
         Ok(autograd::record(
             "add_scalar",
             out,
             &[self],
-            Box::new(move |g| vec![Some(g.clone())]),
+            Box::new(move |g| Ok(vec![Some(g.clone())])),
         ))
     }
 
@@ -298,7 +258,7 @@ impl Tensor {
             "sub_scalar",
             out,
             &[self],
-            Box::new(move |g| vec![Some(g.clone())]),
+            Box::new(move |g| Ok(vec![Some(g.clone())])),
         ))
     }
 
@@ -312,7 +272,7 @@ impl Tensor {
             "mul_scalar",
             out,
             &[self],
-            Box::new(move |g| vec![g.mul_scalar(scalar).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.mul_scalar(scalar)?)])),
         ))
     }
 
@@ -326,7 +286,7 @@ impl Tensor {
             "div_scalar",
             out,
             &[self],
-            Box::new(move |g| vec![g.div_scalar(scalar).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.div_scalar(scalar)?)])),
         ))
     }
 
@@ -375,7 +335,7 @@ impl Tensor {
     /// The subgradient at `0` is `0`.
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on a dtype the kernel does not implement
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a dtype the kernel does not implement
     /// (`relu` is float-only).
     pub fn relu(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Relu, self)?;
@@ -385,11 +345,8 @@ impl Tensor {
             out,
             &[self],
             Box::new(move |g| {
-                let grad = || -> Result<Tensor> {
-                    let zero = zeros_like(&x)?;
-                    x.gt(&zero)?.where_cond(g, &zero)
-                };
-                vec![grad().ok()]
+                let zero = zeros_like(&x)?;
+                Ok(vec![Some(x.gt(&zero)?.where_cond(g, &zero)?)])
             }),
         ))
     }
@@ -398,7 +355,7 @@ impl Tensor {
     /// tanh approximation (the familiar-semantics contract, exploration §3.1).
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on a non-float dtype.
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
     pub fn gelu(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Gelu, self)?;
         let x = self.detach();
@@ -413,18 +370,15 @@ impl Tensor {
                 // singularity at x == 0 (where Φ(0) = 1/2) filled in
                 // explicitly. `where_cond` evaluates both branches, so the
                 // NaN produced by 0/0 is computed and then discarded.
-                let grad = || -> Result<Tensor> {
-                    let zero = zeros_like(&x)?;
-                    let half = Tensor::full(x.dims(), 0.5, x.dtype(), &x.device())?;
-                    let cdf = x.eq(&zero)?.where_cond(&half, &out_d.div(&x)?)?;
-                    let pdf = x
-                        .mul(&x)?
-                        .mul_scalar(-0.5)?
-                        .exp()?
-                        .mul_scalar(INV_SQRT_2PI)?;
-                    cdf.add(&x.mul(&pdf)?)?.mul(g)
-                };
-                vec![grad().ok()]
+                let zero = zeros_like(&x)?;
+                let half = Tensor::full(x.dims(), 0.5, x.dtype(), &x.device())?;
+                let cdf = x.eq(&zero)?.where_cond(&half, &out_d.div(&x)?)?;
+                let pdf = x
+                    .mul(&x)?
+                    .mul_scalar(-0.5)?
+                    .exp()?
+                    .mul_scalar(INV_SQRT_2PI)?;
+                Ok(vec![Some(cdf.add(&x.mul(&pdf)?)?.mul(g)?)])
             }),
         ))
     }
@@ -432,7 +386,7 @@ impl Tensor {
     /// Element-wise `exp(x)`.
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on a non-float dtype.
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
     pub fn exp(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Exp, self)?;
         let out_d = out.detach();
@@ -440,14 +394,14 @@ impl Tensor {
             "exp",
             out,
             &[self],
-            Box::new(move |g| vec![g.mul(&out_d).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.mul(&out_d)?)])),
         ))
     }
 
     /// Element-wise natural logarithm.
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on a non-float dtype.
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
     pub fn ln(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Ln, self)?;
         let x = self.detach();
@@ -455,14 +409,14 @@ impl Tensor {
             "ln",
             out,
             &[self],
-            Box::new(move |g| vec![g.div(&x).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.div(&x)?)])),
         ))
     }
 
     /// Element-wise square root.
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on a non-float dtype.
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
     pub fn sqrt(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Sqrt, self)?;
         let out_d = out.detach();
@@ -471,14 +425,14 @@ impl Tensor {
             out,
             &[self],
             // d√x/dx = 1/(2√x), and √x is the output.
-            Box::new(move |g| vec![g.div(&out_d).and_then(|t| t.mul_scalar(0.5)).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.div(&out_d)?.mul_scalar(0.5)?)])),
         ))
     }
 
     /// Element-wise hyperbolic tangent.
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on a non-float dtype.
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
     pub fn tanh(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Tanh, self)?;
         let out_d = out.detach();
@@ -488,14 +442,9 @@ impl Tensor {
             &[self],
             // 1 - tanh(x)²
             Box::new(move |g| {
-                vec![
-                    out_d
-                        .mul(&out_d)
-                        .and_then(|t| t.neg())
-                        .and_then(|t| t.add_scalar(1.0))
-                        .and_then(|t| t.mul(g))
-                        .ok(),
-                ]
+                Ok(vec![Some(
+                    out_d.mul(&out_d)?.neg()?.add_scalar(1.0)?.mul(g)?,
+                )])
             }),
         ))
     }
@@ -503,7 +452,7 @@ impl Tensor {
     /// Element-wise logistic sigmoid, `1/(1 + exp(-x))`.
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on a non-float dtype.
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
     pub fn sigmoid(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Sigmoid, self)?;
         let out_d = out.detach();
@@ -513,14 +462,9 @@ impl Tensor {
             &[self],
             // σ(x)·(1 - σ(x))
             Box::new(move |g| {
-                vec![
-                    out_d
-                        .neg()
-                        .and_then(|t| t.add_scalar(1.0))
-                        .and_then(|t| t.mul(&out_d))
-                        .and_then(|t| t.mul(g))
-                        .ok(),
-                ]
+                Ok(vec![Some(
+                    out_d.neg()?.add_scalar(1.0)?.mul(&out_d)?.mul(g)?,
+                )])
             }),
         ))
     }
@@ -529,14 +473,14 @@ impl Tensor {
     /// [`I64`](crate::DType::I64).
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on [`Bool`](crate::DType::Bool).
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on [`Bool`](crate::DType::Bool).
     pub fn neg(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Neg, self)?;
         Ok(autograd::record(
             "neg",
             out,
             &[self],
-            Box::new(move |g| vec![g.neg().ok()]),
+            Box::new(move |g| Ok(vec![Some(g.neg()?)])),
         ))
     }
 
@@ -546,7 +490,7 @@ impl Tensor {
     /// The subgradient at `0` is `0`.
     ///
     /// # Errors
-    /// [`Error::Unsupported`] on [`Bool`](crate::DType::Bool).
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on [`Bool`](crate::DType::Bool).
     pub fn abs(&self) -> Result<Tensor> {
         let out = unary_forward(UnaryOp::Abs, self)?;
         let x = self.detach();
@@ -556,13 +500,10 @@ impl Tensor {
             &[self],
             Box::new(move |g| {
                 // sign(x)·g, with sign(0) = 0.
-                let grad = || -> Result<Tensor> {
-                    let zero = zeros_like(&x)?;
-                    let pos = x.gt(&zero)?.where_cond(g, &zero)?;
-                    let neg = x.lt(&zero)?.where_cond(g, &zero)?;
-                    pos.sub(&neg)
-                };
-                vec![grad().ok()]
+                let zero = zeros_like(&x)?;
+                let pos = x.gt(&zero)?.where_cond(g, &zero)?;
+                let neg = x.lt(&zero)?.where_cond(g, &zero)?;
+                Ok(vec![Some(pos.sub(&neg)?)])
             }),
         ))
     }
@@ -576,8 +517,9 @@ impl Tensor {
     /// graph.
     ///
     /// # Errors
-    /// [`Error::DeviceMismatch`], [`Error::DTypeMismatch`] or
-    /// [`Error::ShapeMismatch`] as for [`add`](Tensor::add).
+    /// [`Error::DeviceMismatch`](crate::Error::DeviceMismatch),
+    /// [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) or
+    /// [`Error::ShapeMismatch`](crate::Error::ShapeMismatch) as for [`add`](Tensor::add).
     pub fn eq(&self, rhs: &Tensor) -> Result<Tensor> {
         compare_forward("eq", CmpOp::Eq, self, rhs)
     }
@@ -634,12 +576,13 @@ impl Tensor {
     /// simply does not flow through the filled positions.
     ///
     /// # Errors
-    /// [`Error::DTypeMismatch`] if `mask` is not [`Bool`](crate::DType::Bool),
-    /// [`Error::DeviceMismatch`] if it lives elsewhere, and
-    /// [`Error::ShapeMismatch`] if the shapes do not broadcast.
+    /// [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) if `mask` is not
+    /// [`Bool`](crate::DType::Bool),
+    /// [`Error::DeviceMismatch`](crate::Error::DeviceMismatch) if it lives elsewhere, and
+    /// [`Error::ShapeMismatch`](crate::Error::ShapeMismatch) if the shapes do not broadcast.
     pub fn masked_fill(&self, mask: &Tensor, value: f64) -> Result<Tensor> {
         const OP: &str = "masked_fill";
-        require_bool(OP, mask)?;
+        require_dtype(OP, mask, DType::Bool)?;
         same_device(OP, self, mask)?;
         let out_shape = self.shape().broadcast_with(mask.shape(), OP)?;
         let xl = self.layout().broadcast_to(&out_shape)?;
@@ -656,7 +599,7 @@ impl Tensor {
             OP,
             out,
             &[self],
-            Box::new(move |g| vec![g.masked_fill(&m, 0.0).and_then(|t| t.sum_to(&dims)).ok()]),
+            Box::new(move |g| Ok(vec![Some(g.masked_fill(&m, 0.0)?.sum_to(&dims)?)])),
         ))
     }
 
@@ -669,13 +612,14 @@ impl Tensor {
     /// operand supplied each element.
     ///
     /// # Errors
-    /// [`Error::DTypeMismatch`] if `self` is not
+    /// [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) if `self` is not
     /// [`Bool`](crate::DType::Bool) or the two value operands disagree,
-    /// [`Error::DeviceMismatch`] across devices, and [`Error::ShapeMismatch`]
-    /// if the three shapes do not broadcast.
+    /// [`Error::DeviceMismatch`](crate::Error::DeviceMismatch) across devices, and
+    /// [`Error::ShapeMismatch`](crate::Error::ShapeMismatch) if the three shapes do not
+    /// broadcast.
     pub fn where_cond(&self, on_true: &Tensor, on_false: &Tensor) -> Result<Tensor> {
         const OP: &str = "where";
-        require_bool(OP, self)?;
+        require_dtype(OP, self, DType::Bool)?;
         same_device(OP, self, on_true)?;
         same_device(OP, self, on_false)?;
         same_dtype(OP, on_true, on_false)?;
@@ -708,7 +652,7 @@ impl Tensor {
                     };
                     picked.sum_to(dims)
                 };
-                vec![split(true, &td).ok(), split(false, &fd).ok()]
+                Ok(vec![Some(split(true, &td)?), Some(split(false, &fd)?)])
             }),
         ))
     }
@@ -718,6 +662,7 @@ impl Tensor {
 mod tests {
     use super::*;
     use crate::device::Device;
+    use crate::error::Error;
     use crate::shape::Shape;
     use crate::testing::check_grad;
 
@@ -857,12 +802,12 @@ mod tests {
         let g = t(&[10.0, 10.0, 10.0], [3]);
 
         // b, tie, a wins: the tied element hands each side half the cotangent.
-        let grads = extremum_backward(&g, &a, &b, a.dims(), b.dims(), true);
+        let grads = extremum_backward(&g, &a, &b, a.dims(), b.dims(), true).unwrap();
         assert_eq!(v(grads[0].as_ref().unwrap()), vec![0.0, 5.0, 10.0]);
         assert_eq!(v(grads[1].as_ref().unwrap()), vec![10.0, 5.0, 0.0]);
 
         // `minimum` flips which side wins, tie handling unchanged.
-        let grads = extremum_backward(&g, &a, &b, a.dims(), b.dims(), false);
+        let grads = extremum_backward(&g, &a, &b, a.dims(), b.dims(), false).unwrap();
         assert_eq!(v(grads[0].as_ref().unwrap()), vec![10.0, 5.0, 0.0]);
         assert_eq!(v(grads[1].as_ref().unwrap()), vec![0.0, 5.0, 10.0]);
 
@@ -872,7 +817,7 @@ mod tests {
         let col = t(&[1.0, 4.0], [2, 1]);
         let row = t(&[2.0, 3.0], [2]);
         let g = t(&[1.0, 1.0, 1.0, 1.0], [2, 2]);
-        let grads = extremum_backward(&g, &col, &row, col.dims(), row.dims(), true);
+        let grads = extremum_backward(&g, &col, &row, col.dims(), row.dims(), true).unwrap();
         assert_eq!(grads[0].as_ref().unwrap().dims(), &[2, 1]);
         assert_eq!(v(grads[0].as_ref().unwrap()), vec![0.0, 2.0]);
         assert_eq!(grads[1].as_ref().unwrap().dims(), &[2]);

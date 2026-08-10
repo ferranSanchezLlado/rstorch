@@ -1,6 +1,5 @@
 use super::{
-    ArgKeepDimOutput, ArgOutput, KeepDimOutput, RemoveAxisOutput, ScalarOutput, dynamic,
-    relabel_error_op, wrap,
+    ArgKeepDimOutput, ArgOutput, KeepDimOutput, RemoveAxisOutput, ScalarOutput, dynamic, wrap,
 };
 use crate::typed::{
     DYN, FloatElement, NumericElement, Placement, Tensor0, Tensor1, Tensor2, Tensor3, Tensor4,
@@ -13,7 +12,7 @@ fn dynamic_reduction<T: TypedTensor>(
     op: &'static str,
     reduction: impl FnOnce(&Tensor) -> Result<Tensor>,
 ) -> Result<Tensor> {
-    reduction(dynamic(input, op)?).map_err(|error| relabel_error_op(op, error))
+    reduction(dynamic(input, op)?).map_err(|error| error.with_op(op))
 }
 
 // One macro per reduction signature shape. Each expands to a single method whose

@@ -20,6 +20,7 @@
 //! [`IndexOutOfBounds`](crate::Error::IndexOutOfBounds) rather than a
 //! Python-style wrap.
 
+use super::{require_dtype, same_device};
 use crate::autograd::{self, BackwardFn};
 use crate::backend::{CmpOp, View, dispatch};
 use crate::device::Device;
@@ -33,21 +34,8 @@ use crate::tensor::Tensor;
 /// indexes. Rank is checked per op (1-D for `index_select`, same-rank for
 /// `gather`).
 fn check_index_operand(op: &'static str, data: &Tensor, indices: &Tensor) -> Result<()> {
-    if indices.dtype() != DType::I64 {
-        return Err(Error::DTypeMismatch {
-            op,
-            expected: DType::I64,
-            got: indices.dtype(),
-        });
-    }
-    if indices.device() != data.device() {
-        return Err(Error::DeviceMismatch {
-            op,
-            expected: data.device(),
-            got: indices.device(),
-        });
-    }
-    Ok(())
+    require_dtype(op, indices, DType::I64)?;
+    same_device(op, data, indices)
 }
 
 /// The cotangent of an [`index_select`](Tensor::index_select) input: a fresh
@@ -162,7 +150,8 @@ impl Tensor {
         // the closure never holds a graph.
         let idx = indices.detach();
         let backward: BackwardFn = Box::new(move |g| {
-            vec![index_add_into_zeros(&shape, dtype, device, axis, &idx, g).ok()]
+            let grad = index_add_into_zeros(&shape, dtype, device, axis, &idx, g)?;
+            Ok(vec![Some(grad)])
         });
         Ok(autograd::record(OP, out, &[self], backward))
     }
@@ -238,7 +227,8 @@ impl Tensor {
         let device = self.device();
         let idx = indices.detach();
         let backward: BackwardFn = Box::new(move |g| {
-            vec![scatter_add_into_zeros(&shape, dtype, device, axis, &idx, g).ok()]
+            let grad = scatter_add_into_zeros(&shape, dtype, device, axis, &idx, g)?;
+            Ok(vec![Some(grad)])
         });
         Ok(autograd::record(OP, out, &[self], backward))
     }
