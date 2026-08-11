@@ -249,8 +249,11 @@ where
 /// `optim` is invalid; `optim.*` tensors are reserved for and validated by the
 /// transactional runtime SGD loader after model staging.
 ///
+/// Model state is snapshotted before mutation. If the runtime optimizer load
+/// fails, only the model snapshot is restored — the optimizer is not reloaded,
+/// which preserves all its prior state, including entries for other models.
 /// Optimizer *step* backend failures retain their separate, potentially
-/// partial semantics; see [`load_checkpoint`] for the rollback rule.
+/// partial semantics.
 pub fn load_sgd_checkpoint<M: Module + ?Sized>(
     optimizer: &mut Sgd,
     model: &mut M,
