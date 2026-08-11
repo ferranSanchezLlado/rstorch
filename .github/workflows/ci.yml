@@ -1,14 +1,14 @@
 # restart-v3 CI (implementation-plan §1.2): stable + MSRV, fmt, clippy
 # -D warnings, doc build, and a cargo-public-api diff against the committed
-# baseline. Branch filters keep pushed task branches from triggering this;
-# only integration branches and PRs targeting them run.
+# baselines in `api/`. Branch filters keep pushed task branches from triggering
+# this; only integration branches and PRs targeting them run.
 name: CI
 
 on:
   push:
-    branches: [restart-v3, compile-time]
+    branches: [master, restart-v3, compile-time]
   pull_request:
-    branches: [restart-v3, compile-time]
+    branches: [master, restart-v3, compile-time]
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,8 +38,12 @@ jobs:
       - name: Clippy (all features)
         if: matrix.toolchain == 'stable'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # `testing` gates the finite-difference harness, and with it the
+      # `numerics` and `reduced_precision` suites. This is the lane that owns
+      # their coverage on both stable and MSRV, so it opts in explicitly; the
+      # feature-surface lanes below deliberately run without it.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --features testing
       - name: Compile benchmarks
         if: matrix.toolchain == 'stable'
         run: cargo bench --workspace --no-run
@@ -127,6 +131,26 @@ jobs:
       - name: Test typed diagnostic semantics
         run: cargo test --test typed_ui --features typed
 
+  package:
+    name: Publishable tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      # The derive publishes first (see RELEASING.md), and it verifies fully
+      # because everything it needs is already on crates.io.
+      - name: Package and verify rstorch-derive
+        run: cargo package -p rstorch-derive
+      # `cargo package -p rstorch` cannot verify until the matching
+      # rstorch-derive is published, because the manifest resolves it by
+      # version. What CI can check every run is the file set: this catches a
+      # source the build needs that exists only in an untracked or excluded
+      # directory — which is how the API baselines silently left the tree.
+      - name: List the rstorch package contents
+        run: cargo package -p rstorch --list
+
   public-api:
     name: Public API diff
     runs-on: ubuntu-latest
@@ -140,18 +164,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-public-api
         run: cargo install cargo-public-api --version 0.52.0 --locked
-      - name: Diff dynamic and typed surfaces
+      # The first-hour surface is pinned by content, not just by shape: the
+      # baselines below would not notice a re-ordering of `prelude`.
+      - name: Pin the prelude
         run: |
           test "$(shasum -a 256 src/prelude.rs | cut -d ' ' -f 1)" = 35b28f3a7f452ec7e802de85f350efd9a2e17dbc298b86b49e1936ed49540c56
-          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features > /tmp/dynamic-default.txt
-          diff -u docs/restart-v3/public-api-baseline.txt /tmp/dynamic-default.txt
-          diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-default.txt /tmp/dynamic-default.txt
-          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features hub,rayon > /tmp/dynamic-portable.txt
-          diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-portable.txt /tmp/dynamic-portable.txt
-          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features typed > /tmp/typed.txt
-          diff -u docs/restart-v3/m4-baselines/public-api-typed.txt /tmp/typed.txt
-          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features typed,hub,rayon > /tmp/typed-portable.txt
-          diff -u docs/restart-v3/m4-baselines/public-api-typed-portable.txt /tmp/typed-portable.txt
+      - name: Diff dynamic and typed surfaces
+        run: ./tools/api-baseline.sh check portable
 
   metal-training-macos:
     name: Metal training execution (macOS runner)
@@ -181,11 +200,7 @@ jobs:
       - name: Install cargo-public-api
         run: cargo install cargo-public-api --version 0.52.0 --locked
       - name: Diff macOS all-feature surfaces
-        run: |
-          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --no-default-features --features hub,rayon,metal > /tmp/dynamic-macos.txt
-          diff -u docs/restart-v3/ct00-baselines/public-api-dynamic-macos-all-runtime.txt /tmp/dynamic-macos.txt
-          cargo +nightly-2026-06-15 public-api -p rstorch --simplified --all-features > /tmp/typed-macos.txt
-          diff -u docs/restart-v3/m4-baselines/public-api-typed-macos-all-features.txt /tmp/typed-macos.txt
+        run: ./tools/api-baseline.sh check macos
 
   ct20-macos-boundary:
     name: CT20 wrong-device boundary (macOS)

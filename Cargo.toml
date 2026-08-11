@@ -2,7 +2,7 @@
 members = ["rstorch-derive", "fixtures"]
 
 [workspace.package]
-version = "0.3.0"
+version = "1.0.0"
 authors = ["Ferran Sanchez Llado"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ferranSanchezLlado/rstorch.git"
@@ -22,11 +22,24 @@ keywords = ["neural-network", "machine-learning", "deep-learning", "pytorch", "t
 categories = ["science", "mathematics", "algorithms"]
 edition.workspace = true
 rust-version.workspace = true
+# The design record (`docs/`) is untracked working material; `tools/` and
+# `api/` are the CI gate's harness and its 3.5 MB of recorded surfaces, which
+# no consumer of the crate reads. `tests/` and `benches/` stay in: they are
+# declared targets, so the manifest a consumer resolves must still find their
+# sources.
+exclude = [".github/", "api/", "tools/", ".gitignore"]
+
+# docs.rs renders the whole surface, not just the default features, so `typed`,
+# `hub`, `rayon` and `metal` are documented. `metal` compiles only on macOS, so
+# that target is built as well as the default Linux one.
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
 
 [dependencies]
 half = "2"
 rayon = { version = "1", optional = true }
-rstorch-derive = { version = "0.3.0", path = "rstorch-derive" }
+rstorch-derive = { version = "1.0.0", path = "rstorch-derive" }
 safetensors = "0.8"
 # The safetensors header is JSON; `serde_json` parses it (and already builds,
 # as a `safetensors` dependency) instead of a hand-rolled scanner here.
@@ -73,6 +86,24 @@ name = "resnet_mnist"
 harness = false
 required-features = ["bench-resnet"]
 
+# The typed example names typed types, so a default `cargo build --examples`
+# must skip it rather than fail to compile.
+[[example]]
+name = "typed"
+required-features = ["typed"]
+
+# The two integration suites that drive `rstorch::testing::check_grad`, which
+# the `testing` feature gates. Declaring the requirement here means a plain
+# `cargo test` skips them instead of failing to compile; the CI lanes that own
+# their coverage pass `--features testing`.
+[[test]]
+name = "numerics"
+required-features = ["testing"]
+
+[[test]]
+name = "reduced_precision"
+required-features = ["testing"]
+
 [features]
 default = []
 typed = []
@@ -82,5 +113,12 @@ rayon = ["dep:rayon"]
 # It exists so a minutes-long big-model benchmark cannot be picked up by a plain
 # `cargo bench`.
 bench-resnet = []
-# Experimental until the conformance + perf gate passes.
+# Correct and conformance-tested, but slower than the CPU backend on the
+# recorded training workloads, which is why `Device::best_available` still
+# returns CPU. See STABILITY.md.
 metal = ["dep:metal"]
+# The finite-difference gradient harness (`rstorch::testing`). It is a test
+# utility, not library surface, so it is the one public module outside the
+# semver guarantee in STABILITY.md — hence a feature rather than an
+# unconditional `pub mod`.
+testing = []

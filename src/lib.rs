@@ -13,6 +13,26 @@
 //! assert_eq!(x.dims(), &[3]);
 //! # Ok::<(), rstorch::Error>(())
 //! ```
+//!
+//! # Feature flags
+//!
+//! All are off by default, and all are additive: enabling one never removes or
+//! changes an item that was there without it.
+//!
+//! | Feature | What it adds |
+//! |---|---|
+//! | `typed` | The `typed` namespace: rank, dimensions, dtype and placement checked at compile time, as a wrapper over this same [`Tensor`]. |
+//! | `rayon` | Multi-threaded CPU kernels. Results are bit-identical to the single-threaded ones: kernels partition by output element, so no float is accumulated across threads in a racing order. |
+//! | `hub` | Downloads for the bundled datasets in [`data::hub`]. |
+//! | `metal` | A macOS GPU backend. Conformance-tested against the CPU backend, but slower than it on the recorded training workloads, which is why [`Device::best_available`] still returns CPU. |
+//! | `testing` | The `testing` finite-difference gradient harness. The one public module outside the stability guarantee. |
+//!
+//! # Stability
+//!
+//! This crate follows semantic versioning from 1.0. The covered surface is
+//! recorded per feature combination under `api/` in the repository and diffed
+//! by CI on every run; `STABILITY.md` states the scope, including what the
+//! `metal` guarantee does and does not promise, and the MSRV policy.
 
 // `#[derive(Module)]` (the `rstorch-derive` crate) generates paths
 // rooted at `::rstorch`; this alias lets that expansion resolve when the
@@ -44,6 +64,7 @@ pub mod nn;
 pub mod optim;
 pub mod persist;
 pub mod prelude;
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod text;
 /// Compile-time checked tensor and neural-network APIs.

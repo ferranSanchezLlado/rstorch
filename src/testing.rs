@@ -1,8 +1,13 @@
-//! Test utilities shared across the crate and the fixture suite.
+//! Test utilities shared across the crate and the fixture suite, behind the
+//! `testing` feature.
 //!
 //! [`check_grad`] is the **single** finite-difference gradient harness: every
 //! op family writes its backward tests as cases against this one signature,
 //! so no module invents its own FD checker.
+//!
+//! This is the one public module the stability guarantee does not cover (see
+//! `STABILITY.md`): its signature follows the crate's own test needs, and it
+//! is public so downstream code can reuse it, not because it is frozen.
 
 use crate::backend::dispatch;
 use crate::dtype::DType;

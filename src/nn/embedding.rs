@@ -156,8 +156,8 @@ impl Embedding {
     /// `ids` may have any rank, including 0 (a single id yields a
     /// `[embedding_dim]` vector). This is the `&self` sibling of
     /// [`Forward::forward`] — an embedding has no mutable state, so it is
-    /// usable from a shared reference (and inside a `Fn` closure such as
-    /// [`check_grad`](crate::testing::check_grad)'s objective).
+    /// usable from a shared reference (and inside a `Fn` closure such as a
+    /// finite-difference gradient check's objective).
     ///
     /// `mode`'s recording axis decides whether the lookup is traced; its
     /// behavior axis is irrelevant here (a table behaves identically in train
