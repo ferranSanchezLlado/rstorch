@@ -19,21 +19,21 @@
 //!
 //! Every normalization here divides the squared deviations by the **full**
 //! element count `n`, not `n − 1`: the population (biased, `correction = 0`)
-//! variance, which is what PyTorch's norm layers use. It is the only choice
+//! variance, which is what `PyTorch`'s norm layers use. It is the only choice
 //! that makes sense for a whitening transform — the statistic is a property of
 //! the block being normalized, not an estimate of some wider population's
 //! variance.
 //!
 //! This is deliberately **not** the convention of the standalone
 //! [`Tensor::var`](crate::Tensor::var)/[`std`](crate::Tensor::std) ops, which
-//! follow PyTorch's *other* default of `correction = 1` (Bessel's correction)
+//! follow `PyTorch`'s *other* default of `correction = 1` (Bessel's correction)
 //! and are pinned that way by the reference-vector suite. The two are different
-//! things with the same name and this crate matches PyTorch on both: the ops
+//! things with the same name and this crate matches `PyTorch` on both: the ops
 //! estimate a population variance from a sample, the layers whiten a block.
 //! Nothing here calls `Tensor::var`.
 //!
 //! [`BatchNorm2d`] then has the one exception that trips everybody, and it is
-//! PyTorch's too: the value folded into the `running_var` **buffer** is the
+//! `PyTorch`'s too: the value folded into the `running_var` **buffer** is the
 //! *unbiased* (`correction = 1`) batch variance, because that buffer really is
 //! an estimate of the data distribution's variance. Normalization uses the
 //! biased form; the running estimate stores the unbiased one. See
@@ -119,7 +119,7 @@ fn composed_layer_norm(
     affine(&xhat, weight, bias)
 }
 
-/// The detached values needed by the single-node fused LayerNorm backward.
+/// The detached values needed by the single-node fused `LayerNorm` backward.
 struct LayerNormBackward {
     xhat: Tensor,
     inv_std: Tensor,
@@ -191,7 +191,7 @@ impl LayerNormBackward {
     }
 }
 
-/// Last-axis LayerNorm through the optional fused backend contract.
+/// Last-axis `LayerNorm` through the optional fused backend contract.
 fn fused_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Result<Tensor> {
     const OP: &str = "LayerNorm::forward";
     let save_stats = [x, weight, bias].iter().any(|input| input.node().is_some());
@@ -237,7 +237,7 @@ fn fused_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Res
     Ok(autograd::record(OP, out, &[x, weight, bias], backward))
 }
 
-/// LayerNorm over caller-owned parameter tensors.
+/// `LayerNorm` over caller-owned parameter tensors.
 pub(crate) fn layer_norm_forward(
     x: &Tensor,
     weight: &Tensor,
@@ -266,7 +266,7 @@ fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     affine(&xhat, weight, None)
 }
 
-/// RMSNorm over a caller-owned parameter tensor.
+/// `RMSNorm` over a caller-owned parameter tensor.
 pub(crate) fn rms_norm_forward(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     check_suffix("RMSNorm::forward", x, weight.shape())?;
     rms_norm(x, weight, eps)
@@ -303,7 +303,7 @@ fn batch_stats(x: &Tensor) -> Result<(Tensor, Tensor)> {
     Ok((mu, var))
 }
 
-/// BatchNorm2d over caller-owned parameters and running buffers.
+/// `BatchNorm2d` over caller-owned parameters and running buffers.
 ///
 /// Training returns detached replacement buffers; eval returns none. Both
 /// replacements are computed before returning so the caller can update them
@@ -451,16 +451,16 @@ fn filled(shape: impl Into<Shape>, value: f64, device: &Device) -> Result<Tensor
 /// # The variance convention (`correction = 0`)
 ///
 /// `var` divides the squared deviations by the **full** element count `n`, not
-/// `n − 1`: the population (biased) variance, which is what PyTorch's norm
+/// `n − 1`: the population (biased) variance, which is what `PyTorch`'s norm
 /// layers use and the only choice that makes sense for a whitening transform —
 /// the statistic describes the block being normalized rather than estimating
 /// some wider population's spread.
 ///
 /// This is deliberately **not** the convention of the standalone
 /// [`Tensor::var`](crate::Tensor::var)/[`std`](crate::Tensor::std) ops, which
-/// follow PyTorch's *other* default of `correction = 1` (Bessel's correction).
+/// follow `PyTorch`'s *other* default of `correction = 1` (Bessel's correction).
 /// The two are different things that share a name, and this crate matches
-/// PyTorch on both; nothing in this layer calls `Tensor::var`.
+/// `PyTorch` on both; nothing in this layer calls `Tensor::var`.
 ///
 /// [`Mode`]'s behavior axis is irrelevant here (the statistics are per-sample,
 /// never running), so train and eval produce identical numbers; only recording
@@ -491,6 +491,7 @@ impl std::fmt::Debug for LayerNorm {
     /// The configuration, not the parameter values: `Param` is not `Debug`
     /// (its values are reached through `state_dict`), and a layer's shape is
     /// what a reader of a model dump wants.
+    #[allow(clippy::missing_fields_in_debug)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LayerNorm")
             .field("normalized_shape", &self.normalized_shape().dims())
@@ -500,7 +501,7 @@ impl std::fmt::Debug for LayerNorm {
 }
 
 impl LayerNorm {
-    /// The default `eps`, matching PyTorch's `nn.LayerNorm`.
+    /// The default `eps`, matching `PyTorch`'s `nn.LayerNorm`.
     pub const DEFAULT_EPS: f64 = 1e-5;
 
     /// A layer normalizing over the trailing `normalized_shape` axes, with
@@ -601,6 +602,7 @@ pub struct RMSNorm {
 
 impl std::fmt::Debug for RMSNorm {
     /// The configuration, as for [`LayerNorm`].
+    #[allow(clippy::missing_fields_in_debug)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RMSNorm")
             .field("normalized_shape", &self.normalized_shape().dims())
@@ -614,7 +616,7 @@ impl RMSNorm {
     /// divisor is a raw second moment rather than a variance, so it is
     /// typically further from zero.
     ///
-    /// Unlike [`LayerNorm::DEFAULT_EPS`] this is *not* PyTorch's default —
+    /// Unlike [`LayerNorm::DEFAULT_EPS`] this is *not* `PyTorch`'s default —
     /// `torch.nn.RMSNorm` defaults to the input dtype's machine epsilon
     /// (`~1.2e-7` in F32). `1e-6` is the value the published decoder stacks use,
     /// and it is dtype-independent, which the machine-epsilon rule is not. Pass
@@ -714,11 +716,11 @@ impl Forward for RMSNorm {
 /// ```
 ///
 /// The update is a plain exponential moving average with a constant
-/// `momentum` (PyTorch's `momentum=None` cumulative-average mode is not
+/// `momentum` (`PyTorch`'s `momentum=None` cumulative-average mode is not
 /// implemented, so there is no `num_batches_tracked` buffer). The values folded
 /// in are detached, so the buffers never hold a graph.
 ///
-/// Note the deliberate asymmetry, which is PyTorch's: the **normalization**
+/// Note the deliberate asymmetry, which is `PyTorch`'s: the **normalization**
 /// divides by the biased (`correction = 0`) batch variance — see
 /// [`LayerNorm`]'s note on that convention — while the value folded into
 /// `running_var` is the **unbiased** (`correction = 1`) one, because that buffer
@@ -754,6 +756,7 @@ impl std::fmt::Debug for BatchNorm2d {
     /// The configuration, as for [`LayerNorm`]. The running buffers are
     /// tensors and print through [`running_mean`](BatchNorm2d::running_mean) /
     /// [`running_var`](BatchNorm2d::running_var) if wanted.
+    #[allow(clippy::missing_fields_in_debug)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BatchNorm2d")
             .field("channels", &self.channels())
@@ -764,10 +767,10 @@ impl std::fmt::Debug for BatchNorm2d {
 }
 
 impl BatchNorm2d {
-    /// The default `eps`, matching PyTorch's `nn.BatchNorm2d`.
+    /// The default `eps`, matching `PyTorch`'s `nn.BatchNorm2d`.
     pub const DEFAULT_EPS: f64 = 1e-5;
 
-    /// The default EMA `momentum`, matching PyTorch's `nn.BatchNorm2d`. Note
+    /// The default EMA `momentum`, matching `PyTorch`'s `nn.BatchNorm2d`. Note
     /// the convention: `momentum` weights the **new** batch, so larger means
     /// faster forgetting (the opposite of the optimizer's momentum).
     pub const DEFAULT_MOMENTUM: f64 = 0.1;
@@ -846,7 +849,7 @@ impl Forward for BatchNorm2d {
     /// axis is not [`channels`](BatchNorm2d::channels) (`rhs` is `[C]`),
     /// [`Error::InvalidArg`] (`op: "BatchNorm2d::forward"`) if a **training**
     /// forward has fewer than two elements per channel (`N·H·W < 2`: no
-    /// unbiased variance to store, exactly PyTorch's "expected more than 1
+    /// unbiased variance to store, exactly `PyTorch`'s "expected more than 1
     /// value per channel" refusal), and
     /// [`Error::DTypeMismatch`]/[`Error::DeviceMismatch`] if `x` disagrees with
     /// the parameters and buffers.

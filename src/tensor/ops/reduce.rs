@@ -30,7 +30,7 @@
 //! - Accumulation happens in the wide [`Acc`](crate::dtype::Element::Acc)
 //!   type inside the kernel, with a single cast at output, so a long `f16`
 //!   sum cannot saturate to infinity on its way to an in-range total.
-//! - `var`/`std` use **`correction = 1`** (Bessel's correction), PyTorch's
+//! - `var`/`std` use **`correction = 1`** (Bessel's correction), `PyTorch`'s
 //!   default, and are float-only.
 //! - `softmax`/`log_softmax` use the standard max-shifted formulas, so a row
 //!   of large logits cannot overflow. The shift is **detached**: softmax is
@@ -189,7 +189,7 @@ fn spread(
 
 /// The `max`/`min` backward: the cotangent reaches exactly the elements that
 /// achieved the extremum, split evenly when several tie (the rule
-/// [`Tensor::maximum`] already uses element-wise, and PyTorch's `amax`/`amin`
+/// [`Tensor::maximum`] already uses element-wise, and `PyTorch`'s `amax`/`amin`
 /// rule).
 ///
 /// `x` and `out` are the **detached** input and output; both are re-viewed
@@ -213,7 +213,7 @@ fn spread(
 /// - It is what the even-split formula already *tried* to produce: with no
 ///   winners the share is `g / 0` and `hit · share` is `0 · ∞` = NaN. The
 ///   decision here is to keep that answer and make it deliberate, not to
-///   overturn it. (PyTorch's `amax`/`amin` backward is the same
+///   overturn it. (`PyTorch`'s `amax`/`amin` backward is the same
 ///   `mask · (g / mask.sum())` shape and so reaches `0 / 0` the same way,
 ///   but that was **not** re-measured for this decision — do not cite it as
 ///   verified parity.)
@@ -609,7 +609,7 @@ impl Tensor {
     // ---- var / std -------------------------------------------------------
 
     /// Variance over `axis` with **`correction = 1`** (Bessel's correction —
-    /// PyTorch's default), dropping the axis.
+    /// `PyTorch`'s default), dropping the axis.
     ///
     /// Float-only, and the axis must hold at least two elements: with
     /// `correction = 1` a single sample has no unbiased variance, and this

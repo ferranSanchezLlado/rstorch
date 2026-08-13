@@ -193,7 +193,7 @@ reductions_for_rank!(Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7], Tensor7<DYN, DYN
 mod tests {
     use super::*;
     use crate::typed::sealed::TypedTensor as SealedTypedTensor;
-    use crate::typed::{Cpu, DeviceBinding, DeviceCtx};
+    use crate::typed::{DeviceBinding, DeviceCtx};
     use crate::{Device, Error, Grads};
     use std::sync::Arc;
 
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn frozen_outputs_are_exact_for_every_rank() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let t1 = Tensor1::<1>::from_vec(vec![1.0], [1], &ctx).unwrap();
         let t2 = Tensor2::<1, 1>::from_vec(vec![1.0], [1, 1], &ctx).unwrap();
         let t3 = Tensor3::<1, 1, 1>::from_vec(vec![1.0], [1, 1, 1], &ctx).unwrap();
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn typed_values_match_runtime_and_runtime_axes_erase_markers() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let x =
             Tensor2::<2, 3>::from_vec(vec![1.0f32, 5.0, 3.0, 4.0, 2.0, 6.0], [2, 3], &ctx).unwrap();
 
@@ -287,7 +287,7 @@ mod tests {
     /// `AXIS as isize` with `0` before this test existed.
     #[test]
     fn every_reduction_passes_its_const_axis_to_the_runtime() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let x =
             Tensor2::<2, 3>::from_vec(vec![1.0f32, 5.0, 3.0, 4.0, 2.0, 6.0], [2, 3], &ctx).unwrap();
 
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn runtime_errors_and_empty_policies_are_preserved() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let x = Tensor2::<2, 3>::from_vec(vec![0.0f32; 6], [2, 3], &ctx).unwrap();
         macro_rules! assert_invalid_axis_op {
             ($expression:expr, $op:literal) => {
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn typed_reductions_preserve_runtime_gradients() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let runtime = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &ctx.device())
             .unwrap()
             .traced()

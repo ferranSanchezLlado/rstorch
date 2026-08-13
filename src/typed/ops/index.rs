@@ -269,8 +269,8 @@ mod tests {
 
         // The same computation through `DYN` markers agrees, which is the
         // property the old equality check silently broke.
-        let dynamic_source: Tensor2<DYN, DYN> = source.clone().erase_shape().unwrap();
-        let dynamic_ids: Tensor2<DYN, DYN, i64> = ids.clone().erase_shape().unwrap();
+        let dynamic_source: Tensor2<DYN, DYN> = source.erase_shape().unwrap();
+        let dynamic_ids: Tensor2<DYN, DYN, i64> = ids.erase_shape().unwrap();
         let via_dyn = dynamic_source.gather::<1, _>(&dynamic_ids).unwrap();
         assert_eq!(via_dyn.dims(), gathered.dims());
         assert_eq!(

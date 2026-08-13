@@ -6,7 +6,7 @@
 //! everything in front of them is a batch axis, and the two operands' batch
 //! prefixes broadcast right-aligned under the usual rules (a size-1 or
 //! missing batch axis repeats). Both operands must be rank ≥ 2: there is no
-//! implicit vector promotion (PyTorch's rank-1 special cases), because "the
+//! implicit vector promotion (`PyTorch`'s rank-1 special cases), because "the
 //! last two axes are the matrix" is the rule that composes with batching
 //! without surprises.
 //!
@@ -468,13 +468,7 @@ mod tests {
         // the sum over the batch axis (the `sum_to` path).
         let a = iota([2, 3]);
         let b = iota([2, 3, 2]);
-        check_grad(
-            |xs| pick(&xs[0].matmul(&xs[1])?, 3),
-            &[a.clone(), b.clone()],
-            EPS,
-            TOL,
-        )
-        .unwrap();
+        check_grad(|xs| pick(&xs[0].matmul(&xs[1])?, 3), &[a, b], EPS, TOL).unwrap();
 
         // …and symmetrically, with a size-1 batch axis on the right.
         let a = iota([2, 2, 3]);

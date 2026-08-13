@@ -3,13 +3,14 @@
 //! ([`state_dict`]/[`load_state_dict`]/[`to_device`]/[`to_dtype`]),
 //! [`Sequential`], and (from wave 4 on) the layer zoo.
 //!
-//! Five public traits exist in the entire library; two of them —
-//! [`Module`] and [`Forward`] — live here. Both are object-safe.
+//! The dynamic core has five foundational public traits; two of them —
+//! [`Module`] and [`Forward`] — live here. The optional `typed` namespace adds
+//! compile-time contract traits of its own. Both dynamic traits are object-safe.
 //!
 //! # Parameters, buffers, and paths
 //!
 //! A [`Param`] is trainable and optimizer-visited; a plain `Tensor` field
-//! declared as a buffer is non-trainable persistent state (BatchNorm running
+//! declared as a buffer is non-trainable persistent state (`BatchNorm` running
 //! statistics). Both are moved by [`to_device`]/[`to_dtype`] and both land in
 //! [`state_dict`], so a checkpoint reconstructs a model — only `Param`s count
 //! toward [`num_params`] and receive gradients. Every leaf is named by the
@@ -105,7 +106,8 @@ use crate::tensor::Tensor;
 /// paths. `#[derive(Module)]` (the `rstorch-derive` crate) writes both;
 /// the derive is **loud by default** — every non-whitelisted field must be a
 /// child `Module` or bear `#[module(skip)]`, so a silently unvisited (and
-/// therefore untrained) parameter is a compile error.
+/// therefore untrained) parameter is a compile error unless the caller has
+/// explicitly opted that field out with `skip`.
 ///
 /// Object-safe: `&dyn Module` drives the model-level utilities and, via
 /// stable dyn upcasting (Rust 1.86), the crate-private `Sequential` layer.
@@ -118,10 +120,15 @@ pub trait Module {
 }
 
 /// A module that maps a tensor to a tensor under a [`Mode`] (exploration
-/// §4.1). `&mut self` is honest about layer state (dropout RNG, BatchNorm
+/// §4.1). `&mut self` is honest about layer state (dropout RNG, `BatchNorm`
 /// running stats as plain fields — no interior mutability, no mutexes).
 pub trait Forward {
     /// Run the forward pass. `mode` selects layer behavior and whether the
     /// computation is recorded for autograd.
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined: propagates whatever error the layer's own
+    /// tensor ops return, typically a shape or dtype mismatch against `x`.
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor>;
 }

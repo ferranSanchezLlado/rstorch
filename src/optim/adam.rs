@@ -292,7 +292,7 @@ fn kernel_scalars(lr: f64, hyper: AdamGroup, decoupled: bool, clock: u64) -> [f6
 /// divide a fresh, near-zero moment estimate by an almost-saturated correction
 /// factor and take a step several times too small.
 ///
-/// # Adam vs AdamW
+/// # Adam vs `AdamW`
 ///
 /// One implementation and one type: the only difference is *where* weight decay
 /// enters, so it is a flag ([`Adam::decoupled`]) rather than a second code path.
@@ -372,14 +372,14 @@ impl Adam {
     }
 
     /// Choose where weight decay enters: `true` applies it straight to the
-    /// parameter (AdamW), `false` folds it into the gradient (classic Adam).
+    /// parameter (`AdamW`), `false` folds it into the gradient (classic Adam).
     #[must_use]
     pub fn decoupled(mut self, decoupled: bool) -> Adam {
         self.engine.rule.decoupled = decoupled;
         self
     }
 
-    /// Whether weight decay is decoupled (i.e. whether this is an AdamW).
+    /// Whether weight decay is decoupled (i.e. whether this is an `AdamW`).
     pub fn is_decoupled(&self) -> bool {
         self.engine.rule.decoupled
     }
@@ -453,6 +453,39 @@ impl Adam {
     ///
     /// [`Error::Persistence`](crate::Error::Persistence) if `envelope` already
     /// carries optimizer state, or if a host transfer fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::nn::{Mode, Param};
+    /// use rstorch::optim::Adam;
+    /// use rstorch::persist::Envelope;
+    /// use rstorch::{DType, Device, Result, Tensor};
+    ///
+    /// #[derive(rstorch::Module)]
+    /// struct Model {
+    ///     w: Param,
+    /// }
+    ///
+    /// # fn main() -> Result<()> {
+    /// let dev = Device::Cpu;
+    /// let mut model = Model {
+    ///     w: Param::new(Tensor::full([2], 1.0, DType::F32, &dev)?),
+    /// };
+    /// let mut opt = Adam::new(0.1);
+    /// let w = model.w.get(Mode::TRAIN);
+    /// let loss = w.mul(&w)?.sum_all()?;
+    /// opt.step(&mut model, loss.backward()?)?;
+    ///
+    /// let mut envelope = Envelope::new();
+    /// opt.save_state(&model, &mut envelope)?;
+    ///
+    /// let mut restored = Adam::new(0.1);
+    /// restored.load_state(&model, &envelope)?;
+    /// assert_eq!(restored.param_steps(&model.w), opt.param_steps(&model.w));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn save_state(&self, model: &dyn Module, envelope: &mut Envelope) -> Result<()> {
         self.engine.save(model, envelope)
     }
@@ -470,7 +503,7 @@ impl Adam {
     /// parameter `model` does not have, holds a buffer whose shape/dtype does
     /// not match its parameter, is missing one of the two moments, or disagrees
     /// about [`decoupled`](Adam::decoupled) — a coupled-decay checkpoint and an
-    /// AdamW are different algorithms, so that is a rejection rather than a
+    /// `AdamW` are different algorithms, so that is a rejection rather than a
     /// silent reconfiguration.
     pub fn load_state(&mut self, model: &dyn Module, envelope: &Envelope) -> Result<()> {
         self.engine.load(model, envelope)
@@ -487,7 +520,7 @@ impl Adam {
     }
 }
 
-/// **AdamW**: Adam with *decoupled* weight decay (Loshchilov & Hutter, 2019).
+/// **`AdamW`**: Adam with *decoupled* weight decay (Loshchilov & Hutter, 2019).
 ///
 /// One implementation, two names. The decay term is the only
 /// difference — coupled decay adds `weight_decay · w` to the gradient, where
@@ -965,6 +998,9 @@ mod tests {
         half.set_section("optimizer", full.section("optimizer").unwrap())
             .unwrap();
         for (key, tensor) in full.tensors() {
+            // Not a file path: `.v` here is an optimizer-state tensor-key
+            // suffix, so `Path::extension()` doesn't apply.
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if !key.ends_with(".v") {
                 half.insert_tensor(key.clone(), tensor.clone());
             }

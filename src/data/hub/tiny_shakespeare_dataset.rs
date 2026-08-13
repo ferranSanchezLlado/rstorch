@@ -1,4 +1,4 @@
-//! TinyShakespeare as a batch-level [`Dataset`] of causal-LM windows: the
+//! `TinyShakespeare` as a batch-level [`Dataset`] of causal-LM windows: the
 //! tensor-side wrapper over the raw [`TinyShakespeare`] corpus.
 //!
 //! The hub downloads and verifies one text file; this module tokenizes it once with
@@ -23,7 +23,7 @@ use crate::text::CharTokenizer;
 
 /// Character-level causal-LM windows over a text corpus.
 ///
-/// Built from the TinyShakespeare cache ([`from_cache`](Self::from_cache), or
+/// Built from the `TinyShakespeare` cache ([`from_cache`](Self::from_cache), or
 /// `load`, which the `hub` feature adds) or from any text at all
 /// ([`from_text`](Self::from_text) — what the tests and small examples use).
 /// The tokenizer is built from the corpus it is given and kept, so

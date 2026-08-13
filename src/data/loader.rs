@@ -66,7 +66,7 @@ impl<D: Dataset> DataLoader<D> {
     /// dataset order.
     ///
     /// The final batch is **short, not dropped**, when the length is not a
-    /// multiple of `batch_size` (PyTorch's default; see
+    /// multiple of `batch_size` (`PyTorch`'s default; see
     /// [`drop_last`](DataLoader::drop_last) to change it).
     ///
     /// # Panics
@@ -431,9 +431,8 @@ mod tests {
                     assert_eq!(sizes.len(), expected, "{case}");
                     // Every batch but the last is exactly `batch_size`; the
                     // last is nonempty, and full unless it is a kept tail.
-                    let (last, rest) = match sizes.split_last() {
-                        Some(split) => split,
-                        None => continue,
+                    let Some((last, rest)) = sizes.split_last() else {
+                        continue;
                     };
                     assert!(rest.iter().all(|size| *size == batch_size), "{case}");
                     assert!(*last > 0 && *last <= batch_size, "{case}");

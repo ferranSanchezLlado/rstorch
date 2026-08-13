@@ -73,9 +73,24 @@ where
 /// Fully static incompatible input suffixes fail during monomorphization. A
 /// relation containing [`DYN`] is checked against runtime dimensions.
 ///
+/// # Examples
+///
+/// ```
+/// use rstorch::typed::{nn::{Forward, LayerNorm, Mode}, DeviceCtx, Tensor1, Tensor2};
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let ctx = DeviceCtx::cpu()?;
+/// let mut norm = LayerNorm::<Tensor1<4>>::new([4], &ctx)?;
+/// let input = Tensor2::<2, 4>::from_vec(vec![0.0f32; 8], [2, 4], &ctx)?;
+/// let out = norm.forward(&input, Mode::EVAL)?;
+/// assert_eq!(out.dims(), [2, 4]);
+/// # Ok(())
+/// # }
+/// ```
+///
 /// ```compile_fail
 /// use rstorch::typed::{nn::{Forward, LayerNorm, Mode}, Cpu, DeviceCtx, Tensor1, Tensor2};
-/// let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+/// let ctx = DeviceCtx::cpu().unwrap();
 /// let mut norm = LayerNorm::<Tensor1<4>>::new([4], &ctx).unwrap();
 /// let input = Tensor2::<2, 3>::from_vec(vec![0.0; 6], [2, 3], &ctx).unwrap();
 /// let _ = norm.forward(&input, Mode::EVAL);
@@ -101,11 +116,22 @@ where
     pub const DEFAULT_EPS: f64 = 1e-5;
 
     /// Constructs a typed layer with ones for weight and zeros for bias.
+    ///
+    /// # Errors
+    ///
+    /// As [`with_eps`](Self::with_eps).
     pub fn new(shape: impl Into<Shape>, ctx: &DeviceCtx<S::Placement>) -> Result<Self> {
         Self::with_eps(shape, Self::DEFAULT_EPS, ctx)
     }
 
     /// Constructs a typed layer with an explicit positive epsilon.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] if `eps` is not finite and positive, or if
+    /// `shape` has rank zero, contains a zero dimension, or contradicts a
+    /// static marker in `S`; otherwise propagates the binding-check error
+    /// from `ctx`.
     pub fn with_eps(
         shape: impl Into<Shape>,
         eps: f64,
@@ -160,7 +186,7 @@ where
             assert_suffix(
                 <I as SealedTypedTensor>::MARKERS,
                 <S as SealedTypedTensor>::MARKERS,
-            )
+            );
         };
         validate_binding::<I::Placement>(input.binding(), "LayerNorm::forward")?;
         let weight = self.weight.get(mode)?;
@@ -225,9 +251,24 @@ where
 ///
 /// It has one parameter named `weight` and preserves the exact input type.
 ///
+/// # Examples
+///
+/// ```
+/// use rstorch::typed::{nn::{Forward, Mode, RMSNorm}, DeviceCtx, Tensor1, Tensor2};
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let ctx = DeviceCtx::cpu()?;
+/// let mut norm = RMSNorm::<Tensor1<4>>::new([4], &ctx)?;
+/// let input = Tensor2::<2, 4>::from_vec(vec![1.0f32; 8], [2, 4], &ctx)?;
+/// let out = norm.forward(&input, Mode::EVAL)?;
+/// assert_eq!(out.dims(), [2, 4]);
+/// # Ok(())
+/// # }
+/// ```
+///
 /// ```compile_fail
 /// use rstorch::typed::{nn::{Forward, Mode, RMSNorm}, Cpu, DeviceCtx, Tensor1, Tensor3};
-/// let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+/// let ctx = DeviceCtx::cpu().unwrap();
 /// let mut norm = RMSNorm::<Tensor1<4>>::new([4], &ctx).unwrap();
 /// let input = Tensor3::<2, 3, 5>::from_vec(vec![0.0; 30], [2, 3, 5], &ctx).unwrap();
 /// let _ = norm.forward(&input, Mode::EVAL);
@@ -251,12 +292,20 @@ where
     /// Default epsilon, matching [`crate::nn::RMSNorm`].
     pub const DEFAULT_EPS: f64 = 1e-6;
 
-    /// Constructs a typed RMSNorm with a unit scale.
+    /// Constructs a typed `RMSNorm` with a unit scale.
+    ///
+    /// # Errors
+    ///
+    /// As [`with_eps`](Self::with_eps).
     pub fn new(shape: impl Into<Shape>, ctx: &DeviceCtx<S::Placement>) -> Result<Self> {
         Self::with_eps(shape, Self::DEFAULT_EPS, ctx)
     }
 
-    /// Constructs a typed RMSNorm with an explicit positive epsilon.
+    /// Constructs a typed `RMSNorm` with an explicit positive epsilon.
+    ///
+    /// # Errors
+    ///
+    /// As [`LayerNorm::with_eps`].
     pub fn with_eps(
         shape: impl Into<Shape>,
         eps: f64,
@@ -298,7 +347,7 @@ where
             assert_suffix(
                 <I as SealedTypedTensor>::MARKERS,
                 <S as SealedTypedTensor>::MARKERS,
-            )
+            );
         };
         validate_binding::<I::Placement>(input.binding(), "RMSNorm::forward")?;
         let weight = self.weight.get(mode)?;
@@ -349,9 +398,24 @@ where
 /// Static channel mismatches fail during monomorphization. `C = DYN` permits a
 /// runtime channel count supplied to the constructor and checked on forward.
 ///
+/// # Examples
+///
+/// ```
+/// use rstorch::typed::{nn::{BatchNorm2d, Forward, Mode}, DeviceCtx, Tensor4};
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let ctx = DeviceCtx::cpu()?;
+/// let mut norm = BatchNorm2d::<2>::new(2, &ctx)?;
+/// let input = Tensor4::<1, 2, 4, 4>::from_vec(vec![0.0f32; 32], [1, 2, 4, 4], &ctx)?;
+/// let out = norm.forward(&input, Mode::EVAL)?;
+/// assert_eq!(out.dims(), [1, 2, 4, 4]);
+/// # Ok(())
+/// # }
+/// ```
+///
 /// ```compile_fail
 /// use rstorch::typed::{nn::{BatchNorm2d, Forward, Mode}, Cpu, DeviceCtx, Tensor4};
-/// let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+/// let ctx = DeviceCtx::cpu().unwrap();
 /// let mut norm = BatchNorm2d::<3>::new(3, &ctx).unwrap();
 /// let input = Tensor4::<1, 2, 4, 4>::from_vec(vec![0.0; 32], [1, 2, 4, 4], &ctx).unwrap();
 /// let _ = norm.forward(&input, Mode::EVAL);
@@ -374,12 +438,22 @@ impl<const C: usize, E: FloatElement, P: Placement> BatchNorm2d<C, E, P> {
     /// Default running-statistic momentum, matching [`crate::nn::BatchNorm2d`].
     pub const DEFAULT_MOMENTUM: f64 = 0.1;
 
-    /// Constructs a typed BatchNorm2d for `channels` actual channels.
+    /// Constructs a typed `BatchNorm2d` for `channels` actual channels.
+    ///
+    /// # Errors
+    ///
+    /// As [`with_params`](Self::with_params).
     pub fn new(channels: usize, ctx: &DeviceCtx<P>) -> Result<Self> {
         Self::with_params(channels, Self::DEFAULT_EPS, Self::DEFAULT_MOMENTUM, ctx)
     }
 
-    /// Constructs a typed BatchNorm2d with explicit epsilon and momentum.
+    /// Constructs a typed `BatchNorm2d` with explicit epsilon and momentum.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] if `channels` is zero or contradicts the static
+    /// `C` marker; as [`LayerNorm::with_eps`] for `eps`; `momentum` outside
+    /// `[0, 1]` fails the same way.
     pub fn with_params(
         channels: usize,
         eps: f64,
@@ -413,6 +487,11 @@ impl<const C: usize, E: FloatElement, P: Placement> BatchNorm2d<C, E, P> {
     }
 
     /// Returns the actual channel count.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: every constructor seals `running_mean` through
+    /// [`TypedBuffer::new`], so its binding is always valid.
     pub fn channels(&self) -> usize {
         self.running_mean
             .value()
@@ -444,10 +523,19 @@ impl<const C: usize, E: FloatElement, P: Placement> BatchNorm2d<C, E, P> {
         &mut self.bias
     }
     /// Returns the running mean buffer value.
+    ///
+    /// # Errors
+    ///
+    /// As [`TypedBuffer::value`]; unreachable in practice, for the same
+    /// reason as [`channels`](Self::channels).
     pub fn running_mean(&self) -> Result<Tensor1<C, E, P>> {
         self.running_mean.value()
     }
     /// Returns the running variance buffer value.
+    ///
+    /// # Errors
+    ///
+    /// As [`running_mean`](Self::running_mean).
     pub fn running_var(&self) -> Result<Tensor1<C, E, P>> {
         self.running_var.value()
     }
@@ -561,7 +649,7 @@ mod tests {
 
     #[test]
     fn layer_and_rms_are_shape_preserving_and_match_runtime_values() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let input =
             Tensor2::<2, 4>::from_vec((1..=8).map(|x| x as f32).collect(), [2, 4], &ctx).unwrap();
         let mut typed = LayerNorm::<Tensor1<4>>::new([4], &ctx).unwrap();
@@ -583,7 +671,7 @@ mod tests {
     /// message cannot drift away from the typed layer's silently.
     #[test]
     fn constructor_rejections_and_reported_configuration_match_the_runtime_rules() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
 
         for eps in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             let expected = format!("invalid argument: eps must be finite and positive, got {eps}");
@@ -696,7 +784,7 @@ mod tests {
 
     #[test]
     fn dynamic_suffix_and_channels_report_runtime_mismatches() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let input = Tensor2::<DYN, DYN>::from_vec(vec![0.0; 6], [2, 3], &ctx).unwrap();
         let mut norm = LayerNorm::<Tensor1<DYN>>::new([4], &ctx).unwrap();
         assert!(matches!(
@@ -723,7 +811,7 @@ mod tests {
 
     #[test]
     fn dynamic_affine_and_buffer_inconsistency_rejects_before_batch_updates() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let row = Tensor2::<1, DYN>::from_vec(vec![1.0, 2.0], [1, 2], &ctx).unwrap();
 
         // Both rejections must name `LayerNorm::forward` rather than a fused or
@@ -780,7 +868,7 @@ mod tests {
 
     #[test]
     fn gradients_and_exact_state_paths_include_parameters_and_buffers() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let input =
             Tensor2::<2, 3>::from_vec(vec![0.5, -1.5, 2.0, 0.25, -0.75, 1.25], [2, 3], &ctx)
                 .unwrap()
@@ -842,7 +930,7 @@ mod tests {
 
     #[test]
     fn forged_noncanonical_input_binding_is_rejected_before_arithmetic() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let dynamic = Tensor::from_vec(vec![1.0f32, 2.0], [1, 2], &Device::Cpu).unwrap();
         let forged = Arc::new(DeviceBinding {
             device: Device::Cpu,
@@ -860,7 +948,7 @@ mod tests {
 
     #[test]
     fn batch_norm_train_eval_and_state_movement_match_runtime() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let input = Tensor4::<2, 2, 2, 2>::from_vec(
             (0..16).map(|x| x as f32).collect(),
             [2, 2, 2, 2],
@@ -914,7 +1002,7 @@ mod tests {
 
     #[test]
     fn reduced_precision_layer_norm_matches_runtime_and_keeps_gradients_typed() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let values = vec![0.5f32, -1.5, 2.0, 0.25, -0.75, 1.25];
         let input = Tensor2::<2, 3>::from_vec(values, [2, 3], &ctx)
             .unwrap()
@@ -1003,7 +1091,7 @@ mod tests {
 
     #[test]
     fn reduced_precision_multi_axis_values_and_gradients_match_runtime_helper_exactly() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let values = vec![0.5f32, -1.5, 2.0, 0.25, -0.75, 1.25, 0.75, -0.25];
         let input = crate::typed::Tensor3::<2, 2, 2>::from_vec(values, [2, 2, 2], &ctx)
             .unwrap()
@@ -1086,7 +1174,7 @@ mod tests {
 
     #[test]
     fn frozen_parameters_and_training_behavior_are_independent() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let input =
             Tensor4::<1, 2, 1, 2>::from_vec(vec![1.0, 3.0, 2.0, 6.0], [1, 2, 1, 2], &ctx).unwrap();
         let mut norm = BatchNorm2d::<2>::new(2, &ctx).unwrap();

@@ -1,6 +1,6 @@
 //! [`Linear`] — the fully connected affine layer.
 //!
-//! The weight is stored `[out_features, in_features]`, PyTorch's orientation,
+//! The weight is stored `[out_features, in_features]`, `PyTorch`'s orientation,
 //! and the forward pass transposes it *as a view*
 //! (`x.matmul(&w.transpose(-2, -1)?)`): `matmul` consumes strided views, so the
 //! transposed weight is never materialized. Storing `[in, out]` instead would
@@ -31,16 +31,16 @@ use crate::tensor::Tensor;
 ///
 /// # Initialization
 ///
-/// The weight is drawn from the Kaiming (He) uniform distribution for a ReLU
+/// The weight is drawn from the Kaiming (He) uniform distribution for a `ReLU`
 /// nonlinearity — `U(-√(6/fan_in), √(6/fan_in))`, `fan_in = in_features` — and
 /// the bias starts at zero. Constructors always produce
 /// [`F32`](crate::DType::F32) parameters; convert afterwards with
 /// [`nn::to_dtype`](crate::nn::to_dtype).
 ///
-/// This is *not* bug-compatible with PyTorch's `nn.Linear`, whose default is
+/// This is *not* bug-compatible with `PyTorch`'s `nn.Linear`, whose default is
 /// `kaiming_uniform_(a=√5)` — a bound of `1/√fan_in`, some 2.4× smaller — with
 /// a uniformly drawn bias. The textbook He bound is the better default for
-/// ReLU stacks; a script ported from PyTorch that depends on the exact initial
+/// `ReLU` stacks; a script ported from `PyTorch` that depends on the exact initial
 /// distribution should load a checkpoint rather than rely on either default.
 ///
 /// ```

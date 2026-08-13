@@ -38,7 +38,7 @@ fn every_rank_constructs_and_reports_exact_runtime_dimensions() {
     assert_eq!(t8.dims(), [1, 1, 1, 1, 1, 1, 1, 1]);
     assert_eq!(Tensor8::<1, 1, 1, 1, 1, 1, 1, 1>::RANK, 8);
 
-    Tensor0::<f32, Cpu>::try_from_dynamic(t0.into_dynamic(), &ctx).unwrap();
+    Tensor0::<f32>::try_from_dynamic(t0.into_dynamic(), &ctx).unwrap();
     Tensor1::<1>::try_from_dynamic(t1.into_dynamic(), &ctx).unwrap();
     Tensor2::<1, 1>::try_from_dynamic(t2.into_dynamic(), &ctx).unwrap();
     Tensor3::<1, 1, 1>::try_from_dynamic(t3.into_dynamic(), &ctx).unwrap();

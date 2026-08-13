@@ -1,5 +1,6 @@
 #![cfg(feature = "typed")]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -202,7 +203,7 @@ fn tensor_type(dims: &[String], element: Option<&str>) -> String {
 }
 
 fn push_same(source: &mut String, actual: &str, expected: &str) {
-    source.push_str(&format!("    same::<{actual}, {expected}>();\n"));
+    let _ = writeln!(source, "    same::<{actual}, {expected}>();");
 }
 
 fn cargo_check(root: &Path, binary: &str) -> Output {

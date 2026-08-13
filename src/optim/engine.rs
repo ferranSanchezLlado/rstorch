@@ -656,6 +656,9 @@ pub(crate) fn fused_outputs(
     }
     let mut tensors = Vec::with_capacity(count);
     for (index, storage) in outputs.into_iter().enumerate() {
+        // Three genuinely different fields (dtype, device, element count), not
+        // a copy-paste slip clippy's heuristic mistakes it for.
+        #[allow(clippy::suspicious_operation_groupings)]
         if storage.dtype() != like.dtype()
             || storage.device() != like.device()
             || storage.len() != like.num_elements()

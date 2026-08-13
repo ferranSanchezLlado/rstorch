@@ -139,6 +139,12 @@ pub trait Forward<Input> {
     type Output;
 
     /// Runs the module under `mode`.
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined; conforming implementations only fail from a
+    /// canonical-binding mismatch between `self` and `input`, or from the
+    /// underlying runtime op's own error.
     fn forward(&mut self, input: &Input, mode: Mode) -> Result<Self::Output>;
 }
 
@@ -250,6 +256,11 @@ pub trait ToDevice<Q: Placement>: Module + Sized {
     type Output: Module;
 
     /// Moves the complete model to the target canonical binding.
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined; conforming implementations only fail from a
+    /// canonical-binding mismatch or the underlying transfer's own error.
     fn to_device(self, target: &DeviceCtx<Q>) -> Result<Self::Output>;
 }
 
@@ -265,6 +276,11 @@ pub trait ToDType<F: FloatElement>: Module + Sized {
 
     /// Consumes the complete model and returns one whose precision-bearing
     /// leaves have been retyped to `F`.
+    ///
+    /// # Errors
+    ///
+    /// Implementation-defined; conforming implementations only fail from the
+    /// underlying cast's own error.
     fn to_dtype(self) -> Result<Self::Output>;
 }
 
@@ -387,7 +403,7 @@ mod tests {
 
     #[test]
     fn forward_and_consuming_retype_contracts_are_implementable() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let input = Tensor1::<1>::from_vec(vec![3.0], [1], &ctx).unwrap();
         let mut module = Identity;
         assert_module_object_safe(&module);
@@ -415,7 +431,7 @@ mod tests {
     }
 
     fn state_entry() -> StateEntry {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let value = Tensor1::<1>::from_vec(vec![0.0], [1], &ctx).unwrap();
         StateEntry {
             value: value.as_dynamic().clone(),

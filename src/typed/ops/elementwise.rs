@@ -255,7 +255,7 @@ typed_rank_table!(impl_elementwise);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::{Cpu, DYN, DeviceCtx};
+    use crate::typed::{DYN, DeviceCtx};
     use crate::{DType, Device, Shape, Tensor};
 
     fn values<E: Element>(tensor: &Tensor) -> Vec<E> {
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn typed_values_match_runtime_elementwise_operations() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let a = Tensor2::<2, 2>::from_vec(vec![-1.0, 2.0, 3.0, 4.0], [2, 2], &ctx).unwrap();
         let b = Tensor2::<2, 2>::from_vec(vec![2.0, 2.0, 1.0, 8.0], [2, 2], &ctx).unwrap();
 
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn dynamic_markers_do_not_enable_implicit_broadcasting() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let matrix = Tensor2::<DYN, DYN>::from_vec(vec![1.0f32; 6], [2, 3], &ctx).unwrap();
         let row = Tensor2::<DYN, DYN>::from_vec(vec![2.0f32; 3], [1, 3], &ctx).unwrap();
         assert!(matrix.as_dynamic().add(row.as_dynamic()).is_ok());
@@ -325,7 +325,7 @@ mod tests {
     /// `op: "add"`, passed the whole suite. One rejection per method fixes that.
     #[test]
     fn every_binary_method_reports_its_own_op_name() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let matrix = Tensor2::<DYN, DYN>::from_vec(vec![1.0f32; 6], [2, 3], &ctx).unwrap();
         let row = Tensor2::<DYN, DYN>::from_vec(vec![2.0f32; 3], [1, 3], &ctx).unwrap();
 
@@ -350,14 +350,11 @@ mod tests {
 
     #[test]
     fn operator_sugar_is_strict_and_matches_named_methods() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let a = Tensor1::<2>::from_vec(vec![1.0f32, 2.0], [2], &ctx).unwrap();
         let b = Tensor1::<2>::from_vec(vec![3.0f32, 4.0], [2], &ctx).unwrap();
         assert_eq!(values::<f32>((&a + &b).as_dynamic()), vec![4.0, 6.0]);
-        assert_eq!(
-            values::<f32>((a.clone() * 2.0).as_dynamic()),
-            vec![2.0, 4.0]
-        );
+        assert_eq!(values::<f32>((a * 2.0).as_dynamic()), vec![2.0, 4.0]);
 
         let short = Tensor1::<DYN>::from_vec(vec![1.0f32], [1], &ctx).unwrap();
         let long = Tensor1::<DYN>::from_vec(vec![1.0f32, 2.0], [2], &ctx).unwrap();
@@ -367,7 +364,7 @@ mod tests {
 
     #[test]
     fn runtime_errors_and_gradients_are_preserved() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let ints = Tensor1::<2, i64>::from_vec(vec![1, 2], [2], &ctx).unwrap();
         assert_eq!(
             values::<i64>(ints.div_scalar(0.0).unwrap().as_dynamic()),
@@ -389,7 +386,7 @@ mod tests {
 
     #[test]
     fn forged_binding_is_rejected_before_runtime_delegation() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let dynamic = Tensor::zeros([2], DType::F32, &Device::Cpu).unwrap();
         let forged = Arc::new(crate::typed::DeviceBinding {
             device: Device::Cpu,
@@ -417,7 +414,7 @@ mod tests {
 
     #[test]
     fn representative_capability_and_operator_signatures_compile() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let value =
             Tensor8::<1, 1, 1, 1, 1, 1, 1, 1, i64>::from_vec(vec![1], [1; 8], &ctx).unwrap();
         assert_numeric_surface(&value);

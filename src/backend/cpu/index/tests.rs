@@ -433,7 +433,7 @@ fn scatter_add_accumulates_duplicate_destinations() {
     assert_eq!(as_f32(&out), vec![0.0, 3.0, 0.0, 3.0, 0.0, 4.0]);
 }
 
-/// PyTorch's rule is `index.size(d) <= src.size(d)`, so `src` may be
+/// `PyTorch`'s rule is `index.size(d) <= src.size(d)`, so `src` may be
 /// strictly larger than the index grid: the grid names which `src`
 /// positions participate, and the rest are simply never read.
 ///

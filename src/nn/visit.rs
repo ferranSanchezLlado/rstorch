@@ -7,14 +7,14 @@
 //! single sink. `#[derive(Module)]` generates the walk: one method
 //! call per field — [`param`](Visitor::param) for a [`Param`],
 //! [`buffer`](Visitor::buffer) for a whitelisted `Tensor` buffer (e.g.
-//! BatchNorm `running_mean`), and [`module`](Visitor::module) for a child
+//! `BatchNorm` `running_mean`), and [`module`](Visitor::module) for a child
 //! module. These path semantics are the on-disk `state_dict` key format, so
 //! they are frozen here (a §9 risk item).
 //!
 //! **Params vs buffers**: a `Param` is trainable
 //! and optimizer-visited; a `Tensor` buffer is non-trainable persistent state
 //! (running statistics). Both are moved by `nn::to_device`/`to_dtype` and both
-//! land in `state_dict` (so a checkpoint reconstructs a model, as PyTorch
+//! land in `state_dict` (so a checkpoint reconstructs a model, as `PyTorch`
 //! does); only `Param`s count toward `num_params` and receive gradients.
 
 use crate::nn::{Module, Param};
@@ -64,9 +64,9 @@ pub(crate) enum LeafMut<'a> {
 ///
 /// `#[derive(Module)]` emits, per field: [`param`](Visitor::param) for a
 /// [`Param`], [`buffer`](Visitor::buffer) for a whitelisted `Tensor` buffer,
-/// [`module`](Visitor::module) for a child module, and an indexed
-/// [`module`](Visitor::module) call per element for `Vec<M>`/`Option<M>`
-/// (child name `"3"`, producing paths like `blocks.3.weight`).
+/// [`module`](Visitor::module) for a child module, an indexed call per `Vec<M>`
+/// element (child name `"blocks.3"`, producing `blocks.3.weight`), and a
+/// field-named call when an `Option<M>` is `Some`.
 pub struct Visitor<'a> {
     path: String,
     sink: &'a mut dyn FnMut(&str, Leaf<'_>),
@@ -87,7 +87,7 @@ impl<'a> Visitor<'a> {
     }
 
     /// Emit a non-trainable `Tensor` buffer leaf named `name` at the current
-    /// prefix (persistent state such as BatchNorm running statistics).
+    /// prefix (persistent state such as `BatchNorm` running statistics).
     pub fn buffer(&mut self, name: &str, t: &Tensor) {
         let full = join(&self.path, name);
         (self.sink)(&full, Leaf::Buffer(t));

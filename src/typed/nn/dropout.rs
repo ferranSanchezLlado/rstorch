@@ -10,6 +10,25 @@ use std::sync::Arc;
 /// The adapter owns exactly the runtime layer's split RNG stream. It has no
 /// parameters or tensor buffers, and reads training behavior independently of
 /// recording through [`Mode`].
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::Rng;
+/// use rstorch::typed::{DeviceCtx, Tensor2};
+/// use rstorch::typed::nn::{Dropout, Forward, Mode};
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let ctx = DeviceCtx::cpu()?;
+/// let mut rng = Rng::seed(0);
+/// let mut drop = Dropout::new(0.5, &mut rng)?;
+/// let x = Tensor2::<1, 8>::from_vec(vec![1.0f32; 8], [1, 8], &ctx)?;
+///
+/// // Eval is the identity, element for element.
+/// assert_eq!(drop.forward(&x, Mode::EVAL)?.to_vec()?, x.to_vec()?);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(rstorch::typed::nn::TypedModule)]
 pub struct Dropout {
     // The runtime layer owns only an RNG stream and a probability, so the walk
@@ -21,6 +40,11 @@ pub struct Dropout {
 
 impl Dropout {
     /// Creates dropout by splitting `rng` exactly once in the runtime layer.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`crate::nn::Dropout::new`]'s rejection of a `p` outside
+    /// `[0, 1)` or non-finite.
     pub fn new(p: f64, rng: &mut Rng) -> Result<Self> {
         Ok(Self {
             runtime: crate::nn::Dropout::new(p, rng)?,

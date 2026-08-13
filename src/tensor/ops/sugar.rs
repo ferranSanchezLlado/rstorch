@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(v(&(&a + &b)), expected);
         assert_eq!(v(&(&a + b.clone())), expected);
         assert_eq!(v(&(a.clone() + &b)), expected);
-        assert_eq!(v(&(a.clone() + b.clone())), expected);
+        assert_eq!(v(&(a + b)), expected);
     }
 
     #[test]
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(v(&(&a + 1.0)), vec![2.0, 3.0]);
         assert_eq!(v(&(&a - 1.0)), vec![0.0, 1.0]);
         assert_eq!(v(&(&a * 3.0)), vec![3.0, 6.0]);
-        assert_eq!(v(&(a.clone() / 2.0)), vec![0.5, 1.0]);
+        assert_eq!(v(&(a / 2.0)), vec![0.5, 1.0]);
     }
 
     #[test]

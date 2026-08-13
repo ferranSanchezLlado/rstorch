@@ -203,7 +203,7 @@ fn assert_close(actual: &[f32], expected: &[f32]) {
 
 #[test]
 fn seeded_typed_mnist_mlp_learns_checkpoints_and_resumes() -> Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let train = typed_split(30, 11, &ctx)?;
     let held_out = typed_split(10, 977, &ctx)?;
     let train_loader = DataLoader::new(&train, 32).shuffle(5);
@@ -344,7 +344,7 @@ fn public_boundaries_reject_width_and_placement_mutations() -> Result<()> {
     struct Auxiliary;
     impl Placement for Auxiliary {}
 
-    let cpu = DeviceCtx::<Cpu>::cpu()?;
+    let cpu = DeviceCtx::cpu()?;
     let auxiliary = DeviceCtx::<Auxiliary>::bind(Device::Cpu)?;
     assert!(matches!(
         Linear::<{ FEATURES + 1 }, HIDDEN>::new(FEATURES, HIDDEN, &cpu, &mut Rng::seed(1),),

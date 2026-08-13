@@ -193,12 +193,13 @@ fn run_case(
     let case_root = run_root.join(&case_name);
     fs::create_dir_all(case_root.join("src")).map_err(|error| error.to_string())?;
     fs::write(case_root.join("src/main.rs"), source).map_err(|error| error.to_string())?;
-    fs::write(
-        case_root.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"rstorch-typed-ui-{case_name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nrstorch = {{ path = {workspace:?}, features = [\"typed\"] }}\n\n[workspace]\n"
-        ),
-    )
+    // `{:?}` is deliberate here, not a `Display` oversight: it TOML-quotes
+    // and escapes the path, which `Path::display()` would not.
+    #[allow(clippy::unnecessary_debug_formatting)]
+    let manifest = format!(
+        "[package]\nname = \"rstorch-typed-ui-{case_name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nrstorch = {{ path = {workspace:?}, features = [\"typed\"] }}\n\n[workspace]\n"
+    );
+    fs::write(case_root.join("Cargo.toml"), manifest)
     .map_err(|error| error.to_string())?;
 
     let output = Command::new("cargo")
@@ -252,9 +253,9 @@ fn run_case(
 }
 
 fn normalized_stderr(output: &Output, workspace: &Path, case_root: &Path) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).replace("\\", "/");
-    let workspace = workspace.to_string_lossy().replace("\\", "/");
-    let case_root = case_root.to_string_lossy().replace("\\", "/");
+    let stderr = String::from_utf8_lossy(&output.stderr).replace('\\', "/");
+    let workspace = workspace.to_string_lossy().replace('\\', "/");
+    let case_root = case_root.to_string_lossy().replace('\\', "/");
     stderr
         .replace(&case_root, "$CASE")
         .replace(&workspace, "$WORKSPACE")

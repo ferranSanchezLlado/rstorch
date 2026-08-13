@@ -6,7 +6,7 @@
 //! `transpose`, `permute`, `squeeze`, `unsqueeze`, `narrow` and
 //! `broadcast_to` are **always zero-copy**: they re-describe the same storage
 //! through a new [`Layout`] (an `Arc` bump, no element copy). `reshape`
-//! follows PyTorch semantics — a view when the source layout permits one
+//! follows `PyTorch` semantics — a view when the source layout permits one
 //! (`Layout::reshape_view`), a contiguous copy otherwise. `cat`/`stack` are
 //! the only ops here that always allocate, because their result cannot be a
 //! view of several disjoint buffers.
@@ -199,7 +199,7 @@ fn first_operand<'a>(op: &'static str, tensors: &'a [&'a Tensor]) -> Result<&'a 
 
 impl Tensor {
     /// The same elements under a new shape, with the same total element
-    /// count (PyTorch `reshape` semantics).
+    /// count (`PyTorch` `reshape` semantics).
     ///
     /// Returns a zero-copy view whenever the source layout admits one — always
     /// for a contiguous tensor, and for strided ones when the merged/split

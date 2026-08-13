@@ -46,7 +46,7 @@ struct Net {
 
 #[test]
 fn derived_typed_module_is_reachable_through_rstorch_only() -> rstorch::Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let mut rng = Rng::seed(7);
     let model = Net {
         blocks: vec![Block::new(&ctx, &mut rng)?, Block::new(&ctx, &mut rng)?],
@@ -81,7 +81,7 @@ fn derived_typed_module_is_reachable_through_rstorch_only() -> rstorch::Result<(
 fn derived_walk_matches_a_forward_capable_model() -> rstorch::Result<()> {
     use rstorch::typed::nn::Forward;
 
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let mut rng = Rng::seed(11);
     let mut model = Net {
         blocks: Vec::new(),
@@ -132,7 +132,7 @@ fn leaves(net: &Net) -> rstorch::Result<Vec<Vec<f32>>> {
 /// destination leaf unwritten below.
 #[test]
 fn derived_mutable_walk_writes_every_leaf() -> rstorch::Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
 
     let mut source_rng = Rng::seed(7);
     let mut source = Net {

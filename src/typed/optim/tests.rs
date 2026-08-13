@@ -3,30 +3,19 @@
 //! files against the same model driven through the dynamic API.
 
 use super::*;
-use crate::typed::nn::{Mode, TypedBuffer, TypedParam, TypedVisitor, TypedVisitorMut};
-use crate::typed::{Cpu, DeviceCtx, FloatElement, NumericElement, Tensor1};
+use crate::typed::nn::{Mode, TypedBuffer, TypedModule, TypedParam, TypedVisitor, TypedVisitorMut};
+use crate::typed::{DeviceCtx, FloatElement, NumericElement, Tensor1};
 use crate::{Error, Tensor};
 use std::cell::Cell;
 
+#[derive(TypedModule)]
 struct Pair {
     first: TypedParam<Tensor1<1>>,
     second: TypedParam<Tensor1<1>>,
 }
 
-impl Module for Pair {
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("first", &self.first);
-        visitor.param("second", &self.second);
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("first", &mut self.first);
-        visitor.param("second", &mut self.second);
-    }
-}
-
 fn pair() -> Pair {
-    let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+    let ctx = DeviceCtx::cpu().unwrap();
     Pair {
         first: TypedParam::new(Tensor1::from_vec(vec![1.0], [1], &ctx).unwrap()).unwrap(),
         second: TypedParam::new(Tensor1::from_vec(vec![1.0], [1], &ctx).unwrap()).unwrap(),
@@ -253,22 +242,13 @@ fn sgd_momentum_load_resumes_values_and_clocks() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[derive(TypedModule)]
 struct Reduced<E: FloatElement + NumericElement> {
     weight: TypedParam<Tensor1<1, E>>,
 }
 
-impl<E: FloatElement + NumericElement> Module for Reduced<E> {
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("weight", &self.weight);
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("weight", &mut self.weight);
-    }
-}
-
 fn reduced<E: FloatElement + NumericElement>(value: E) -> Reduced<E> {
-    let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+    let ctx = DeviceCtx::cpu().unwrap();
     Reduced {
         weight: TypedParam::new(Tensor1::from_vec(vec![value], [1], &ctx).unwrap()).unwrap(),
     }
@@ -467,21 +447,12 @@ fn a_failed_rollback_reports_both_causes() {
 
 #[test]
 fn clock_inspection_rejects_buffer_paths() {
+    #[derive(TypedModule)]
     struct WithBuffer {
         weight: TypedParam<Tensor1<1>>,
         running: TypedBuffer<Tensor1<1>>,
     }
-    impl Module for WithBuffer {
-        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-            visitor.param("weight", &self.weight);
-            visitor.buffer("running", &self.running);
-        }
-        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-            visitor.param("weight", &mut self.weight);
-            visitor.buffer("running", &mut self.running);
-        }
-    }
-    let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+    let ctx = DeviceCtx::cpu().unwrap();
     let mut model = WithBuffer {
         weight: TypedParam::new(Tensor1::from_vec(vec![1.0], [1], &ctx).unwrap()).unwrap(),
         running: TypedBuffer::new(Tensor1::from_vec(vec![0.0], [1], &ctx).unwrap()).unwrap(),
@@ -591,7 +562,7 @@ fn path_varying_modules_are_rejected_by_preflight() {
             visitor.param("a", &mut self.value);
         }
     }
-    let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+    let ctx = DeviceCtx::cpu().unwrap();
     let mut model = Varying {
         calls: Cell::new(0),
         value: TypedParam::new(Tensor1::from_vec(vec![1.0], [1], &ctx).unwrap()).unwrap(),

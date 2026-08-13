@@ -1,5 +1,5 @@
 //! Fused CPU kernels for last-axis softmax, layer normalization, and optimizer
-//! updates. Recorded LayerNorm additionally returns its normalized values and
+//! updates. Recorded `LayerNorm` additionally returns its normalized values and
 //! inverse standard deviations, and accepts them back for its input gradient.
 //!
 //! Optimizer variants use the multi-output encoding documented on

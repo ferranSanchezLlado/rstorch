@@ -63,13 +63,11 @@ pub(crate) const fn assert_refinement(source: &[usize], target: &[usize]) {
 }
 
 pub(crate) const fn assert_reshape_numel(source: &[usize], target: &[usize]) {
-    let source = match reshape_numel(source) {
-        Ok(value) => value,
-        Err(()) => panic!("typed reshape source element count overflow"),
+    let Ok(source) = reshape_numel(source) else {
+        panic!("typed reshape source element count overflow")
     };
-    let target = match reshape_numel(target) {
-        Ok(value) => value,
-        Err(()) => panic!("typed reshape target element count overflow"),
+    let Ok(target) = reshape_numel(target) else {
+        panic!("typed reshape target element count overflow")
     };
     if let (Some(source), Some(target)) = (source, target) {
         assert!(

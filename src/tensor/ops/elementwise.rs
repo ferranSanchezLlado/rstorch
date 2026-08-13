@@ -113,7 +113,7 @@ fn zeros_like(like: &Tensor) -> Result<Tensor> {
 }
 
 /// One side of the `maximum`/`minimum` backward: the cotangent where this
-/// operand strictly wins, plus half of it where the two tie (PyTorch's
+/// operand strictly wins, plus half of it where the two tie (`PyTorch`'s
 /// tie-splitting rule), reduced back to `dims`.
 fn extremum_side(g: &Tensor, win: &Tensor, tie: &Tensor, dims: &[usize]) -> Result<Tensor> {
     let zero = zeros_like(g)?;
@@ -292,7 +292,7 @@ impl Tensor {
 
     /// Element-wise maximum, broadcasting to the common shape.
     ///
-    /// The backward splits the cotangent evenly on ties (PyTorch's
+    /// The backward splits the cotangent evenly on ties (`PyTorch`'s
     /// `torch.maximum` rule).
     ///
     /// # Errors
@@ -311,7 +311,7 @@ impl Tensor {
 
     /// Element-wise minimum, broadcasting to the common shape.
     ///
-    /// The backward splits the cotangent evenly on ties (PyTorch's
+    /// The backward splits the cotangent evenly on ties (`PyTorch`'s
     /// `torch.minimum` rule).
     ///
     /// # Errors

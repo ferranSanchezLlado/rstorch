@@ -22,7 +22,7 @@ use crate::layout::Layout;
 use crate::tensor::Tensor;
 
 impl Tensor {
-    /// 2-D convolution (cross-correlation, as in PyTorch) of an NCHW image
+    /// 2-D convolution (cross-correlation, as in `PyTorch`) of an NCHW image
     /// with an OIHW `weight`.
     ///
     /// `self` is `[batch, in_channels, height, width]` and `weight` is
@@ -135,7 +135,7 @@ impl Tensor {
     /// **not** candidates for the maximum, and `padding` may not exceed half
     /// the window on either axis, so no window is ever empty.
     ///
-    /// A window containing a NaN pools to NaN (as in PyTorch), and the
+    /// A window containing a NaN pools to NaN (as in `PyTorch`), and the
     /// gradient of a tie goes to the first winning position — the same
     /// first-wins rule `argmax` uses.
     ///
@@ -189,7 +189,7 @@ impl Tensor {
     /// 2-D average pooling over an NCHW image.
     ///
     /// Geometry is exactly [`max_pool2d`](Tensor::max_pool2d)'s. The divisor
-    /// is the **full window area** (`kernel.0 · kernel.1`), i.e. PyTorch's
+    /// is the **full window area** (`kernel.0 · kernel.1`), i.e. `PyTorch`'s
     /// `count_include_pad = true` default: padding positions contribute zero
     /// to the sum but still count in the divisor.
     ///

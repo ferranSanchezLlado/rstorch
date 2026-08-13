@@ -68,6 +68,12 @@ fn validate_advancing_clocks(envelope: &Envelope) -> Result<()> {
 /// sgd_step(&mut optimizer, &mut model, grads).unwrap();
 /// sgd_step(&mut optimizer, &mut model, grads).unwrap();
 /// ```
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `model`'s walk is malformed (a stability-contract
+/// violation); otherwise propagates [`Sgd::step`]'s own validation and
+/// backend errors.
 pub fn sgd_step<M: Module + ?Sized>(
     optimizer: &mut Sgd,
     model: &mut M,
@@ -77,10 +83,14 @@ pub fn sgd_step<M: Module + ?Sized>(
     optimizer.step(&mut RuntimeModuleAdapter::new(model), grads)
 }
 
-/// Applies one Adam or AdamW update to a typed model, consuming `grads` by move.
+/// Applies one Adam or `AdamW` update to a typed model, consuming `grads` by move.
 ///
 /// [`AdamW::new`] returns the same [`Adam`] implementation with decoupled
 /// weight decay, so this one adapter covers both names exactly.
+///
+/// # Errors
+///
+/// As [`sgd_step`], against [`Adam::step`].
 pub fn adam_step<M: Module + ?Sized>(
     optimizer: &mut Adam,
     model: &mut M,
@@ -91,6 +101,11 @@ pub fn adam_step<M: Module + ?Sized>(
 }
 
 /// Writes SGD state into an envelope using the typed model's exact paths.
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `model`'s walk is malformed; otherwise propagates
+/// [`Sgd::save_state`]'s own errors.
 pub fn save_sgd_state<M: Module + ?Sized>(
     optimizer: &Sgd,
     model: &mut M,
@@ -104,6 +119,13 @@ pub fn save_sgd_state<M: Module + ?Sized>(
 ///
 /// The runtime loader checks every untrusted clock and wide buffer before
 /// replacing any optimizer state. The model itself is not modified.
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `model`'s walk is malformed;
+/// [`Error::Persistence`] if a clock in `envelope` is not a valid `u64` or
+/// would overflow on the next step; otherwise propagates
+/// [`Sgd::load_state`]'s own validation errors, none of which touch `model`.
 pub fn load_sgd_state<M: Module + ?Sized>(
     optimizer: &mut Sgd,
     model: &mut M,
@@ -114,7 +136,11 @@ pub fn load_sgd_state<M: Module + ?Sized>(
     optimizer.load_state(&RuntimeModuleAdapter::new(model), envelope)
 }
 
-/// Writes Adam or AdamW state into an envelope using exact typed-model paths.
+/// Writes Adam or `AdamW` state into an envelope using exact typed-model paths.
+///
+/// # Errors
+///
+/// As [`save_sgd_state`], against [`Adam::save_state`].
 pub fn save_adam_state<M: Module + ?Sized>(
     optimizer: &Adam,
     model: &mut M,
@@ -124,7 +150,11 @@ pub fn save_adam_state<M: Module + ?Sized>(
     optimizer.save_state(&RuntimeModuleAdapter::new(model), envelope)
 }
 
-/// Stages and restores Adam or AdamW state against the target typed model.
+/// Stages and restores Adam or `AdamW` state against the target typed model.
+///
+/// # Errors
+///
+/// As [`load_sgd_state`], against [`Adam::load_state`].
 pub fn load_adam_state<M: Module + ?Sized>(
     optimizer: &mut Adam,
     model: &mut M,
@@ -178,6 +208,11 @@ where
 /// As with runtime `Sgd::param_steps`, an unseen parameter reports zero. Typed
 /// callers identify parameters by the same stable dotted paths used by groups
 /// and checkpoints; malformed or path-varying module walks remain errors.
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `model`'s walk is malformed or if `path` is not
+/// a parameter of `model`.
 pub fn sgd_param_steps<M: Module + ?Sized>(
     optimizer: &Sgd,
     model: &mut M,
@@ -188,7 +223,11 @@ pub fn sgd_param_steps<M: Module + ?Sized>(
     })
 }
 
-/// Returns Adam or AdamW's saved bias-correction clock at `path`.
+/// Returns Adam or `AdamW`'s saved bias-correction clock at `path`.
+///
+/// # Errors
+///
+/// As [`sgd_param_steps`].
 pub fn adam_param_steps<M: Module + ?Sized>(
     optimizer: &Adam,
     model: &mut M,
@@ -254,6 +293,16 @@ where
 /// which preserves all its prior state, including entries for other models.
 /// Optimizer *step* backend failures retain their separate, potentially
 /// partial semantics.
+///
+/// # Errors
+///
+/// [`Envelope::load`]'s reader-limit/format/filesystem errors;
+/// [`Error::Persistence`] for an invalid or overflowing clock; otherwise
+/// propagates the model-state loader's (as [`load_model_state`](crate::typed::persist::load_model_state)) and
+/// [`Sgd::load_state`]'s errors. If the optimizer half fails after the model
+/// was staged, the model is rolled back to its pre-load snapshot; a failure
+/// during that rollback itself is reported as a combined
+/// [`Error::Persistence`] naming both failures.
 pub fn load_sgd_checkpoint<M: Module + ?Sized>(
     optimizer: &mut Sgd,
     model: &mut M,
@@ -269,11 +318,15 @@ pub fn load_sgd_checkpoint<M: Module + ?Sized>(
     )
 }
 
-/// Loads model and Adam or AdamW state from one checkpoint with checked rollback.
+/// Loads model and Adam or `AdamW` state from one checkpoint with checked rollback.
 ///
 /// The checkpoint must carry an `optimizer` section. The bare tensor path
 /// `optim` is invalid; `optim.*` tensors are reserved for and validated by the
 /// transactional runtime Adam loader after model staging.
+///
+/// # Errors
+///
+/// As [`load_sgd_checkpoint`], against [`Adam::load_state`].
 pub fn load_adam_checkpoint<M: Module + ?Sized>(
     optimizer: &mut Adam,
     model: &mut M,
@@ -290,6 +343,11 @@ pub fn load_adam_checkpoint<M: Module + ?Sized>(
 }
 
 /// Saves typed model and SGD state through [`Envelope::save`].
+///
+/// # Errors
+///
+/// As [`crate::typed::persist::save_model_state`] and [`save_sgd_state`];
+/// otherwise propagates [`Envelope::save`]'s filesystem error.
 pub fn save_sgd_checkpoint<M: Module + ?Sized>(
     optimizer: &Sgd,
     model: &mut M,
@@ -302,7 +360,11 @@ pub fn save_sgd_checkpoint<M: Module + ?Sized>(
     envelope.save(path, limits)
 }
 
-/// Saves typed model and Adam or AdamW state through [`Envelope::save`].
+/// Saves typed model and Adam or `AdamW` state through [`Envelope::save`].
+///
+/// # Errors
+///
+/// As [`save_sgd_checkpoint`], against [`save_adam_state`].
 pub fn save_adam_checkpoint<M: Module + ?Sized>(
     optimizer: &Adam,
     model: &mut M,

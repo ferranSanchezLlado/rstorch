@@ -84,6 +84,12 @@ impl<P: Placement> DeviceCtx<P> {
     /// is idempotent, while attempting to bind `P` to another device returns
     /// [`Error::InvalidArg`]. Marker policy and device availability are checked
     /// before the binding is committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArg`] if `P` is already bound to a different
+    /// device, if `P::validate_device` rejects `device`, or if `device` is
+    /// unavailable (the zero-sized allocation probe fails).
     pub fn bind(device: Device) -> Result<Self> {
         let marker = TypeId::of::<P>();
         {
@@ -105,6 +111,7 @@ impl<P: Placement> DeviceCtx<P> {
 
         let binding = Arc::new(DeviceBinding { device });
         bindings.insert(marker, Arc::clone(&binding));
+        drop(bindings);
         Ok(Self {
             binding,
             marker: PhantomData,
@@ -144,6 +151,12 @@ fn context_for_existing<P: Placement>(
 
 impl DeviceCtx<super::Cpu> {
     /// Returns the canonical context for the built-in CPU placement.
+    ///
+    /// # Errors
+    ///
+    /// As [`bind`](Self::bind); in practice this only fails if `Cpu` was
+    /// previously bound to a different device, which cannot happen for the
+    /// built-in placement.
     pub fn cpu() -> Result<Self> {
         Self::bind(Device::Cpu)
     }
@@ -279,6 +292,10 @@ mod tests {
 
     #[test]
     fn concurrent_bind_is_atomic_and_canonical() {
+        // Collecting first spawns all 16 threads before any join, which is
+        // the point of the test; folding the two loops into one (as clippy
+        // suggests) would spawn-then-immediately-join threads one at a time.
+        #[allow(clippy::needless_collect)]
         let threads: Vec<_> = (0..16)
             .map(|_| thread::spawn(|| DeviceCtx::<ConcurrentBind>::bind(Device::Cpu).unwrap()))
             .collect();
@@ -413,7 +430,7 @@ mod tests {
 
     #[test]
     fn fixed_cpu_marker_and_convenience_constructor() {
-        let cpu = DeviceCtx::<Cpu>::cpu().unwrap();
+        let cpu = DeviceCtx::cpu().unwrap();
         assert_eq!(cpu.device(), Device::Cpu);
 
         #[cfg(all(feature = "metal", target_os = "macos"))]

@@ -9,6 +9,17 @@ use crate::error::{Error, Result};
 /// Constructed via `impl Into<Shape>` conveniences in argument position:
 /// arrays (`[64, 784]`), slices, `Vec<usize>`, and `()` for the rank-0
 /// scalar shape.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::Shape;
+///
+/// let shape: Shape = [64, 784].into();
+/// assert_eq!(shape.dims(), &[64, 784]);
+/// assert_eq!(shape.rank(), 2);
+/// assert_eq!(shape.num_elements(), 64 * 784);
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Shape(Vec<usize>);
 
@@ -51,6 +62,10 @@ impl Shape {
     ///
     /// `-1` is the last axis, `-rank` the first; anything outside
     /// `[-rank, rank)` is [`Error::InvalidAxis`] carrying `op`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidAxis`] if `axis` falls outside `[-rank, rank)`.
     pub fn resolve_axis(&self, axis: isize, op: &'static str) -> Result<usize> {
         let rank = self.rank() as isize;
         let resolved = if axis < 0 { axis + rank } else { axis };
@@ -69,6 +84,10 @@ impl Shape {
     /// `rank` itself (append position) is valid and negative axes count
     /// from the end of the *output* rank: valid inputs are
     /// `[-rank-1, rank]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidAxis`] if `axis` falls outside `[-rank-1, rank]`.
     pub fn resolve_insert_axis(&self, axis: isize, op: &'static str) -> Result<usize> {
         let out_rank = self.rank() as isize + 1;
         let resolved = if axis < 0 { axis + out_rank } else { axis };
@@ -87,6 +106,11 @@ impl Shape {
     /// pair must be equal or contain a 1, producing the max.
     ///
     /// Returns [`Error::ShapeMismatch`] carrying `op` when incompatible.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ShapeMismatch`] if `self` and `other` are not
+    /// broadcast-compatible (some axis pair disagrees and neither side is 1).
     pub fn broadcast_with(&self, other: &Shape, op: &'static str) -> Result<Shape> {
         let (a, b) = (self.dims(), other.dims());
         let rank = a.len().max(b.len());
@@ -139,7 +163,7 @@ impl From<&Shape> for Shape {
 
 /// The rank-0 scalar shape.
 impl From<()> for Shape {
-    fn from(_: ()) -> Self {
+    fn from((): ()) -> Self {
         Shape(Vec::new())
     }
 }

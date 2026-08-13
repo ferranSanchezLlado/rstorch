@@ -12,7 +12,7 @@
 //!   index-add, or conv is rejected loudly before a generic kernel is ever
 //!   instantiated.
 //! - `i64` implements [`NumAcc`] but deliberately **not** [`FloatAcc`], which
-//!   is what makes softmax, LayerNorm, and the optimizer steps decline an
+//!   is what makes softmax, `LayerNorm`, and the optimizer steps decline an
 //!   integer dtype rather than do something numerically meaningless.
 //!
 //! Three *different* extremum rules live here and are not interchangeable:
@@ -45,16 +45,16 @@ pub(crate) trait NumAcc: Copy {
     fn mul_add(self, a: Self, b: Self) -> Self;
     /// Divide an accumulated sum by a (wide) element count — `Mean`'s axis
     /// length, or `AvgPool2d`'s window area — widening the count inside the
-    /// impl. Integer division truncates toward zero: PyTorch offers no integer
+    /// impl. Integer division truncates toward zero: `PyTorch` offers no integer
     /// mean, and an integer average has no single obvious rounding rule.
     fn div_count(self, count: usize) -> Self;
     /// Running maximum, propagating NaN (so a NaN anywhere in the axis wins,
-    /// matching PyTorch) and keeping the receiver on a tie.
+    /// matching `PyTorch`) and keeping the receiver on a tie.
     fn max(self, other: Self) -> Self;
     /// Running minimum, propagating NaN.
     fn min(self, other: Self) -> Self;
     /// Order two accumulated values for `argmax`/`argmin`, with the first
-    /// occurrence winning a tie (as in PyTorch).
+    /// occurrence winning a tie (as in `PyTorch`).
     ///
     /// NaN never reaches here: `arg_reduce_generic` settles a NaN candidate
     /// before comparing, because a NaN must win *both* directions and so
@@ -63,7 +63,7 @@ pub(crate) trait NumAcc: Copy {
     /// Whether `self` strictly beats `other` as a running maximum.
     ///
     /// NaN beats every number but not another NaN, so a window containing a
-    /// NaN pools to NaN (PyTorch's propagation) and the **first** NaN — or,
+    /// NaN pools to NaN (`PyTorch`'s propagation) and the **first** NaN — or,
     /// with no NaN, the first occurrence of the maximum — owns the gradient.
     ///
     /// Deliberately *not* [`max`](NumAcc::max) or [`order`](NumAcc::order):
@@ -80,7 +80,7 @@ pub(crate) trait NumAcc: Copy {
 /// The float-only accumulator extras used by the fused kernels.
 ///
 /// Implemented for `f32` and `f64` only; the missing `i64` impl is what
-/// rejects integer dtypes from softmax, LayerNorm, and the optimizer steps.
+/// rejects integer dtypes from softmax, `LayerNorm`, and the optimizer steps.
 pub(crate) trait FloatAcc:
     NumAcc
     + PartialEq

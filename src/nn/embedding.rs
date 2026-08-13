@@ -58,7 +58,7 @@ pub struct Embedding {
 impl Embedding {
     /// A fresh table of `num_embeddings` rows of `embedding_dim`
     /// [`F32`](crate::DType::F32) values on `device`, initialized from the
-    /// standard normal (PyTorch's `nn.Embedding` default) using `rng`.
+    /// standard normal (`PyTorch`'s `nn.Embedding` default) using `rng`.
     ///
     /// Tables are created in `F32` and converted afterwards
     /// ([`nn::to_dtype`](crate::nn::to_dtype)), like every other layer.
@@ -97,6 +97,20 @@ impl Embedding {
     /// The tensor is used as given — dtype and device come from it — and any
     /// graph it carries is dropped: a parameter is a leaf, not an interior
     /// value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::nn::{Embedding, Forward, Mode};
+    /// use rstorch::{DType, Device, Tensor};
+    ///
+    /// let dev = Device::Cpu;
+    /// let table = Tensor::zeros([100, 8], DType::F32, &dev)?;
+    /// let emb = Embedding::from_weight(table)?;
+    /// let ids = Tensor::from_vec(vec![5i64, 0], [2], &dev)?;
+    /// assert_eq!(emb.lookup(&ids, Mode::EVAL)?.dims(), &[2, 8]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
     ///
     /// # Errors
     ///

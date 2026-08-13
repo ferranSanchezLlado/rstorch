@@ -31,6 +31,7 @@
 //! same way. Only the base hyperparameters, the clocks and the moments persist.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 
 use crate::autograd::GradKey;
 use crate::error::{Error, Result};
@@ -89,9 +90,9 @@ fn save(
     }
 
     let mut text = String::new();
-    text.push_str(&format!("version={ENCODING_VERSION}\n"));
-    text.push_str(&format!("kind={kind}\n"));
-    text.push_str(&format!("steps={steps}\n"));
+    let _ = writeln!(text, "version={ENCODING_VERSION}");
+    let _ = writeln!(text, "kind={kind}");
+    let _ = writeln!(text, "steps={steps}");
     let mut section_keys = std::collections::BTreeSet::from([
         "version".to_string(),
         "kind".to_string(),
@@ -104,7 +105,7 @@ fn save(
                 msg: format!("duplicate optimizer state key `{key}`"),
             });
         }
-        text.push_str(&format!("hyper.{name}={value:?}\n"));
+        let _ = writeln!(text, "hyper.{name}={value:?}");
     }
     let mut staged: Vec<(String, HostTensor)> = Vec::new();
     let mut buffer_keys = std::collections::BTreeSet::new();
@@ -127,7 +128,7 @@ fn save(
                 msg: format!("duplicate optimizer state key `{clock_key}`"),
             });
         }
-        text.push_str(&format!("clock.{}={}\n", param.path, param.clock));
+        let _ = writeln!(text, "clock.{}={}", param.path, param.clock);
         for (name, tensor) in &param.buffers {
             let key = format!("{TENSOR_PREFIX}{}.{name}", param.path);
             if !buffer_keys.insert(key.clone()) {

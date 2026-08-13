@@ -270,7 +270,7 @@ impl Layout {
         })
     }
 
-    /// Broadcast this view to `target` shape (NumPy rules, right-aligned;
+    /// Broadcast this view to `target` shape (`NumPy` rules, right-aligned;
     /// the target must be a valid broadcast of the current shape, else
     /// [`crate::Error::ShapeMismatch`]). Zero-copy: broadcast axes
     /// (including new leading axes) get stride 0; existing size-1 axes
@@ -377,7 +377,7 @@ impl Layout {
     }
 
     /// Attempt to view this layout as `new_shape` **without copying**
-    /// (PyTorch `reshape` semantics): returns
+    /// (`PyTorch` `reshape` semantics): returns
     /// `Some(layout)` when the elements of the new shape can be addressed
     /// by some stride assignment over the existing storage walk order —
     /// always true for contiguous layouts; true for permuted/narrowed
@@ -426,7 +426,7 @@ impl Layout {
         let mut new_strides = vec![0usize; new_dims.len()];
 
         let mut view_d = new_dims.len(); // one past the rightmost unassigned new axis
-        let mut chunk_base_stride = old.last().map(|&(_, s)| s).unwrap_or(1);
+        let mut chunk_base_stride = old.last().map_or(1, |&(_, s)| s);
         let mut tensor_numel = 1usize; // product of old dims in the current chunk
         let mut view_numel = 1usize; // product of new dims assigned to the chunk
 

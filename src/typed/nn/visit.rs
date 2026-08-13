@@ -155,13 +155,13 @@ fn collect_read<M: Module + ?Sized>(
             let (kind, identity, value, contract) = match leaf {
                 TypedLeaf::Param(param, contract) => (
                     LeafKind::Param,
-                    param as *const crate::nn::Param as usize,
+                    (&raw const *param) as usize,
                     param.value(),
                     contract,
                 ),
                 TypedLeaf::Buffer(buffer, contract) => (
                     LeafKind::Buffer,
-                    buffer as *const Tensor as usize,
+                    (&raw const *buffer) as usize,
                     buffer,
                     contract,
                 ),
@@ -216,13 +216,13 @@ fn collect_mut<M: Module + ?Sized>(
             let (kind, identity, value, contract) = match leaf {
                 TypedLeafMut::Param(param, contract) => (
                     LeafKind::Param,
-                    param as *mut crate::nn::Param as usize,
+                    (&raw mut *param) as usize,
                     param.value(),
                     contract,
                 ),
                 TypedLeafMut::Buffer(buffer, contract) => (
                     LeafKind::Buffer,
-                    buffer as *mut Tensor as usize,
+                    (&raw mut *buffer) as usize,
                     &*buffer,
                     contract,
                 ),
@@ -331,13 +331,13 @@ fn apply_checked<M: Module + ?Sized>(
             let (kind, identity, dims, contract) = match &leaf {
                 TypedLeafMut::Param(param, contract) => (
                     LeafKind::Param,
-                    &**param as *const crate::nn::Param as usize,
+                    (&raw const **param) as usize,
                     param.value().dims(),
                     contract,
                 ),
                 TypedLeafMut::Buffer(buffer, contract) => (
                     LeafKind::Buffer,
-                    &**buffer as *const Tensor as usize,
+                    (&raw const **buffer) as usize,
                     buffer.dims(),
                     contract,
                 ),
@@ -420,6 +420,12 @@ fn rollback<M: Module + ?Sized>(
 }
 
 /// Collects an opaque, detached snapshot after validating the complete walk.
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `module`'s read-only and mutable walks would
+/// disagree (a malformed [`Module`] implementation) or if a leaf's binding
+/// fails revalidation.
 pub fn state_dict<M: Module + ?Sized>(module: &M) -> Result<TypedStateDict> {
     let (walk, values) = collect_read(module, true, "typed::nn::state_dict")?;
     let entries = walk
@@ -448,6 +454,14 @@ impl TypedStateDict {
 }
 
 /// Checks and stages the entire state before replacing any target leaf.
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `module`'s walks disagree, if `state` has a path
+/// `module` doesn't, if `module` has a path `state` is missing, if a shared
+/// path's typed contract or dimensions (including any static `DYN` marker)
+/// disagree, or if the mutable commit itself fails partway (the target is
+/// rolled back to its original values before the error is returned).
 pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDict) -> Result<()> {
     const OP: &str = "typed::nn::load_state_dict";
     let (read, _) = collect_read(module, false, OP)?;
@@ -606,38 +620,16 @@ mod tests {
     use crate::{DType, Device};
     use std::any::TypeId;
 
+    #[derive(crate::typed::nn::TypedModule)]
     struct Pair<P: Placement = Cpu> {
         a: TypedParam<Tensor1<1, f32, P>>,
         child: Child<P>,
     }
 
+    #[derive(crate::typed::nn::TypedModule)]
     struct Child<P: Placement> {
         b: TypedParam<Tensor1<1, f32, P>>,
         running: TypedBuffer<Tensor1<1, f32, P>>,
-    }
-
-    impl<P: Placement> Module for Pair<P> {
-        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-            visitor.param("a", &self.a);
-            visitor.module("child", &self.child);
-        }
-
-        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-            visitor.param("a", &mut self.a);
-            visitor.module("child", &mut self.child);
-        }
-    }
-
-    impl<P: Placement> Module for Child<P> {
-        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-            visitor.param("b", &self.b);
-            visitor.buffer("running", &self.running);
-        }
-
-        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-            visitor.param("b", &mut self.b);
-            visitor.buffer("running", &mut self.running);
-        }
     }
 
     fn tensor<P: Placement>(value: f32, ctx: &DeviceCtx<P>) -> Tensor1<1, f32, P> {
@@ -664,7 +656,7 @@ mod tests {
 
     #[test]
     fn dotted_paths_restore_prefix_and_match_the_dynamic_adapter() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut model = pair(1.0, &ctx);
         let typed = state_dict(&model).unwrap();
         assert_eq!(
@@ -683,7 +675,7 @@ mod tests {
 
     #[test]
     fn checked_load_is_transactional_on_a_late_value_failure() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = pair(10.0, &ctx);
         let mut state = state_dict(&source).unwrap();
         state.entries.get_mut("child.running").unwrap().value =
@@ -694,26 +686,15 @@ mod tests {
         assert_eq!(values(&target), before);
     }
 
+    #[derive(crate::typed::nn::TypedModule)]
     struct DynamicPair {
         first: TypedParam<Tensor1<DYN>>,
         second: TypedParam<Tensor1<DYN>>,
     }
 
-    impl Module for DynamicPair {
-        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-            visitor.param("first", &self.first);
-            visitor.param("second", &self.second);
-        }
-
-        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-            visitor.param("first", &mut self.first);
-            visitor.param("second", &mut self.second);
-        }
-    }
-
     #[test]
     fn checked_load_stages_actual_dynamic_dimensions_before_commit() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = DynamicPair {
             first: TypedParam::new(Tensor1::from_vec(vec![10.0], [1], &ctx).unwrap()).unwrap(),
             second: TypedParam::new(Tensor1::from_vec(vec![20.0, 21.0], [2], &ctx).unwrap())
@@ -732,7 +713,7 @@ mod tests {
 
     #[test]
     fn successful_load_detaches_and_replaces_every_leaf() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = pair(10.0, &ctx);
         let state = state_dict(&source).unwrap();
         let mut target = pair(1.0, &ctx);
@@ -743,7 +724,7 @@ mod tests {
 
     #[test]
     fn missing_and_extra_paths_are_rejected_without_mutation() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = pair(10.0, &ctx);
         let mut missing = state_dict(&source).unwrap();
         missing.entries.remove("child.running");
@@ -808,7 +789,7 @@ mod tests {
     }
 
     fn stateful_buffers(base: f32, mutation: CommitMutation) -> StatefulBuffers {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         StatefulBuffers {
             calls: 0,
             mutation,
@@ -891,7 +872,7 @@ mod tests {
     }
 
     fn stateful_param(base: f32) -> StatefulParam {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         StatefulParam {
             calls: 0,
             first: TypedBuffer::new(tensor(base, &ctx)).unwrap(),
@@ -931,7 +912,7 @@ mod tests {
 
     #[test]
     fn every_erased_contract_field_and_binding_identity_is_checked() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = pair(10.0, &ctx);
 
         let check = |mutate: &dyn Fn(&mut StateEntry)| {
@@ -985,7 +966,7 @@ mod tests {
 
     #[test]
     fn duplicate_paths_and_leaf_identities_are_rejected() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let duplicate_path = DuplicatePath {
             a: TypedParam::new(tensor(1.0, &ctx)).unwrap(),
             b: TypedParam::new(tensor(2.0, &ctx)).unwrap(),
@@ -1014,7 +995,7 @@ mod tests {
 
     #[test]
     fn disagreeing_read_and_mutable_walks_reject_before_mutation() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = DuplicateIdentity {
             value: TypedParam::new(tensor(9.0, &ctx)).unwrap(),
         };
@@ -1053,19 +1034,11 @@ mod tests {
 
     #[test]
     fn runtime_adapter_keeps_tied_gradient_identity_optimizer_viable() {
+        #[derive(crate::typed::nn::TypedModule)]
         struct One {
             value: TypedParam<Tensor1<1>>,
         }
-        impl Module for One {
-            fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-                visitor.param("value", &self.value);
-            }
-            fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-                visitor.param("value", &mut self.value);
-            }
-        }
-
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut model = One {
             value: TypedParam::new(tensor(2.0, &ctx)).unwrap(),
         };
@@ -1091,18 +1064,9 @@ mod tests {
 
     /// One leaf, generic over its element type, so two instantiations differ in
     /// nothing a walk compares except `dtype`.
+    #[derive(crate::typed::nn::TypedModule)]
     struct Precision<E: crate::typed::FloatElement> {
         w: TypedParam<Tensor1<2, E, Cpu>>,
-    }
-
-    impl<E: crate::typed::FloatElement> Module for Precision<E> {
-        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-            visitor.param("w", &self.w);
-        }
-
-        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-            visitor.param("w", &mut self.w);
-        }
     }
 
     /// `same_contract`'s `dtype` comparison is the *only* thing rejecting a load
@@ -1114,18 +1078,13 @@ mod tests {
     /// marker.
     #[test]
     fn a_different_precision_model_cannot_load_into_this_one() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = Precision::<f32> {
-            w: TypedParam::new(
-                Tensor1::<2, f32, Cpu>::from_vec(vec![1.0, 2.0], [2], &ctx).unwrap(),
-            )
-            .unwrap(),
+            w: TypedParam::new(Tensor1::<2>::from_vec(vec![1.0, 2.0], [2], &ctx).unwrap()).unwrap(),
         };
         let mut target = Precision::<f64> {
-            w: TypedParam::new(
-                Tensor1::<2, f64, Cpu>::from_vec(vec![9.0, 9.5], [2], &ctx).unwrap(),
-            )
-            .unwrap(),
+            w: TypedParam::new(Tensor1::<2, f64>::from_vec(vec![9.0, 9.5], [2], &ctx).unwrap())
+                .unwrap(),
         };
 
         let state = state_dict(&source).unwrap();
@@ -1170,7 +1129,7 @@ mod tests {
     /// loss rather than a loud rejection.
     #[test]
     fn a_read_walk_longer_than_the_mutable_walk_loads_nothing() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = HalfMutable {
             a: TypedParam::new(tensor(10.0, &ctx)).unwrap(),
             b: TypedParam::new(tensor(20.0, &ctx)).unwrap(),
@@ -1197,18 +1156,9 @@ mod tests {
 
     /// A `DYN` buffer, which unlike a `DYN` parameter has no runtime shape rule
     /// to fall back on.
+    #[derive(crate::typed::nn::TypedModule)]
     struct DynBuffer {
         r: TypedBuffer<Tensor1<DYN, f32, Cpu>>,
-    }
-
-    impl Module for DynBuffer {
-        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-            visitor.buffer("r", &self.r);
-        }
-
-        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-            visitor.buffer("r", &mut self.r);
-        }
     }
 
     /// The staging dimension check is the only backstop here. `TypedBuffer::set`
@@ -1219,16 +1169,13 @@ mod tests {
     /// restores, so that test passes either way.
     #[test]
     fn a_dynamic_buffer_is_not_silently_resized_by_a_load() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = DynBuffer {
-            r: TypedBuffer::new(
-                Tensor1::<DYN, f32, Cpu>::from_vec(vec![9.0, 9.5], [2], &ctx).unwrap(),
-            )
-            .unwrap(),
+            r: TypedBuffer::new(Tensor1::<DYN>::from_vec(vec![9.0, 9.5], [2], &ctx).unwrap())
+                .unwrap(),
         };
         let mut target = DynBuffer {
-            r: TypedBuffer::new(Tensor1::<DYN, f32, Cpu>::from_vec(vec![1.0], [1], &ctx).unwrap())
-                .unwrap(),
+            r: TypedBuffer::new(Tensor1::<DYN>::from_vec(vec![1.0], [1], &ctx).unwrap()).unwrap(),
         };
 
         let error = load_state_dict(&mut target, &state_dict(&source).unwrap())
@@ -1281,7 +1228,7 @@ mod tests {
     /// inspected.
     #[test]
     fn an_early_commit_malformation_stops_the_rest_of_the_walk() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = LateDrift {
             calls: std::cell::Cell::new(0),
             a: TypedParam::new(tensor(10.0, &ctx)).unwrap(),

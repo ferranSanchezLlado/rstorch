@@ -244,7 +244,7 @@ pub(crate) fn merge_heads(context: &Tensor, embed_dim: usize) -> Result<Tensor> 
 /// The crate-private stand-in for `nn::Linear` (the
 /// two tasks are parallel). The field names — `weight` shaped
 /// `[out_features, in_features]`, optional `bias` shaped `[out_features]` —
-/// are deliberately PyTorch's, so the `state_dict` paths this emits
+/// are deliberately `PyTorch`'s, so the `state_dict` paths this emits
 /// (`q_proj.weight`, `q_proj.bias`) are the same ones a `Linear`-based
 /// implementation would, and swapping the two later moves no checkpoint keys.
 #[derive(rstorch::Module)]
@@ -255,7 +255,7 @@ struct Proj {
 
 impl Proj {
     /// Glorot/Xavier-uniform weights on `U(-a, a)`, `a = √(6 / (in + out))`,
-    /// and zero bias — PyTorch's `MultiheadAttention` initialization.
+    /// and zero bias — `PyTorch`'s `MultiheadAttention` initialization.
     fn new(
         in_features: usize,
         out_features: usize,
@@ -345,7 +345,7 @@ pub struct MultiHeadAttention {
 }
 
 impl MultiHeadAttention {
-    /// Four `[embed_dim, embed_dim]` projections with biases (PyTorch's
+    /// Four `[embed_dim, embed_dim]` projections with biases (`PyTorch`'s
     /// default), Xavier-uniform weights drawn from `rng`, zero biases,
     /// [`F32`](crate::DType::F32) on `device`.
     ///

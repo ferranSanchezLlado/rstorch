@@ -82,6 +82,27 @@ macro_rules! impl_tensor_boundary {
                 super::$name<$($dim,)* E, P>
             {
                 /// Constructs a typed tensor from row-major host data.
+                ///
+                /// # Examples
+                ///
+                /// ```
+                /// use rstorch::typed::{DeviceCtx, Tensor2};
+                ///
+                /// # fn main() -> rstorch::Result<()> {
+                /// let ctx = DeviceCtx::cpu()?;
+                /// let x = Tensor2::<2, 2>::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &ctx)?;
+                /// assert_eq!(x.dims(), [2, 2]);
+                /// assert_eq!(x.to_vec()?, vec![1.0, 2.0, 3.0, 4.0]);
+                /// # Ok(())
+                /// # }
+                /// ```
+                ///
+                /// # Errors
+                ///
+                /// [`Error::InvalidArg`] if `ctx`'s binding is not the
+                /// canonical one for `P`; [`Error::ShapeMismatch`] if `dims`
+                /// contradicts a static marker; otherwise propagates
+                /// [`Tensor::from_vec`]'s own length/dtype error.
                 pub fn from_vec(
                     data: Vec<E>,
                     dims: [usize; $rank],
@@ -114,6 +135,14 @@ macro_rules! impl_tensor_boundary {
                 }
 
                 /// Checks and wraps an existing runtime tensor without copying it.
+                ///
+                /// # Errors
+                ///
+                /// [`Error::RankMismatch`]/[`Error::ShapeMismatch`] if
+                /// `tensor`'s rank or dimensions contradict `Self`;
+                /// [`Error::DTypeMismatch`]/[`Error::DeviceMismatch`] if its
+                /// dtype or device does not match; [`Error::InvalidArg`] if
+                /// `ctx`'s binding is not the canonical one for `P`.
                 pub fn try_from_dynamic(tensor: Tensor, ctx: &DeviceCtx<P>) -> Result<Self> {
                     checked_wrap::<Self>(
                         tensor,
@@ -140,6 +169,13 @@ macro_rules! impl_tensor_boundary {
                 }
 
                 /// Checks this tensor against a more precise shape of the same rank.
+                ///
+                /// # Errors
+                ///
+                /// As [`try_from_dynamic`](Self::try_from_dynamic); in
+                /// practice only [`Error::ShapeMismatch`] is reachable, since
+                /// `Target`'s markers are statically checked to refine
+                /// `Self`'s.
                 pub fn refine<Target>(self) -> Result<Target>
                 where
                     Target: RefinementOf<Self>,
@@ -158,6 +194,12 @@ macro_rules! impl_tensor_boundary {
                 /// Both placement bindings must be canonical and identify the same physical
                 /// device. The runtime tensor, storage, layout, and autograd identity are
                 /// unchanged.
+                ///
+                /// # Errors
+                ///
+                /// [`Error::InvalidArg`] if `self`'s or `target`'s binding is
+                /// not canonical for `P`/`Q`; [`Error::DeviceMismatch`] if
+                /// they name different physical devices.
                 pub fn relabel<Q: Placement>(
                     self,
                     target: &DeviceCtx<Q>,
@@ -171,6 +213,12 @@ macro_rules! impl_tensor_boundary {
                 }
 
                 /// Replaces every static dimension marker with [`DYN`].
+                ///
+                /// # Errors
+                ///
+                /// As [`try_from_dynamic`](Self::try_from_dynamic);
+                /// unreachable in practice, since erasing markers to `DYN`
+                /// only widens what the target accepts.
                 pub fn erase_shape(self) -> Result<<Self as DynamicOutput>::Output> {
                     checked_wrap::<super::$name<$({ impl_tensor_boundary!(@dyn $dim) },)* E, P>>(
                         self.inner,
@@ -189,11 +237,11 @@ typed_rank_table!(impl_tensor_boundary);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::{Cpu, Tensor2};
+    use crate::typed::Tensor2;
 
     #[test]
     fn boundary_transitions_keep_the_runtime_tensor_arc() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let dynamic = Tensor::from_vec(vec![1.0f32, 2.0], [1, 2], &ctx.device())
             .unwrap()
             .traced()
@@ -215,7 +263,7 @@ mod tests {
 
     #[test]
     fn trusted_construction_rejects_noncanonical_binding_identity() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let dynamic = Tensor::zeros([1, 2], f32::DTYPE, &ctx.device()).unwrap();
         let forged = Arc::new(DeviceBinding {
             device: ctx.device(),

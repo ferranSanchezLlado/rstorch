@@ -17,6 +17,18 @@ use crate::tensor::Tensor;
 /// is a crate-private `GradKey` minted at [`new`](Param::new): the optimizer keys
 /// gradients by it, and a parameter used twice in one graph (weight tying)
 /// accumulates both contributions under the one key.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::prelude::*;
+///
+/// let w = Param::new(Tensor::from_vec(vec![1.0f32, 2.0], [2], &Device::Cpu)?);
+/// let y = w.get(Mode::TRAIN).sum_all()?;
+/// let grads = y.backward()?;
+/// assert_eq!(grads.wrt(&w)?.to_vec::<f32>()?, vec![1.0, 1.0]);
+/// # Ok::<(), rstorch::Error>(())
+/// ```
 pub struct Param {
     /// The current value. Replaced wholesale by [`set`](Param::set); old
     /// values stay alive inside any graph that captured them (`Arc`).

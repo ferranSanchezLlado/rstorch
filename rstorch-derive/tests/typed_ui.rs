@@ -84,13 +84,13 @@ fn run_case(
         .replace('_', "-");
     let case_root = run_root.join(&name);
     fs::create_dir_all(&case_root).map_err(|error| error.to_string())?;
-    fs::write(
-        case_root.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"rstorch-typed-derive-ui-{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"case\"\npath = {case:?}\n\n[dependencies]\nrstorch = {{ path = {workspace:?}, features = [\"typed\"] }}\nrstorch-derive = {{ path = {derive_root:?} }}\n\n[workspace]\n"
-        ),
-    )
-    .map_err(|error| error.to_string())?;
+    // `{:?}` is deliberate here, not a `Display` oversight: it TOML-quotes
+    // and escapes each path, which `Path::display()` would not.
+    #[allow(clippy::unnecessary_debug_formatting)]
+    let manifest = format!(
+        "[package]\nname = \"rstorch-typed-derive-ui-{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"case\"\npath = {case:?}\n\n[dependencies]\nrstorch = {{ path = {workspace:?}, features = [\"typed\"] }}\nrstorch-derive = {{ path = {derive_root:?} }}\n\n[workspace]\n"
+    );
+    fs::write(case_root.join("Cargo.toml"), manifest).map_err(|error| error.to_string())?;
 
     let output = Command::new("cargo")
         .arg("check")

@@ -43,6 +43,34 @@ const SECTION_PREFIX: &str = "rstorch.section.";
 /// Build one with [`Envelope::new`], attach tensors and sections, then
 /// [`Envelope::save`] atomically. [`Envelope::load`] validates the magic and
 /// dispatches on the major version before returning the parsed envelope.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::persist::{Envelope, HostTensor, Limits};
+/// use rstorch::DType;
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let path = std::env::temp_dir().join(format!(
+///     "rstorch-doctest-envelope-{}.safetensors",
+///     std::process::id()
+/// ));
+///
+/// let mut envelope = Envelope::new();
+/// envelope.set_section("config", r#"{"hidden":8}"#)?;
+/// envelope.insert_tensor(
+///     "layer.weight",
+///     HostTensor::from_bytes(DType::F32, vec![2], vec![0; 8])?,
+/// );
+/// envelope.save(&path, &Limits::default())?;
+///
+/// let loaded = Envelope::load(&path, &Limits::default())?;
+/// assert_eq!(loaded.section("config"), Some(r#"{"hidden":8}"#));
+/// assert!(loaded.tensor("layer.weight").is_some());
+/// # let _ = std::fs::remove_file(&path);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Envelope {
     tensors: BTreeMap<String, HostTensor>,
@@ -87,6 +115,10 @@ impl Envelope {
     ///
     /// Errors with [`Error::Persistence`] if `name` contains a `.` (which
     /// would collide with the reserved key namespace) or is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Persistence`] if `name` is empty or contains a `.`.
     pub fn set_section(&mut self, name: impl Into<String>, value: impl Into<String>) -> Result<()> {
         let name = name.into();
         if name.is_empty() || name.contains('.') {
@@ -124,6 +156,11 @@ impl Envelope {
     }
 
     /// Atomically save the envelope to `path`, validating writer `limits`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Persistence`] if `limits` reject the payload, or if
+    /// the underlying write fails.
     pub fn save(&self, path: impl AsRef<Path>, limits: &Limits) -> Result<()> {
         save_tensors(
             path.as_ref(),
@@ -137,6 +174,12 @@ impl Envelope {
     ///
     /// Rejects a file whose magic is not this format family, or whose major
     /// version this reader does not understand ([`Error::Persistence`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Persistence`] if `limits` reject the file, its magic
+    /// is not this format family, its version fields are malformed, or its
+    /// major version is not [`FORMAT_MAJOR`].
     pub fn load(path: impl AsRef<Path>, limits: &Limits) -> Result<Self> {
         let (tensors, meta) = load_tensors(path.as_ref(), limits)?;
 
@@ -184,7 +227,7 @@ fn parse_version(meta: &HashMap<String, String>, key: &str) -> Result<u32> {
     let raw = meta.get(key).ok_or_else(|| Error::Persistence {
         msg: format!("checkpoint missing required `{key}`"),
     })?;
-    raw.parse::<u32>().map_err(|_| Error::Persistence {
+    raw.parse().map_err(|_| Error::Persistence {
         msg: format!("checkpoint `{key}` is not a number: {raw:?}"),
     })
 }

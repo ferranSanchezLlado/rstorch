@@ -21,7 +21,7 @@
 //! | `Option<Param>` | `if let Some(p) = &self.name { v.param("name", p) }` |
 //! | `Tensor` | `v.buffer("name", &self.name)` (non-trainable buffer) |
 //! | `Option<Tensor>` | `if let Some(t) = … { v.buffer("name", t) }` |
-//! | `Vec<M>` | `v.module("0", &self.name[0])`, `…("1", …)`, … (indexed) |
+//! | `Vec<M>` | `v.module("name.0", &self.name[0])`, `…("name.1", …)`, … (indexed) |
 //! | `Option<M>` | `if let Some(m) = &self.name { v.module("name", m) }` |
 //! | primitive whitelist (`f32`, `f64`, `usize`, `bool`, …) | skipped |
 //! | `#[module(skip)]` (any type) | skipped |
@@ -29,6 +29,12 @@
 //!
 //! The `_mut` walk mirrors this against `visit_mut` / the `&mut` visitor
 //! methods.
+//!
+//! `#[module(skip)]` is an explicit escape hatch. On the dynamic derive it can
+//! skip any field, including a `Param`; a skipped parameter is intentionally
+//! absent from optimizer and state-dict walks. The typed derive applies
+//! stricter validation to typed leaves and containers; see its differences
+//! below.
 //!
 //! ## Type aliases fail loudly
 //!

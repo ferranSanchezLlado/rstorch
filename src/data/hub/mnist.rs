@@ -99,6 +99,10 @@ impl Mnist {
     /// Downloads all four MNIST archives into `hub`'s cache if missing.
     ///
     /// Requires the `hub` feature (network access).
+    ///
+    /// # Errors
+    ///
+    /// As [`DatasetHub::ensure_cached`].
     #[cfg(feature = "hub")]
     pub fn download(hub: &DatasetHub) -> Result<()> {
         hub.ensure_cached(
@@ -111,6 +115,11 @@ impl Mnist {
     /// Loads a split, downloading and caching the archives if necessary.
     ///
     /// Requires the `hub` feature (network access + gzip).
+    ///
+    /// # Errors
+    ///
+    /// As [`DatasetHub::ensure_resource`] and
+    /// [`from_gzip_files`](Self::from_gzip_files).
     #[cfg(feature = "hub")]
     pub fn load(hub: &DatasetHub, split: MnistSplit) -> Result<Self> {
         let [images_resource, labels_resource] = split.resources();
@@ -122,6 +131,13 @@ impl Mnist {
     /// Parses a split from two gzip-compressed IDX files on disk.
     ///
     /// Requires the `hub` feature (gzip decompression).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any file I/O error opening `images_path`/`labels_path`.
+    /// Returns [`Error::Data`] if decompression exceeds the crate's fixed
+    /// 64&nbsp;MiB cap, or as [`from_idx_bytes`](Self::from_idx_bytes) for
+    /// the decompressed contents.
     #[cfg(feature = "hub")]
     pub fn from_gzip_files(
         images_path: impl AsRef<std::path::Path>,
@@ -137,6 +153,11 @@ impl Mnist {
     /// This is feature-free: give it the raw IDX bytes (already decompressed)
     /// and it validates the headers, normalizes pixels, and cross-checks that
     /// the image and label counts agree.
+    ///
+    /// # Errors
+    ///
+    /// As [`parse_idx_images`] and [`parse_idx_labels`]. Returns
+    /// [`Error::Data`] if the parsed image and label counts disagree.
     pub fn from_idx_bytes(images: &[u8], labels: &[u8]) -> Result<Self> {
         let parsed = parse_idx_images(images)?;
         let labels = parse_idx_labels(labels)?;
@@ -238,6 +259,13 @@ fn read_gzip(path: impl AsRef<std::path::Path>) -> Result<Vec<u8>> {
 ///
 /// Pixels are scaled from `0..=255` to `[0.0, 1.0]`. The header magic, the
 /// declared geometry, and the exact byte length are all validated.
+///
+/// # Errors
+///
+/// Returns [`Error::Data`] if `bytes` is shorter than the IDX3 header, has
+/// the wrong magic, declares a zero-sized geometry, the declared element
+/// count overflows, or the byte length does not match the declared
+/// geometry.
 pub fn parse_idx_images(bytes: &[u8]) -> Result<RawImages> {
     if bytes.len() < 16 {
         return parse_error("truncated IDX image header");
@@ -282,6 +310,12 @@ pub fn parse_idx_images(bytes: &[u8]) -> Result<RawImages> {
 /// Parses a decompressed IDX1 (label) file into a vector of `u8` labels.
 ///
 /// The header magic and the exact byte length are validated.
+///
+/// # Errors
+///
+/// Returns [`Error::Data`] if `bytes` is shorter than the IDX1 header, has
+/// the wrong magic, the declared count overflows, or the byte length does
+/// not match the declared count.
 pub fn parse_idx_labels(bytes: &[u8]) -> Result<Vec<u8>> {
     if bytes.len() < 8 {
         return parse_error("truncated IDX label header");

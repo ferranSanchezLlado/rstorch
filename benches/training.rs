@@ -1,5 +1,5 @@
 //! End-to-end model benchmarks: a tiny decoder-only transformer's forward,
-//! forward+backward and AdamW training step; an MNIST-shaped MLP training
+//! forward+backward and `AdamW` training step; an MNIST-shaped MLP training
 //! epoch; autograd overhead (no-recording vs recorded vs recorded+backward on
 //! the same graph); Conv2d/pooling forward and backward at small image sizes;
 //! and a whole-tensor-reduction rank scan.
@@ -173,7 +173,7 @@ impl TinyTransformer {
     }
 }
 
-/// The v2 `transformer` group: forward, forward+backward, and an AdamW step.
+/// The v2 `transformer` group: forward, forward+backward, and an `AdamW` step.
 fn bench_transformer(c: &mut Criterion) {
     for dev in benchmark_devices() {
         let mut group = c.benchmark_group(format!("transformer/{dev}"));

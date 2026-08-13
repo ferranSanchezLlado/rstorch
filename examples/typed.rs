@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     // A `Placement` marker is bound to a real device once; from then on the
     // type says which device a tensor is on, and mixing two of them is a type
     // error rather than a runtime `DeviceMismatch`.
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
 
     // Dimensions are const generics. This is a 2x3 f32 tensor on `Cpu`, and
     // the compiler knows all three facts.

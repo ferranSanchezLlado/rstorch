@@ -121,7 +121,7 @@ fn both_loop_orders_are_bitwise_identical_to_the_naive_nest() {
     let b: Vec<f32> = (0..k * n).map(|_| rng.wide()).collect();
     let expected = naive(&a, &b, m, k, n);
 
-    let sa = f32_storage(a.clone());
+    let sa = f32_storage(a);
     let la = Layout::contiguous([m, k]).unwrap();
 
     // Row-major rhs -> the unit-stride `i`/`p`/`j` row-accumulator order.

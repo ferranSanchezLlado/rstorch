@@ -16,11 +16,11 @@ use std::sync::Arc;
 /// let x = Tensor1::<2, i64>::from_vec(vec![1, -1], [2], &ctx).unwrap();
 /// let _ = Relu.forward(&x, Mode::EVAL);
 /// ```
-#[derive(rstorch::typed::nn::TypedModule)]
+#[derive(Clone, rstorch::typed::nn::TypedModule)]
 pub struct Relu;
 
 /// A shape-preserving typed exact Gaussian error linear unit.
-#[derive(rstorch::typed::nn::TypedModule)]
+#[derive(Clone, rstorch::typed::nn::TypedModule)]
 pub struct Gelu;
 
 impl<T> Forward<T> for Relu
@@ -60,10 +60,6 @@ where
 macro_rules! impl_stateless_layer {
     ($($ty:ty),+ $(,)?) => {
         $(
-            impl Clone for $ty {
-                fn clone(&self) -> Self { *self }
-            }
-
             impl Copy for $ty {}
 
             impl Default for $ty {

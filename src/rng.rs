@@ -23,6 +23,19 @@ fn splitmix64(seed: u64) -> u64 {
 /// Determinism is a contract: a given seed reproduces an exact sequence, and
 /// [`state`](Rng::state)/[`from_state`](Rng::from_state) round-trips resume it
 /// bit-for-bit (gated by the determinism fixture below).
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::Rng;
+///
+/// let mut rng = Rng::seed(0);
+/// let checkpoint = rng.state();
+/// let a = rng.uniform(0.0, 1.0);
+///
+/// let mut resumed = Rng::from_state(checkpoint);
+/// assert_eq!(resumed.uniform(0.0, 1.0), a);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Rng {
     /// The full generator state (splitmix64 register). One `u64` is the
@@ -59,6 +72,7 @@ impl Rng {
     /// The child is seeded by drawing one raw word from `self` (which advances
     /// the parent) and diffusing it through splitmix64, so the parent and child
     /// streams are decorrelated.
+    #[must_use]
     pub fn split(&mut self) -> Rng {
         let child_seed = self.next_u64();
         Rng {

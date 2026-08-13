@@ -30,7 +30,7 @@ impl<T: Forward + Module + Send> SeqLayer for T {}
 /// the derive treats a `Vec<M>`: a `Sequential` field named `layers` produces
 /// `layers.0.weight`, `layers.1.weight`, … Those are the on-disk `state_dict`
 /// keys, so inserting a layer in the middle renames every later path — the
-/// same trade PyTorch's `nn.Sequential` makes.
+/// same trade `PyTorch`'s `nn.Sequential` makes.
 ///
 /// ```
 /// # use rstorch::nn::{self, Forward, Mode, Module, Param, Sequential};

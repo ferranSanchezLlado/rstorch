@@ -209,7 +209,7 @@ fn index_select_generic<E: Copy>(
     if let Some(run) = trailing_run(out_dims, x_strides, axis) {
         let outer = &out_dims[..axis];
         let mut walk = Walk::new(outer, [x_strides], [x_offset]);
-        for _ in 0..outer.iter().product::<usize>() {
+        for _ in 0..outer.iter().product() {
             let base = walk.index(0);
             for &pick in picks {
                 let at = base + pick * axis_stride;
@@ -260,7 +260,7 @@ pub(crate) fn index_select(x: View<'_>, axis: usize, indices: View<'_>) -> Resul
 
 /// `out[c0, .., c_axis, ..] = x[c0, .., picks[flat], ..]`, where `picks` is
 /// the same-rank index grid read row-major and `out_dims` is its shape
-/// (PyTorch `gather` semantics).
+/// (`PyTorch` `gather` semantics).
 fn gather_generic<E: Copy>(
     data: &[E],
     x_strides: &[usize],
@@ -385,7 +385,7 @@ where
         if let Some(run) = trailing_run(src_dims, src_strides, axis) {
             let outer = &src_dims[..axis];
             let mut walk = Walk::new(outer, [src_strides, &x_place], [src_layout.offset(), 0]);
-            for _ in 0..outer.iter().product::<usize>() {
+            for _ in 0..outer.iter().product() {
                 let (from_base, dst_base) = (walk.index(0), walk.index(1));
                 for (k, &pick) in picks.iter().enumerate() {
                     let from = from_base + k * src_strides[axis];

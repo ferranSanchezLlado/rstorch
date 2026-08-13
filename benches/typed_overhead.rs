@@ -35,7 +35,7 @@ fn randn(seed: u64, dims: &[usize]) -> Tensor {
 
 /// Elementwise add and a reduction, at both sizes, dynamic against typed.
 fn elementwise_and_reduce(c: &mut Criterion) {
-    let ctx = DeviceCtx::<Cpu>::cpu().expect("cpu context");
+    let ctx = DeviceCtx::cpu().expect("cpu context");
     let mut group = c.benchmark_group("typed_overhead");
     group.sample_size(30);
     group.warm_up_time(Duration::from_secs(1));

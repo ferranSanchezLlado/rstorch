@@ -49,6 +49,23 @@ embedding_inputs! {
 }
 
 /// A typed learned lookup table with a static vocabulary and row width.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::Rng;
+/// use rstorch::typed::{DeviceCtx, Tensor1};
+/// use rstorch::typed::nn::{Embedding, Mode};
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let ctx = DeviceCtx::cpu()?;
+/// let embedding = Embedding::<100, 8>::new(&ctx, &mut Rng::seed(0))?;
+/// let ids = Tensor1::<3, i64>::from_vec(vec![5, 0, 99], [3], &ctx)?;
+/// let rows = embedding.lookup(&ids, Mode::EVAL)?;
+/// assert_eq!(rows.dims(), [3, 8]);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(rstorch::typed::nn::TypedModule)]
 pub struct Embedding<
     const VOCAB: usize,
@@ -82,6 +99,12 @@ impl<const VOCAB: usize, const WIDTH: usize, E: FloatElement, P: Placement>
     /// let ctx = DeviceCtx::cpu().unwrap();
     /// let _ = Embedding::<4, 0>::new(&ctx, &mut Rng::seed(1));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] if `ctx`'s binding is not the canonical one for
+    /// `P`; otherwise propagates the runtime embedding's own initialization
+    /// error and the cast/conversion into the typed table.
     pub fn new(ctx: &DeviceCtx<P>, rng: &mut Rng) -> Result<Self> {
         const { assert_configuration(VOCAB, WIDTH) };
         validate_binding::<P>(ctx.binding(), "typed::nn::Embedding::new")?;
@@ -91,6 +114,26 @@ impl<const VOCAB: usize, const WIDTH: usize, E: FloatElement, P: Placement>
     }
 
     /// Creates an embedding from an exact typed table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::typed::{DeviceCtx, Tensor2};
+    /// use rstorch::typed::nn::Embedding;
+    ///
+    /// # fn main() -> rstorch::Result<()> {
+    /// let ctx = DeviceCtx::cpu()?;
+    /// let table = Tensor2::<100, 8>::from_vec(vec![0.0f32; 800], [100, 8], &ctx)?;
+    /// let embedding = Embedding::<100, 8>::from_weight(table)?;
+    /// assert_eq!(embedding.weight().value()?.dims(), [100, 8]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`TypedParam::new`]: [`Error::InvalidArg`] if `weight`'s binding is
+    /// not the canonical one for `P`.
     pub fn from_weight(weight: crate::typed::Tensor2<VOCAB, WIDTH, E, P>) -> Result<Self> {
         const { assert_configuration(VOCAB, WIDTH) };
         Ok(Self {
@@ -141,6 +184,13 @@ impl<const VOCAB: usize, const WIDTH: usize, E: FloatElement, P: Placement>
     /// ).unwrap();
     /// let _ = embedding.lookup(&ids, Mode::EVAL);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] if `ids`' binding is not the canonical one for
+    /// `P`, or if `ids` was not built through the same [`DeviceCtx`] as this
+    /// embedding's weight; [`Error::IndexOutOfBounds`] if an index is outside
+    /// `[0, VOCAB)`.
     pub fn lookup<I>(&self, ids: &I, mode: Mode) -> Result<I::Output>
     where
         I: EmbeddingInput<WIDTH, E, P>,
@@ -305,7 +355,7 @@ mod tests {
         impl Placement for Main {}
 
         let source = DeviceCtx::<Main>::bind(crate::Device::Cpu).unwrap();
-        let target = DeviceCtx::<Cpu>::cpu().unwrap();
+        let target = DeviceCtx::cpu().unwrap();
         let weight = crate::typed::Tensor2::<4, 3, f32, Main>::from_vec(
             (0..12).map(|value| value as f32).collect(),
             [4, 3],

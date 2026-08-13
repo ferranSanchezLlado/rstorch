@@ -28,8 +28,8 @@ use rstorch::nn as dynamic_nn;
 use rstorch::persist::{Envelope, Limits, LoadOptions};
 use rstorch::prelude::{DType, Device, Result, Rng, Tensor};
 use rstorch::typed::nn::{
-    Embedding, Forward, LayerNorm, Linear, Mode, Module, MultiHeadAttention, ToDType, TypedVisitor,
-    TypedVisitorMut, scaled_dot_product_attention,
+    Embedding, Forward, LayerNorm, Linear, Mode, MultiHeadAttention, ToDType, TypedModule,
+    scaled_dot_product_attention,
 };
 use rstorch::typed::optim::{
     Adam, Sgd, adam_param_steps, adam_step, load_adam_checkpoint, save_adam_state, sgd_step,
@@ -103,6 +103,7 @@ fn batch(ctx: &DeviceCtx<Cpu>, offsets: &[usize], sequence: usize) -> Result<(To
     ))
 }
 
+#[derive(TypedModule)]
 struct TypedBlock {
     norm1: LayerNorm<Tensor1<EMBED>>,
     attention: MultiHeadAttention<EMBED, HEADS>,
@@ -159,24 +160,7 @@ impl TypedBlock {
     }
 }
 
-impl Module for TypedBlock {
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.module("norm1", &self.norm1);
-        visitor.module("attention", &self.attention);
-        visitor.module("norm2", &self.norm2);
-        visitor.module("feed_forward1", &self.feed_forward1);
-        visitor.module("feed_forward2", &self.feed_forward2);
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.module("norm1", &mut self.norm1);
-        visitor.module("attention", &mut self.attention);
-        visitor.module("norm2", &mut self.norm2);
-        visitor.module("feed_forward1", &mut self.feed_forward1);
-        visitor.module("feed_forward2", &mut self.feed_forward2);
-    }
-}
-
+#[derive(TypedModule)]
 struct TypedDecoder {
     token_embedding: Embedding<VOCAB, EMBED>,
     position_embedding: Embedding<MAX_SEQUENCE, EMBED>,
@@ -301,28 +285,6 @@ impl TypedDecoder {
     }
 }
 
-impl Module for TypedDecoder {
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.module("token_embedding", &self.token_embedding);
-        visitor.module("position_embedding", &self.position_embedding);
-        for (index, block) in self.blocks.iter().enumerate() {
-            visitor.module(&format!("blocks.{index}"), block);
-        }
-        visitor.module("final_norm", &self.final_norm);
-        visitor.module("output", &self.output);
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.module("token_embedding", &mut self.token_embedding);
-        visitor.module("position_embedding", &mut self.position_embedding);
-        for (index, block) in self.blocks.iter_mut().enumerate() {
-            visitor.module(&format!("blocks.{index}"), block);
-        }
-        visitor.module("final_norm", &mut self.final_norm);
-        visitor.module("output", &mut self.output);
-    }
-}
-
 fn loss(
     model: &mut TypedDecoder,
     inputs: &Tokens,
@@ -370,7 +332,7 @@ fn save_training_checkpoint(
 
 #[test]
 fn seeded_dynamic_and_typed_logits_gradients_paths_and_variable_shapes_agree() -> Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let (small, small_targets) = batch(&ctx, &[0], 2)?;
     // Batch 4, sequence 5, HEADS 2, head_dim 3: no two axes share an extent.
     let (inputs, targets) = batch(&ctx, &[0, 5, 11, 19], 5)?;
@@ -428,7 +390,7 @@ fn seeded_dynamic_and_typed_logits_gradients_paths_and_variable_shapes_agree() -
 
 #[test]
 fn typed_cache_generation_training_and_checkpoint_resume_are_exact() -> Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     // Batch 6, sequence 4, narrowed to batch 5: the cached path then runs with
     // batch 5, HEADS 2, sequence 4 and head_dim 3, all four extents distinct,
     // so no axis transposition can survive by coincidence.
@@ -588,7 +550,7 @@ fn assert_tracks_wide(actual: &[f32], wide: &[f32], tolerance: f32, label: &str)
 
 #[test]
 fn typed_decoder_layer_runs_in_reduced_precision() -> Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let (ids, _) = batch(&ctx, &[0, 4, 9, 15, 21], 4)?;
 
     // Both reduced formats are supported on CPU; neither is skipped.

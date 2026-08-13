@@ -39,7 +39,7 @@
 //!
 //! # What each row measures
 //!
-//! - `forward` — an inference forward (`Mode::EVAL`, so BatchNorm reads its
+//! - `forward` — an inference forward (`Mode::EVAL`, so `BatchNorm` reads its
 //!   running statistics and nothing is recorded), ending in a host read of the
 //!   logits.
 //! - `train_step` — forward, cross-entropy, `backward`, `Sgd::step`, and a host
@@ -63,7 +63,7 @@ mod support;
 use support::{HostData, ResNet, ResNetSpec, Source, batch_size, devices, seed, train_step};
 
 /// Training batches materialized per device. More than one so an iteration is
-/// not a single batch memorized into the BatchNorm buffers, few enough that a
+/// not a single batch memorized into the `BatchNorm` buffers, few enough that a
 /// scaled-up shape does not exhaust GPU memory.
 const BATCHES: usize = 4;
 

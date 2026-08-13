@@ -12,7 +12,7 @@
 //!
 //! **Params vs buffers**: `num_params` counts trainable [`Param`](crate::nn::Param)
 //! elements only; `state_dict`/`load_state_dict`/`to_device`/`to_dtype`
-//! operate on both parameters and non-trainable `Tensor` buffers (BatchNorm
+//! operate on both parameters and non-trainable `Tensor` buffers (`BatchNorm`
 //! running stats), so a moved or checkpointed model stays complete.
 //!
 //! The user-facing prose for these functions — the replication recipe and the
@@ -47,7 +47,7 @@ pub fn num_params(module: &dyn Module) -> usize {
 /// Collect the module's parameters **and buffers** into a dotted-path → value
 /// map (ordered for stable, diffable output). Values are `Arc`-cheap clones.
 /// Buffers are included so a checkpoint reconstructs a model (running stats
-/// survive), matching PyTorch `state_dict` semantics.
+/// survive), matching `PyTorch` `state_dict` semantics.
 pub fn state_dict(module: &dyn Module) -> BTreeMap<String, Tensor> {
     let mut out = BTreeMap::new();
     visit_all(module, &mut |path, leaf| {
@@ -173,7 +173,7 @@ pub fn to_device(module: &mut dyn Module, device: &Device) -> Result<()> {
 /// Cast every **floating-point** parameter and buffer of `module` to `dtype`
 /// (constructors initialize F32, convert after).
 ///
-/// Integer and boolean leaves are left untouched, as in PyTorch: an `I64`
+/// Integer and boolean leaves are left untouched, as in `PyTorch`: an `I64`
 /// index buffer or a `Bool` mask is structure, not precision, and casting it
 /// to a float would corrupt the model rather than convert it.
 ///

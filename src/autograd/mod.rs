@@ -459,10 +459,23 @@ fn merge_accumulated<K: std::hash::Hash + Eq>(
 /// gradients, as a **linear** value (§5).
 ///
 /// `Grads` is deliberately **not `Clone`** and is `#[must_use]`: the
-/// optimizer consumes it by move (`opt.step(&mut model, grads)`), so applying
-/// the same gradients twice is a compile error and forgetting to step is a
-/// warning. Micro-batch accumulation and clipping are explicit linear
+/// optimizer consumes it by move (`opt.step(&mut model, grads)`), so reusing a
+/// moved value is a compile error and forgetting to use it is a warning.
+/// Micro-batch accumulation and clipping are explicit linear
 /// pipelines (`acc = acc.merge(step)?`, `grads.clip_norm(1.0)?`).
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::prelude::*;
+///
+/// let x = Tensor::from_vec(vec![2.0f32], [1], &Device::Cpu)?;
+/// let param = Param::new(x);
+/// let y = param.get(Mode::TRAIN).mul_scalar(3.0)?;
+/// let grads = y.backward()?;
+/// assert_eq!(grads.wrt(&param)?.to_vec::<f32>()?, vec![3.0]);
+/// # Ok::<(), rstorch::Error>(())
+/// ```
 #[must_use]
 pub struct Grads {
     grads: HashMap<GradKey, Accumulated>,
@@ -481,7 +494,7 @@ impl Grads {
     /// the value that was already computed avoids both.
     ///
     /// [`wrt`](Self::wrt) deliberately keeps narrowing: a gradient a *caller*
-    /// inspects matches its parameter's dtype, as in PyTorch.
+    /// inspects matches its parameter's dtype, as in `PyTorch`.
     pub(crate) fn take_wide(&mut self, key: GradKey) -> Result<Option<Tensor>> {
         self.grads
             .remove(&key)

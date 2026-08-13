@@ -1,4 +1,4 @@
-//! A ResNet over MNIST-shaped images, shared by the `resnet_mnist` bench and
+//! A `ResNet` over MNIST-shaped images, shared by the `resnet_mnist` bench and
 //! the `resnet_mnist` convergence test.
 //!
 //! Included with `#[path]` by both targets rather than living in the library:
@@ -54,9 +54,9 @@ pub struct Conv2d {
 }
 
 impl Conv2d {
-    /// Kaiming-normal (`fan_in`, ReLU gain) initialization — what PyTorch's
+    /// Kaiming-normal (`fan_in`, `ReLU` gain) initialization — what `PyTorch`'s
     /// `kaiming_normal_(mode="fan_in", nonlinearity="relu")` does, and what a
-    /// ResNet needs to train at this depth without a warm-up schedule.
+    /// `ResNet` needs to train at this depth without a warm-up schedule.
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -107,7 +107,7 @@ impl Forward for Downsample {
     }
 }
 
-/// The post-activation basic block of the original ResNet paper:
+/// The post-activation basic block of the original `ResNet` paper:
 /// `conv3x3 → BN → ReLU → conv3x3 → BN → (+ shortcut) → ReLU`.
 #[derive(Module)]
 pub struct BasicBlock {
@@ -322,7 +322,7 @@ pub fn train_step(
     Ok(value)
 }
 
-/// Top-1 accuracy over `batches`, in [`Mode::EVAL`] (so BatchNorm uses its
+/// Top-1 accuracy over `batches`, in [`Mode::EVAL`] (so `BatchNorm` uses its
 /// running statistics rather than the batch's).
 pub fn accuracy(model: &mut ResNet, batches: &[(Tensor, Tensor)]) -> Result<f64> {
     let mut correct = 0usize;
@@ -532,7 +532,7 @@ pub fn build_label() -> String {
     format!(
         "rayon {}, {} cores visible, {}",
         if cfg!(feature = "rayon") { "ON" } else { "off" },
-        std::thread::available_parallelism().map_or(0, |n| n.get()),
+        std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
         if cfg!(debug_assertions) {
             "DEBUG build (timings are meaningless; use --release)"
         } else {

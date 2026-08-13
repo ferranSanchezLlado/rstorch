@@ -8,7 +8,7 @@
 //!
 //! Images are **NCHW** (`[batch, channels, height, width]`) and convolution
 //! weights are **OIHW** (`[out_channels, in_channels, kernel_h, kernel_w]`),
-//! matching PyTorch. Every operand is read stride-aware through its
+//! matching `PyTorch`. Every operand is read stride-aware through its
 //! [`Layout`], so transposed / narrowed / broadcast views work without a
 //! pre-materialization; every result is a freshly allocated **contiguous**
 //! buffer in the op layer's output shape.
@@ -21,13 +21,13 @@
 //!
 //! # Semantics (PyTorch-familiar)
 //!
-//! - `Conv2d` is a **cross-correlation** (no kernel flip), like PyTorch's.
+//! - `Conv2d` is a **cross-correlation** (no kernel flip), like `PyTorch`'s.
 //!   Bias is not a kernel operand: the op layer adds it as a broadcast add.
 //! - `MaxPool2d` picks the window maximum with a NaN-propagating,
 //!   first-position-wins ordering, so the forward value and the position its
 //!   gradient is routed to always agree.
 //! - `AvgPool2d` divides by the **full window area** (`kernel_h · kernel_w`),
-//!   i.e. PyTorch's `count_include_pad = true` default; positions that fall
+//!   i.e. `PyTorch`'s `count_include_pad = true` default; positions that fall
 //!   in the zero padding contribute `0` to the sum but still count in the
 //!   divisor.
 //! - Pooling ignores `dilation`, per

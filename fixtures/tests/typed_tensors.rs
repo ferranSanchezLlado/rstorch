@@ -5,7 +5,7 @@ use rstorch::{Device, Result, Tensor};
 
 #[test]
 fn downstream_typed_tensor_workflow_uses_only_public_api() -> Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let dynamic = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &Device::Cpu)?.traced()?;
     let input = Tensor2::<DYN, 2>::try_from_dynamic(dynamic.clone(), &ctx)?;
     let weight = Tensor2::<2, 1>::from_vec(vec![0.5, 1.0], [2, 1], &ctx)?;
@@ -24,7 +24,7 @@ fn downstream_typed_tensor_workflow_uses_only_public_api() -> Result<()> {
 
 #[test]
 fn downstream_static_dynamic_empty_and_view_paths_compile() -> Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let row = Tensor2::<1, 3, i64>::from_vec(vec![1, 2, 3], [1, 3], &ctx)?;
     let expanded = row.broadcast_to::<Tensor2<2, 3, i64>>([2, 3])?;
     let view = expanded.transpose::<0, 1>()?;

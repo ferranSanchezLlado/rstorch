@@ -86,7 +86,7 @@ fn sdpa_is_the_scaled_softmax_weighted_average_of_the_values() {
         let logits: Vec<f32> = (0..2)
             .map(|j| (0..4).map(|d| qv[i * 4 + d] * kv[j * 4 + d]).sum::<f32>() / scale)
             .collect();
-        let peak = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let peak = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let e: Vec<f32> = logits.iter().map(|l| (l - peak).exp()).collect();
         let denom: f32 = e.iter().sum();
         for c in 0..3 {

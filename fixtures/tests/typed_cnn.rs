@@ -6,8 +6,8 @@
 use rstorch::persist::{Envelope, Limits, LoadOptions};
 use rstorch::typed::data::{DataLoader, Dataset, TensorDataset};
 use rstorch::typed::nn::{
-    BatchNorm2d, Forward, Linear, Mode, Module, Relu, Sequential2, TypedParam, TypedStateDict,
-    TypedVisitor, TypedVisitorMut, sequential, state_dict,
+    BatchNorm2d, Forward, Linear, Mode, Relu, Sequential2, TypedModule, TypedParam, TypedStateDict,
+    sequential, state_dict,
 };
 use rstorch::typed::optim::{
     Adam, adam_param_steps, adam_step, load_adam_checkpoint, save_adam_checkpoint,
@@ -33,24 +33,11 @@ type Split = TensorDataset<Image, Label>;
 type ConvOutput = Tensor4<DYN, CHANNELS, DYN, DYN>;
 type Trunk = Sequential2<ConvOutput, BatchNorm2d<CHANNELS>, Relu>;
 
+#[derive(TypedModule)]
 struct Cnn {
     conv: TypedParam<Tensor4<CHANNELS, 1, 3, 3>>,
     trunk: Trunk,
     head: Linear<FEATURES, CLASSES>,
-}
-
-impl Module for Cnn {
-    fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-        visitor.param("conv", &self.conv);
-        visitor.module("trunk", &self.trunk);
-        visitor.module("head", &self.head);
-    }
-
-    fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-        visitor.param("conv", &mut self.conv);
-        visitor.module("trunk", &mut self.trunk);
-        visitor.module("head", &mut self.head);
-    }
 }
 
 impl Cnn {
@@ -176,7 +163,7 @@ fn assert_paths(state: &TypedStateDict) {
 /// backend geometry changes the asserted output dims instead of cancelling out.
 #[test]
 fn typed_conv_pool_values_and_gradients_match_the_dynamic_view() -> Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let dynamic_input = rstorch::Tensor::from_vec(
         (0..20).map(|n| n as f32 / 20.0).collect(),
         [1, 1, 5, 4],
@@ -225,7 +212,7 @@ fn typed_conv_pool_values_and_gradients_match_the_dynamic_view() -> Result<()> {
 fn typed_cnn_learns_and_resumes_bit_exactly_across_a_tail_batch() -> Result<()> {
     const EPOCHS: u64 = 8;
 
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let train = generated_split(TRAIN_ITEMS, 11, &ctx)?;
     let held_out = generated_split(EVAL_ITEMS, 977, &ctx)?;
     let train_loader = DataLoader::new(&train, BATCH_SIZE).shuffle(23);

@@ -13,16 +13,32 @@ macro_rules! impl_typed_core {
                 super::$name<$($dim,)* E, P>
             {
                 /// Returns an untraced tensor sharing this tensor's storage and layout.
+                ///
+                /// # Errors
+                ///
+                /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `self`'s placement binding is not the
+                /// canonical one for `P` — unreachable for a typed tensor built
+                /// through the public API, only possible via a forged binding.
                 pub fn detach(&self) -> Result<Self> {
                     wrap(self, dynamic(self, "detach")?.detach(), "detach")
                 }
 
                 /// Returns a row-major contiguous tensor with unchanged typed metadata.
+                ///
+                /// # Errors
+                ///
+                /// As [`detach`](Self::detach) for the binding check; otherwise
+                /// propagates the backend's allocation error for the copy.
                 pub fn contiguous(&self) -> Result<Self> {
                     wrap(self, dynamic(self, "contiguous")?.contiguous()?, "contiguous")
                 }
 
                 /// Casts the element type while preserving shape and placement.
+                ///
+                /// # Errors
+                ///
+                /// As [`detach`](Self::detach) for the binding check; otherwise
+                /// propagates the backend's allocation error for the cast.
                 pub fn to_dtype<F: Element>(&self) -> Result<<Self as WithElement<F>>::Output>
                 where
                     Self: WithElement<F>,
@@ -31,6 +47,12 @@ macro_rules! impl_typed_core {
                 }
 
                 /// Moves the tensor while preserving shape and element type.
+                ///
+                /// # Errors
+                ///
+                /// As [`detach`](Self::detach) for `self`'s binding; the same check
+                /// against `target`'s binding for `Q`; otherwise propagates the
+                /// backend's transfer error.
                 pub fn to_device<Q: Placement>(
                     &self,
                     target: &DeviceCtx<Q>,
@@ -48,16 +70,30 @@ macro_rules! impl_typed_core {
                 }
 
                 /// Copies the elements to host memory in row-major order.
+                ///
+                /// # Errors
+                ///
+                /// As [`detach`](Self::detach) for the binding check; otherwise
+                /// propagates the backend's host-transfer error.
                 pub fn to_vec(&self) -> Result<Vec<E>> {
                     dynamic(self, "to_vec")?.to_vec::<E>()
                 }
 
                 /// Reads the sole element using this tensor's element type.
+                ///
+                /// # Errors
+                ///
+                /// As [`detach`](Self::detach) for the binding check; otherwise
+                /// [`Error::InvalidArg`](crate::Error::InvalidArg) if the tensor has more than one element.
                 pub fn to_scalar(&self) -> Result<E> {
                     dynamic(self, "to_scalar")?.to_scalar::<E>()
                 }
 
                 /// Reads the sole element as `f64` regardless of element type.
+                ///
+                /// # Errors
+                ///
+                /// As [`to_scalar`](Self::to_scalar).
                 pub fn item(&self) -> Result<f64> {
                     dynamic(self, "item")?.item()
                 }
@@ -67,11 +103,21 @@ macro_rules! impl_typed_core {
                 super::$name<$($dim,)* E, P>
             {
                 /// Returns a traced leaf for gradient lookup by typed input.
+                ///
+                /// # Errors
+                ///
+                /// As [`detach`](Self::detach) for the binding check; otherwise
+                /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `self` is already traced.
                 pub fn traced(&self) -> Result<Self> {
                     wrap(self, dynamic(self, "traced")?.traced()?, "traced")
                 }
 
                 /// Runs reverse-mode autodiff from this tensor.
+                ///
+                /// # Errors
+                ///
+                /// As [`detach`](Self::detach) for the binding check; otherwise
+                /// [`Error::NotTraced`](crate::Error::NotTraced) if `self` was never marked [`traced`](Self::traced).
                 pub fn backward(&self) -> Result<Grads> {
                     dynamic(self, "backward")?.backward()
                 }
@@ -85,6 +131,12 @@ typed_rank_table!(impl_typed_core);
 /// Typed gradient lookup for a leaf returned by a typed `traced` call.
 pub trait TypedGradsExt {
     /// Returns the gradient with the input's exact shape, element, and placement.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `input`'s binding
+    /// is not the canonical one for `T::Placement`; otherwise propagates
+    /// [`Grads::wrt_input`]'s [`Error::NotTraced`](crate::Error::NotTraced).
     fn wrt_typed_input<T: TypedTensor>(&self, input: &T) -> Result<T>;
 }
 

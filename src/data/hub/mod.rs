@@ -1,5 +1,5 @@
 //! Dataset hub: download, caching, checksum verification, and parsing for
-//! the bundled datasets (MNIST, TinyShakespeare).
+//! the bundled datasets (MNIST, `TinyShakespeare`).
 //!
 //! This is the **raw** layer: it produces plain `Vec`s and small metadata
 //! structs and has **no `Tensor` dependency**. The [`crate::data`] `Dataset`
@@ -120,6 +120,10 @@ impl DatasetHub {
     /// Available only with the `hub` feature; use
     /// [`ensure_cached_with`](Self::ensure_cached_with) for an offline,
     /// caller-supplied fetcher.
+    ///
+    /// # Errors
+    ///
+    /// As [`ensure_cached_with`](Self::ensure_cached_with).
     #[cfg(feature = "hub")]
     pub fn ensure_cached(
         &self,
@@ -131,6 +135,11 @@ impl DatasetHub {
 
     /// Ensures every resource is cached, fetching missing ones with the
     /// caller-supplied `fetch` closure. Returns their paths in order.
+    ///
+    /// # Errors
+    ///
+    /// As [`ensure_resource_with`](Self::ensure_resource_with), for the first
+    /// resource that fails.
     pub fn ensure_cached_with<F>(
         &self,
         dataset: &str,
@@ -151,6 +160,10 @@ impl DatasetHub {
     /// Available only with the `hub` feature; use
     /// [`ensure_resource_with`](Self::ensure_resource_with) for an offline,
     /// caller-supplied fetcher.
+    ///
+    /// # Errors
+    ///
+    /// As [`ensure_resource_with`](Self::ensure_resource_with).
     #[cfg(feature = "hub")]
     pub fn ensure_resource(&self, dataset: &str, resource: &DatasetResource) -> Result<PathBuf> {
         self.ensure_resource_with(dataset, resource, fetch_resource)
@@ -167,6 +180,13 @@ impl DatasetHub {
     /// digest is only recomputed for resources that declare one; a resource
     /// with neither a digest nor a cap is checked only for existence, because
     /// there is nothing to check it against.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Data`] if `dataset` or `resource.file_name` is not a
+    /// single ordinary path component, or if a cached file fails its size or
+    /// checksum re-verification. As [`download_with`](Self::download_with) if
+    /// the resource is not yet cached.
     pub fn ensure_resource_with<F>(
         &self,
         dataset: &str,
@@ -190,6 +210,10 @@ impl DatasetHub {
     /// Available only with the `hub` feature; use
     /// [`download_with`](Self::download_with) for an offline, caller-supplied
     /// fetcher.
+    ///
+    /// # Errors
+    ///
+    /// As [`download_with`](Self::download_with).
     #[cfg(feature = "hub")]
     pub fn download(&self, dataset: &str, resource: &DatasetResource) -> Result<PathBuf> {
         self.download_with(dataset, resource, fetch_resource)
@@ -211,6 +235,14 @@ impl DatasetHub {
     /// installed file later, which is why
     /// [`ensure_resource_with`](Self::ensure_resource_with) re-verifies on a
     /// cache hit rather than trusting the path's mere existence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Data`] if `dataset` or `resource.file_name` is not a
+    /// single ordinary path component, if `fetch` fails, or if the fetched
+    /// bytes fail their size cap or checksum check. Propagates any
+    /// filesystem I/O error from creating the cache directory or installing
+    /// the file.
     pub fn download_with<F>(
         &self,
         dataset: &str,

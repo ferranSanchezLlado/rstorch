@@ -32,6 +32,25 @@ impl HostTensor {
     /// Errors with [`Error::Persistence`] if `dims` overflows `usize` when
     /// multiplied out, or if `bytes.len()` does not equal
     /// `dtype.size_in_bytes() * dims.product()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Persistence`] if `dims`'s element count overflows
+    /// `usize`, or if `bytes.len()` does not equal
+    /// `dtype.size_in_bytes() * dims.product()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::persist::HostTensor;
+    /// use rstorch::DType;
+    ///
+    /// let bytes = 1.0f32.to_le_bytes().repeat(4);
+    /// let host = HostTensor::from_bytes(DType::F32, vec![2, 2], bytes)?;
+    /// assert_eq!(host.dims(), &[2, 2]);
+    /// assert_eq!(host.dtype(), DType::F32);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
     pub fn from_bytes(dtype: DType, dims: Vec<usize>, bytes: Vec<u8>) -> Result<Self> {
         let expected = byte_len(dtype, &dims)?;
         if bytes.len() != expected {

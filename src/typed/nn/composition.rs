@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn dynamic_batch_output_and_flat_state_paths_match_dynamic_sequential() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut typed_rng = Rng::seed(17);
         let mut dynamic_rng = Rng::seed(17);
         let mut typed = Sequential::<Tensor2<DYN, 4>>::new()
@@ -692,7 +692,7 @@ mod tests {
 
     #[test]
     fn gradients_and_mode_match_the_runtime_chain() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut typed_rng = Rng::seed(9);
         let mut dynamic_rng = Rng::seed(9);
         let mut typed = Sequential::<Tensor2<2, 3>>::new()
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn empty_chain_and_consuming_retyping_preserve_structure() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let empty = Sequential::<Tensor2<1, 2>>::new();
         assert!(empty.is_empty());
 
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn returned_cons_type_is_nameable_in_fields_and_signatures() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut model = NamedField {
             layers: named_linear(&ctx),
         };
@@ -762,7 +762,7 @@ mod tests {
 
     #[test]
     fn normalization_and_cnn_layers_compose_with_exact_paths_and_values() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let input =
             Tensor2::<2, 3>::from_vec(vec![1.0f32, 2.0, 4.0, 3.0, 5.0, 8.0], [2, 3], &ctx).unwrap();
         let mut chain = Sequential::<Tensor2<2, 3>>::new()
@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn embedding_composes_into_linear_and_matches_runtime_values() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut typed_rng = Rng::seed(31);
         let mut dynamic_rng = Rng::seed(31);
         let mut typed = Sequential::<Tensor1<4, i64>>::new()
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn nested_sequence_flattens_only_each_numeric_boundary_and_matches_runtime() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut typed_rng = Rng::seed(44);
         let mut dynamic_rng = Rng::seed(44);
         let inner = Sequential::<Tensor2<1, 2>>::new()
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn consuming_device_and_dtype_conversion_retype_the_complete_chain() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let build = || {
             Sequential::<Tensor2<1, 2>>::new()
                 .push(Linear::<2, 3>::new(2, 3, &ctx, &mut Rng::seed(52)).unwrap())
@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn embedding_chain_dtype_conversion_keeps_structural_input_and_forwards() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut rng = Rng::seed(61);
         let model = Sequential::<Tensor1<4, i64>>::new()
             .push(Embedding::<8, 3>::new(&ctx, &mut rng).unwrap())
@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn float_chain_dtype_conversion_retypes_external_input_and_output() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let model = Sequential::<Tensor2<1, 2>>::new()
             .push(Linear::<2, 3>::new(2, 3, &ctx, &mut Rng::seed(62)).unwrap())
             .push(super::super::Relu);
@@ -933,7 +933,7 @@ mod tests {
 
     #[test]
     fn bounded_tuple_helper_uses_nameable_types_and_flat_paths() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let layers = (
             Linear::<2, 3>::new(2, 3, &ctx, &mut Rng::seed(70)).unwrap(),
             super::super::Relu,
@@ -976,7 +976,7 @@ mod tests {
     /// leaving the check meaningful if those bounds are ever relaxed.
     #[test]
     fn the_three_tuple_helper_pushes_its_layers_in_order() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut first = Linear::<2, 2>::new(2, 2, &ctx, &mut Rng::seed(80)).unwrap();
         let mut second = Linear::<2, 2>::new(2, 2, &ctx, &mut Rng::seed(81)).unwrap();
 

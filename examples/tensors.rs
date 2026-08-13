@@ -36,8 +36,8 @@ fn main() -> Result<()> {
 
     // Rule 3: gradients are linear. `backward` yields one `Grads`, which is
     // not `Clone` and is `#[must_use]` — an optimizer step consumes it, so
-    // "stepped twice on the same gradients" is a compile error, not a bug you
-    // find in a loss curve. `tests/linearity_ui.rs` pins those diagnostics.
+    // reusing the moved value is a compile error, while ignoring it is a
+    // warning. `tests/linearity_ui.rs` pins those diagnostics.
     // Tracing is explicit: `traced` returns the binding the tape records
     // against, and that binding — not the tensor it came from — is what
     // `wrt_input` answers for.

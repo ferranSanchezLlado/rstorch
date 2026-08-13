@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::device::Device;
 use crate::error::{Error, Result};
@@ -188,6 +189,7 @@ struct LayerCache {
 pub struct KvCache {
     layers: Vec<Option<LayerCache>>,
     len: usize,
+    model_id: Arc<()>,
 }
 
 impl KvCache {
@@ -209,6 +211,30 @@ impl KvCache {
 /// Parameter paths are stable dotted checkpoint keys. In particular, blocks
 /// are stored in a derived `Vec<Block>` and therefore use paths such as
 /// `blocks.0.attention.q_proj.weight`.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::models::{DecoderTransformer, TransformerConfig};
+/// use rstorch::{Device, Rng, Tensor};
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let config = TransformerConfig {
+///     vocab_size: 16,
+///     max_seq_len: 8,
+///     embed_dim: 4,
+///     num_heads: 2,
+///     num_layers: 1,
+///     feed_forward_dim: 8,
+/// };
+/// let mut model = DecoderTransformer::new(config, &Device::Cpu, &mut Rng::seed(0))?;
+///
+/// let prompt = Tensor::from_vec(vec![1i64, 2, 3], [1, 3], &Device::Cpu)?;
+/// let generated = model.generate(&prompt, 2)?;
+/// assert_eq!(generated.dims(), &[1, 5]);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(rstorch::Module)]
 pub struct DecoderTransformer {
     token_embedding: Embedding,
@@ -218,6 +244,8 @@ pub struct DecoderTransformer {
     output: Linear,
     #[module(skip)]
     config: TransformerConfig,
+    #[module(skip)]
+    cache_id: Arc<()>,
 }
 
 impl DecoderTransformer {
@@ -244,6 +272,7 @@ impl DecoderTransformer {
             final_norm,
             output,
             config,
+            cache_id: Arc::new(()),
         })
     }
 
@@ -257,6 +286,7 @@ impl DecoderTransformer {
         KvCache {
             layers: (0..self.blocks.len()).map(|_| None).collect(),
             len: 0,
+            model_id: Arc::clone(&self.cache_id),
         }
     }
 
@@ -290,8 +320,8 @@ impl DecoderTransformer {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidArg`] if the cache belongs to a differently
-    /// shaped model, is full, or `token_ids` is not one token per batch.
+    /// Returns [`Error::InvalidArg`] if the cache belongs to a different model,
+    /// is full, or `token_ids` is not one token per batch.
     pub fn logits_cached(
         &mut self,
         token_ids: &Tensor,
@@ -299,7 +329,10 @@ impl DecoderTransformer {
         mode: Mode,
     ) -> Result<Tensor> {
         let (_batch, sequence) = checked_tokens(token_ids, 1)?;
-        if sequence != 1 || cache.layers.len() != self.blocks.len() {
+        if sequence != 1
+            || cache.layers.len() != self.blocks.len()
+            || !Arc::ptr_eq(&cache.model_id, &self.cache_id)
+        {
             return Err(Error::InvalidArg {
                 op: "DecoderTransformer::logits_cached",
                 msg: "expected one token and a cache created by this model".to_string(),
@@ -365,6 +398,11 @@ impl DecoderTransformer {
     /// # Errors
     ///
     /// As [`generate`](Self::generate).
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: `prompt` is checked non-empty above, so the
+    /// prompt-priming loop runs at least once before `logits` is read.
     pub fn generate_with_cache(
         &mut self,
         prompt: &Tensor,
@@ -414,6 +452,37 @@ impl DecoderTransformer {
     /// # Errors
     ///
     /// Host transfer, envelope validation, and filesystem errors propagate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::models::{DecoderTransformer, TransformerConfig};
+    /// use rstorch::persist::Limits;
+    /// use rstorch::{Device, Rng};
+    ///
+    /// # fn main() -> rstorch::Result<()> {
+    /// let config = TransformerConfig {
+    ///     vocab_size: 16,
+    ///     max_seq_len: 8,
+    ///     embed_dim: 4,
+    ///     num_heads: 2,
+    ///     num_layers: 1,
+    ///     feed_forward_dim: 8,
+    /// };
+    /// let model = DecoderTransformer::new(config, &Device::Cpu, &mut Rng::seed(0))?;
+    ///
+    /// let path = std::env::temp_dir().join(format!(
+    ///     "rstorch-doctest-transformer-{}.safetensors",
+    ///     std::process::id()
+    /// ));
+    /// model.save_checkpoint(&path, &Limits::default())?;
+    ///
+    /// let restored = DecoderTransformer::load_checkpoint(&path, &Device::Cpu, &Limits::default())?;
+    /// assert_eq!(restored.config(), model.config());
+    /// # let _ = std::fs::remove_file(&path);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn save_checkpoint(&self, path: impl AsRef<Path>, limits: &Limits) -> Result<()> {
         let mut envelope = Envelope::new();
         envelope.set_section("config", self.config.encode())?;
@@ -532,6 +601,25 @@ mod tests {
             }
         }
         assert_eq!(cache.len(), 4);
+    }
+
+    #[test]
+    fn a_cache_cannot_be_reused_with_another_model() {
+        let first = DecoderTransformer::new(config(), &CPU, &mut Rng::seed(4)).unwrap();
+        let mut second = DecoderTransformer::new(config(), &CPU, &mut Rng::seed(4)).unwrap();
+        let ids = Tensor::from_vec(vec![4i64], [1, 1], &CPU).unwrap();
+        let mut cache = first.empty_cache();
+
+        let error = second
+            .logits_cached(&ids, &mut cache, Mode::EVAL)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidArg {
+                op: "DecoderTransformer::logits_cached",
+                ..
+            }
+        ));
     }
 
     /// A rejected cached step must leave the cache byte-for-byte usable.

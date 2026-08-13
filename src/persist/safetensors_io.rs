@@ -120,14 +120,14 @@ fn push_json_string(out: &mut Vec<u8>, value: &str) {
     for ch in value.chars() {
         match ch {
             '"' => out.extend_from_slice(br#"\""#),
-            '\\' => out.extend_from_slice(br#"\\"#),
-            '\u{08}' => out.extend_from_slice(br#"\b"#),
-            '\u{0c}' => out.extend_from_slice(br#"\f"#),
-            '\n' => out.extend_from_slice(br#"\n"#),
-            '\r' => out.extend_from_slice(br#"\r"#),
-            '\t' => out.extend_from_slice(br#"\t"#),
+            '\\' => out.extend_from_slice(br"\\"),
+            '\u{08}' => out.extend_from_slice(br"\b"),
+            '\u{0c}' => out.extend_from_slice(br"\f"),
+            '\n' => out.extend_from_slice(br"\n"),
+            '\r' => out.extend_from_slice(br"\r"),
+            '\t' => out.extend_from_slice(br"\t"),
             ch if ch <= '\u{1f}' => {
-                out.extend_from_slice(format!("\\u{:04x}", ch as u32).as_bytes())
+                out.extend_from_slice(format!("\\u{:04x}", ch as u32).as_bytes());
             }
             ch => {
                 let mut encoded = [0; 4];
@@ -363,7 +363,7 @@ impl<'de> serde::de::Visitor<'de> for Descent {
 
 impl Descent {
     /// The visitor for one level further in, or the nesting error.
-    fn descend<E: serde::de::Error>(&self) -> std::result::Result<Descent, E> {
+    fn descend<E: serde::de::Error>(self) -> std::result::Result<Descent, E> {
         if self.depth == MAX_JSON_NESTING {
             return Err(E::custom(format!(
                 "safetensors JSON nesting exceeds limit {MAX_JSON_NESTING}"

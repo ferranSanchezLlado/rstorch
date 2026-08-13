@@ -544,7 +544,7 @@ fn seeded_random_views_preserve_mapping() {
                     let mut tgt = cur.dims().to_vec();
                     // Expand any size-1 axis.
                     let mut changed = false;
-                    for d in tgt.iter_mut() {
+                    for d in &mut tgt {
                         if *d == 1 && rng.below(2) == 0 {
                             *d = 1 + rng.below(3);
                             changed = true;

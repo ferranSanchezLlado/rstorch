@@ -1,7 +1,7 @@
 //! [`Mode`] — two orthogonal axes in one `Copy` value.
 //!
 //! `Mode` carries **layer behavior** (Train vs Eval — dropout on/off,
-//! BatchNorm batch-stats vs running-stats) and **recording** (whether
+//! `BatchNorm` batch-stats vs running-stats) and **recording** (whether
 //! `Param::get` hands back a traced leaf) as *independent* axes, because
 //! conflating them makes standard flows inexpressible. The diagonal
 //! constants cover hour one; the off-diagonals are one call away.
@@ -17,6 +17,16 @@
 ///
 /// Freezing a *subtree* is per-`Param` (`Param::freeze`), never a `Mode`
 /// side effect.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::nn::Mode;
+///
+/// let fine_tune = Mode::EVAL.recorded();
+/// assert!(!fine_tune.is_training());
+/// assert!(fine_tune.records());
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mode {
     training: bool,
@@ -39,6 +49,7 @@ impl Mode {
 
     /// This mode's behavior with recording forced **on**
     /// (`Mode::EVAL.recorded()` = frozen-BatchNorm/dropout-off fine-tuning).
+    #[must_use]
     pub fn recorded(self) -> Mode {
         Mode {
             record: true,
@@ -48,6 +59,7 @@ impl Mode {
 
     /// This mode's behavior with recording forced **off**
     /// (`Mode::TRAIN.frozen()` = MC-dropout sampling with no graph cost).
+    #[must_use]
     pub fn frozen(self) -> Mode {
         Mode {
             record: false,
@@ -56,7 +68,7 @@ impl Mode {
     }
 
     /// Whether layers should use **training** behavior (dropout active,
-    /// BatchNorm using batch statistics).
+    /// `BatchNorm` using batch statistics).
     pub fn is_training(self) -> bool {
         self.training
     }

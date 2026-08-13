@@ -290,7 +290,7 @@ impl Tensor {
     /// Ignored rows contribute nothing to the sum *and* nothing to the
     /// divisor, so the result is the mean over the kept rows only, and their
     /// logits receive exactly zero gradient. The sentinel is an ordinary
-    /// `i64` and need not be a valid class (PyTorch's `-100` is the
+    /// `i64` and need not be a valid class (`PyTorch`'s `-100` is the
     /// conventional choice); labels that are neither the sentinel nor a valid
     /// class are still a loud
     /// [`IndexOutOfBounds`](crate::Error::IndexOutOfBounds). A batch in which
@@ -410,7 +410,7 @@ mod tests {
 
     /// `ln Σ exp(x)`, computed on the host as the reference.
     fn logsumexp(row: &[f32]) -> f64 {
-        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
         max + row
             .iter()
             .map(|&x| (x as f64 - max).exp())
@@ -429,7 +429,7 @@ mod tests {
         let loss = logits.cross_entropy(&labels(&[2, 0])).unwrap();
 
         let lse = logsumexp(&row);
-        let expected = ((lse - 3.0) + (lse - 1.0)) / 2.0;
+        let expected = f64::midpoint(lse - 3.0, lse - 1.0);
         assert!(loss.dims().is_empty(), "the loss is a rank-0 scalar");
         assert!((loss.item().unwrap() - expected).abs() < 1e-6);
     }

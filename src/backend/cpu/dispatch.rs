@@ -21,7 +21,7 @@
 //!   materialization), [`dispatch_numeric!`] (the five with a wide accumulator;
 //!   `Bool` is [`Error::Unsupported`](crate::error::Error::Unsupported) — reduce,
 //!   matmul, conv, index-add), and [`dispatch_float!`] (the four floats —
-//!   softmax, LayerNorm, the optimizer steps, where an integer dtype has
+//!   softmax, `LayerNorm`, the optimizer steps, where an integer dtype has
 //!   already been rejected upstream).
 //!
 //! Every accessor runs once per kernel call, outside the element loop; the
@@ -79,7 +79,7 @@ pub(super) trait CpuElement: Element {
 /// [`FloatAcc`](super::acc::FloatAcc) applies one level down, so an integer or
 /// bool dtype has no impl for a [`dispatch_float!`] to land on.
 pub(super) trait CpuFloat: CpuElement {
-    /// Borrow accumulation-dtype elements: optimizer state, or LayerNorm's
+    /// Borrow accumulation-dtype elements: optimizer state, or `LayerNorm`'s
     /// saved statistics.
     fn acc_slice(storage: &CpuStorage) -> &[Self::Acc];
 
@@ -255,7 +255,7 @@ macro_rules! dispatch_numeric {
 /// [`dispatch_all!`] over the four float dtypes.
 ///
 /// Unlike [`dispatch_numeric!`] this has no error arm: its callers (softmax,
-/// LayerNorm, the optimizer steps) reject a non-float dtype up front with their
+/// `LayerNorm`, the optimizer steps) reject a non-float dtype up front with their
 /// own `Error::Unsupported`, before any operand is borrowed.
 macro_rules! dispatch_float {
     ($dtype:expr, $elem:ident => $body:block) => {

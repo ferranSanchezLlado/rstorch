@@ -30,7 +30,7 @@ use std::sync::Arc;
 /// use rstorch::typed::{DeviceCtx, Tensor2, nn::{Forward, Linear, Mode}};
 /// use rstorch::Rng;
 /// let ctx = DeviceCtx::cpu().unwrap();
-/// let mut layer = Linear::<3, 2, f32>::new(3, 2, &ctx, &mut Rng::seed(0)).unwrap();
+/// let mut layer = Linear::<3, 2>::new(3, 2, &ctx, &mut Rng::seed(0)).unwrap();
 /// let input = Tensor2::<1, 3, f64>::from_vec(vec![0.0; 3], [1, 3], &ctx).unwrap();
 /// let _ = layer.forward(&input, Mode::EVAL);
 /// ```
@@ -40,7 +40,7 @@ use std::sync::Arc;
 /// use rstorch::{Device, Rng};
 /// struct Auxiliary;
 /// impl Placement for Auxiliary {}
-/// let cpu = DeviceCtx::<Cpu>::cpu().unwrap();
+/// let cpu = DeviceCtx::cpu().unwrap();
 /// let auxiliary = DeviceCtx::<Auxiliary>::bind(Device::Cpu).unwrap();
 /// let mut layer = Linear::<3, 2>::new(3, 2, &cpu, &mut Rng::seed(0)).unwrap();
 /// let input = Tensor2::<1, 3, f32, Auxiliary>::from_vec(vec![0.0; 3], [1, 3], &auxiliary).unwrap();
@@ -69,6 +69,12 @@ pub struct Linear<
 
 impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> Linear<IN, OUT, E, P> {
     /// Initializes through runtime `Linear`, then validates and seals its state.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] if `in_features`/`out_features` contradict a
+    /// static `IN`/`OUT` marker; otherwise propagates the runtime layer's own
+    /// construction and cast errors.
     pub fn new(
         in_features: usize,
         out_features: usize,
@@ -125,6 +131,11 @@ impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> Linear<IN
     }
 
     /// Returns the actual runtime input width.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: every constructor seals `weight` through
+    /// [`TypedParam::new`], so its binding is always valid.
     pub fn in_features(&self) -> usize {
         self.weight
             .value()
@@ -133,6 +144,11 @@ impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> Linear<IN
     }
 
     /// Returns the actual runtime output width.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice, for the same reason as
+    /// [`in_features`](Self::in_features).
     pub fn out_features(&self) -> usize {
         self.weight
             .value()
@@ -264,11 +280,11 @@ impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> std::fmt:
 mod tests {
     use super::*;
     use crate::nn::Forward as RuntimeForward;
-    use crate::typed::{Cpu, Tensor2, Tensor8};
+    use crate::typed::{Tensor2, Tensor8};
 
     #[test]
     fn initialization_values_errors_and_rng_match_runtime() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut a = Rng::seed(12);
         let mut b = Rng::seed(12);
         let typed = Linear::<3, 2>::new(3, 2, &ctx, &mut a).unwrap();
@@ -283,7 +299,7 @@ mod tests {
 
     #[test]
     fn ordinary_construction_values_state_paths_and_gradients_match_runtime() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut rng_a = Rng::seed(3);
         let mut rng_b = Rng::seed(3);
         let mut typed = Linear::<3, 2>::new(3, 2, &ctx, &mut rng_a).unwrap();
@@ -348,7 +364,7 @@ mod tests {
 
     #[test]
     fn dynamic_batch_can_change_and_dynamic_width_fails_at_runtime() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut layer = Linear::<3, 2>::new(3, 2, &ctx, &mut Rng::seed(1)).unwrap();
         let one = Tensor2::<DYN, 3>::from_vec(vec![1.0f32; 3], [1, 3], &ctx).unwrap();
         let five = Tensor2::<DYN, 3>::from_vec(vec![1.0f32; 15], [5, 3], &ctx).unwrap();
@@ -367,7 +383,7 @@ mod tests {
 
     #[test]
     fn rank_two_and_rank_eight_preserve_all_leading_markers() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut layer = Linear::<1, 2>::new(1, 2, &ctx, &mut Rng::seed(5)).unwrap();
         let low = Tensor2::<3, 1>::from_vec(vec![1.0f32; 3], [3, 1], &ctx).unwrap();
         let _: Tensor2<3, 2> = layer.forward(&low, Mode::EVAL).unwrap();
@@ -383,7 +399,7 @@ mod tests {
 
     #[test]
     fn without_bias_sheds_the_bias_leaf_and_leaves_the_weight_intact() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let biased = Linear::<3, 2>::new(3, 2, &ctx, &mut Rng::seed(4)).unwrap();
         let weight = biased.weight.value().unwrap().to_vec().unwrap();
         let input =
@@ -423,7 +439,7 @@ mod tests {
 
     #[test]
     fn reported_geometry_and_debug_describe_the_actual_runtime_widths() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let layer = Linear::<3, 2>::new(3, 2, &ctx, &mut Rng::seed(6)).unwrap();
         assert_eq!((layer.in_features(), layer.out_features()), (3, 2));
         assert_eq!(format!("{layer:?}"), "Linear(3 -> 2, bias)");
@@ -441,7 +457,7 @@ mod tests {
 
     #[test]
     fn construction_rejects_widths_that_contradict_a_static_marker() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         assert_eq!(
             Linear::<4, 2>::new(3, 2, &ctx, &mut Rng::seed(0))
                 .unwrap_err()
@@ -470,7 +486,7 @@ mod tests {
 
     #[test]
     fn mode_and_consuming_retyping_preserve_parameter_behavior() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut layer = Linear::<2, 1>::new(2, 1, &ctx, &mut Rng::seed(8)).unwrap();
         let input = Tensor2::<1, 2>::from_vec(vec![1.0f32, 2.0], [1, 2], &ctx).unwrap();
         assert!(

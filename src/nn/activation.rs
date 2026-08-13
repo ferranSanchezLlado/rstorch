@@ -254,7 +254,8 @@ mod tests {
         assert_eq!(format!("{Relu:?} {Gelu:?}"), "Relu Gelu");
         // `Copy`: passing one by value does not move it away.
         let act = Relu;
-        let _copy = act;
+        let copy = act;
         assert_eq!(act, Relu);
+        assert_eq!(copy, Relu);
     }
 }

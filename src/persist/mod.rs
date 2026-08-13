@@ -25,6 +25,11 @@
 //!   every swap it is about to make will succeed.
 //! - [`Limits`] / [`LoadOptions`] / [`MissingPolicy`] / [`UnexpectedPolicy`]:
 //!   the safe-default reader limits and load policies for untrusted files.
+//!
+//! These safeguards are structural, not cryptographic. Files are not
+//! checksummed or authenticated, so a bit-flipped tensor payload can still
+//! decode as valid, different values. Add an application-level integrity check
+//! before loading checkpoints received from an untrusted or unreliable source.
 
 // Also the install step for cached hub downloads (`crate::data::hub`), so
 // every file this crate creates goes through one atomic-save path.
@@ -56,6 +61,33 @@ pub use restore::{Expected, StagedTensors, stage};
 ///
 /// [`Error::Persistence`](crate::Error::Persistence) if the tensor map exceeds
 /// `limits`, or [`Error::Io`](crate::Error::Io) on a filesystem failure.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::persist::{HostTensor, Limits, load_safetensors, save_safetensors};
+/// use rstorch::DType;
+/// use std::collections::BTreeMap;
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let path = std::env::temp_dir().join(format!(
+///     "rstorch-doctest-safetensors-{}.safetensors",
+///     std::process::id()
+/// ));
+///
+/// let mut tensors = BTreeMap::new();
+/// tensors.insert(
+///     "w".to_string(),
+///     HostTensor::from_bytes(DType::F32, vec![2], 1.0f32.to_le_bytes().repeat(2))?,
+/// );
+/// save_safetensors(&path, &tensors, &Limits::default())?;
+///
+/// let (loaded, _metadata) = load_safetensors(&path, &Limits::default())?;
+/// assert_eq!(loaded["w"].dims(), &[2]);
+/// # let _ = std::fs::remove_file(&path);
+/// # Ok(())
+/// # }
+/// ```
 pub fn save_safetensors(
     path: impl AsRef<Path>,
     tensors: &BTreeMap<String, HostTensor>,

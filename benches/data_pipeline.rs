@@ -6,7 +6,7 @@
 //!   collate with `Tensor::stack`, so a batch pays one stack per item.
 //! - The **tensor** lanes ([`TensorDataset`]) are one `index_select` per batch
 //!   on the whole split — the idiom for data that already lives in tensors,
-//!   and what `fixtures/mnist_mlp.rs` uses.
+//!   and what `fixtures/tests/mnist_mlp.rs` uses.
 //! - The `collate` group isolates the two collation primitives at one batch's
 //!   shape so the epoch cost above can be attributed instead of guessed. See
 //!   [`bench_collate`].
@@ -186,7 +186,7 @@ fn bench_collate(c: &mut Criterion) {
                         .index_select(0, black_box(&positions))
                         .unwrap(),
                 )
-            })
+            });
         });
     }
 

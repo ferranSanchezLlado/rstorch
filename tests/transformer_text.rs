@@ -168,7 +168,7 @@ fn transformer_learns_a_repeating_corpus() -> Result<()> {
     Ok(())
 }
 
-/// Trains on real TinyShakespeare with a real BPE vocabulary and asserts the
+/// Trains on real `TinyShakespeare` with a real BPE vocabulary and asserts the
 /// model beats the only baseline that needs no learning at all: predicting
 /// every token uniformly, which costs `ln(vocab)` nats.
 #[cfg(feature = "hub")]

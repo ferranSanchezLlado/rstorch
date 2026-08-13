@@ -88,6 +88,13 @@ impl StagedTensors {
 ///
 /// On any failure it returns an [`Error::Persistence`] and stages nothing —
 /// the caller has not been handed a partial result, so it commits nothing.
+///
+/// # Errors
+///
+/// Returns [`Error::Persistence`] if `loaded` contains an unexpected path
+/// under [`UnexpectedPolicy::Reject`], is missing an expected path under a
+/// rejecting [`MissingPolicy`], or has a dtype/dims mismatch against
+/// `schema`.
 pub fn stage(
     schema: &[Expected],
     loaded: &BTreeMap<String, HostTensor>,

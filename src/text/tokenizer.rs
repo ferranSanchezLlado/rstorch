@@ -32,6 +32,17 @@ fn tokenizer_error(msg: impl Into<String>) -> Error {
 /// that maps to nothing, or a byte sequence that is not valid UTF-8, is
 /// reported through the crate [`Error`] rather than being silently
 /// substituted or lossily decoded.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::text::{CharTokenizer, Tokenizer};
+///
+/// let tok = CharTokenizer::from_text("abc");
+/// let ids = tok.encode("cab", false)?;
+/// assert_eq!(tok.decode(&ids)?, "cab");
+/// # Ok::<(), rstorch::Error>(())
+/// ```
 pub trait Tokenizer {
     /// Encodes text into token ids.
     ///
@@ -80,6 +91,18 @@ pub trait Tokenizer {
 ///
 /// Ids `0..4` are reserved for the `pad`, `unk`, `bos`, and `eos` special
 /// tokens; corpus characters occupy ids `4..4 + n` in sorted order.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::text::{CharTokenizer, Tokenizer};
+///
+/// let tok = CharTokenizer::from_text("hello");
+/// let ids = tok.encode("hello", true)?;
+/// assert_eq!(ids.first(), tok.bos_id().as_ref());
+/// assert_eq!(tok.decode(&ids)?, "hello"); // bos/eos are dropped on decode
+/// # Ok::<(), rstorch::Error>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct CharTokenizer {
     /// Distinct corpus characters, sorted; index `i` maps to id `i + SPECIALS`.
@@ -244,6 +267,17 @@ impl Tokenizer for CharTokenizer {
 /// The vocabulary always contains the four special tokens and the 256
 /// single-byte tokens; learned merges extend it up to the requested target
 /// size.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::text::{BpeTokenizer, Tokenizer};
+///
+/// let tok = BpeTokenizer::train("hello hello hello", 260)?;
+/// let ids = tok.encode("hello", false)?;
+/// assert_eq!(tok.decode(&ids)?, "hello");
+/// # Ok::<(), rstorch::Error>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct BpeTokenizer {
     /// Learned merges in rank order; entry `r` merges its pair into id
@@ -387,7 +421,7 @@ fn byte_id(byte: u8) -> usize {
 /// Returns the most frequent adjacent symbol pair (count `>= 2`), breaking
 /// ties deterministically by preferring the lexicographically smaller pair.
 fn most_frequent_pair(symbols: &[usize]) -> Option<(usize, usize)> {
-    let mut counts = HashMap::<(usize, usize), usize>::new();
+    let mut counts = HashMap::new();
     for pair in symbols.windows(2) {
         *counts.entry((pair[0], pair[1])).or_insert(0) += 1;
     }

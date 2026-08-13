@@ -15,6 +15,26 @@ where
     T::Elem: FloatElement,
 {
     /// Creates a parameter from a detached, canonically bound typed value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::typed::{DeviceCtx, Tensor1, nn::{Mode, TypedParam}};
+    ///
+    /// # fn main() -> rstorch::Result<()> {
+    /// let ctx = DeviceCtx::cpu()?;
+    /// let value = Tensor1::<3>::from_vec(vec![1.0f32, 2.0, 3.0], [3], &ctx)?;
+    /// let param = TypedParam::new(value)?;
+    /// assert_eq!(param.get(Mode::EVAL)?.dims(), [3]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `value`'s placement
+    /// binding is not the canonical one for `T::Placement` — unreachable for a
+    /// typed tensor built through the public API.
     pub fn new(value: T) -> Result<Self> {
         validate_binding::<T::Placement>(value.binding(), "TypedParam::new")?;
         let binding = Arc::clone(value.binding());
@@ -28,6 +48,11 @@ where
     }
 
     /// Returns the cached traced leaf when `mode` records and the parameter is unfrozen.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new); unreachable in practice since this parameter's
+    /// binding was already validated on construction.
     pub fn get(&self, mode: super::Mode) -> Result<T> {
         checked_wrap::<T>(
             self.runtime.get(mode),
@@ -37,6 +62,10 @@ where
     }
 
     /// Returns the detached parameter value.
+    ///
+    /// # Errors
+    ///
+    /// As [`get`](Self::get).
     pub fn value(&self) -> Result<T> {
         checked_wrap::<T>(
             self.runtime.value().clone(),
@@ -46,6 +75,13 @@ where
     }
 
     /// Replaces the value without changing gradient identity or freeze state.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `value`'s placement
+    /// binding is not the canonical one for `T::Placement`, or if it does not
+    /// carry this parameter's own binding (a value from a different
+    /// [`DeviceCtx`] of the same placement type).
     pub fn set(&mut self, value: T) -> Result<()> {
         validate_binding::<T::Placement>(value.binding(), "TypedParam::set")?;
         if !Arc::ptr_eq(value.binding(), &self.binding) {
@@ -60,6 +96,12 @@ where
     }
 
     /// Returns this parameter's gradient, checked and wrapped as `T`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotTraced`](crate::Error::NotTraced) if the leaf this
+    /// parameter last handed out for tracing was never part of the graph
+    /// `grads` came from.
     pub fn grad_from(&self, grads: &Grads) -> Result<T> {
         checked_wrap::<T>(
             grads.wrt(&self.runtime)?,
@@ -84,6 +126,11 @@ where
     }
 
     /// Consumes and moves this parameter while preserving its runtime identity.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new) for `self`'s binding and for `target`'s binding
+    /// against `Q`; otherwise propagates the backend's transfer error.
     pub fn to_device<Q>(
         self,
         target: &DeviceCtx<Q>,
@@ -111,6 +158,11 @@ where
     }
 
     /// Consumes and converts this parameter while preserving its runtime identity.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new) for `self`'s binding; otherwise propagates the
+    /// backend's allocation error for the cast.
     pub fn to_dtype<F>(self) -> Result<TypedParam<<T as WithElement<F>>::Output>>
     where
         F: FloatElement,
@@ -143,6 +195,25 @@ where
 
 impl<T: TypedTensor> TypedBuffer<T> {
     /// Creates persistent state from a detached, canonically bound value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::typed::{DeviceCtx, Tensor1, nn::TypedBuffer};
+    ///
+    /// # fn main() -> rstorch::Result<()> {
+    /// let ctx = DeviceCtx::cpu()?;
+    /// let value = Tensor1::<3>::from_vec(vec![0.0f32, 0.0, 0.0], [3], &ctx)?;
+    /// let buffer = TypedBuffer::new(value)?;
+    /// assert_eq!(buffer.value()?.dims(), [3]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `value`'s placement
+    /// binding is not the canonical one for `T::Placement`.
     pub fn new(value: T) -> Result<Self> {
         validate_binding::<T::Placement>(value.binding(), "TypedBuffer::new")?;
         let binding = Arc::clone(value.binding());
@@ -156,6 +227,11 @@ impl<T: TypedTensor> TypedBuffer<T> {
     }
 
     /// Returns the persistent value as its exact typed tensor.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new); unreachable in practice since this buffer's
+    /// binding was already validated on construction.
     pub fn value(&self) -> Result<T> {
         checked_wrap::<T>(
             self.runtime.clone(),
@@ -165,6 +241,13 @@ impl<T: TypedTensor> TypedBuffer<T> {
     }
 
     /// Replaces this buffer with a detached value of the exact same type.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `value`'s placement
+    /// binding is not the canonical one for `T::Placement`, or if it does not
+    /// carry this buffer's own binding (a value from a different
+    /// [`DeviceCtx`] of the same placement type).
     pub fn set(&mut self, value: T) -> Result<()> {
         validate_binding::<T::Placement>(value.binding(), "TypedBuffer::set")?;
         if !Arc::ptr_eq(value.binding(), &self.binding) {
@@ -184,6 +267,11 @@ impl<T: TypedTensor> TypedBuffer<T> {
     }
 
     /// Consumes and moves this buffer to `Q`.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new) for `self`'s binding and for `target`'s binding
+    /// against `Q`; otherwise propagates the backend's transfer error.
     pub fn to_device<Q>(
         self,
         target: &DeviceCtx<Q>,
@@ -208,6 +296,11 @@ impl<T: TypedTensor> TypedBuffer<T> {
     }
 
     /// Consumes and converts this buffer's element type.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new) for `self`'s binding; otherwise propagates the
+    /// backend's allocation error for the cast.
     pub fn to_dtype<F>(self) -> Result<TypedBuffer<<T as WithElement<F>>::Output>>
     where
         F: Element,
@@ -250,12 +343,12 @@ fn contract<T: TypedTensor>(kind: LeafKind, binding: Arc<super::DeviceBinding>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typed::Tensor1;
     use crate::typed::sealed::{DeviceBinding, TypedTensor as SealedTypedTensor};
-    use crate::typed::{Cpu, Tensor1};
     use crate::{Device, Error};
 
     fn value(data: [f32; 2]) -> Tensor1<2> {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         Tensor1::from_vec(data.to_vec(), [2], &ctx).unwrap()
     }
 
@@ -271,7 +364,7 @@ mod tests {
 
     #[test]
     fn parameter_detaches_and_grad_from_uses_the_stable_runtime_key() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let traced = value([1.0, 2.0]).traced().unwrap();
         let mut param = TypedParam::new(traced).unwrap();
         assert!(param.value().unwrap().as_dynamic().backward().is_err());

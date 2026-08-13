@@ -29,6 +29,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Collects an opaque in-memory state dictionary with exact typed metadata.
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `model`'s walk is malformed, or if any path
+/// collides with the reserved `optim`/`optim.*` namespace.
 pub fn state_dict<M: Module + ?Sized>(model: &M) -> Result<TypedStateDict> {
     let state = stable_state(model, "typed::persist::state_dict")?;
     reject_reserved_paths(state.paths(), "typed::persist::state_dict")?;
@@ -39,6 +44,13 @@ pub fn state_dict<M: Module + ?Sized>(model: &M) -> Result<TypedStateDict> {
 ///
 /// Dtype/device changes require a reconstructed or consuming-retyped target;
 /// this function never changes markers in place.
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `model`'s or `state`'s paths collide with the
+/// reserved `optim`/`optim.*` namespace; otherwise propagates
+/// [`nn::load_state_dict`]'s own contract/dimension/binding errors, which
+/// leave `model` untouched.
 pub fn load_state_dict<M: Module + ?Sized>(model: &mut M, state: &TypedStateDict) -> Result<()> {
     let target = stable_state(model, "typed::persist::load_state_dict")?;
     reject_reserved_paths(target.paths(), "typed::persist::load_state_dict")?;
@@ -66,6 +78,12 @@ fn reject_reserved_paths<'a>(paths: impl Iterator<Item = &'a str>, op: &'static 
 ///
 /// Existing sections and optimizer tensors are preserved. A model key already
 /// present in the envelope is replaced, matching [`Envelope::insert_tensor`].
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if a path collides with the reserved
+/// `optim`/`optim.*` namespace; otherwise propagates the host-transfer
+/// error for any tensor.
 pub fn save_model_state<M: Module + ?Sized>(model: &mut M, envelope: &mut Envelope) -> Result<()> {
     let state = stable_state(model, "typed::persist::save_model_state")?;
     reject_reserved_paths(state.paths(), "typed::persist::save_model_state")?;
@@ -89,6 +107,14 @@ pub fn save_model_state<M: Module + ?Sized>(model: &mut M, envelope: &mut Envelo
 /// [`crate::typed::optim::load_adam_checkpoint`], which validate and load both
 /// halves together. Missing and other unexpected model paths obey `options`;
 /// shape and dtype mismatches are always errors.
+///
+/// # Errors
+///
+/// [`Error::Persistence`] if `envelope` carries an `optimizer` section or any
+/// `optim`/`optim.*` tensor; [`Error::InvalidArg`] if a model path collides
+/// with that reserved namespace; otherwise propagates
+/// [`crate::persist::stage`]'s missing/unexpected/shape/dtype errors and the
+/// host-tensor conversion error, both under `options`.
 pub fn load_model_state<M: Module + ?Sized>(
     model: &mut M,
     envelope: &Envelope,
@@ -165,6 +191,38 @@ fn load_model_state_impl<M: Module + ?Sized>(
 ///
 /// To include optimizer or application sections, use [`save_model_state`], add
 /// them to the same [`Envelope`], and call [`Envelope::save`].
+///
+/// # Errors
+///
+/// As [`save_model_state`]; otherwise propagates [`Envelope::save`]'s
+/// filesystem error.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::Rng;
+/// use rstorch::persist::{Limits, LoadOptions};
+/// use rstorch::typed::DeviceCtx;
+/// use rstorch::typed::nn::Linear;
+/// use rstorch::typed::persist::{load_checkpoint, save_checkpoint};
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let ctx = DeviceCtx::cpu()?;
+/// let mut model = Linear::<3, 2>::new(3, 2, &ctx, &mut Rng::seed(0))?;
+///
+/// let path = std::env::temp_dir().join(format!(
+///     "rstorch-doctest-typed-checkpoint-{}.safetensors",
+///     std::process::id()
+/// ));
+/// save_checkpoint(&mut model, &path, &Limits::default())?;
+///
+/// let mut restored = Linear::<3, 2>::new(3, 2, &ctx, &mut Rng::seed(1))?;
+/// load_checkpoint(&mut restored, &path, &LoadOptions::default())?;
+/// assert_eq!(restored.weight().value()?.dims(), model.weight().value()?.dims());
+/// # let _ = std::fs::remove_file(&path);
+/// # Ok(())
+/// # }
+/// ```
 pub fn save_checkpoint<M: Module + ?Sized>(
     model: &mut M,
     path: impl AsRef<Path>,
@@ -176,6 +234,11 @@ pub fn save_checkpoint<M: Module + ?Sized>(
 }
 
 /// Loads a versioned checkpoint and stages its model state into `model`.
+///
+/// # Errors
+///
+/// [`Envelope::load`]'s reader-limit, format, and filesystem errors; otherwise
+/// as [`load_model_state`].
 pub fn load_checkpoint<M: Module + ?Sized>(
     model: &mut M,
     path: impl AsRef<Path>,
@@ -188,25 +251,14 @@ pub fn load_checkpoint<M: Module + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::nn::{TypedBuffer, TypedParam, TypedVisitor, TypedVisitorMut};
+    use crate::typed::nn::{TypedBuffer, TypedModule, TypedParam, TypedVisitor, TypedVisitorMut};
     use crate::typed::{Cpu, DeviceCtx, Placement, Tensor1};
     use crate::{DType, Device};
 
+    #[derive(TypedModule)]
     struct Model<P: Placement = Cpu> {
         weight: TypedParam<Tensor1<2, f32, P>>,
         running: TypedBuffer<Tensor1<1, f32, P>>,
-    }
-
-    impl<P: Placement> Module for Model<P> {
-        fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-            visitor.param("weight", &self.weight);
-            visitor.buffer("running", &self.running);
-        }
-
-        fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-            visitor.param("weight", &mut self.weight);
-            visitor.buffer("running", &mut self.running);
-        }
     }
 
     fn model<P: Placement>(base: f32, ctx: &DeviceCtx<P>) -> Model<P> {
@@ -244,7 +296,7 @@ mod tests {
 
     #[test]
     fn envelope_load_stages_every_value_and_preserves_checkpoint_sections() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let source = model(10.0, &ctx);
         let mut envelope = Envelope::new();
         envelope.set_section("rng", "seed=7").unwrap();
@@ -266,21 +318,14 @@ mod tests {
 
     #[test]
     fn dtype_transition_requires_a_reconstructed_typed_target() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut source = model(4.0, &ctx);
         let mut envelope = Envelope::new();
         save_model_state(&mut source, &mut envelope).unwrap();
 
+        #[derive(TypedModule)]
         struct F64Model {
             weight: TypedParam<Tensor1<2, f64>>,
-        }
-        impl Module for F64Model {
-            fn visit(&self, visitor: &mut TypedVisitor<'_>) {
-                visitor.param("weight", &self.weight);
-            }
-            fn visit_mut(&mut self, visitor: &mut TypedVisitorMut<'_>) {
-                visitor.param("weight", &mut self.weight);
-            }
         }
         let mut target = F64Model {
             weight: TypedParam::new(Tensor1::from_vec(vec![0.0f64, 0.0], [2], &ctx).unwrap())
@@ -316,7 +361,7 @@ mod tests {
 
     #[test]
     fn optimizer_namespace_is_reserved_at_typed_state_and_save_boundaries() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let reserved = |dotted| Reserved {
             value: TypedParam::new(Tensor1::from_vec(vec![1.0], [1], &ctx).unwrap()).unwrap(),
             dotted,
@@ -379,7 +424,7 @@ mod tests {
     /// half and rely on the caller's optimizer failing afterwards.
     #[test]
     fn combined_load_rejects_a_model_only_checkpoint_and_leaves_the_model_untouched() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut envelope = Envelope::new();
         save_model_state(&mut model(9.0, &ctx), &mut envelope).unwrap();
 
@@ -396,7 +441,7 @@ mod tests {
 
     #[test]
     fn model_only_load_never_ignores_optimizer_prefixed_tensors() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut source = model(5.0, &ctx);
         let mut envelope = Envelope::new();
         save_model_state(&mut source, &mut envelope).unwrap();
@@ -431,7 +476,7 @@ mod tests {
 
     #[test]
     fn combined_load_rejects_bare_optim_even_when_unexpected_paths_are_allowed() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let mut source = model(5.0, &ctx);
         let mut envelope = Envelope::new();
         save_model_state(&mut source, &mut envelope).unwrap();

@@ -87,7 +87,7 @@ impl Tensor {
     // ---- indexed reads ---------------------------------------------------
 
     /// Select whole slices along `axis` at the positions in the 1-D
-    /// [`I64`](crate::DType::I64) tensor `indices` (PyTorch `index_select`).
+    /// [`I64`](crate::DType::I64) tensor `indices` (`PyTorch` `index_select`).
     ///
     /// The result has this tensor's shape with `axis` resized to
     /// `indices.num_elements()`, is contiguous, and keeps the dtype and
@@ -157,7 +157,7 @@ impl Tensor {
     }
 
     /// Gather individual elements along `axis` through a **same-rank**
-    /// [`I64`](crate::DType::I64) index grid (PyTorch `gather`).
+    /// [`I64`](crate::DType::I64) index grid (`PyTorch` `gather`).
     ///
     /// `out[c0, .., c_axis, ..] = self[c0, .., indices[c0, .., c_axis, ..], ..]`:
     /// every coordinate except `axis` is taken from the output position, and
@@ -178,7 +178,7 @@ impl Tensor {
     ///   have this tensor's rank.
     /// - [`ShapeMismatch`](crate::Error::ShapeMismatch) if the index grid is
     ///   larger than the source on any axis other than `axis` (it may be
-    ///   smaller, as PyTorch allows).
+    ///   smaller, as `PyTorch` allows).
     /// - [`IndexOutOfBounds`](crate::Error::IndexOutOfBounds) for a negative
     ///   index or one at/past `dims()[axis]`.
     ///
@@ -323,6 +323,11 @@ impl Tensor {
     /// );
     /// # Ok::<(), rstorch::Error>(())
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`index_range`](Self::index_range): [`Error::InvalidArg`] if `t`
+    /// is not exactly representable as an `f64` range bound.
     pub fn causal_mask(t: usize, device: &Device) -> Result<Tensor> {
         let positions = Tensor::index_range(t, device)?;
         let square = Shape::from([t, t]);

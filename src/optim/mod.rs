@@ -5,8 +5,9 @@
 //!
 //! `step` **consumes** the [`Grads`](crate::Grads) by move. Gradients are a
 //! return value, not state hanging off the parameters, so there is nothing to
-//! zero and applying the same gradients twice is a compile error rather than
-//! silent double-counting. Micro-batch accumulation and
+//! zero and reusing the same gradients after the optimizer consumes them is a
+//! compile error rather than silent double-counting. Ignoring a `Grads` value
+//! emits its `#[must_use]` warning. Micro-batch accumulation and
 //! clipping are explicit linear pipelines on the `Grads` itself
 //! (`acc = acc.merge(step)?`, `grads.clip_norm(1.0)?`).
 //!
@@ -41,8 +42,8 @@
 //!
 //! [`Sgd`] and [`Adam`] are concrete types — every layer and every optimizer
 //! is. Generic-over-optimizer code is not a
-//! first-hour need, and a sixth public trait would cost the design's
-//! five-public-traits claim; a caller who wants to switch optimizers at runtime
+//! first-hour need, and another dynamic trait would widen the core vocabulary;
+//! a caller who wants to switch optimizers at runtime
 //! writes an enum over the two.
 //!
 //! Internally the two *are* one implementation: each is a crate-private
@@ -121,7 +122,7 @@
 //! one avoidable precision loss in the step — a gradient past F16's range would
 //! reach the update as `inf`, and one merely past its spacing would be rounded.
 //! ([`Grads::wrt`](crate::Grads::wrt), which a *caller* uses to inspect a
-//! gradient, still reports it in the parameter's own dtype, as PyTorch does.)
+//! gradient, still reports it in the parameter's own dtype, as `PyTorch` does.)
 //! There are deliberately no persistent master weights: the checkpoint contains
 //! the reduced model values and wide optimizer state only.
 

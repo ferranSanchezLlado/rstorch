@@ -211,6 +211,14 @@ fn check_context_geometry(
 }
 
 /// Delegates scaled dot-product attention after requiring an explicitly broadcast mask.
+///
+/// # Errors
+///
+/// [`Error::InvalidArg`] if `q`, `k`, `v`, or `mask` do not all share the
+/// canonical placement binding; [`Error::ShapeMismatch`] if `k` and `v`
+/// disagree on shape, if their leading batch axes don't broadcast against
+/// `q`'s, or if `mask` isn't already broadcast to the query/key geometry;
+/// otherwise propagates the runtime attention kernel's own error.
 pub fn scaled_dot_product_attention<
     const EMBED: usize,
     const HEADS: usize,
@@ -306,6 +314,23 @@ where
 }
 
 /// Typed multi-head attention with static embedding and head configuration.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::Rng;
+/// use rstorch::typed::{DeviceCtx, Tensor3};
+/// use rstorch::typed::nn::{Mode, MultiHeadAttention};
+///
+/// # fn main() -> rstorch::Result<()> {
+/// let ctx = DeviceCtx::cpu()?;
+/// let attention = MultiHeadAttention::<4, 2>::new(&ctx, &mut Rng::seed(1))?;
+/// let input = Tensor3::<1, 3, 4>::from_vec(vec![0.0f32; 12], [1, 3, 4], &ctx)?;
+/// let out = attention.attend(&input, None, Mode::EVAL)?;
+/// assert_eq!(out.dims(), [1, 3, 4]);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(rstorch::typed::nn::TypedModule)]
 pub struct MultiHeadAttention<
     const EMBED: usize,
@@ -333,11 +358,21 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     /// let ctx = DeviceCtx::cpu().unwrap();
     /// let _ = MultiHeadAttention::<6, 4>::new(&ctx, &mut Rng::seed(1));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] if `ctx`'s binding is not the canonical one for
+    /// `P`; otherwise propagates the runtime attention layer's own
+    /// construction error and the per-projection state conversion error.
     pub fn new(ctx: &DeviceCtx<P>, rng: &mut Rng) -> Result<Self> {
         Self::build(true, ctx, rng)
     }
 
     /// Constructs the four projections without biases.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new).
     pub fn new_without_bias(ctx: &DeviceCtx<P>, rng: &mut Rng) -> Result<Self> {
         Self::build(false, ctx, rng)
     }
@@ -397,6 +432,12 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     }
 
     /// Projects and splits queries into heads.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] if `input`'s binding is not the canonical one
+    /// for `P`; [`Error::ShapeMismatch`] if `input`'s trailing axis is not
+    /// `EMBED`.
     pub fn project_query<I>(&self, input: &I, mode: Mode) -> Result<I::Context>
     where
         I: AttentionInput<EMBED, HEADS, E, P>,
@@ -405,6 +446,10 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     }
 
     /// Projects and splits keys into heads.
+    ///
+    /// # Errors
+    ///
+    /// As [`project_query`](Self::project_query).
     pub fn project_keys<I>(&self, input: &I, mode: Mode) -> Result<I::Context>
     where
         I: AttentionInput<EMBED, HEADS, E, P>,
@@ -413,6 +458,10 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     }
 
     /// Projects and splits values into heads.
+    ///
+    /// # Errors
+    ///
+    /// As [`project_query`](Self::project_query).
     pub fn project_values<I>(&self, input: &I, mode: Mode) -> Result<I::Context>
     where
         I: AttentionInput<EMBED, HEADS, E, P>,
@@ -421,6 +470,10 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     }
 
     /// Projects both halves stored by a KV cache.
+    ///
+    /// # Errors
+    ///
+    /// As [`project_query`](Self::project_query).
     pub fn project_keys_values<I>(&self, input: &I, mode: Mode) -> Result<(I::Context, I::Context)>
     where
         I: AttentionInput<EMBED, HEADS, E, P>,
@@ -432,6 +485,12 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     }
 
     /// Merges projected heads and applies the output projection.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] if `context`'s binding is not the canonical one
+    /// for `P`; [`Error::ShapeMismatch`] if its head-count or head-width axes
+    /// don't match `HEADS`/[`head_dim`](Self::head_dim).
     pub fn project_output<C>(&self, context: &C, mode: Mode) -> Result<C::Output>
     where
         C: AttentionContext<EMBED, HEADS, E, P>,
@@ -508,6 +567,11 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     /// ).unwrap();
     /// let _ = attention.attend(&input, None, Mode::EVAL);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`attend_to`](Self::attend_to), with `input` for both query and
+    /// key/value.
     pub fn attend<I>(
         &self,
         input: &I,
@@ -548,6 +612,13 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
     /// let keys_values = Tensor2::<DYN, 4>::from_vec(vec![0.0; 20], [5, 4], &ctx).unwrap();
     /// let _ = attention.attend_to(&query, &keys_values, None, Mode::EVAL);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`project_query`](Self::project_query) for `query` and
+    /// `keys_values`; as
+    /// [`scaled_dot_product_attention`] for the projected contexts and
+    /// `mask`; as [`project_output`](Self::project_output) for the result.
     pub fn attend_to<Q, K>(
         &self,
         query: &Q,
@@ -620,7 +691,7 @@ mod tests {
         use crate::{Device, Tensor};
 
         let attention =
-            MultiHeadAttention::<4, 2>::new(&DeviceCtx::<Cpu>::cpu().unwrap(), &mut Rng::seed(11))
+            MultiHeadAttention::<4, 2>::new(&DeviceCtx::cpu().unwrap(), &mut Rng::seed(11))
                 .unwrap();
         let dynamic = Tensor::from_vec(vec![0.1f32; 2 * 3 * 5], [2, 3, 5], &Device::Cpu).unwrap();
         let forged = Arc::new(DeviceBinding {
@@ -831,7 +902,7 @@ mod tests {
 
     #[test]
     fn reported_configuration_matches_the_runtime_layer_it_was_built_from() {
-        let ctx = DeviceCtx::<Cpu>::cpu().unwrap();
+        let ctx = DeviceCtx::cpu().unwrap();
         let typed = MultiHeadAttention::<6, 3>::new(&ctx, &mut Rng::seed(13)).unwrap();
         let runtime =
             crate::nn::MultiHeadAttention::new(6, 3, &ctx.device(), &mut Rng::seed(13)).unwrap();
@@ -882,8 +953,8 @@ mod tests {
             (context([1, 2, 2, 1]), k.clone(), v.clone()),
             (q.clone(), context([1, 2, 3, 1]), v.clone()),
             (q.clone(), k.clone(), context([1, 2, 3, 1])),
-            (q.clone(), k.clone(), context([1, 2, 4, 2])),
-            (context([2, 2, 2, 2]), context([3, 2, 3, 2]), v.clone()),
+            (q, k, context([1, 2, 4, 2])),
+            (context([2, 2, 2, 2]), context([3, 2, 3, 2]), v),
         ] {
             assert!(matches!(
                 scaled_dot_product_attention::<4, 2, f32, Cpu, _>(&bad_q, &bad_k, &bad_v, None),
@@ -901,7 +972,7 @@ mod tests {
         impl Placement for Main {}
 
         let source = DeviceCtx::<Main>::bind(crate::Device::Cpu).unwrap();
-        let target = DeviceCtx::<Cpu>::cpu().unwrap();
+        let target = DeviceCtx::cpu().unwrap();
         let attention =
             MultiHeadAttention::<4, 2, f32, Main>::new(&source, &mut Rng::seed(31)).unwrap();
         let paths = super::super::state_dict(&attention)

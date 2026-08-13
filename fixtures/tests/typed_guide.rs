@@ -13,7 +13,7 @@ use rstorch::{Device, Rng, Tensor};
 #[test]
 fn guide_snippets() -> rstorch::Result<()> {
     // 1. context + construction
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let x = Tensor2::<2, 3>::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3], &ctx)?;
     assert_eq!(x.dims(), [2, 3]);
 
@@ -66,7 +66,7 @@ struct Dims(Vec<usize>);
 
 #[test]
 fn guide_derive_snippet() -> rstorch::Result<()> {
-    let ctx = DeviceCtx::<Cpu>::cpu()?;
+    let ctx = DeviceCtx::cpu()?;
     let mut rng = Rng::seed(1);
     let mut block = Block {
         proj: Linear::new(3, 4, &ctx, &mut rng)?,

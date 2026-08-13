@@ -17,7 +17,7 @@
 //! use rstorch::Result;
 //!
 //! # fn main() -> Result<()> {
-//! let cpu = DeviceCtx::<Cpu>::cpu()?;
+//! let cpu = DeviceCtx::cpu()?;
 //! let features = Tensor2::<DYN, 2>::from_vec(
 //!     vec![0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0],
 //!     [3, 2],
@@ -43,7 +43,7 @@
 //! use rstorch::typed::{Cpu, Tensor0, Tensor8};
 //!
 //! type Rank8 = Tensor8<1, 1, 1, 1, 1, 1, 1, 1, f32, Cpu>;
-//! let _ = VecDataset::<Rank8, Tensor0<i64, Cpu>>::new(Vec::new());
+//! let _ = VecDataset::<Rank8, Tensor0<i64>>::new(Vec::new());
 //! ```
 
 use super::device::validate_binding;
@@ -272,6 +272,8 @@ where
             .field("inner", &self.inner)
             .field("feature_item", &std::any::type_name::<F>())
             .field("label_item", &std::any::type_name::<L>())
+            .field("feature_binding", &self.feature_binding)
+            .field("label_binding", &self.label_binding)
             .finish()
     }
 }
@@ -303,6 +305,32 @@ where
 /// Each `(F, L)` pair is an unbatched item. The runtime implementation checks
 /// uniformity and collates selected items with `Tensor::stack`; this adapter
 /// checks the resulting tensors and restores precise leading-`DYN` batch types.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::typed::data::{Dataset, VecDataset};
+/// use rstorch::typed::{DeviceCtx, Tensor0, Tensor1};
+/// use rstorch::Result;
+///
+/// # fn main() -> Result<()> {
+/// let cpu = DeviceCtx::cpu()?;
+/// let items = (0..4)
+///     .map(|value| {
+///         Ok((
+///             Tensor1::<2>::from_vec(vec![value as f32; 2], [2], &cpu)?,
+///             Tensor0::<i64>::from_vec(vec![value], [], &cpu)?,
+///         ))
+///     })
+///     .collect::<Result<Vec<_>>>()?;
+/// let dataset = VecDataset::new(items)?;
+///
+/// let (features, labels) = dataset.batch(&[2, 0])?;
+/// assert_eq!(features.dims(), [2, 2]);
+/// assert_eq!(labels.dims(), [2]);
+/// # Ok(())
+/// # }
+/// ```
 pub struct VecDataset<F, L>
 where
     F: BatchItem,
@@ -501,6 +529,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VecDataset")
             .field("inner", &self.inner)
+            .field("bindings", &self.bindings)
             .field("typed_transform", &self.transform.is_some())
             .field("feature_item", &std::any::type_name::<F>())
             .field("label_item", &std::any::type_name::<L>())
@@ -797,6 +826,10 @@ mod tests {
             .unwrap()
             .transform::<Tensor1<1>>(move |feature| {
                 let (entered, ready) = &*transform_overlap;
+                // The guard is consumed by `wait_timeout_while` a few lines
+                // down and the resulting guard is dropped explicitly right
+                // after; there is nothing left to tighten.
+                #[allow(clippy::significant_drop_tightening)]
                 let mut entered = entered.lock().unwrap();
                 *entered += 1;
                 ready.notify_all();

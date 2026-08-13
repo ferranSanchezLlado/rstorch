@@ -28,7 +28,7 @@ pub(crate) enum FieldKind {
     Buffer,
     /// `Option<buffer leaf>` → emit `buffer` when `Some`.
     OptionBuffer,
-    /// `Vec<M>` → indexed `v.module("i", &self.field[i])`.
+    /// `Vec<M>` → indexed `v.module("field.i", &self.field[i])`.
     VecModule,
     /// `Option<M>` (M not a leaf) → emit `module` when `Some`.
     OptionModule,

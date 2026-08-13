@@ -139,6 +139,10 @@ impl Tensor {
     }
 
     /// Assert rank 1, returning the single dimension.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RankMismatch`] if `self` is not rank 1.
     pub fn dims1(&self) -> Result<usize> {
         match self.dims() {
             &[a] => Ok(a),
@@ -147,6 +151,10 @@ impl Tensor {
     }
 
     /// Assert rank 2, returning `(d0, d1)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RankMismatch`] if `self` is not rank 2.
     pub fn dims2(&self) -> Result<(usize, usize)> {
         match self.dims() {
             &[a, b] => Ok((a, b)),
@@ -155,6 +163,10 @@ impl Tensor {
     }
 
     /// Assert rank 3, returning `(d0, d1, d2)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RankMismatch`] if `self` is not rank 3.
     pub fn dims3(&self) -> Result<(usize, usize, usize)> {
         match self.dims() {
             &[a, b, c] => Ok((a, b, c)),
@@ -163,6 +175,10 @@ impl Tensor {
     }
 
     /// Assert rank 4, returning `(d0, d1, d2, d3)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RankMismatch`] if `self` is not rank 4.
     pub fn dims4(&self) -> Result<(usize, usize, usize, usize)> {
         match self.dims() {
             &[a, b, c, d] => Ok((a, b, c, d)),
@@ -183,6 +199,11 @@ impl Tensor {
     /// (`op: "traced"`) if `self` already carries a graph — double-tracing is
     /// a bug. (`NotTraced` is reserved for the opposite condition: a
     /// `backward()`/lookup on a tensor with *no* graph.)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArg`](crate::Error::InvalidArg) if `self`
+    /// already carries a graph.
     pub fn traced(&self) -> Result<Tensor> {
         autograd::traced(self)
     }
@@ -190,6 +211,11 @@ impl Tensor {
     /// Reverse-mode autodiff from this tensor, returning a fresh, linear
     /// [`Grads`]. [`Error::NotTraced`](crate::Error::NotTraced) if this
     /// tensor carries no autograd graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotTraced`](crate::Error::NotTraced) if `self`
+    /// carries no autograd graph.
     pub fn backward(&self) -> Result<Grads> {
         autograd::backward(self)
     }
@@ -202,6 +228,7 @@ impl Tensor {
     /// bump, not an element copy). It is the public spelling of the
     /// crate-internal `detach_shallow`; the two are identical because `Inner`
     /// already keeps storage and layout out of the autograd node.
+    #[must_use]
     pub fn detach(&self) -> Tensor {
         self.detach_shallow()
     }
@@ -218,11 +245,19 @@ impl Tensor {
     // ---- constructors ----------------------------------------------------
 
     /// A tensor of zeros.
+    ///
+    /// # Errors
+    ///
+    /// As [`full`](Self::full).
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: &Device) -> Result<Tensor> {
         Tensor::full(shape, 0.0, dtype, device)
     }
 
     /// A tensor of ones.
+    ///
+    /// # Errors
+    ///
+    /// As [`full`](Self::full).
     pub fn ones(shape: impl Into<Shape>, dtype: DType, device: &Device) -> Result<Tensor> {
         Tensor::full(shape, 1.0, dtype, device)
     }
@@ -232,6 +267,11 @@ impl Tensor {
     /// The single overflow-validation point for constructed tensors is the
     /// contiguous layout, which errors with
     /// [`Error::InvalidArg`](crate::Error::InvalidArg) (`op: "layout"`) if the
+    /// element count overflows `usize`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArg`](crate::Error::InvalidArg) if `shape`'s
     /// element count overflows `usize`.
     pub fn full(
         shape: impl Into<Shape>,
@@ -247,6 +287,24 @@ impl Tensor {
     /// A tensor from a host vector; the dtype is `T`'s. `data.len()` must
     /// equal the shape's element count
     /// ([`Error::ShapeMismatch`](crate::Error::ShapeMismatch)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ShapeMismatch`](crate::Error::ShapeMismatch) if
+    /// `data.len()` does not equal `shape`'s element count, or
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `shape`'s element
+    /// count overflows `usize`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::{Device, Tensor};
+    ///
+    /// let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &Device::Cpu)?;
+    /// assert_eq!(x.dims(), &[2, 2]);
+    /// assert_eq!(x.to_vec::<f32>()?, vec![1.0, 2.0, 3.0, 4.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
     pub fn from_vec<T: Element>(
         data: Vec<T>,
         shape: impl Into<Shape>,
@@ -272,6 +330,11 @@ impl Tensor {
     /// A non-float `dtype` is [`Error::InvalidArg`](crate::Error::InvalidArg):
     /// only floating-point tensors participate in autograd, and a "random
     /// integer tensor" has no single obvious meaning here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArg`](crate::Error::InvalidArg) if `dtype` is
+    /// not a float dtype, or if `shape`'s element count overflows `usize`.
     pub fn rand(
         shape: impl Into<Shape>,
         dtype: DType,
@@ -286,6 +349,10 @@ impl Tensor {
     ///
     /// A non-float `dtype` is [`Error::InvalidArg`](crate::Error::InvalidArg)
     /// (see [`rand`](Tensor::rand)).
+    ///
+    /// # Errors
+    ///
+    /// As [`rand`](Self::rand).
     pub fn randn(
         shape: impl Into<Shape>,
         dtype: DType,
@@ -339,12 +406,19 @@ impl Tensor {
     /// `step` must be non-zero and every bound finite
     /// ([`Error::InvalidArg`](crate::Error::InvalidArg) otherwise). The value
     /// count is `ceil((end - start) / step)`, or zero when `step` points away
-    /// from `end` (an empty range, matching PyTorch rather than erroring).
+    /// from `end` (an empty range, matching `PyTorch` rather than erroring).
     /// Values are generated as `f64` (`start + i * step`) and narrowed to
     /// `dtype`; a [`Bool`](crate::DType::Bool) `dtype` is
     /// [`Error::InvalidArg`](crate::Error::InvalidArg) since a stepped range is
     /// not a boolean sequence, and so is a range whose element count would not
     /// fit in `usize`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArg`](crate::Error::InvalidArg) if any of
+    /// `start`/`end`/`step` is not finite, if `step` is zero, if `dtype` is
+    /// [`Bool`](crate::DType::Bool), or if the resulting element count would
+    /// not fit in `usize`.
     pub fn arange(
         start: f64,
         end: f64,
@@ -414,6 +488,11 @@ impl Tensor {
     /// Copy the tensor's elements to a host `Vec` in row-major order (a host
     /// boundary: synchronizes the backend). Dtype must be `T`, else
     /// [`Error::DTypeMismatch`](crate::Error::DTypeMismatch).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) if
+    /// `self`'s dtype is not `T`.
     pub fn to_vec<T: Element>(&self) -> Result<Vec<T>> {
         let host = dispatch::backend(self.device()).transfer_out(self.view())?;
         <T as HostConv>::try_from_cpu_storage(&host, "to_vec")
@@ -422,6 +501,13 @@ impl Tensor {
     /// Read a single-element tensor as a scalar of type `T`. The tensor must
     /// have exactly one element ([`Error::InvalidArg`](crate::Error::InvalidArg))
     /// and dtype `T` ([`Error::DTypeMismatch`](crate::Error::DTypeMismatch)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArg`](crate::Error::InvalidArg) if `self` does
+    /// not have exactly one element, or
+    /// [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) if its dtype is
+    /// not `T`.
     pub fn to_scalar<T: Element>(&self) -> Result<T> {
         if self.num_elements() != 1 {
             return Err(Error::InvalidArg {
@@ -438,6 +524,11 @@ impl Tensor {
     /// Read a single-element tensor as `f64` regardless of dtype (the
     /// dtype-agnostic convenience behind loss/accuracy reads). The tensor must
     /// have exactly one element ([`Error::InvalidArg`](crate::Error::InvalidArg)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArg`](crate::Error::InvalidArg) if `self` does
+    /// not have exactly one element.
     pub fn item(&self) -> Result<f64> {
         if self.num_elements() != 1 {
             return Err(Error::InvalidArg {
@@ -467,8 +558,13 @@ impl Tensor {
     }
 
     /// Move to `device`. A differentiable op: the backward pass moves the
-    /// cotangent back to the source device. `cpu→cpu` is the identity (and,
-    /// currently, the only reachable case for now).
+    /// cotangent back to the source device. Equal devices are returned without
+    /// a copy; different devices use the explicit host transfer path.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any backend transfer error from `self`'s device or
+    /// `device`.
     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
         if self.device() == *device {
             return Ok(self.clone());
@@ -489,6 +585,11 @@ impl Tensor {
     /// Cast to `dtype` via the backend Cast kernel. A differentiable op: the
     /// backward pass casts the cotangent back to the input dtype (meaningful
     /// for float↔float; the engine drops gradients for integer/bool inputs).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`](crate::Error::Unsupported) if `self`'s
+    /// dtype cannot be cast to `dtype` on the current backend.
     pub fn to_dtype(&self, dtype: DType) -> Result<Tensor> {
         if self.dtype() == dtype {
             return Ok(self.clone());
@@ -508,6 +609,10 @@ impl Tensor {
     /// A contiguous copy in row-major order, or `self` unchanged when already
     /// contiguous. Value-identity, so it is transparent to autograd (the
     /// cotangent flows straight through).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any backend copy error from `self`'s device.
     pub fn contiguous(&self) -> Result<Tensor> {
         if self.is_contiguous() {
             return Ok(self.clone());
