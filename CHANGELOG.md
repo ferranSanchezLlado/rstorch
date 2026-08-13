@@ -16,10 +16,11 @@ carries over: this shares a name and a purpose with it, and no code.
   device are values a tensor carries, not type parameters, so no user
   signature has to be generic over them.
 - **Linear gradients.** `Tensor::backward` returns one `Grads`, which is not
-  `Clone`, is `#[must_use]`, and is consumed by `Optimizer::step`. Stepping
-  twice on the same gradients is a compile error. Accumulation and clipping are
-  explicit (`acc.merge(step)?`, `grads.clip_norm(1.0)?`), and there is no
-  `zero_grad` because gradients never live in the parameters.
+  `Clone`, is `#[must_use]`, and is consumed by `Optimizer::step`. Reusing a
+  moved value is a compile error; ignoring it emits the normal `#[must_use]`
+  warning. Accumulation and clipping are explicit (`acc.merge(step)?`,
+  `grads.clip_norm(1.0)?`), and there is no `zero_grad` because gradients never
+  live in the parameters.
 - **One error type.** A single `#[non_exhaustive]` enum whose variants carry
   the operation name and the offending values, so a failure is self-describing
   without a backtrace.
@@ -31,9 +32,8 @@ carries over: this shares a name and a purpose with it, and no code.
 
 ### Added
 
-- Tensors over `f16`, `bf16`, `f32`, `f64`, `i64` and `bool`: elementwise and
-  broadcasting ops, matmul, reductions, indexing and `gather`, `conv2d`,
-  `max_pool2d`, softmax and the loss functions.
+- Tensors over `f16`, `bf16`, `f32`, `f64`, `i64` and `bool`, with explicit
+  operation-specific dtype contracts and loud unsupported-operation errors.
 - Reverse-mode autograd over the whole operation set, including input
   gradients for saliency.
 - `nn`: `Linear`, `Dropout`, `Relu`, `Gelu`, `Embedding`,
@@ -51,9 +51,15 @@ carries over: this shares a name and a purpose with it, and no code.
   A `DYN` axis opts out where a dimension is only known at runtime.
 - `rayon` (optional): multi-threaded CPU kernels that leave results
   bit-identical.
-- `metal` (optional): a macOS GPU backend, conformance-tested against the CPU
-  backend. It is currently slower than CPU on the recorded training workloads,
-  so `Device::best_available` still returns CPU.
+- `metal` (enabled by default): a macOS GPU backend, conformance-tested against
+  the CPU backend. `Device::best_available` selects Metal when available, then
+  considers WGPU and CPU.
+- Metal uses tiled matrix multiplication, SIMD-group reductions, contiguous
+  addressing and deterministic indexing fast paths, with synchronized
+  CPU-vs-Metal kernel benchmarks covering its main operation families.
+- `wgpu` (optional): a portable native backend with F32 compute and lossless
+  I64/Bool storage for supported operations. It is selected after Metal and
+  before CPU when an adapter is available.
 
 ### Changed since 0.2.0
 
@@ -64,9 +70,6 @@ crates.io for anyone who needs it.
 
 ### Infrastructure
 
-- The public surface is recorded in `api/` for six feature combinations and
-  diffed by CI on every run, so a break in the 1.0 guarantee fails the build
-  rather than reaching a release.
 - CI enforces the 1.88 MSRV, `clippy -D warnings`, warning-free docs, the
   compile-fail diagnostic suites on a pinned toolchain, and Metal execution on
   a macOS runner.

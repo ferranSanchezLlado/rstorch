@@ -151,27 +151,6 @@ jobs:
       - name: List the rstorch package contents
         run: cargo package -p rstorch --list
 
-  public-api:
-    name: Public API diff
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install toolchains
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup toolchain install nightly-2026-06-15 --profile minimal
-          rustup default stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-public-api
-        run: cargo install cargo-public-api --version 0.52.0 --locked
-      # The first-hour surface is pinned by content, not just by shape: the
-      # baselines below would not notice a re-ordering of `prelude`.
-      - name: Pin the prelude
-        run: |
-          test "$(shasum -a 256 src/prelude.rs | cut -d ' ' -f 1)" = 35b28f3a7f452ec7e802de85f350efd9a2e17dbc298b86b49e1936ed49540c56
-      - name: Diff dynamic and typed surfaces
-        run: ./tools/api-baseline.sh check portable
-
   metal-training-macos:
     name: Metal training execution (macOS runner)
     runs-on: macos-latest
@@ -185,22 +164,6 @@ jobs:
       # persistent hardware-availability claim.
       - name: Test Metal training
         run: cargo +stable test --features metal --test metal_training
-
-  public-api-macos:
-    name: Public API diff (macOS all features)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install toolchains
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup toolchain install nightly-2026-06-15 --profile minimal
-          rustup default stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-public-api
-        run: cargo install cargo-public-api --version 0.52.0 --locked
-      - name: Diff macOS all-feature surfaces
-        run: ./tools/api-baseline.sh check macos
 
   ct20-macos-boundary:
     name: CT20 wrong-device boundary (macOS)

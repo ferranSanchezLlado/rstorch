@@ -5,10 +5,11 @@
 # untracked directory that root-anchored /target does not cover.
 target/
 Cargo.lock
-!tools/compile-cost/**/Cargo.lock
 /.test_cache
 /data
 .DS_Store
 # The design record and the milestone baseline snapshots: working material,
 # kept locally rather than carried in the history.
 /docs
+# Generated public-API surface snapshots: working material, not carried in history.
+/api

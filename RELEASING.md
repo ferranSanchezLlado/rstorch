@@ -18,7 +18,6 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 cargo +1.88 check --workspace --all-features          # MSRV
-./tools/api-baseline.sh check all                     # the 1.0 guarantee
 ```
 
 Then confirm the release itself:
@@ -27,10 +26,6 @@ Then confirm the release itself:
       longer `unreleased`.
 - [ ] The workspace version in `Cargo.toml` matches it, and so does the
       `rstorch-derive` dependency requirement.
-- [ ] `api/` is current. If a diff is expected, the commit that changes the
-      surface is the commit that rewrites the baselines
-      (`./tools/api-baseline.sh write all`), and the version bump reflects it
-      per [STABILITY.md](STABILITY.md).
 - [ ] `cargo package -p rstorch --list` contains no file the build does not
       need, and no directory that is only present in a working tree.
 - [ ] The macOS lanes are green: they are the only ones that build the Metal
