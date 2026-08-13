@@ -252,7 +252,10 @@ where
                 cpu.dtype()
             ),
         }),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
+        #[cfg(any(
+            all(feature = "metal", target_os = "macos"),
+            all(feature = "wgpu", not(target_arch = "wasm32"))
+        ))]
         _ => Err(Error::Backend {
             op,
             msg: "cpu elementwise kernel received non-cpu storage".into(),
@@ -568,8 +571,8 @@ pub(crate) fn unary(op: UnaryOp, x: View<'_>) -> Result<Storage> {
             DType::I64 => match OP {
                 // Only the sign-preserving integer unaries are defined; the
                 // rest are float-only per the `UnaryOp` contract.
-                UnaryOp::Neg => unary_map::<i64, _>(name, x, |a| a.wrapping_neg()),
-                UnaryOp::Abs => unary_map::<i64, _>(name, x, |a| a.wrapping_abs()),
+                UnaryOp::Neg => unary_map::<i64, _>(name, x, i64::wrapping_neg),
+                UnaryOp::Abs => unary_map::<i64, _>(name, x, i64::wrapping_abs),
                 _ => Err(Error::Unsupported {
                     op: name,
                     device,

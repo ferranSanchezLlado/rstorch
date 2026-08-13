@@ -20,9 +20,10 @@
 //!
 //! # Scope and policy
 //!
-//! - **Dtypes**: `F16`, `BF16`, `F32`, `I64`, `Bool`, with dtype-appropriate
-//!   tolerances. Each dtype is a separate row, so a future Metal backend can
-//!   honestly report BF16 as unsupported without hiding its F16 coverage.
+//! - **Dtypes**: `F16`, `BF16`, `F32`, `F64`, `I64`, `Bool`, with
+//!   dtype-appropriate tolerances. Each dtype is a separate row, so an
+//!   accelerator can honestly report BF16 as unsupported without hiding its
+//!   F16 coverage.
 //! - **Layouts**: cases deliberately include transposed and broadcast
 //!   views, because the kernel contract is stride-aware.
 //! - **`Unsupported` is not a mismatch.** A backend that reports
@@ -37,9 +38,9 @@
 //!   `expected_unsupported` only if the declining is declared; otherwise it is
 //!   an unexpected skip, exactly as for any other entry point.
 //!
-//! Today the only backend is CPU, so the shipped test is the self-check
-//! (CPU vs CPU): it proves the whole table is runnable and exactly matched
-//! on the reference. A new backend reuses `run` unchanged.
+//! CPU is the reference, and the Metal and WGPU test lanes reuse `run`
+//! unchanged for the rows their capability declarations cover. The CPU
+//! self-check still proves the complete table is runnable on every target.
 
 use crate::backend::{
     ArgReduceOp, BackendOps, BinaryOp, CmpOp, Conv2dParams, ConvOp, FusedOp, ReduceOp, UnaryOp,
@@ -211,11 +212,25 @@ impl Call {
             (Call::Conv(op, params), inputs) => one(backend.conv(*op, inputs, params)),
             (Call::Fused(op, scalars), inputs) => backend.fused(*op, inputs, scalars),
             (Call::Full { .. }, _) => Err(arity(0)),
-            (Call::Cast(_) | Call::CopyStrided | Call::BinaryScalar(..), _) => Err(arity(1)),
-            (Call::CopyInto { .. }, _) => Err(arity(1)),
-            (Call::Unary(_) | Call::Reduce(..) | Call::ArgReduce(..), _) => Err(arity(1)),
-            (Call::Binary(_) | Call::Compare(_) | Call::Matmul, _) => Err(arity(2)),
-            (Call::MaskedFill(_) | Call::IndexSelect(_) | Call::Gather(_), _) => Err(arity(2)),
+            (
+                Call::Cast(_)
+                | Call::CopyStrided
+                | Call::BinaryScalar(..)
+                | Call::CopyInto { .. }
+                | Call::Unary(_)
+                | Call::Reduce(..)
+                | Call::ArgReduce(..),
+                _,
+            ) => Err(arity(1)),
+            (
+                Call::Binary(_)
+                | Call::Compare(_)
+                | Call::Matmul
+                | Call::MaskedFill(_)
+                | Call::IndexSelect(_)
+                | Call::Gather(_),
+                _,
+            ) => Err(arity(2)),
             (Call::WhereCond | Call::IndexAdd(_) | Call::ScatterAdd(_), _) => Err(arity(3)),
         }
     }
@@ -250,6 +265,8 @@ impl Case {
             | Call::Gather(_)
             | Call::ScatterAdd(_)
             | Call::Conv(..)
+            | Call::Binary(_)
+            | Call::Matmul
             // A fused row's outputs are the parameter dtype plus, for the
             // recorded/optimizer encodings, wide state in the accumulation
             // dtype. Taking the *parameter* dtype's tolerance is the loose
@@ -257,7 +274,6 @@ impl Case {
             // more of an F32 state buffer than the reduced parameter can
             // deliver, and `compare` still rejects a dtype divergence outright.
             | Call::Fused(..) => operands[0].host.dtype(),
-            Call::Binary(_) | Call::Matmul => operands[0].host.dtype(),
         };
         // Casts are deterministic representation conversions. In particular,
         // widening a reduced value to F32 must reproduce it exactly; input
@@ -386,6 +402,10 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
 /// [`crate::backend`] or in the kernel module that enforces it.
 fn expected_unsupported(_device: Device, case: &Case) -> bool {
     let input_dtype = case.operands.first().map(|operand| operand.host.dtype());
+    // Left un-nested on purpose: each top-level `|` group below is one rule
+    // from the doc comment above, with its own justifying comment; flattening
+    // into one mega or-pattern (as clippy suggests) would erase that mapping.
+    #[allow(clippy::unnested_or_patterns)]
     let outside_common_contract =
         matches!(
             (&case.call, input_dtype),
@@ -435,6 +455,48 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
                     ..
                 } | Call::Cast(DType::BF16 | DType::F64)
             );
+    }
+    #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+    if matches!(_device, Device::Wgpu(_)) {
+        let f16 = crate::backend::wgpu::supports_f16(_device);
+        let float_supported = |dtype| dtype == DType::F32 || (dtype == DType::F16 && f16);
+        let supported = match (&case.call, input_dtype) {
+            (Call::Full { dtype, .. }, _) => {
+                matches!(dtype, DType::F32 | DType::I64 | DType::Bool)
+                    || (*dtype == DType::F16 && f16)
+            }
+            (Call::CopyStrided | Call::CopyInto { .. }, Some(dtype)) => {
+                matches!(dtype, DType::F32 | DType::I64 | DType::Bool)
+                    || (dtype == DType::F16 && f16)
+            }
+            (Call::Cast(to), Some(from)) => {
+                matches!(
+                    (from, to),
+                    (DType::F32, DType::Bool) | (DType::Bool, DType::F32)
+                ) || (f16
+                    && (from == DType::F16 || *to == DType::F16)
+                    && matches!(from, DType::F16 | DType::F32 | DType::I64 | DType::Bool)
+                    && matches!(to, DType::F16 | DType::F32 | DType::I64 | DType::Bool))
+            }
+            (Call::WhereCond, _) => case
+                .operands
+                .get(1)
+                .is_some_and(|o| float_supported(o.host.dtype())),
+            (Call::Fused(FusedOp::Softmax, scalars), Some(dtype)) => {
+                scalars.is_empty() && float_supported(dtype)
+            }
+            (Call::Fused(FusedOp::LayerNorm, scalars), Some(dtype)) => {
+                scalars.len() == 1 && case.operands.len() == 3 && float_supported(dtype)
+            }
+            // `Fused(..)` must stay ahead of the `Some`/`None` catch-alls: any
+            // other fused op is unsupported regardless of dtype, which the
+            // catch-alls' `float_supported` would get wrong if reordered.
+            #[allow(clippy::match_same_arms)]
+            (Call::Fused(..), _) => false,
+            (_, Some(dtype)) => float_supported(dtype),
+            (_, None) => false,
+        };
+        return !supported;
     }
     false
 }
@@ -719,7 +781,7 @@ pub(crate) fn suite() -> Vec<Case> {
     cases
 }
 
-/// Softmax, LayerNorm (plain, recorded, and its input gradient), and the two
+/// Softmax, `LayerNorm` (plain, recorded, and its input gradient), and the two
 /// optimizer steps, over every float dtype and both layout paths.
 ///
 /// These are the rows that used to be missing entirely. Nothing else in the

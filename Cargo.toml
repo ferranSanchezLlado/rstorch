@@ -30,7 +30,7 @@ rust-version.workspace = true
 exclude = [".github/", "api/", "tools/", ".gitignore"]
 
 # docs.rs renders the whole surface, not just the default features, so `typed`,
-# `hub`, `rayon` and `metal` are documented. `metal` compiles only on macOS, so
+# `hub`, `rayon`, `metal`, and `wgpu` are documented. `metal` compiles only on macOS, so
 # that target is built as well as the default Linux one.
 [package.metadata.docs.rs]
 all-features = true
@@ -48,9 +48,13 @@ serde_json = "1"
 thiserror = "2"
 flate2 = { version = "1", optional = true }
 ureq = { version = "2", optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "26", optional = true, default-features = false, features = ["wgsl", "vulkan", "metal", "dx12", "gles"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-metal = { version = "0.33.0", optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSArray", "NSString"] }
+objc2-metal = { version = "0.3.2", optional = true, default-features = false, features = ["std", "MTLAllocation", "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLDevice", "MTLTypes"] }
 
 [dev-dependencies]
 criterion = "0.8.2"
@@ -66,6 +70,16 @@ harness = false
 [[bench]]
 name = "training"
 harness = false
+
+[[bench]]
+name = "metal_ops"
+harness = false
+required-features = ["metal"]
+
+[[bench]]
+name = "wgpu_ops"
+harness = false
+required-features = ["wgpu"]
 
 [[bench]]
 name = "data_pipeline"
@@ -92,6 +106,18 @@ required-features = ["bench-resnet"]
 name = "typed"
 required-features = ["typed"]
 
+[[example]]
+name = "mnist"
+required-features = ["hub"]
+
+[[example]]
+name = "tiny_shakespeare"
+required-features = ["hub"]
+
+[[example]]
+name = "typed_mnist"
+required-features = ["typed", "hub"]
+
 # The two integration suites that drive `rstorch::testing::check_grad`, which
 # the `testing` feature gates. Declaring the requirement here means a plain
 # `cargo test` skips them instead of failing to compile; the CI lanes that own
@@ -105,7 +131,7 @@ name = "reduced_precision"
 required-features = ["testing"]
 
 [features]
-default = []
+default = ["metal"]
 typed = []
 hub = ["dep:flate2", "dep:ureq"]
 rayon = ["dep:rayon"]
@@ -113,12 +139,15 @@ rayon = ["dep:rayon"]
 # It exists so a minutes-long big-model benchmark cannot be picked up by a plain
 # `cargo bench`.
 bench-resnet = []
-# Correct and conformance-tested, but slower than the CPU backend on the
-# recorded training workloads, which is why `Device::best_available` still
-# returns CPU. See STABILITY.md.
-metal = ["dep:metal"]
+# Conformance-tested GPU acceleration on macOS. On other targets this default
+# feature has no platform dependency; `Device::best_available` considers WGPU
+# before falling back to CPU when the opt-in WGPU feature is enabled.
+metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
+# Portable native GPU compute through WebGPU. Kept opt-in because it adds a
+# substantial graphics dependency. F16 is negotiated per adapter at runtime.
+wgpu = ["dep:pollster", "dep:wgpu"]
 # The finite-difference gradient harness (`rstorch::testing`). It is a test
-# utility, not library surface, so it is the one public module outside the
-# semver guarantee in STABILITY.md — hence a feature rather than an
+# utility, not frozen library surface, so it is the one public module outside
+# the semver guarantee in STABILITY.md — hence a feature rather than an
 # unconditional `pub mod`.
 testing = []

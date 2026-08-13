@@ -4,7 +4,7 @@
 //!
 //! The `backend::conformance` table deliberately excludes fused ops (their
 //! multi-output encodings do not fit its single-output harness), and the
-//! in-crate Metal fused test checks output *shapes and dtypes* for LayerNorm
+//! in-crate Metal fused test checks output *shapes and dtypes* for `LayerNorm`
 //! plus hardcoded values for one SGD step. Nothing compared a fused Metal
 //! **value** against the CPU reference, which is where a hand-written
 //! threadgroup reduction or a mis-set eps hides: the numbers stay finite and
@@ -118,6 +118,46 @@ fn layer_norm_and_rms_norm_match_the_cpu() {
             })
         });
     }
+}
+
+#[test]
+fn wide_parallel_reductions_match_the_cpu_forward_and_backward() {
+    compare("softmax.parallel.1024", |device| {
+        value_and_grad(device, [7, 1024], 51, |x| x.softmax(1).unwrap())
+    });
+    compare("layer_norm.parallel.1024", |device| {
+        value_and_grad(device, [7, 1024], 52, |x| {
+            LayerNorm::new([1024], device)
+                .unwrap()
+                .forward(x, Mode::TRAIN)
+                .unwrap()
+        })
+    });
+}
+
+#[test]
+fn contiguous_index_backward_fast_paths_match_the_cpu_with_duplicates() {
+    compare("index_select.axis0.backward", |device| {
+        let table = Param::new(Tensor::from_vec(values(53, 257 * 64), [257, 64], device).unwrap());
+        let ids = Tensor::from_vec(vec![3i64, 200, 3, 0, 256, 200, 17], [7], device).unwrap();
+        let selected = table.get(Mode::TRAIN).index_select(0, &ids).unwrap();
+        let grads = selected.sum_all().unwrap().backward().unwrap();
+        grads.wrt(&table).unwrap().to_vec::<f32>().unwrap()
+    });
+
+    compare("gather.last.backward", |device| {
+        let logits =
+            Param::new(Tensor::from_vec(values(54, 128 * 257), [128, 257], device).unwrap());
+        let indices = Tensor::from_vec(
+            (0..128).map(|row| ((row * 43) % 257) as i64).collect(),
+            [128, 1],
+            device,
+        )
+        .unwrap();
+        let selected = logits.get(Mode::TRAIN).gather(1, &indices).unwrap();
+        let grads = selected.sum_all().unwrap().backward().unwrap();
+        grads.wrt(&logits).unwrap().to_vec::<f32>().unwrap()
+    });
 }
 
 /// The normalization layers' own parameters also receive gradients; a kernel
@@ -234,7 +274,7 @@ fn attention_matches_the_cpu() {
     });
 }
 
-/// BatchNorm keeps running buffers, so a Metal divergence accumulates across
+/// `BatchNorm` keeps running buffers, so a Metal divergence accumulates across
 /// forwards instead of showing up in one.
 #[test]
 fn batch_norm_running_statistics_match_the_cpu() {

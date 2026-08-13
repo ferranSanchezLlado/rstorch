@@ -4,10 +4,12 @@
 //! the only public generic in the tensor math surface is `T: Element` on
 //! `from_vec` / `to_vec` / `to_scalar`.
 //!
-//! Dtype scope: epoch-1 kernels implement `F32`, `I64`,
-//! `Bool`; `F16`/`BF16` arrive in the dedicated precision epoch under
-//! the `Acc` contract; `F64` follows demand. All six [`Element`] impls exist
-//! from the start so signatures never change.
+//! The CPU backend implements all six dtypes. Accelerator support is narrower:
+//! Metal currently stores `F16`, `F32`, `I64`, and `Bool`, while WGPU stores
+//! `F32`, `I64`, and `Bool` and adds native `F16` when the adapter advertises
+//! it; unsupported pairs return a loud
+//! [`Error::Unsupported`]. All six [`Element`]
+//! implementations exist so host-transfer and tensor signatures stay stable.
 
 use crate::error::{Error, Result};
 use crate::storage::CpuStorage;
@@ -18,6 +20,18 @@ use std::sync::Arc;
 /// There is **no implicit promotion** between dtypes: mixing dtypes in an
 /// op is a structured [`Error::DTypeMismatch`] telling you to cast with
 /// `to_dtype`.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::{DType, Device, Tensor};
+///
+/// let x = Tensor::zeros([2], DType::F32, &Device::Cpu)?;
+/// assert_eq!(x.dtype(), DType::F32);
+/// let y = x.to_dtype(DType::F16)?;
+/// assert_eq!(y.dtype(), DType::F16);
+/// # Ok::<(), rstorch::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DType {

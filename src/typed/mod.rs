@@ -195,6 +195,30 @@ impl<const N: usize> Placement for Metal<N> {
     }
 }
 
+/// A fixed portable WebGPU logical placement with adapter ordinal `N`.
+///
+/// WGPU currently provides F32 compute and lossless I64/Bool storage for the
+/// operations that support those dtypes. Adapters exposing `SHADER_F16` also
+/// provide native F16 operations; unsupported dtype/operation pairs return
+/// [`Error::Unsupported`].
+#[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Wgpu<const N: usize>;
+
+#[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+impl<const N: usize> Placement for Wgpu<N> {
+    fn validate_device(device: Device) -> Result<()> {
+        if device == Device::Wgpu(N) {
+            Ok(())
+        } else {
+            Err(Error::InvalidArg {
+                op: "DeviceCtx::bind",
+                msg: format!("Wgpu<{N}> placement requires wgpu:{N}, got {device}"),
+            })
+        }
+    }
+}
+
 /// A canonical process-lifetime binding from `P` to one runtime device.
 pub struct DeviceCtx<P: Placement> {
     pub(in crate::typed) binding: Arc<DeviceBinding>,

@@ -31,15 +31,17 @@
 //! synchronous and satisfies the contract vacuously.
 
 // The table-driven op × dtype harness that validates any backend
-// against the CPU reference (`conformance::run_device`). Test-only: its sole
-// caller is the Metal backend's conformance test, so it is not compiled into
-// release builds.
+// against the CPU reference (`conformance::run_device`). Test-only: its callers
+// are the accelerator conformance tests, so it is not compiled into release
+// builds.
 #[cfg(test)]
 pub(crate) mod conformance;
 pub(crate) mod conv_geometry;
 pub(crate) mod cpu;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) mod metal;
+#[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+pub(crate) mod wgpu;
 // The parallelism switch. Always compiled — the `rayon` feature is
 // consulted *inside* it, so a kernel writes one loop body and never carries a
 // `#[cfg]` arm of its own (see the module docs for why that matters).
@@ -266,7 +268,7 @@ pub(crate) enum FusedOp {
 /// contiguous output ([`full`](BackendOps::full)) and assemble it from
 /// [`narrow`](crate::layout::Layout::narrow) views of the inputs via
 /// per-region [`copy_strided`](BackendOps::copy_strided). On CPU this is
-/// exact and allocation-minimal. A future GPU backend that cannot express a
+/// exact and allocation-minimal. Another GPU backend that cannot express a
 /// device-side region copy through the existing entry points would add one
 /// crate-private `copy_into` primitive at that point — a lock-free,
 /// non-semver change, since this trait is crate-private — rather than a host
@@ -363,7 +365,7 @@ pub(crate) trait BackendOps: Send + Sync {
 
     /// Accumulate `src` slices into a copy of `x` along `axis` at the
     /// positions in the 1-D [`I64`](DType::I64) `indices` view (the backward
-    /// of [`index_select`](BackendOps::index_select); PyTorch `index_add`
+    /// of [`index_select`](BackendOps::index_select); `PyTorch` `index_add`
     /// semantics — whole slices, 1-D index). Accumulates in
     /// [`Acc`](crate::dtype::Element::Acc). Bounds-checked.
     fn index_add(
@@ -375,7 +377,7 @@ pub(crate) trait BackendOps: Send + Sync {
     ) -> Result<Storage>;
 
     /// Gather along `axis` using a same-rank [`I64`](DType::I64) `indices`
-    /// view (PyTorch `gather` semantics). Bounds-checked.
+    /// view (`PyTorch` `gather` semantics). Bounds-checked.
     fn gather(&self, x: View<'_>, axis: usize, indices: View<'_>) -> Result<Storage>;
 
     /// Scatter-add `src` into a copy of `x` along `axis` at a **same-rank**
@@ -408,13 +410,13 @@ pub(crate) struct CpuBackend;
 
 impl BackendOps for CpuBackend {
     fn transfer_in(&self, host: CpuStorage) -> Result<Storage> {
-        cpu::host::transfer_in(host)
+        Ok(cpu::host::transfer_in(host))
     }
     fn transfer_out(&self, x: View<'_>) -> Result<CpuStorage> {
-        cpu::host::transfer_out(x)
+        Ok(cpu::host::transfer_out(x))
     }
     fn copy_strided(&self, x: View<'_>) -> Result<Storage> {
-        cpu::host::copy_strided(x)
+        Ok(cpu::host::copy_strided(x))
     }
     fn copy_into(
         &self,
@@ -425,7 +427,7 @@ impl BackendOps for CpuBackend {
         cpu::host::copy_into(src, dst, dst_layout)
     }
     fn full(&self, len: usize, dtype: DType, value: f64) -> Result<Storage> {
-        cpu::host::full(len, dtype, value)
+        Ok(cpu::host::full(len, dtype, value))
     }
     fn cast(&self, x: View<'_>, to: DType) -> Result<Storage> {
         cpu::host::cast(x, to)
@@ -510,6 +512,8 @@ pub(crate) mod dispatch {
             Device::Cpu => &CPU,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Device::Metal(ordinal) => super::metal::backend(ordinal),
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            Device::Wgpu(ordinal) => super::wgpu::backend(ordinal),
         }
     }
 }

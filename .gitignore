@@ -13,3 +13,4 @@ Cargo.lock
 /docs
 # Generated public-API surface snapshots: working material, not carried in history.
 /api
+/test-tools

@@ -51,8 +51,10 @@ and no signature in your code has to be generic over them.
 
 **Linear gradients.** `backward` returns one `Grads`. It is not `Clone`, it is
 `#[must_use]`, and an optimizer step consumes it. Stepping twice on the same
-gradients, or dropping them on the floor, is a compile error — not a flat loss
-curve you debug for an afternoon.
+gradients is a compile error. Ignoring them emits the normal `#[must_use]`
+warning, while the optimizer's missing-gradient checks catch parameters that
+were never reached. There is no `zero_grad` because gradients never live in
+the parameters.
 
 **Loud, never silent.** Every failure names the operation and the values that
 were wrong:
@@ -75,14 +77,14 @@ total.
 
 | | |
 |---|---|
-| **Tensors** | elementwise, broadcasting, matmul, reductions, indexing/gather, `conv2d`, `max_pool2d`, softmax and losses over `f16`/`bf16`/`f32`/`f64`/`i64`/`bool` |
+| **Tensors** | elementwise, broadcasting, matmul, reductions, indexing/gather, `conv2d`, `max_pool2d`, softmax and losses over six runtime dtypes, with operation-specific support and loud `Unsupported` errors |
 | **Autograd** | reverse-mode over the whole op set, `Grads::clip_norm`/`scale`/`merge`, input gradients for saliency |
 | **`nn`** | `Linear`, `Dropout`, `Relu`, `Gelu`, `Embedding`, `MultiHeadAttention`, `LayerNorm`, `RMSNorm`, `BatchNorm2d`, `Sequential`, `#[derive(Module)]` |
 | **`optim`** | `Sgd`, `Adam`, `AdamW`, parameter groups, learning-rate schedules |
 | **`data`** | `Dataset`, `DataLoader` with seeded shuffling, `TensorDataset`, `VecDataset`, MNIST and Tiny Shakespeare loaders |
 | **`text`** | `CharTokenizer`, `BpeTokenizer` |
 | **`models`** | `DecoderTransformer` with a config and a `KvCache` for generation |
-| **`persist`** | safetensors state dicts, and training checkpoints that reload optimizer state |
+| **`persist`** | safetensors state dicts and training checkpoints that reload optimizer state; files are transactional but not checksummed or authenticated |
 
 ## Examples
 
@@ -90,6 +92,12 @@ total.
 cargo run --example tensors                  # tensors, errors, autograd
 cargo run --example mlp                      # a full training loop on two spirals
 cargo run --example typed --features typed   # compile-time shapes
+cargo run --release --example mnist --features hub
+                                              # real MNIST, best device, cosine LR
+cargo run --release --example tiny_shakespeare --features hub
+                                              # AdamW, clipping, cached generation
+cargo run --release --example typed_mnist --features typed,hub
+                                              # typed CNN and resumable checkpoints
 ```
 
 ## Feature flags
@@ -99,8 +107,25 @@ cargo run --example typed --features typed   # compile-time shapes
 | `typed` | off | Compile-time checked rank, dimensions, dtype and device placement, as a wrapper over the same `Tensor`. Mismatched shapes become type errors. |
 | `rayon` | off | Multi-threaded CPU kernels. Results stay bit-identical: kernels partition by output element, so no float is accumulated across threads in a racing order. |
 | `hub` | off | Downloads for the bundled MNIST and Tiny Shakespeare datasets. |
-| `metal` | off | GPU backend on macOS. Correct and conformance-tested, but **slower than the CPU backend** on the recorded training workloads, which is why `Device::best_available` still returns CPU. See [STABILITY.md](STABILITY.md). |
+| `metal` | on | GPU backend on macOS. `Device::best_available` selects the first Metal device when present, then considers WGPU and CPU. |
+| `wgpu` | off | Portable native WebGPU backend. F32 is always supported; native F16 is enabled only when the adapter advertises `SHADER_F16`. I64 index storage remains lossless. |
 | `testing` | off | The finite-difference gradient harness the crate tests itself with. The one public module outside the stability guarantee. |
+
+## Backends and dtypes
+
+CPU is the reference backend and supports the six runtime dtypes subject to
+each operation's contract. On macOS, Metal supports F16/F32 arithmetic and
+F16/F32/I64/Bool storage; BF16 and F64 are rejected. WGPU is opt-in and
+supports F32 compute plus native F16 when `SHADER_F16` is available, with
+lossless I64 and Bool storage. Unsupported combinations return an error rather than silently
+promoting or copying through the host.
+
+`Device::best_available` chooses Metal first, then the first WGPU adapter, then
+CPU. WGPU uses native F16 when the adapter exposes `SHADER_F16`; otherwise F16
+operations fail loudly like other unsupported combinations. The feature and
+hardware must be available for a device to be selected; the selection order
+does not promise a performance win. The complete stability and capability
+policy is in [STABILITY.md](STABILITY.md).
 
 ## Compile-time shapes, if you want them
 
@@ -108,7 +133,7 @@ cargo run --example typed --features typed   # compile-time shapes
 owns no kernels of its own, and computes identical values:
 
 ```rust,ignore
-let ctx = DeviceCtx::<Cpu>::cpu()?;
+let ctx = DeviceCtx::cpu()?;
 let x = Tensor2::<2, 3>::from_vec(vec![1.0f32; 6], [2, 3], &ctx)?;
 let w = Tensor2::<3, 4>::from_vec(vec![0.1f32; 12], [3, 4], &ctx)?;
 let y: Tensor2<2, 4> = x.matmul(&w)?;   // the output type is computed, not asserted

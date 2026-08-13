@@ -26,11 +26,15 @@ pub(crate) mod reduce;
 /// CPU-resident views. Any other storage here is an internal contract
 /// violation, not a user error.
 #[inline]
-pub(super) fn cpu_storage<'a>(x: View<'a>) -> &'a CpuStorage {
+pub(super) fn cpu_storage(x: View<'_>) -> &CpuStorage {
     match x.storage() {
         Storage::Cpu(s) => s,
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Storage::Metal(_) => {
+            unreachable!("CPU backend received non-CPU storage; dispatcher invariant violated")
+        }
+        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+        Storage::Wgpu(_) => {
             unreachable!("CPU backend received non-CPU storage; dispatcher invariant violated")
         }
     }

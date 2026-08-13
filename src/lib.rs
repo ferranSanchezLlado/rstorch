@@ -16,23 +16,24 @@
 //!
 //! # Feature flags
 //!
-//! All are off by default, and all are additive: enabling one never removes or
-//! changes an item that was there without it.
+//! Features are additive: enabling one never removes or changes an item that
+//! was there without it. `metal` is enabled by default and only affects macOS.
 //!
 //! | Feature | What it adds |
 //! |---|---|
 //! | `typed` | The `typed` namespace: rank, dimensions, dtype and placement checked at compile time, as a wrapper over this same [`Tensor`]. |
 //! | `rayon` | Multi-threaded CPU kernels. Results are bit-identical to the single-threaded ones: kernels partition by output element, so no float is accumulated across threads in a racing order. |
 //! | `hub` | Downloads for the bundled datasets in [`data::hub`]. |
-//! | `metal` | A macOS GPU backend. Conformance-tested against the CPU backend, but slower than it on the recorded training workloads, which is why [`Device::best_available`] still returns CPU. |
+//! | `metal` | The default macOS GPU backend. [`Device::best_available`] selects it when present, then considers WGPU and CPU. |
+//! | `wgpu` | Opt-in portable native GPU backend. Supports F32 compute plus lossless I64 index storage; unsupported dtypes fail loudly. |
 //! | `testing` | The `testing` finite-difference gradient harness. The one public module outside the stability guarantee. |
 //!
 //! # Stability
 //!
 //! This crate follows semantic versioning from 1.0. The covered surface is
 //! recorded per feature combination under `api/` in the repository and diffed
-//! by CI on every run; `STABILITY.md` states the scope, including what the
-//! `metal` guarantee does and does not promise, and the MSRV policy.
+//! by CI on every run; `STABILITY.md` states the scope, backend and dtype
+//! capability policy, checkpoint integrity limits, and MSRV policy.
 
 // `#[derive(Module)]` (the `rstorch-derive` crate) generates paths
 // rooted at `::rstorch`; this alias lets that expansion resolve when the

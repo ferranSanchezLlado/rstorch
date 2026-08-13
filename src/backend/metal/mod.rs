@@ -1,15 +1,23 @@
 //! Apple Metal backend: ordinal-scoped shared contexts and ordered async
 //! command encoding.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
+use std::ops::Deref;
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ::metal as metal_rs;
-use metal_rs::objc::rc::autoreleasepool;
+use objc2::rc::{Retained, autoreleasepool};
+use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSString;
+use objc2_metal::{
+    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
+    MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
+    MTLDevice, MTLLibrary, MTLResourceOptions, MTLSize,
+};
 
 use crate::backend::{
     ArgReduceOp, BackendOps, BinaryOp, CmpOp, Conv2dParams, ConvOp, FusedOp, ReduceOp, UnaryOp,
@@ -24,10 +32,73 @@ use crate::storage::{CpuStorage, Storage};
 const SOURCE: &str = include_str!("kernels.metal");
 const COMMIT_THRESHOLD: usize = 64;
 /// Threads per threadgroup to aim for; see [`threads_per_group`].
-const TARGET_THREADS_PER_GROUP: u64 = 256;
+const TARGET_THREADS_PER_GROUP: usize = 256;
+const PARALLEL_REDUCTION_WIDTH: usize = 256;
 const MAX_GRID_SIZE: usize = u32::MAX as usize;
 type ContextResult = std::result::Result<Arc<Context>, String>;
 type ContextRegistry = Mutex<HashMap<usize, ContextResult>>;
+struct MetalObject<P: ?Sized>(Retained<ProtocolObject<P>>);
+
+impl<P: ?Sized> Deref for MetalObject<P> {
+    type Target = ProtocolObject<P>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<P: ?Sized> From<Retained<ProtocolObject<P>>> for MetalObject<P> {
+    fn from(value: Retained<ProtocolObject<P>>) -> Self {
+        Self(value)
+    }
+}
+
+// SAFETY: Metal objects used here support multithreaded ownership. Mutable
+// command encoding and allocator state are serialized by the context mutexes,
+// and shared buffer host access occurs only after the command queue is drained.
+macro_rules! unsafe_impl_metal_send_sync {
+    ($($protocol:ty),+ $(,)?) => {$(
+        // Clippy can't see the SAFETY argument above: `Retained<ProtocolObject<P>>`
+        // is not `Send`/`Sync` by default, but these specific Metal object kinds
+        // are made safe to share by the context mutexes and drain-before-host-read
+        // discipline documented there.
+        #[allow(clippy::non_send_fields_in_send_ty)]
+        unsafe impl Send for MetalObject<$protocol> {}
+        unsafe impl Sync for MetalObject<$protocol> {}
+    )+};
+}
+
+unsafe_impl_metal_send_sync!(
+    dyn MTLDevice,
+    dyn MTLBuffer,
+    dyn MTLCommandQueue,
+    dyn MTLCommandBuffer,
+    dyn MTLComputeCommandEncoder,
+    dyn MTLLibrary,
+    dyn MTLComputePipelineState,
+);
+
+type MetalDevice = MetalObject<dyn MTLDevice>;
+type MetalBuffer = MetalObject<dyn MTLBuffer>;
+type MetalCommandQueue = MetalObject<dyn MTLCommandQueue>;
+type MetalCommandBuffer = MetalObject<dyn MTLCommandBuffer>;
+type MetalComputeCommandEncoder = MetalObject<dyn MTLComputeCommandEncoder>;
+type MetalLibrary = MetalObject<dyn MTLLibrary>;
+type MetalPipeline = MetalObject<dyn MTLComputePipelineState>;
+type MetalPipelineRef = ProtocolObject<dyn MTLComputePipelineState>;
+type MetalEncoderRef = ProtocolObject<dyn MTLComputeCommandEncoder>;
+
+trait MetalEncoderExt {
+    fn set_buffer(&self, index: u64, buffer: Option<&ProtocolObject<dyn MTLBuffer>>, offset: u64);
+}
+
+impl MetalEncoderExt for MetalEncoderRef {
+    fn set_buffer(&self, index: u64, buffer: Option<&ProtocolObject<dyn MTLBuffer>>, offset: u64) {
+        // SAFETY: Buffers are retained in `OpenBuffer::resources` until GPU
+        // completion. Shader argument indices and offsets are defined by SOURCE.
+        unsafe { self.setBuffer_offset_atIndex(buffer, offset as usize, index as usize) };
+    }
+}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -63,7 +134,7 @@ pub(crate) struct MetalBackend {
 
 #[derive(Clone)]
 pub(crate) struct MetalStorage {
-    buffer: Arc<metal_rs::Buffer>,
+    buffer: Arc<MetalBuffer>,
     dtype: DType,
     len: usize,
     context: Arc<Context>,
@@ -71,10 +142,10 @@ pub(crate) struct MetalStorage {
 
 struct Context {
     ordinal: usize,
-    raw: metal_rs::Device,
-    queue: metal_rs::CommandQueue,
-    library: metal_rs::Library,
-    pipelines: Mutex<HashMap<PipelineKey, Arc<metal_rs::ComputePipelineState>>>,
+    raw: MetalDevice,
+    queue: MetalCommandQueue,
+    library: MetalLibrary,
+    pipelines: Mutex<HashMap<PipelineKey, Arc<MetalPipeline>>>,
     submission: Mutex<Submission>,
     pool: Mutex<BufferPool>,
     validation: Mutex<Validation>,
@@ -89,7 +160,7 @@ struct Context {
 /// committing the open command buffer and waiting for the whole queue to
 /// drain, in the middle of encoding. An embedding lookup therefore forced a
 /// full GPU round trip, and a transformer step paid several: removing those
-/// waits measured −69% on forward and −36% on a full AdamW step.
+/// waits measured −69% on forward and −36% on a full `AdamW` step.
 ///
 /// So the verdict is now collected at the next host boundary instead, which is
 /// exactly where the backend already synchronizes (see the module-level
@@ -107,7 +178,7 @@ struct Validation {
     /// Two `i64` per slot — `[failed, offending_index]` — written by the
     /// validation kernel at a per-slot byte offset. Fixed capacity so it is
     /// never reallocated while a command buffer still references it.
-    status: Arc<metal_rs::Buffer>,
+    status: Arc<MetalBuffer>,
     /// Host-side descriptors, one per encoded slot, in program order.
     pending: Vec<PendingValidation>,
 }
@@ -128,19 +199,19 @@ const VALIDATION_SLOT_BYTES: u64 = 16;
 
 struct Submission {
     open: Option<OpenBuffer>,
-    pending: Vec<PendingBuffer>,
+    pending: VecDeque<PendingBuffer>,
 }
 
 struct OpenBuffer {
-    command: metal_rs::CommandBuffer,
-    encoder: metal_rs::ComputeCommandEncoder,
-    resources: Vec<Arc<metal_rs::Buffer>>,
+    command: MetalCommandBuffer,
+    encoder: MetalComputeCommandEncoder,
+    resources: Vec<Arc<MetalBuffer>>,
     dispatches: usize,
 }
 
 struct PendingBuffer {
-    command: metal_rs::CommandBuffer,
-    _resources: Vec<Arc<metal_rs::Buffer>>,
+    command: MetalCommandBuffer,
+    _resources: Vec<Arc<MetalBuffer>>,
 }
 
 pub(crate) fn backend(ordinal: usize) -> &'static dyn BackendOps {
@@ -156,34 +227,46 @@ pub(crate) fn backend(ordinal: usize) -> &'static dyn BackendOps {
 
 fn context(ordinal: usize) -> Result<Arc<Context>> {
     static CONTEXTS: OnceLock<ContextRegistry> = OnceLock::new();
-    let mut contexts = CONTEXTS
+    let value = CONTEXTS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .expect("Metal context registry poisoned");
-    let value = contexts
+        .expect("Metal context registry poisoned")
         .entry(ordinal)
-        .or_insert_with(|| create_context(ordinal));
-    value.clone().map_err(|msg| Error::Backend {
+        .or_insert_with(|| create_context(ordinal))
+        .clone();
+    value.map_err(|msg| Error::Backend {
         op: "metal_device",
         msg,
     })
 }
 
 fn create_context(ordinal: usize) -> std::result::Result<Arc<Context>, String> {
-    autoreleasepool(|| {
-        let devices = metal_rs::Device::all();
-        let raw = devices.into_iter().nth(ordinal).ok_or_else(|| {
-            format!("invalid Metal device ordinal {ordinal}; no such device is available")
-        })?;
-        let options = metal_rs::CompileOptions::new();
-        let library = raw
-            .new_library_with_source(SOURCE, &options)
-            .map_err(|e| format!("runtime shader compilation failed: {e}"))?;
-        let queue = raw.new_command_queue();
-        let status = Arc::new(raw.new_buffer(
-            VALIDATION_SLOTS as u64 * VALIDATION_SLOT_BYTES,
-            metal_rs::MTLResourceOptions::StorageModeShared,
-        ));
+    autoreleasepool(|_| {
+        let devices = MTLCopyAllDevices();
+        let raw: MetalDevice = (ordinal < devices.len())
+            .then(|| devices.objectAtIndex(ordinal))
+            .ok_or_else(|| {
+                format!("invalid Metal device ordinal {ordinal}; no such device is available")
+            })?
+            .into();
+        let options = MTLCompileOptions::new();
+        let source = NSString::from_str(SOURCE);
+        let library: MetalLibrary = raw
+            .newLibraryWithSource_options_error(&source, Some(&options))
+            .map_err(|e| format!("runtime shader compilation failed: {e}"))?
+            .into();
+        let queue: MetalCommandQueue = raw
+            .newCommandQueue()
+            .ok_or_else(|| "Metal failed to create a command queue".to_owned())?
+            .into();
+        let status = Arc::new(
+            raw.newBufferWithLength_options(
+                VALIDATION_SLOTS * VALIDATION_SLOT_BYTES as usize,
+                MTLResourceOptions::StorageModeShared,
+            )
+            .ok_or_else(|| "Metal failed to allocate the validation buffer".to_owned())?
+            .into(),
+        );
         Ok(Arc::new(Context {
             ordinal,
             raw,
@@ -192,7 +275,7 @@ fn create_context(ordinal: usize) -> std::result::Result<Arc<Context>, String> {
             pipelines: Mutex::new(HashMap::new()),
             submission: Mutex::new(Submission {
                 open: None,
-                pending: Vec::new(),
+                pending: VecDeque::new(),
             }),
             pool: Mutex::new(BufferPool::default()),
             validation: Mutex::new(Validation {
@@ -224,6 +307,12 @@ fn metal_storage<'a>(op: &'static str, view: View<'a>) -> Result<&'a MetalStorag
             op,
             expected: view.device(),
             got: Device::Cpu,
+        }),
+        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+        Storage::Wgpu(storage) => Err(Error::DeviceMismatch {
+            op,
+            expected: view.device(),
+            got: storage.device(),
         }),
     }
 }
@@ -260,12 +349,10 @@ fn supported_dtype(op: &'static str, dtype: DType, device: Device) -> Result<()>
 
 fn element_size(dtype: DType) -> usize {
     match dtype {
-        DType::F16 => 2,
+        DType::F16 | DType::BF16 => 2,
         DType::F32 => 4,
-        DType::I64 => 8,
+        DType::I64 | DType::F64 => 8,
         DType::Bool => 1,
-        DType::BF16 => 2,
-        DType::F64 => 8,
     }
 }
 
@@ -309,17 +396,21 @@ fn byte_len(dtype: DType, len: usize) -> Result<u64> {
 /// new op while a command buffer still in flight was writing it.
 ///
 /// Buffers are cached rather than freed, so the pool settles at the peak
-/// concurrent footprint per size class. That is the same bargain PyTorch's
+/// concurrent footprint per size class. That is the same bargain `PyTorch`'s
 /// caching allocator makes.
 #[derive(Default)]
 struct BufferPool {
-    by_size: HashMap<u64, Vec<Arc<metal_rs::Buffer>>>,
+    by_size: HashMap<u64, Vec<Arc<MetalBuffer>>>,
 }
 
 impl BufferPool {
-    /// A buffer of exactly `bytes`, recycled if one is idle.
-    fn take(&mut self, device: &metal_rs::Device, bytes: u64) -> Arc<metal_rs::Buffer> {
-        let slots = self.by_size.entry(bytes).or_default();
+    /// A size-classed buffer at least `bytes` long, recycled if one is idle.
+    fn take(&mut self, device: &ProtocolObject<dyn MTLDevice>, bytes: u64) -> Arc<MetalBuffer> {
+        let alignment = if bytes <= 1 << 20 { 256 } else { 4096 };
+        let class = bytes
+            .checked_add(alignment - 1)
+            .map_or(bytes, |rounded| rounded / alignment * alignment);
+        let slots = self.by_size.entry(class).or_default();
         if let Some(idle) = slots
             .iter()
             .find(|buffer| Arc::strong_count(buffer) == 1)
@@ -327,8 +418,11 @@ impl BufferPool {
         {
             return idle;
         }
-        let buffer =
-            Arc::new(device.new_buffer(bytes, metal_rs::MTLResourceOptions::StorageModeShared));
+        let buffer = Arc::new(MetalBuffer::from(
+            device
+                .newBufferWithLength_options(class as usize, MTLResourceOptions::StorageModeShared)
+                .expect("Metal failed to allocate a shared buffer"),
+        ));
         slots.push(Arc::clone(&buffer));
         buffer
     }
@@ -384,11 +478,11 @@ fn pipeline_typed(
     context: &Context,
     base: &'static str,
     dtype: DType,
-) -> Result<Arc<metal_rs::ComputePipelineState>> {
+) -> Result<Arc<MetalPipeline>> {
     pipeline(context, PipelineKey::Typed(base, dtype))
 }
 
-fn pipeline(context: &Context, key: PipelineKey) -> Result<Arc<metal_rs::ComputePipelineState>> {
+fn pipeline(context: &Context, key: PipelineKey) -> Result<Arc<MetalPipeline>> {
     let mut pipelines = context
         .pipelines
         .lock()
@@ -397,42 +491,47 @@ fn pipeline(context: &Context, key: PipelineKey) -> Result<Arc<metal_rs::Compute
         return Ok(Arc::clone(pipeline));
     }
     let name = key.shader_name();
-    let pipeline = autoreleasepool(|| {
-        let function = context
-            .library
-            .get_function(&name, None)
-            .map_err(|e| Error::Backend {
-                op: "metal_pipeline",
-                msg: e,
-            })?;
+    let pipeline = autoreleasepool(|_| {
+        let name = NSString::from_str(&name);
+        let function =
+            context
+                .library
+                .newFunctionWithName(&name)
+                .ok_or_else(|| Error::Backend {
+                    op: "metal_pipeline",
+                    msg: format!("Metal shader function {name:?} was not found"),
+                })?;
         context
             .raw
-            .new_compute_pipeline_state_with_function(&function)
+            .newComputePipelineStateWithFunction_error(&function)
             .map_err(|e| Error::Backend {
                 op: "metal_pipeline",
-                msg: e,
+                msg: e.to_string(),
             })
     })?;
-    let pipeline = Arc::new(pipeline);
+    let pipeline = Arc::new(MetalPipeline::from(pipeline));
     pipelines.insert(key, Arc::clone(&pipeline));
+    drop(pipelines);
     Ok(pipeline)
 }
 
 fn reap(submission: &mut Submission) -> Result<()> {
     let mut first_error = None;
-    submission
-        .pending
-        .retain(|pending| match pending.command.status() {
-            metal_rs::MTLCommandBufferStatus::Completed => false,
-            metal_rs::MTLCommandBufferStatus::Error => {
+    while let Some(pending) = submission.pending.front() {
+        match pending.command.status() {
+            MTLCommandBufferStatus::Completed => {
+                submission.pending.pop_front();
+            }
+            MTLCommandBufferStatus::Error => {
                 first_error = Some(Error::Backend {
                     op: "metal_command",
                     msg: "Metal command buffer completed with an error".to_owned(),
                 });
-                false
+                submission.pending.pop_front();
             }
-            _ => true,
-        });
+            _ => break,
+        }
+    }
     first_error.map_or(Ok(()), Err)
 }
 
@@ -443,9 +542,9 @@ fn commit_open(submission: &mut Submission) {
             INSTRUMENTATION.commits.fetch_add(1, Ordering::Relaxed);
             observe_max(&INSTRUMENTATION.max_dispatches_per_buffer, open.dispatches);
         }
-        open.encoder.end_encoding();
+        open.encoder.endEncoding();
         open.command.commit();
-        submission.pending.push(PendingBuffer {
+        submission.pending.push_back(PendingBuffer {
             command: open.command,
             _resources: open.resources,
         });
@@ -455,11 +554,16 @@ fn commit_open(submission: &mut Submission) {
 }
 
 fn new_open(context: &Context) -> OpenBuffer {
-    let command = context.queue.new_command_buffer();
-    let encoder = command.new_compute_command_encoder();
+    let command = context
+        .queue
+        .commandBuffer()
+        .expect("Metal failed to create a command buffer");
+    let encoder = command
+        .computeCommandEncoder()
+        .expect("Metal failed to create a compute command encoder");
     OpenBuffer {
-        command: command.to_owned(),
-        encoder: encoder.to_owned(),
+        command: command.into(),
+        encoder: encoder.into(),
         resources: Vec::new(),
         dispatches: 0,
     }
@@ -467,10 +571,10 @@ fn new_open(context: &Context) -> OpenBuffer {
 
 fn encode(
     context: &Arc<Context>,
-    pipeline: &metal_rs::ComputePipelineStateRef,
+    pipeline: &MetalPipelineRef,
     len: usize,
-    resources: &[&Arc<metal_rs::Buffer>],
-    set_args: impl FnOnce(&metal_rs::ComputeCommandEncoderRef),
+    resources: &[&Arc<MetalBuffer>],
+    set_args: impl FnOnce(&MetalEncoderRef),
 ) -> Result<()> {
     if len == 0 {
         return Ok(());
@@ -481,20 +585,47 @@ fn encode(
             msg: format!("grid size {len} exceeds u32::MAX"),
         });
     }
-    autoreleasepool(|| {
+    let group = threads_per_group(pipeline);
+    encode_threadgroups(
+        context,
+        pipeline,
+        MTLSize {
+            width: len.div_ceil(group),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: group,
+            height: 1,
+            depth: 1,
+        },
+        resources,
+        set_args,
+    )
+}
+
+fn encode_threadgroups(
+    context: &Arc<Context>,
+    pipeline: &MetalPipelineRef,
+    groups: MTLSize,
+    threads: MTLSize,
+    resources: &[&Arc<MetalBuffer>],
+    set_args: impl FnOnce(&MetalEncoderRef),
+) -> Result<()> {
+    autoreleasepool(|_| {
+        // The lock must stay held for the whole encode-and-maybe-commit
+        // sequence below, not just the first use; there is nothing to tighten.
+        #[allow(clippy::significant_drop_tightening)]
         let mut submission = context
             .submission
             .lock()
             .expect("Metal submission state poisoned");
         reap(&mut submission)?;
         let open = submission.open.get_or_insert_with(|| new_open(context));
-        open.encoder.set_compute_pipeline_state(pipeline);
+        open.encoder.setComputePipelineState(pipeline);
         set_args(&open.encoder);
-        let group = threads_per_group(pipeline);
-        open.encoder.dispatch_thread_groups(
-            metal_rs::MTLSize::new(len.div_ceil(group as usize) as u64, 1, 1),
-            metal_rs::MTLSize::new(group, 1, 1),
-        );
+        open.encoder
+            .dispatchThreadgroups_threadsPerThreadgroup(groups, threads);
         open.resources
             .extend(resources.iter().map(|buffer| Arc::clone(buffer)));
         open.dispatches += 1;
@@ -520,9 +651,9 @@ fn encode(
 /// because a large group raises register pressure and can *reduce* the number
 /// of groups resident per core. The result is rounded down to a whole number of
 /// SIMD groups so no partial group is dispatched, and is never zero.
-fn threads_per_group(pipeline: &metal_rs::ComputePipelineStateRef) -> u64 {
-    let width = pipeline.thread_execution_width().max(1);
-    let max = pipeline.max_total_threads_per_threadgroup().max(width);
+fn threads_per_group(pipeline: &MetalPipelineRef) -> usize {
+    let width = pipeline.threadExecutionWidth().max(1);
+    let max = pipeline.maxTotalThreadsPerThreadgroup().max(width);
     let target = TARGET_THREADS_PER_GROUP.min(max);
     (target / width).max(1) * width
 }
@@ -535,34 +666,44 @@ fn threads_per_group(pipeline: &metal_rs::ComputePipelineStateRef) -> u64 {
 /// failure is reported ahead of a bounds failure: a command buffer that errored
 /// may be why a verdict never landed.
 fn synchronize(context: &Arc<Context>) -> Result<()> {
-    autoreleasepool(|| {
+    autoreleasepool(|_| {
+        // Validation reservations are held through encoding and publication of
+        // their descriptor. Take this lock before submission so a concurrent
+        // validator cannot deadlock between the two locks.
+        let mut validation = context
+            .validation
+            .lock()
+            .expect("Metal validation state poisoned");
         // Keep submission serialization through the wait. Otherwise another
         // host reader can take this reader's pending buffers and return before
         // the commands producing its storage have completed.
-        let mut submission = context
-            .submission
-            .lock()
-            .expect("Metal submission state poisoned");
-        commit_open(&mut submission);
-        drain_results(
-            std::mem::take(&mut submission.pending)
-                .into_iter()
-                .map(|pending| {
-                    #[cfg(test)]
-                    INSTRUMENTATION.waits.fetch_add(1, Ordering::Relaxed);
-                    pending.command.wait_until_completed();
-                    if pending.command.status() == metal_rs::MTLCommandBufferStatus::Error {
-                        Err(Error::Backend {
-                            op: "transfer_out",
-                            msg: "Metal command buffer completed with an error".to_owned(),
-                        })
-                    } else {
-                        Ok(())
-                    }
-                }),
-        )
-    })?;
-    collect_validations(context)
+        let result = {
+            let mut submission = context
+                .submission
+                .lock()
+                .expect("Metal submission state poisoned");
+            commit_open(&mut submission);
+            drain_results(
+                std::mem::take(&mut submission.pending)
+                    .into_iter()
+                    .map(|pending| {
+                        #[cfg(test)]
+                        INSTRUMENTATION.waits.fetch_add(1, Ordering::Relaxed);
+                        pending.command.waitUntilCompleted();
+                        if pending.command.status() == MTLCommandBufferStatus::Error {
+                            Err(Error::Backend {
+                                op: "transfer_out",
+                                msg: "Metal command buffer completed with an error".to_owned(),
+                            })
+                        } else {
+                            Ok(())
+                        }
+                    }),
+            )
+        };
+        result?;
+        collect_validations(&mut validation)
+    })
 }
 
 fn drain_results(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
@@ -586,21 +727,51 @@ fn checked_product(op: &'static str, values: impl IntoIterator<Item = usize>) ->
     })
 }
 
-fn set_bytes<T>(encoder: &metal_rs::ComputeCommandEncoderRef, index: u64, values: &[T]) {
-    encoder.set_bytes(
-        index,
-        std::mem::size_of_val(values) as u64,
-        values.as_ptr().cast::<c_void>(),
-    );
+fn set_bytes<T>(encoder: &MetalEncoderRef, index: u64, values: &[T]) {
+    let bytes = NonNull::new(values.as_ptr().cast::<c_void>().cast_mut())
+        .expect("slice pointers are non-null");
+    // SAFETY: `bytes` is valid for the supplied length and Metal copies it
+    // before returning. Call sites use indices declared by the selected shader.
+    unsafe {
+        encoder.setBytes_length_atIndex(bytes, std::mem::size_of_val(values), index as usize);
+    }
 }
 
-fn layout_args(encoder: &metal_rs::ComputeCommandEncoderRef, start: u64, layout: &Layout) {
-    let dims: Vec<u64> = layout.dims().iter().map(|&v| v as u64).collect();
-    let strides: Vec<u64> = layout.strides().iter().map(|&v| v as u64).collect();
-    set_bytes(encoder, start, &dims);
-    set_bytes(encoder, start + 1, &strides);
+fn layout_args(encoder: &MetalEncoderRef, start: u64, layout: &Layout) {
+    const INLINE_RANK: usize = 8;
+    if layout.rank() <= INLINE_RANK {
+        let mut dims = [0u64; INLINE_RANK];
+        let mut strides = [0u64; INLINE_RANK];
+        for (slot, &value) in dims.iter_mut().zip(layout.dims()) {
+            *slot = value as u64;
+        }
+        for (slot, &value) in strides.iter_mut().zip(layout.strides()) {
+            *slot = value as u64;
+        }
+        set_bytes(encoder, start, &dims[..layout.rank()]);
+        set_bytes(encoder, start + 1, &strides[..layout.rank()]);
+    } else {
+        let dims: Vec<u64> = layout.dims().iter().map(|&v| v as u64).collect();
+        let strides: Vec<u64> = layout.strides().iter().map(|&v| v as u64).collect();
+        set_bytes(encoder, start, &dims);
+        set_bytes(encoder, start + 1, &strides);
+    }
     set_bytes(encoder, start + 2, &[layout.rank() as u32]);
     set_bytes(encoder, start + 3, &[layout.offset() as u64]);
+}
+
+fn is_row_major(layout: &Layout) -> bool {
+    let mut expected = 1;
+    for (&dim, &stride) in layout.dims().iter().zip(layout.strides()).rev() {
+        if stride != expected {
+            return false;
+        }
+        let Some(next) = expected.checked_mul(dim) else {
+            return false;
+        };
+        expected = next;
+    }
+    true
 }
 
 fn copy_name(dtype: DType, into: bool) -> &'static str {
@@ -747,52 +918,54 @@ fn validate_indices(op: &'static str, indices: View<'_>, axis: usize, bound: usi
                 got: Device::Cpu,
             });
         }
+        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+        Device::Wgpu(ordinal) => {
+            return Err(Error::DeviceMismatch {
+                op,
+                expected: Device::Metal(0),
+                got: Device::Wgpu(ordinal),
+            });
+        }
     })?;
     let input = metal_storage(op, indices)?;
 
-    // A full slot table means the verdicts must be collected before this check
-    // can claim a slot. Draining here costs what every check used to cost, and
-    // only after 256 un-read checks.
-    let slot = {
-        let claimed = context
-            .validation
-            .lock()
-            .expect("Metal validation state poisoned")
-            .pending
-            .len();
-        if claimed < VALIDATION_SLOTS {
-            claimed
-        } else {
-            // Not holding the lock: `synchronize` collects and clears the queue.
-            synchronize(&context)?;
-            0
-        }
-    };
-
     let pipe = pipeline(&context, PipelineKey::Named("validate_indices"))?;
-    let status = Arc::clone(
-        &context
+    loop {
+        // Keep the reservation lock through encoding and descriptor
+        // publication. This prevents concurrent validators from reusing a
+        // status slot, and prevents a host read from collecting before its
+        // descriptor is visible.
+        #[allow(clippy::significant_drop_tightening)]
+        let mut validation = context
             .validation
             .lock()
-            .expect("Metal validation state poisoned")
-            .status,
-    );
-    let offset = slot as u64 * VALIDATION_SLOT_BYTES;
-    encode(&context, &pipe, 1, &[&input.buffer, &status], |encoder| {
-        encoder.set_buffer(0, Some(&input.buffer), 0);
-        encoder.set_buffer(1, Some(&status), offset);
-        layout_args(encoder, 2, indices.layout());
-        set_bytes(encoder, 6, &[indices.layout().num_elements() as u64]);
-        set_bytes(encoder, 7, &[bound as u64]);
-    })?;
+            .expect("Metal validation state poisoned");
+        if validation.pending.len() >= VALIDATION_SLOTS {
+            drop(validation);
+            // A full slot table means the verdicts must be collected before
+            // this check can claim a slot. Draining here costs what every
+            // check used to cost, and only after 256 un-read checks.
+            synchronize(&context)?;
+            continue;
+        }
 
-    context
-        .validation
-        .lock()
-        .expect("Metal validation state poisoned")
-        .pending
-        .push(PendingValidation { op, axis, bound });
-    Ok(())
+        let slot = validation.pending.len();
+        let status = Arc::clone(&validation.status);
+        let offset = slot as u64 * VALIDATION_SLOT_BYTES;
+        let result = encode(&context, &pipe, 1, &[&input.buffer, &status], |encoder| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&status), offset);
+            layout_args(encoder, 2, indices.layout());
+            set_bytes(encoder, 6, &[indices.layout().num_elements() as u64]);
+            set_bytes(encoder, 7, &[bound as u64]);
+        });
+        if result.is_ok() {
+            validation
+                .pending
+                .push(PendingValidation { op, axis, bound });
+        }
+        return result;
+    }
 }
 
 /// Collect every encoded bounds check and report the first failure in program
@@ -801,11 +974,7 @@ fn validate_indices(op: &'static str, indices: View<'_>, axis: usize, bound: usi
 /// Called from [`synchronize`] once the queue has drained, so the status buffer
 /// is complete. Clears the queue either way: a reported failure is reported
 /// once, and the slots are reused from zero.
-fn collect_validations(context: &Arc<Context>) -> Result<()> {
-    let mut validation = context
-        .validation
-        .lock()
-        .expect("Metal validation state poisoned");
+fn collect_validations(validation: &mut Validation) -> Result<()> {
     if validation.pending.is_empty() {
         return Ok(());
     }
@@ -818,7 +987,7 @@ fn collect_validations(context: &Arc<Context>) -> Result<()> {
     // loop below reads no further.
     let words = unsafe {
         std::slice::from_raw_parts(
-            validation.status.contents().cast::<i64>(),
+            validation.status.contents().cast::<i64>().as_ptr(),
             VALIDATION_SLOTS * 2,
         )
     };
@@ -887,6 +1056,13 @@ fn encode_binary(
             layout_args(encoder, 7, rhs.layout());
             set_bytes(encoder, 11, &[output.len as u64]);
             set_bytes(encoder, 12, &[code]);
+            set_bytes(
+                encoder,
+                13,
+                &[u32::from(
+                    lhs.layout().is_contiguous() && rhs.layout().is_contiguous(),
+                )],
+            );
         },
     )?;
     Ok(Storage::Metal(output))
@@ -897,6 +1073,7 @@ struct MatmulPlan {
     lhs_batch: Vec<u64>,
     rhs_batch: Vec<u64>,
     params: [u64; 9],
+    batches: usize,
     len: usize,
 }
 
@@ -983,6 +1160,7 @@ fn matmul_plan(lhs: &Layout, rhs: &Layout) -> Result<MatmulPlan> {
             rhs.strides()[rr - 2] as u64,
             rhs.strides()[rr - 1] as u64,
         ],
+        batches,
         len,
     })
 }
@@ -1042,46 +1220,70 @@ impl MetalBackend {
             let i = metal_storage("fused_layer_norm_backward_input", *inv_std)?;
             let w = metal_storage("fused_layer_norm_backward_input", *weight)?;
             let output = output_for(&context, grad.dtype(), grad.layout().num_elements())?;
-            let pipe = pipeline_typed(&context, "layer_norm_backward", grad.dtype())?;
-            encode(
+            let parallel = width >= 64;
+            let pipe = pipeline_typed(
                 &context,
-                &pipe,
-                rows,
-                &[&g.buffer, &h.buffer, &i.buffer, &w.buffer, &output.buffer],
-                |encoder| {
-                    encoder.set_buffer(0, Some(&g.buffer), 0);
-                    encoder.set_buffer(1, Some(&h.buffer), 0);
-                    encoder.set_buffer(2, Some(&i.buffer), 0);
-                    encoder.set_buffer(3, Some(&w.buffer), 0);
-                    encoder.set_buffer(4, Some(&output.buffer), 0);
-                    layout_args(encoder, 5, grad.layout());
-                    layout_args(encoder, 9, xhat.layout());
-                    set_bytes(
-                        encoder,
-                        13,
-                        &inv_std
-                            .layout()
-                            .strides()
-                            .iter()
-                            .map(|&v| v as u64)
-                            .collect::<Vec<_>>(),
-                    );
-                    set_bytes(encoder, 14, &[inv_std.layout().offset() as u64]);
-                    set_bytes(
-                        encoder,
-                        15,
-                        &weight
-                            .layout()
-                            .strides()
-                            .iter()
-                            .map(|&v| v as u64)
-                            .collect::<Vec<_>>(),
-                    );
-                    set_bytes(encoder, 16, &[weight.layout().offset() as u64]);
-                    set_bytes(encoder, 17, &[rows as u64]);
-                    set_bytes(encoder, 18, &[width as u64]);
+                if parallel {
+                    "layer_norm_backward_parallel"
+                } else {
+                    "layer_norm_backward"
                 },
+                grad.dtype(),
             )?;
+            let resources = [&g.buffer, &h.buffer, &i.buffer, &w.buffer, &output.buffer];
+            let set_args = |encoder: &MetalEncoderRef| {
+                encoder.set_buffer(0, Some(&g.buffer), 0);
+                encoder.set_buffer(1, Some(&h.buffer), 0);
+                encoder.set_buffer(2, Some(&i.buffer), 0);
+                encoder.set_buffer(3, Some(&w.buffer), 0);
+                encoder.set_buffer(4, Some(&output.buffer), 0);
+                layout_args(encoder, 5, grad.layout());
+                layout_args(encoder, 9, xhat.layout());
+                set_bytes(
+                    encoder,
+                    13,
+                    &inv_std
+                        .layout()
+                        .strides()
+                        .iter()
+                        .map(|&v| v as u64)
+                        .collect::<Vec<_>>(),
+                );
+                set_bytes(encoder, 14, &[inv_std.layout().offset() as u64]);
+                set_bytes(
+                    encoder,
+                    15,
+                    &weight
+                        .layout()
+                        .strides()
+                        .iter()
+                        .map(|&v| v as u64)
+                        .collect::<Vec<_>>(),
+                );
+                set_bytes(encoder, 16, &[weight.layout().offset() as u64]);
+                set_bytes(encoder, 17, &[rows as u64]);
+                set_bytes(encoder, 18, &[width as u64]);
+            };
+            if parallel && rows != 0 {
+                encode_threadgroups(
+                    &context,
+                    &pipe,
+                    MTLSize {
+                        width: rows,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: PARALLEL_REDUCTION_WIDTH,
+                        height: 1,
+                        depth: 1,
+                    },
+                    &resources,
+                    set_args,
+                )?;
+            } else {
+                encode(&context, &pipe, rows, &resources, set_args)?;
+            }
             return Ok(vec![Storage::Metal(output)]);
         }
 
@@ -1107,57 +1309,85 @@ impl MetalBackend {
         let wv = metal_storage("fused_layer_norm", *weight)?;
         let bv = metal_storage("fused_layer_norm", *bias)?;
         let output = output_for(&context, dtype, x.layout().num_elements())?;
-        let xhat = output_for(&context, DType::F32, x.layout().num_elements())?;
-        let inv = output_for(&context, DType::F32, rows)?;
-        let pipe = pipeline_typed(&context, "layer_norm", dtype)?;
-        encode(
+        let xhat = output_for(
             &context,
-            &pipe,
-            rows,
-            &[
-                &xv.buffer,
-                &wv.buffer,
-                &bv.buffer,
-                &output.buffer,
-                &xhat.buffer,
-                &inv.buffer,
-            ],
-            |encoder| {
-                encoder.set_buffer(0, Some(&xv.buffer), 0);
-                encoder.set_buffer(1, Some(&wv.buffer), 0);
-                encoder.set_buffer(2, Some(&bv.buffer), 0);
-                encoder.set_buffer(3, Some(&output.buffer), 0);
-                encoder.set_buffer(4, Some(&xhat.buffer), 0);
-                encoder.set_buffer(5, Some(&inv.buffer), 0);
-                layout_args(encoder, 6, x.layout());
-                set_bytes(
-                    encoder,
-                    10,
-                    &weight
-                        .layout()
-                        .strides()
-                        .iter()
-                        .map(|&v| v as u64)
-                        .collect::<Vec<_>>(),
-                );
-                set_bytes(encoder, 11, &[weight.layout().offset() as u64]);
-                set_bytes(
-                    encoder,
-                    12,
-                    &bias
-                        .layout()
-                        .strides()
-                        .iter()
-                        .map(|&v| v as u64)
-                        .collect::<Vec<_>>(),
-                );
-                set_bytes(encoder, 13, &[bias.layout().offset() as u64]);
-                set_bytes(encoder, 14, &[rows as u64]);
-                set_bytes(encoder, 15, &[width as u64]);
-                set_bytes(encoder, 16, &[scalars[0] as f32]);
-                set_bytes(encoder, 17, &[u32::from(save)]);
-            },
+            DType::F32,
+            if save { x.layout().num_elements() } else { 1 },
         )?;
+        let inv = output_for(&context, DType::F32, if save { rows } else { 1 })?;
+        let parallel = width >= 64;
+        let pipe = pipeline_typed(
+            &context,
+            if parallel {
+                "layer_norm_parallel"
+            } else {
+                "layer_norm"
+            },
+            dtype,
+        )?;
+        let resources = [
+            &xv.buffer,
+            &wv.buffer,
+            &bv.buffer,
+            &output.buffer,
+            &xhat.buffer,
+            &inv.buffer,
+        ];
+        let set_args = |encoder: &MetalEncoderRef| {
+            encoder.set_buffer(0, Some(&xv.buffer), 0);
+            encoder.set_buffer(1, Some(&wv.buffer), 0);
+            encoder.set_buffer(2, Some(&bv.buffer), 0);
+            encoder.set_buffer(3, Some(&output.buffer), 0);
+            encoder.set_buffer(4, Some(&xhat.buffer), 0);
+            encoder.set_buffer(5, Some(&inv.buffer), 0);
+            layout_args(encoder, 6, x.layout());
+            set_bytes(
+                encoder,
+                10,
+                &weight
+                    .layout()
+                    .strides()
+                    .iter()
+                    .map(|&v| v as u64)
+                    .collect::<Vec<_>>(),
+            );
+            set_bytes(encoder, 11, &[weight.layout().offset() as u64]);
+            set_bytes(
+                encoder,
+                12,
+                &bias
+                    .layout()
+                    .strides()
+                    .iter()
+                    .map(|&v| v as u64)
+                    .collect::<Vec<_>>(),
+            );
+            set_bytes(encoder, 13, &[bias.layout().offset() as u64]);
+            set_bytes(encoder, 14, &[rows as u64]);
+            set_bytes(encoder, 15, &[width as u64]);
+            set_bytes(encoder, 16, &[scalars[0] as f32]);
+            set_bytes(encoder, 17, &[u32::from(save)]);
+        };
+        if parallel && rows != 0 {
+            encode_threadgroups(
+                &context,
+                &pipe,
+                MTLSize {
+                    width: rows,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: PARALLEL_REDUCTION_WIDTH,
+                    height: 1,
+                    depth: 1,
+                },
+                &resources,
+                set_args,
+            )?;
+        } else {
+            encode(&context, &pipe, rows, &resources, set_args)?;
+        }
         let mut outputs = vec![Storage::Metal(output)];
         if save {
             outputs.push(Storage::Metal(xhat));
@@ -1194,20 +1424,34 @@ impl MetalBackend {
         check_context("fused_sgd_step", &context, inputs)?;
         let dense = inputs
             .iter()
-            .map(|&input| self.copy_strided(input))
+            .map(|&input| {
+                if input.layout().is_contiguous() {
+                    Ok(None)
+                } else {
+                    self.copy_strided(input).map(Some)
+                }
+            })
             .collect::<Result<Vec<_>>>()?;
         let values: Vec<&MetalStorage> = dense
             .iter()
-            .map(|storage| match storage {
-                Storage::Metal(value) => value,
-                Storage::Cpu(_) => unreachable!(),
+            .zip(inputs)
+            .map(|(storage, &input)| match storage {
+                Some(Storage::Metal(value)) => Ok(value),
+                Some(Storage::Cpu(_)) => unreachable!(),
+                #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+                Some(Storage::Wgpu(_)) => unreachable!(),
+                None => metal_storage("fused_sgd_step", input),
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let p = values[0];
         let g = values[1];
         let velocity = values.get(2).copied();
         let next = output_for(&context, dtype, p.len)?;
-        let next_velocity = output_for(&context, DType::F32, p.len)?;
+        let next_velocity = output_for(
+            &context,
+            DType::F32,
+            if *momentum != 0.0 { p.len } else { 1 },
+        )?;
         let pipe = pipeline_typed(&context, "sgd", dtype)?;
         let hp = [*lr as f32, *momentum as f32, *decay as f32];
         let mut resources = vec![&p.buffer, &g.buffer, &next.buffer, &next_velocity.buffer];
@@ -1252,15 +1496,25 @@ impl MetalBackend {
         check_context("fused_adam_step", &context, inputs)?;
         let dense = inputs
             .iter()
-            .map(|&input| self.copy_strided(input))
+            .map(|&input| {
+                if input.layout().is_contiguous() {
+                    Ok(None)
+                } else {
+                    self.copy_strided(input).map(Some)
+                }
+            })
             .collect::<Result<Vec<_>>>()?;
         let values: Vec<&MetalStorage> = dense
             .iter()
-            .map(|storage| match storage {
-                Storage::Metal(value) => value,
-                Storage::Cpu(_) => unreachable!(),
+            .zip(inputs)
+            .map(|(storage, &input)| match storage {
+                Some(Storage::Metal(value)) => Ok(value),
+                Some(Storage::Cpu(_)) => unreachable!(),
+                #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+                Some(Storage::Wgpu(_)) => unreachable!(),
+                None => metal_storage("fused_adam_step", input),
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let [p, g, m, v] = values.as_slice() else {
             unreachable!()
         };
@@ -1320,21 +1574,21 @@ impl BackendOps for MetalBackend {
             match host {
                 CpuStorage::F16(values) => std::ptr::copy_nonoverlapping(
                     values.as_ptr(),
-                    storage.buffer.contents().cast::<half::f16>(),
+                    storage.buffer.contents().cast::<half::f16>().as_ptr(),
                     values.len(),
                 ),
                 CpuStorage::F32(values) => std::ptr::copy_nonoverlapping(
                     values.as_ptr(),
-                    storage.buffer.contents().cast::<f32>(),
+                    storage.buffer.contents().cast::<f32>().as_ptr(),
                     values.len(),
                 ),
                 CpuStorage::I64(values) => std::ptr::copy_nonoverlapping(
                     values.as_ptr(),
-                    storage.buffer.contents().cast::<i64>(),
+                    storage.buffer.contents().cast::<i64>().as_ptr(),
                     values.len(),
                 ),
                 CpuStorage::Bool(values) => {
-                    let dst = storage.buffer.contents().cast::<u8>();
+                    let dst = storage.buffer.contents().cast::<u8>().as_ptr();
                     for (index, value) in values.iter().enumerate() {
                         dst.add(index).write(u8::from(*value));
                     }
@@ -1351,45 +1605,56 @@ impl BackendOps for MetalBackend {
         metal_storage("transfer_out", x)?;
         let context = context(self.ordinal)?;
         check_context("transfer_out", &context, &[x])?;
-        let dense = self.copy_strided(x)?;
-        synchronize(&context)?;
-        let Storage::Metal(storage) = dense else {
-            unreachable!()
+        let dense = if x.layout().is_contiguous() {
+            None
+        } else {
+            Some(self.copy_strided(x)?)
         };
-        // SAFETY: `storage` is the dense copy produced by `copy_strided`, so it
-        // holds `storage.len` initialized elements of `storage.dtype` in a
-        // `StorageModeShared` (CPU-readable) buffer, and the matched arm casts
-        // `contents()` to that same element type. `synchronize` above has
-        // completed, so the GPU is no longer writing the buffer. Each slice is
-        // copied with `to_vec` before `storage` is dropped.
+        synchronize(&context)?;
+        let storage = match &dense {
+            Some(Storage::Metal(storage)) => storage,
+            Some(Storage::Cpu(_)) => unreachable!(),
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            Some(Storage::Wgpu(_)) => unreachable!(),
+            None => metal_storage("transfer_out", x)?,
+        };
+        let len = x.layout().num_elements();
+        // SAFETY: `storage` is either the contiguous input or the dense copy
+        // produced above, so its first `len` elements are initialized values of
+        // `storage.dtype` in a `StorageModeShared` buffer. The matched arm casts
+        // to that same element type. `synchronize` completed, so the GPU is no
+        // longer writing, and each slice is copied before `storage` is dropped.
         unsafe {
             Ok(match storage.dtype {
                 DType::F16 => CpuStorage::F16(Arc::new(
                     std::slice::from_raw_parts(
-                        storage.buffer.contents().cast::<half::f16>(),
-                        storage.len,
+                        storage.buffer.contents().cast::<half::f16>().as_ptr(),
+                        len,
                     )
                     .to_vec(),
                 )),
                 DType::F32 => CpuStorage::F32(Arc::new(
                     std::slice::from_raw_parts(
-                        storage.buffer.contents().cast::<f32>(),
-                        storage.len,
+                        storage.buffer.contents().cast::<f32>().as_ptr(),
+                        len,
                     )
                     .to_vec(),
                 )),
                 DType::I64 => CpuStorage::I64(Arc::new(
                     std::slice::from_raw_parts(
-                        storage.buffer.contents().cast::<i64>(),
-                        storage.len,
+                        storage.buffer.contents().cast::<i64>().as_ptr(),
+                        len,
                     )
                     .to_vec(),
                 )),
                 DType::Bool => CpuStorage::Bool(Arc::new(
-                    std::slice::from_raw_parts(storage.buffer.contents().cast::<u8>(), storage.len)
-                        .iter()
-                        .map(|&value| value != 0)
-                        .collect(),
+                    std::slice::from_raw_parts(
+                        storage.buffer.contents().cast::<u8>().as_ptr(),
+                        len,
+                    )
+                    .iter()
+                    .map(|&value| value != 0)
+                    .collect(),
                 )),
                 DType::BF16 | DType::F64 => unreachable!("unsupported storage cannot exist"),
             })
@@ -1413,6 +1678,7 @@ impl BackendOps for MetalBackend {
                 encoder.set_buffer(1, Some(&output.buffer), 0);
                 layout_args(encoder, 2, x.layout());
                 set_bytes(encoder, 6, &[output.len as u64]);
+                set_bytes(encoder, 7, &[u32::from(is_row_major(x.layout()))]);
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1463,6 +1729,13 @@ impl BackendOps for MetalBackend {
                 layout_args(encoder, 2, src.layout());
                 layout_args(encoder, 6, dst_layout);
                 set_bytes(encoder, 10, &[src.layout().num_elements() as u64]);
+                set_bytes(
+                    encoder,
+                    11,
+                    &[u32::from(
+                        is_row_major(src.layout()) && is_row_major(dst_layout),
+                    )],
+                );
             },
         )
     }
@@ -1479,22 +1752,25 @@ impl BackendOps for MetalBackend {
         unsafe {
             match dtype {
                 DType::F16 => std::slice::from_raw_parts_mut(
-                    storage.buffer.contents().cast::<half::f16>(),
+                    storage.buffer.contents().cast::<half::f16>().as_ptr(),
                     len,
                 )
                 .fill(half::f16::from_f64(value)),
-                DType::F32 => {
-                    std::slice::from_raw_parts_mut(storage.buffer.contents().cast::<f32>(), len)
-                        .fill(value as f32)
-                }
-                DType::I64 => {
-                    std::slice::from_raw_parts_mut(storage.buffer.contents().cast::<i64>(), len)
-                        .fill(value as i64)
-                }
-                DType::Bool => {
-                    std::slice::from_raw_parts_mut(storage.buffer.contents().cast::<u8>(), len)
-                        .fill(u8::from(value != 0.0))
-                }
+                DType::F32 => std::slice::from_raw_parts_mut(
+                    storage.buffer.contents().cast::<f32>().as_ptr(),
+                    len,
+                )
+                .fill(value as f32),
+                DType::I64 => std::slice::from_raw_parts_mut(
+                    storage.buffer.contents().cast::<i64>().as_ptr(),
+                    len,
+                )
+                .fill(value as i64),
+                DType::Bool => std::slice::from_raw_parts_mut(
+                    storage.buffer.contents().cast::<u8>().as_ptr(),
+                    len,
+                )
+                .fill(u8::from(value != 0.0)),
                 DType::BF16 | DType::F64 => unreachable!("dtype validated"),
             }
         }
@@ -1522,6 +1798,7 @@ impl BackendOps for MetalBackend {
                 encoder.set_buffer(1, Some(&output.buffer), 0);
                 layout_args(encoder, 2, x.layout());
                 set_bytes(encoder, 6, &[output.len as u64]);
+                set_bytes(encoder, 7, &[u32::from(x.layout().is_contiguous())]);
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1565,6 +1842,7 @@ impl BackendOps for MetalBackend {
                     set_bytes(encoder, 7, &[scalar as f32]);
                 }
                 set_bytes(encoder, 8, &[op_code_binary(op)]);
+                set_bytes(encoder, 9, &[u32::from(x.layout().is_contiguous())]);
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1592,6 +1870,7 @@ impl BackendOps for MetalBackend {
                 layout_args(encoder, 2, x.layout());
                 set_bytes(encoder, 6, &[output.len as u64]);
                 set_bytes(encoder, 7, &[op_code_unary(op)]);
+                set_bytes(encoder, 8, &[u32::from(x.layout().is_contiguous())]);
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1629,6 +1908,15 @@ impl BackendOps for MetalBackend {
                 layout_args(encoder, 8, on_true.layout());
                 layout_args(encoder, 12, on_false.layout());
                 set_bytes(encoder, 16, &[output.len as u64]);
+                set_bytes(
+                    encoder,
+                    17,
+                    &[u32::from(
+                        cond.layout().is_contiguous()
+                            && on_true.layout().is_contiguous()
+                            && on_false.layout().is_contiguous(),
+                    )],
+                );
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1667,6 +1955,13 @@ impl BackendOps for MetalBackend {
                 } else {
                     set_bytes(encoder, 12, &[value as f32]);
                 }
+                set_bytes(
+                    encoder,
+                    13,
+                    &[u32::from(
+                        x.layout().is_contiguous() && mask.layout().is_contiguous(),
+                    )],
+                );
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1681,27 +1976,52 @@ impl BackendOps for MetalBackend {
         let input = metal_storage("reduce", x)?;
         let len = reduced_len(x.layout(), axis);
         let output = output_for(&context, x.dtype(), len)?;
-        let pipe = pipeline_typed(&context, "reduce", x.dtype())?;
+        let parallel =
+            matches!(x.dtype(), DType::F16 | DType::F32) && x.layout().dims()[axis] >= 64;
+        let pipe = pipeline_typed(
+            &context,
+            if parallel {
+                "reduce_parallel"
+            } else {
+                "reduce"
+            },
+            x.dtype(),
+        )?;
         let code = match op {
             ReduceOp::Sum => 0,
             ReduceOp::Mean => 1,
             ReduceOp::Max => 2,
             ReduceOp::Min => 3,
         };
-        encode(
-            &context,
-            &pipe,
-            len,
-            &[&input.buffer, &output.buffer],
-            |encoder| {
-                encoder.set_buffer(0, Some(&input.buffer), 0);
-                encoder.set_buffer(1, Some(&output.buffer), 0);
-                layout_args(encoder, 2, x.layout());
-                set_bytes(encoder, 6, &[len as u64]);
-                set_bytes(encoder, 7, &[axis as u32]);
-                set_bytes(encoder, 8, &[code]);
-            },
-        )?;
+        let resources = [&input.buffer, &output.buffer];
+        let set_args = |encoder: &MetalEncoderRef| {
+            encoder.set_buffer(0, Some(&input.buffer), 0);
+            encoder.set_buffer(1, Some(&output.buffer), 0);
+            layout_args(encoder, 2, x.layout());
+            set_bytes(encoder, 6, &[len as u64]);
+            set_bytes(encoder, 7, &[axis as u32]);
+            set_bytes(encoder, 8, &[code]);
+        };
+        if parallel && len != 0 {
+            encode_threadgroups(
+                &context,
+                &pipe,
+                MTLSize {
+                    width: len,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: PARALLEL_REDUCTION_WIDTH,
+                    height: 1,
+                    depth: 1,
+                },
+                &resources,
+                set_args,
+            )?;
+        } else {
+            encode(&context, &pipe, len, &resources, set_args)?;
+        }
         Ok(Storage::Metal(output))
     }
     fn arg_reduce(&self, op: ArgReduceOp, x: View<'_>, axis: usize) -> Result<Storage> {
@@ -1742,24 +2062,55 @@ impl BackendOps for MetalBackend {
         let a = metal_storage("matmul", lhs)?;
         let b = metal_storage("matmul", rhs)?;
         let output = output_for(&context, dtype, plan.len)?;
-        let pipe = pipeline_typed(&context, "matmul", dtype)?;
-        encode(
+        // A partial 16x16 tile costs more than the scalar kernel for the tiny
+        // projections used by small transformers. Keep that latency path while
+        // tiling matrices large enough to reuse each loaded value.
+        let tiled = matches!(dtype, DType::F16 | DType::F32)
+            && plan.params[0] >= 16
+            && plan.params[1] >= 16
+            && plan.params[2] >= 16;
+        let pipe = pipeline_typed(
             &context,
-            &pipe,
-            plan.len,
-            &[&a.buffer, &b.buffer, &output.buffer],
-            |encoder| {
-                encoder.set_buffer(0, Some(&a.buffer), 0);
-                encoder.set_buffer(1, Some(&b.buffer), 0);
-                encoder.set_buffer(2, Some(&output.buffer), 0);
-                set_bytes(encoder, 3, &plan.batch);
-                set_bytes(encoder, 4, &plan.lhs_batch);
-                set_bytes(encoder, 5, &plan.rhs_batch);
-                set_bytes(encoder, 6, &[plan.batch.len() as u32]);
-                set_bytes(encoder, 7, &plan.params);
-                set_bytes(encoder, 8, &[plan.len as u64]);
-            },
+            if tiled { "matmul_tiled" } else { "matmul" },
+            dtype,
         )?;
+        let set_args = |encoder: &MetalEncoderRef| {
+            encoder.set_buffer(0, Some(&a.buffer), 0);
+            encoder.set_buffer(1, Some(&b.buffer), 0);
+            encoder.set_buffer(2, Some(&output.buffer), 0);
+            set_bytes(encoder, 3, &plan.batch);
+            set_bytes(encoder, 4, &plan.lhs_batch);
+            set_bytes(encoder, 5, &plan.rhs_batch);
+            set_bytes(encoder, 6, &[plan.batch.len() as u32]);
+            set_bytes(encoder, 7, &plan.params);
+            set_bytes(encoder, 8, &[plan.len as u64]);
+        };
+        if tiled && plan.len != 0 {
+            encode_threadgroups(
+                &context,
+                &pipe,
+                MTLSize {
+                    width: plan.params[2].div_ceil(16) as usize,
+                    height: plan.params[0].div_ceil(16) as usize,
+                    depth: plan.batches,
+                },
+                MTLSize {
+                    width: 16,
+                    height: 16,
+                    depth: 1,
+                },
+                &[&a.buffer, &b.buffer, &output.buffer],
+                set_args,
+            )?;
+        } else {
+            encode(
+                &context,
+                &pipe,
+                plan.len,
+                &[&a.buffer, &b.buffer, &output.buffer],
+                set_args,
+            )?;
+        }
         Ok(Storage::Metal(output))
     }
     fn index_select(&self, x: View<'_>, axis: usize, indices: View<'_>) -> Result<Storage> {
@@ -1789,7 +2140,17 @@ impl BackendOps for MetalBackend {
         let len = checked_product("index_select", dims.iter().copied())?;
         let out_dims: Vec<u64> = dims.iter().map(|&v| v as u64).collect();
         let output = output_for(&context, x.dtype(), len)?;
-        let pipe = pipeline_typed(&context, "index_select", x.dtype())?;
+        let contiguous_axis0 =
+            axis == 0 && x.layout().is_contiguous() && indices.layout().is_contiguous();
+        let pipe = pipeline_typed(
+            &context,
+            if contiguous_axis0 {
+                "index_select_axis0"
+            } else {
+                "index_select"
+            },
+            x.dtype(),
+        )?;
         encode(
             &context,
             &pipe,
@@ -1799,11 +2160,20 @@ impl BackendOps for MetalBackend {
                 encoder.set_buffer(0, Some(&input.buffer), 0);
                 encoder.set_buffer(1, Some(&index.buffer), 0);
                 encoder.set_buffer(2, Some(&output.buffer), 0);
-                layout_args(encoder, 3, x.layout());
-                layout_args(encoder, 7, indices.layout());
-                set_bytes(encoder, 11, &out_dims);
-                set_bytes(encoder, 12, &[axis as u32]);
-                set_bytes(encoder, 13, &[len as u64]);
+                if contiguous_axis0 {
+                    set_bytes(encoder, 3, &[len as u64]);
+                    set_bytes(
+                        encoder,
+                        4,
+                        &[x.layout().num_elements().div_ceil(x.layout().dims()[0]) as u64],
+                    );
+                } else {
+                    layout_args(encoder, 3, x.layout());
+                    layout_args(encoder, 7, indices.layout());
+                    set_bytes(encoder, 11, &out_dims);
+                    set_bytes(encoder, 12, &[axis as u32]);
+                    set_bytes(encoder, 13, &[len as u64]);
+                }
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1850,23 +2220,50 @@ impl BackendOps for MetalBackend {
         let iv = metal_storage("index_add", indices)?;
         let sv = metal_storage("index_add", src)?;
         let output = output_for(&context, dtype, x.layout().num_elements())?;
-        let pipe = pipeline_typed(&context, "index_add", dtype)?;
+        let contiguous_axis0 = axis == 0
+            && x.layout().is_contiguous()
+            && indices.layout().is_contiguous()
+            && dtype != DType::F16;
+        let pipe = pipeline_typed(
+            &context,
+            if contiguous_axis0 {
+                "index_add_axis0"
+            } else {
+                "index_add"
+            },
+            dtype,
+        )?;
         encode(
             &context,
             &pipe,
-            output.len,
+            if contiguous_axis0 {
+                x.layout().dims()[0]
+            } else {
+                output.len
+            },
             &[&xv.buffer, &iv.buffer, &sv.buffer, &output.buffer],
             |encoder| {
                 encoder.set_buffer(0, Some(&xv.buffer), 0);
                 encoder.set_buffer(1, Some(&iv.buffer), 0);
                 encoder.set_buffer(2, Some(&sv.buffer), 0);
                 encoder.set_buffer(3, Some(&output.buffer), 0);
-                layout_args(encoder, 4, x.layout());
-                layout_args(encoder, 8, indices.layout());
-                layout_args(encoder, 12, src.layout());
-                set_bytes(encoder, 16, &[axis as u32]);
-                set_bytes(encoder, 17, &[output.len as u64]);
-                set_bytes(encoder, 18, &[src.layout().num_elements() as u64]);
+                if contiguous_axis0 {
+                    set_bytes(encoder, 4, &[x.layout().dims()[0] as u64]);
+                    set_bytes(encoder, 5, &[indices.layout().num_elements() as u64]);
+                    set_bytes(
+                        encoder,
+                        6,
+                        &[x.layout().num_elements().div_ceil(x.layout().dims()[0]) as u64],
+                    );
+                    layout_args(encoder, 7, src.layout());
+                } else {
+                    layout_args(encoder, 4, x.layout());
+                    layout_args(encoder, 8, indices.layout());
+                    layout_args(encoder, 12, src.layout());
+                    set_bytes(encoder, 16, &[axis as u32]);
+                    set_bytes(encoder, 17, &[output.len as u64]);
+                    set_bytes(encoder, 18, &[src.layout().num_elements() as u64]);
+                }
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1909,7 +2306,18 @@ impl BackendOps for MetalBackend {
         let xv = metal_storage("gather", x)?;
         let iv = metal_storage("gather", indices)?;
         let output = output_for(&context, x.dtype(), indices.layout().num_elements())?;
-        let pipe = pipeline_typed(&context, "gather", x.dtype())?;
+        let contiguous_last = axis + 1 == x.layout().rank()
+            && x.layout().is_contiguous()
+            && indices.layout().is_contiguous();
+        let pipe = pipeline_typed(
+            &context,
+            if contiguous_last {
+                "gather_last"
+            } else {
+                "gather"
+            },
+            x.dtype(),
+        )?;
         encode(
             &context,
             &pipe,
@@ -1919,10 +2327,16 @@ impl BackendOps for MetalBackend {
                 encoder.set_buffer(0, Some(&xv.buffer), 0);
                 encoder.set_buffer(1, Some(&iv.buffer), 0);
                 encoder.set_buffer(2, Some(&output.buffer), 0);
-                layout_args(encoder, 3, x.layout());
-                layout_args(encoder, 7, indices.layout());
-                set_bytes(encoder, 11, &[axis as u32]);
-                set_bytes(encoder, 12, &[output.len as u64]);
+                if contiguous_last {
+                    set_bytes(encoder, 3, &[output.len as u64]);
+                    set_bytes(encoder, 4, &[x.layout().dims()[axis] as u64]);
+                    set_bytes(encoder, 5, &[indices.layout().dims()[axis] as u64]);
+                } else {
+                    layout_args(encoder, 3, x.layout());
+                    layout_args(encoder, 7, indices.layout());
+                    set_bytes(encoder, 11, &[axis as u32]);
+                    set_bytes(encoder, 12, &[output.len as u64]);
+                }
             },
         )?;
         Ok(Storage::Metal(output))
@@ -1991,7 +2405,19 @@ impl BackendOps for MetalBackend {
         let iv = metal_storage("scatter_add", indices)?;
         let sv = metal_storage("scatter_add", src)?;
         let output = output_for(&context, dtype, x.layout().num_elements())?;
-        let pipe = pipeline_typed(&context, "scatter_add", dtype)?;
+        let contiguous_last = axis + 1 == x.layout().rank()
+            && x.layout().is_contiguous()
+            && indices.layout().is_contiguous()
+            && indices.layout().dims() == src.layout().dims();
+        let pipe = pipeline_typed(
+            &context,
+            if contiguous_last {
+                "scatter_add_last"
+            } else {
+                "scatter_add"
+            },
+            dtype,
+        )?;
         encode(
             &context,
             &pipe,
@@ -2002,16 +2428,20 @@ impl BackendOps for MetalBackend {
                 encoder.set_buffer(1, Some(&iv.buffer), 0);
                 encoder.set_buffer(2, Some(&sv.buffer), 0);
                 encoder.set_buffer(3, Some(&output.buffer), 0);
-                layout_args(encoder, 4, x.layout());
-                layout_args(encoder, 8, indices.layout());
-                layout_args(encoder, 12, src.layout());
-                set_bytes(encoder, 16, &[axis as u32]);
-                set_bytes(encoder, 17, &[output.len as u64]);
-                // The *index grid*'s element count, not `src`'s. `src` need
-                // only be at least as large as the grid on every axis
-                // (PyTorch's `scatter_add_` rule, and what the check above
-                // enforces), and the kernel walks the grid.
-                set_bytes(encoder, 18, &[indices.layout().num_elements() as u64]);
+                if contiguous_last {
+                    set_bytes(encoder, 4, &[output.len as u64]);
+                    set_bytes(encoder, 5, &[x.layout().dims()[axis] as u64]);
+                    set_bytes(encoder, 6, &[indices.layout().dims()[axis] as u64]);
+                    layout_args(encoder, 7, src.layout());
+                } else {
+                    layout_args(encoder, 4, x.layout());
+                    layout_args(encoder, 8, indices.layout());
+                    layout_args(encoder, 12, src.layout());
+                    set_bytes(encoder, 16, &[axis as u32]);
+                    set_bytes(encoder, 17, &[output.len as u64]);
+                    // The *index grid*'s element count, not `src`'s.
+                    set_bytes(encoder, 18, &[indices.layout().num_elements() as u64]);
+                }
             },
         )?;
         Ok(Storage::Metal(output))
@@ -2229,20 +2659,44 @@ impl BackendOps for MetalBackend {
                 check_context("fused_softmax", &context, inputs)?;
                 let x = metal_storage("fused_softmax", *input)?;
                 let output = output_for(&context, dtype, input.layout().num_elements())?;
-                let pipe = pipeline_typed(&context, "softmax", dtype)?;
-                encode(
+                let parallel = width >= 64;
+                let pipe = pipeline_typed(
                     &context,
-                    &pipe,
-                    rows,
-                    &[&x.buffer, &output.buffer],
-                    |encoder| {
-                        encoder.set_buffer(0, Some(&x.buffer), 0);
-                        encoder.set_buffer(1, Some(&output.buffer), 0);
-                        layout_args(encoder, 2, input.layout());
-                        set_bytes(encoder, 6, &[rows as u64]);
-                        set_bytes(encoder, 7, &[width as u64]);
+                    if parallel {
+                        "softmax_parallel"
+                    } else {
+                        "softmax"
                     },
+                    dtype,
                 )?;
+                let resources = [&x.buffer, &output.buffer];
+                let set_args = |encoder: &MetalEncoderRef| {
+                    encoder.set_buffer(0, Some(&x.buffer), 0);
+                    encoder.set_buffer(1, Some(&output.buffer), 0);
+                    layout_args(encoder, 2, input.layout());
+                    set_bytes(encoder, 6, &[rows as u64]);
+                    set_bytes(encoder, 7, &[width as u64]);
+                };
+                if parallel && rows != 0 {
+                    encode_threadgroups(
+                        &context,
+                        &pipe,
+                        MTLSize {
+                            width: rows,
+                            height: 1,
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: PARALLEL_REDUCTION_WIDTH,
+                            height: 1,
+                            depth: 1,
+                        },
+                        &resources,
+                        set_args,
+                    )?;
+                } else {
+                    encode(&context, &pipe, rows, &resources, set_args)?;
+                }
                 Ok(vec![Storage::Metal(output)])
             }
             FusedOp::LayerNorm => self.fused_layer_norm(inputs, scalars),
@@ -2474,7 +2928,7 @@ mod tests {
         assert!(INSTRUMENTATION.waits.load(Ordering::Relaxed) > before_wait);
         assert!(
             INSTRUMENTATION.dispatches.load(Ordering::Relaxed) - before_dispatch
-                >= COMMIT_THRESHOLD + 9
+                >= COMMIT_THRESHOLD + 8
         );
         assert!(
             INSTRUMENTATION
@@ -2489,6 +2943,7 @@ mod tests {
             submission.pending.is_empty(),
             "host read must reap pending buffers"
         );
+        drop(submission);
         eprintln!(
             "async counters: dispatches={}, commits={}, waits={}, max_dispatches_per_buffer={}, max_pending={}",
             INSTRUMENTATION.dispatches.load(Ordering::Relaxed) - before_dispatch,
@@ -2983,6 +3438,10 @@ mod tests {
     #[test]
     fn multithreaded_streams_remain_ordered() {
         let _lane = HARDWARE_LANE.lock().unwrap();
+        // Collecting first spawns every thread before any join, which is the
+        // point of the test: folding this into one iterator (as clippy
+        // suggests) would spawn-then-immediately-join threads one at a time.
+        #[allow(clippy::needless_collect)]
         let threads: Vec<_> = (0..4)
             .map(|thread| {
                 std::thread::spawn(move || {

@@ -140,7 +140,7 @@ fn seeded_cnn_loss_decreases_on_metal() -> Result<()> {
 ///
 /// The fused ops are deliberately absent from the `conformance` op × dtype
 /// table, so this is the only thing standing between a wrong fused
-/// LayerNorm backward and a silently mistrained model: a rank-3
+/// `LayerNorm` backward and a silently mistrained model: a rank-3
 /// `[batch, seq, embed]` input is what every transformer block normalizes, and
 /// a "loss decreased" assertion cannot see a gradient that is merely wrong.
 #[test]
@@ -196,7 +196,7 @@ fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
 /// The `conformance` op × dtype table carries no NaN in its fixture data, so
 /// nothing else compares the two backends on the one input class where
 /// `maximum`/`minimum`/`relu`/`argmax` have a real choice to make. All four
-/// must *propagate* NaN (as PyTorch does), and `argmax`/`argmin` must select
+/// must *propagate* NaN (as `PyTorch` does), and `argmax`/`argmin` must select
 /// the NaN so they agree with what `max`/`min` report.
 #[test]
 fn nan_semantics_match_between_cpu_and_metal() -> Result<()> {

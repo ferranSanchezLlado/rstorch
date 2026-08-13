@@ -7,3 +7,6 @@ pub use super::{
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use super::Metal;
+
+#[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+pub use super::Wgpu;

@@ -252,18 +252,18 @@ fn materialize(x: View<'_>, how: impl Materialize) -> CpuStorage {
 
 /// See [`BackendOps::transfer_in`](crate::backend::BackendOps::transfer_in).
 /// For CPU this wraps the buffer unchanged.
-pub(crate) fn transfer_in(host: CpuStorage) -> Result<Storage> {
-    Ok(Storage::Cpu(host))
+pub(crate) fn transfer_in(host: CpuStorage) -> Storage {
+    Storage::Cpu(host)
 }
 
 /// See [`BackendOps::transfer_out`](crate::backend::BackendOps::transfer_out).
-pub(crate) fn transfer_out(x: View<'_>) -> Result<CpuStorage> {
-    Ok(materialize(x, ShareOrCopy))
+pub(crate) fn transfer_out(x: View<'_>) -> CpuStorage {
+    materialize(x, ShareOrCopy)
 }
 
 /// See [`BackendOps::copy_strided`](crate::backend::BackendOps::copy_strided).
-pub(crate) fn copy_strided(x: View<'_>) -> Result<Storage> {
-    Ok(Storage::Cpu(materialize(x, CopyOwned)))
+pub(crate) fn copy_strided(x: View<'_>) -> Storage {
+    Storage::Cpu(materialize(x, CopyOwned))
 }
 
 fn copy_into_typed<T: Copy>(src: &[T], src_layout: &Layout, dst: &mut [T], dst_layout: &Layout) {
@@ -315,6 +315,14 @@ pub(crate) fn copy_into(src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -
                 got: storage.device(),
             });
         }
+        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+        Storage::Wgpu(storage) => {
+            return Err(Error::DeviceMismatch {
+                op: "copy_into",
+                expected: crate::Device::Cpu,
+                got: storage.device(),
+            });
+        }
     };
     // The dtype guard above proves both sides carry the same variant, so one
     // dispatch addresses the pair.
@@ -326,7 +334,7 @@ pub(crate) fn copy_into(src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -
 }
 
 /// See [`BackendOps::full`](crate::backend::BackendOps::full).
-pub(crate) fn full(len: usize, dtype: DType, value: f64) -> Result<Storage> {
+pub(crate) fn full(len: usize, dtype: DType, value: f64) -> Storage {
     let storage = match dtype {
         DType::F16 => CpuStorage::F16(std::sync::Arc::new(vec![half::f16::from_f64(value); len])),
         DType::BF16 => {
@@ -337,7 +345,7 @@ pub(crate) fn full(len: usize, dtype: DType, value: f64) -> Result<Storage> {
         DType::I64 => CpuStorage::I64(std::sync::Arc::new(vec![value as i64; len])),
         DType::Bool => CpuStorage::Bool(std::sync::Arc::new(vec![value != 0.0; len])),
     };
-    Ok(Storage::Cpu(storage))
+    Storage::Cpu(storage)
 }
 
 /// See [`BackendOps::cast`](crate::backend::BackendOps::cast). Supports the
@@ -460,7 +468,10 @@ mod tests {
     fn cpu(storage: &Storage) -> &CpuStorage {
         match storage {
             Storage::Cpu(s) => s,
-            #[cfg(all(feature = "metal", target_os = "macos"))]
+            #[cfg(any(
+                all(feature = "metal", target_os = "macos"),
+                all(feature = "wgpu", not(target_arch = "wasm32"))
+            ))]
             _ => panic!("expected CPU storage"),
         }
     }
@@ -472,7 +483,7 @@ mod tests {
     #[test]
     fn transfer_in_wraps_unchanged() {
         let host = CpuStorage::F32(Arc::new(vec![1.0, 2.0, 3.0]));
-        let dev = transfer_in(host).unwrap();
+        let dev = transfer_in(host);
         assert_eq!(as_f32(cpu(&dev)), vec![1.0, 2.0, 3.0]);
         assert_eq!(dev.device(), crate::device::Device::Cpu);
     }
@@ -483,7 +494,7 @@ mod tests {
         let storage = f32_storage(data.clone());
         let layout = Layout::contiguous([2, 3]).unwrap();
         let view = View::new(&storage, &layout);
-        let out = transfer_out(view).unwrap();
+        let out = transfer_out(view);
         assert_eq!(as_f32(&out), data);
     }
 
@@ -492,7 +503,7 @@ mod tests {
         let storage = f32_storage(vec![42.0]);
         let layout = Layout::contiguous(()).unwrap();
         let view = View::new(&storage, &layout);
-        let out = transfer_out(view).unwrap();
+        let out = transfer_out(view);
         assert_eq!(as_f32(&out), vec![42.0]);
     }
 
@@ -501,7 +512,7 @@ mod tests {
         let storage = f32_storage(vec![]);
         let layout = Layout::contiguous([0, 3]).unwrap();
         let view = View::new(&storage, &layout);
-        let out = transfer_out(view).unwrap();
+        let out = transfer_out(view);
         assert!(as_f32(&out).is_empty());
     }
 
@@ -521,7 +532,7 @@ mod tests {
         let view = View::new(&storage, &layout);
         // Row-major walk of the [3,2] transposed view: (0,0)=1 (0,1)=4
         // (1,0)=2 (1,1)=5 (2,0)=3 (2,1)=6.
-        let out = transfer_out(view).unwrap();
+        let out = transfer_out(view);
         assert_eq!(as_f32(&out), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     }
 
@@ -532,7 +543,7 @@ mod tests {
         let base = Layout::contiguous([2, 3, 4]).unwrap();
         let perm = base.permute(&[2, 0, 1]).unwrap(); // dims [4,2,3]
         let view = View::new(&storage, &perm);
-        let out = copy_strided(view).unwrap();
+        let out = copy_strided(view);
         // Reference: enumerate the permuted logical coords and read the base
         // element at the un-permuted coordinate.
         let base_strides = base.strides().to_vec();
@@ -557,7 +568,7 @@ mod tests {
         let layout = Layout::contiguous([4, 5]).unwrap().narrow(1, 1, 3).unwrap();
         assert_eq!(layout.dims(), &[4, 3]);
         let view = View::new(&storage, &layout);
-        let out = transfer_out(view).unwrap();
+        let out = transfer_out(view);
         let mut expected = Vec::new();
         for row in 0..4 {
             for col in 1..4 {
@@ -577,7 +588,7 @@ mod tests {
             .broadcast_to(&Shape::from([2, 4, 3]))
             .unwrap();
         let view = View::new(&storage, &layout);
-        let out = copy_strided(view).unwrap();
+        let out = copy_strided(view);
         // Every (leading, expanded) coordinate maps to data[col].
         let mut expected = Vec::new();
         for _ in 0..2 {
@@ -599,13 +610,13 @@ mod tests {
         let storage = f32_storage(data);
         let src_layout = Layout::contiguous([3, 4]).unwrap().transpose(0, 1).unwrap();
         let view = View::new(&storage, &src_layout);
-        let copied = copy_strided(view).unwrap();
+        let copied = copy_strided(view);
 
         // Re-view the copy contiguously in the transposed shape and compare
         // element-for-element against a second transfer_out of the source.
-        let expected = as_f32(&transfer_out(View::new(&storage, &src_layout)).unwrap());
+        let expected = as_f32(&transfer_out(View::new(&storage, &src_layout)));
         let new_layout = Layout::contiguous([4, 3]).unwrap();
-        let got = as_f32(&transfer_out(View::new(&copied, &new_layout)).unwrap());
+        let got = as_f32(&transfer_out(View::new(&copied, &new_layout)));
         assert_eq!(got, expected);
     }
 
@@ -693,7 +704,7 @@ mod tests {
         let buf = Arc::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let storage = Storage::Cpu(CpuStorage::F32(Arc::clone(&buf)));
         let layout = Layout::contiguous([2, 3]).unwrap();
-        let out = transfer_out(View::new(&storage, &layout)).unwrap();
+        let out = transfer_out(View::new(&storage, &layout));
         match &out {
             CpuStorage::F32(v) => assert!(
                 Arc::ptr_eq(v, &buf),
@@ -705,7 +716,7 @@ mod tests {
         // A partial view of the same buffer must *not* share it: it has to be
         // the narrowed window's own row-major buffer.
         let part = layout.narrow(0, 1, 1).unwrap();
-        let out = transfer_out(View::new(&storage, &part)).unwrap();
+        let out = transfer_out(View::new(&storage, &part));
         match &out {
             CpuStorage::F32(v) => {
                 assert!(!Arc::ptr_eq(v, &buf));
@@ -724,7 +735,7 @@ mod tests {
         let buf = Arc::new(vec![1.0f32, 2.0, 3.0, 4.0]);
         let storage = Storage::Cpu(CpuStorage::F32(Arc::clone(&buf)));
         let layout = Layout::contiguous([2, 2]).unwrap();
-        let out = copy_strided(View::new(&storage, &layout)).unwrap();
+        let out = copy_strided(View::new(&storage, &layout));
         match &out {
             Storage::Cpu(CpuStorage::F32(v)) => {
                 assert!(!Arc::ptr_eq(v, &buf), "copy_strided must allocate");
@@ -762,28 +773,28 @@ mod tests {
     #[test]
     fn full_fills_each_dtype() {
         assert_eq!(
-            as_f32(cpu(&full(3, DType::F32, 2.5).unwrap())),
+            as_f32(cpu(&full(3, DType::F32, 2.5))),
             vec![2.5, 2.5, 2.5]
         );
-        assert_eq!(as_i64(cpu(&full(2, DType::I64, 7.0).unwrap())), vec![7, 7]);
+        assert_eq!(as_i64(cpu(&full(2, DType::I64, 7.0))), vec![7, 7]);
         // Bool: non-zero is true, zero is false.
         assert_eq!(
-            as_bool(cpu(&full(2, DType::Bool, 1.0).unwrap())),
+            as_bool(cpu(&full(2, DType::Bool, 1.0))),
             vec![true, true]
         );
         assert_eq!(
-            as_bool(cpu(&full(2, DType::Bool, 0.0).unwrap())),
+            as_bool(cpu(&full(2, DType::Bool, 0.0))),
             vec![false, false]
         );
         // Zero-length fill.
-        assert!(as_f32(cpu(&full(0, DType::F32, 1.0).unwrap())).is_empty());
+        assert!(as_f32(cpu(&full(0, DType::F32, 1.0))).is_empty());
     }
 
     #[test]
     fn full_narrows_float_to_int_truncating() {
         // f64 -> i64 truncates toward zero.
-        assert_eq!(as_i64(cpu(&full(1, DType::I64, 2.9).unwrap())), vec![2]);
-        assert_eq!(as_i64(cpu(&full(1, DType::I64, -2.9).unwrap())), vec![-2]);
+        assert_eq!(as_i64(cpu(&full(1, DType::I64, 2.9))), vec![2]);
+        assert_eq!(as_i64(cpu(&full(1, DType::I64, -2.9))), vec![-2]);
     }
 
     // ------------------------------------------------------------------

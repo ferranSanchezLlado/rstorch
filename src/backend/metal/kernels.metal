@@ -26,9 +26,9 @@ kernel void copy_##NAME( \
     constant ulong* strides [[buffer(3)]], \
     constant uint& rank [[buffer(4)]], \
     constant ulong& offset [[buffer(5)]], \
-    constant ulong& len [[buffer(6)]], \
+    constant ulong& len [[buffer(6)]], constant uint& contiguous [[buffer(7)]], \
     uint gid [[thread_position_in_grid]]) { \
-    if (gid < len) dst[gid] = src[view_offset(gid, dims, strides, rank, offset)]; \
+    if (gid < len) dst[gid] = src[contiguous ? offset + gid : view_offset(gid, dims, strides, rank, offset)]; \
 } \
 kernel void copy_into_##NAME( \
     device const TYPE* src [[buffer(0)]], \
@@ -41,11 +41,11 @@ kernel void copy_into_##NAME( \
     constant ulong* dst_strides [[buffer(7)]], \
     constant uint& dst_rank [[buffer(8)]], \
     constant ulong& dst_offset [[buffer(9)]], \
-    constant ulong& len [[buffer(10)]], \
+    constant ulong& len [[buffer(10)]], constant uint& contiguous [[buffer(11)]], \
     uint gid [[thread_position_in_grid]]) { \
     if (gid < len) { \
-        ulong from = view_offset(gid, src_dims, src_strides, src_rank, src_offset); \
-        ulong to = view_offset(gid, dst_dims, dst_strides, dst_rank, dst_offset); \
+        ulong from = contiguous ? src_offset + gid : view_offset(gid, src_dims, src_strides, src_rank, src_offset); \
+        ulong to = contiguous ? dst_offset + gid : view_offset(gid, dst_dims, dst_strides, dst_rank, dst_offset); \
         dst[to] = src[from]; \
     } \
 }
@@ -112,10 +112,10 @@ kernel void binary_##NAME( \
     constant ulong& lo [[buffer(6)]], constant ulong* rd [[buffer(7)]], \
     constant ulong* rs [[buffer(8)]], constant uint& rr [[buffer(9)]], \
     constant ulong& ro [[buffer(10)]], constant ulong& len [[buffer(11)]], \
-    constant uint& op [[buffer(12)]], uint gid [[thread_position_in_grid]]) { \
+    constant uint& op [[buffer(12)]], constant uint& contiguous [[buffer(13)]], uint gid [[thread_position_in_grid]]) { \
     if (gid >= len) return; \
-    TYPE a = lhs[view_offset(gid, ld, ls, lr, lo)]; \
-    TYPE b = rhs[view_offset(gid, rd, rs, rr, ro)]; \
+    TYPE a = lhs[contiguous ? gid : view_offset(gid, ld, ls, lr, lo)]; \
+    TYPE b = rhs[contiguous ? gid : view_offset(gid, rd, rs, rr, ro)]; \
     switch (op) { case 0: out[gid]=ADD(a,b); break; case 1: out[gid]=SUB(a,b); break; \
       case 2: out[gid]=MUL(a,b); break; case 3: out[gid]=DIV(a,b); break; \
       case 4: out[gid]=value_nan(a)?a:(value_nan(b)?b:(a>=b?a:b)); break; \
@@ -126,8 +126,8 @@ kernel void scalar_##NAME( \
     constant ulong* d [[buffer(2)]], constant ulong* s [[buffer(3)]], \
     constant uint& r [[buffer(4)]], constant ulong& off [[buffer(5)]], \
     constant ulong& len [[buffer(6)]], constant ACC& scalar [[buffer(7)]], \
-    constant uint& op [[buffer(8)]], uint gid [[thread_position_in_grid]]) { \
-    if (gid >= len) return; ACC a=TO_ACC(x[view_offset(gid,d,s,r,off)]), b=scalar, v; \
+    constant uint& op [[buffer(8)]], constant uint& contiguous [[buffer(9)]], uint gid [[thread_position_in_grid]]) { \
+    if (gid >= len) return; ACC a=TO_ACC(x[contiguous ? gid : view_offset(gid,d,s,r,off)]), b=scalar, v; \
     switch(op){case 0:v=ADD(a,b);break;case 1:v=SUB(a,b);break;case 2:v=MUL(a,b);break; \
       case 3:v=DIV(a,b);break;case 4:v=value_nan(a)?a:(value_nan(b)?b:(a>=b?a:b));break;default:v=value_nan(a)?a:(value_nan(b)?b:(a<=b?a:b));} \
     out[gid]=FROM_ACC(v); \
@@ -139,8 +139,8 @@ kernel void compare_##NAME( \
     constant ulong& lo [[buffer(6)]], constant ulong* rd [[buffer(7)]], \
     constant ulong* rs [[buffer(8)]], constant uint& rr [[buffer(9)]], \
     constant ulong& ro [[buffer(10)]], constant ulong& len [[buffer(11)]], \
-    constant uint& op [[buffer(12)]], uint gid [[thread_position_in_grid]]) { \
-    if(gid>=len)return; TYPE a=lhs[view_offset(gid,ld,ls,lr,lo)],b=rhs[view_offset(gid,rd,rs,rr,ro)]; \
+    constant uint& op [[buffer(12)]], constant uint& contiguous [[buffer(13)]], uint gid [[thread_position_in_grid]]) { \
+    if(gid>=len)return; TYPE a=lhs[contiguous ? gid : view_offset(gid,ld,ls,lr,lo)],b=rhs[contiguous ? gid : view_offset(gid,rd,rs,rr,ro)]; \
     bool v; switch(op){case 0:v=a==b;break;case 1:v=a!=b;break;case 2:v=a<b;break; \
       case 3:v=a<=b;break;case 4:v=a>b;break;default:v=a>=b;} out[gid]=uchar(v); \
 } \
@@ -197,6 +197,33 @@ NUMERIC_KERNELS(half, float, f16, IDENTITY_F32, FROM_F16, NORMAL_ADD, NORMAL_SUB
 NUMERIC_KERNELS(float, float, f32, IDENTITY_F32, FROM_F32, NORMAL_ADD, NORMAL_SUB, NORMAL_MUL, FLOAT_DIV)
 NUMERIC_KERNELS(long, long, i64, IDENTITY_I64, FROM_I64, WRAP_ADD, WRAP_SUB, WRAP_MUL, INT_DIV)
 
+#define MATMUL_TILE 16
+#define TILED_MATMUL(TYPE, NAME, TO_ACC, FROM_ACC) \
+kernel void matmul_tiled_##NAME( \
+    device const TYPE* lhs [[buffer(0)]], device const TYPE* rhs [[buffer(1)]], device TYPE* out [[buffer(2)]], \
+    constant ulong* bd [[buffer(3)]], constant ulong* lbs [[buffer(4)]], constant ulong* rbs [[buffer(5)]], \
+    constant uint& br [[buffer(6)]], constant ulong* p [[buffer(7)]], constant ulong& len [[buffer(8)]], \
+    uint3 group [[threadgroup_position_in_grid]], uint3 tid [[thread_position_in_threadgroup]]) { \
+    threadgroup float lhs_tile[MATMUL_TILE * MATMUL_TILE]; \
+    threadgroup float rhs_tile[MATMUL_TILE * MATMUL_TILE]; \
+    ulong m=p[0],k=p[1],n=p[2],batch=group.z,row=ulong(group.y)*MATMUL_TILE+tid.y,col=ulong(group.x)*MATMUL_TILE+tid.x; \
+    ulong li=p[3],ri=p[4],b=batch; \
+    for(uint a=br;a>0;--a){ulong dim=bd[a-1],c=dim==0?0:b%dim;if(dim)b/=dim;li+=c*lbs[a-1];ri+=c*rbs[a-1];} \
+    float acc=0.0f; \
+    for(ulong tile=0;tile<k;tile+=MATMUL_TILE){ \
+        ulong lq=tile+tid.x,rq=tile+tid.y; \
+        lhs_tile[tid.y*MATMUL_TILE+tid.x]=(row<m&&lq<k)?TO_ACC(lhs[li+row*p[5]+lq*p[6]]):0.0f; \
+        rhs_tile[tid.y*MATMUL_TILE+tid.x]=(rq<k&&col<n)?TO_ACC(rhs[ri+rq*p[7]+col*p[8]]):0.0f; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        for(uint q=0;q<MATMUL_TILE;++q) acc+=lhs_tile[tid.y*MATMUL_TILE+q]*rhs_tile[q*MATMUL_TILE+tid.x]; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+    } \
+    ulong index=(batch*m+row)*n+col; \
+    if(row<m&&col<n&&index<len)out[index]=FROM_ACC(acc); \
+}
+TILED_MATMUL(half, f16, IDENTITY_F32, FROM_F16)
+TILED_MATMUL(float, f32, IDENTITY_F32, FROM_F32)
+
 kernel void compare_bool(
     device const uchar* lhs [[buffer(0)]], device const uchar* rhs [[buffer(1)]],
     device uchar* out [[buffer(2)]], constant ulong* ld [[buffer(3)]],
@@ -204,9 +231,9 @@ kernel void compare_bool(
     constant ulong& lo [[buffer(6)]], constant ulong* rd [[buffer(7)]],
     constant ulong* rs [[buffer(8)]], constant uint& rr [[buffer(9)]],
     constant ulong& ro [[buffer(10)]], constant ulong& len [[buffer(11)]],
-    constant uint& op [[buffer(12)]], uint gid [[thread_position_in_grid]]) {
+    constant uint& op [[buffer(12)]], constant uint& contiguous [[buffer(13)]], uint gid [[thread_position_in_grid]]) {
     if (gid >= len) return;
-    uchar a=lhs[view_offset(gid,ld,ls,lr,lo)], b=rhs[view_offset(gid,rd,rs,rr,ro)];
+    uchar a=lhs[contiguous ? gid : view_offset(gid,ld,ls,lr,lo)], b=rhs[contiguous ? gid : view_offset(gid,rd,rs,rr,ro)];
     bool v; switch(op){case 0:v=a==b;break;case 1:v=a!=b;break;case 2:v=a<b;break;
       case 3:v=a<=b;break;case 4:v=a>b;break;default:v=a>=b;} out[gid]=uchar(v);
 }
@@ -245,10 +272,10 @@ static float erf_accurate(float x) {
 #define FLOAT_UNARY(TYPE, NAME, FROM) \
 kernel void unary_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[buffer(1)]], \
  constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]], \
- constant ulong& off [[buffer(5)]],constant ulong& len [[buffer(6)]],constant uint& op [[buffer(7)]],uint gid [[thread_position_in_grid]]){ \
+ constant ulong& off [[buffer(5)]],constant ulong& len [[buffer(6)]],constant uint& op [[buffer(7)]],constant uint& contiguous [[buffer(8)]],uint gid [[thread_position_in_grid]]){ \
  /* relu propagates NaN: max() would return the non-NaN operand and quietly \
     turn a diverged activation back into 0. */ \
- if(gid>=len)return;float v=float(x[view_offset(gid,d,s,r,off)]),z;switch(op){case 0:z=isnan(v)?v:max(v,0.0f);break; \
+ if(gid>=len)return;float v=float(x[contiguous ? gid : view_offset(gid,d,s,r,off)]),z;switch(op){case 0:z=isnan(v)?v:max(v,0.0f);break; \
  case 1:z=0.5f*v*(1.0f+erf_accurate(v*0.7071067811865475f));break;case 2:z=exp(v);break;case 3:z=log(v);break; \
  /* MSL's tanh evaluates its positive branch as (exp(2x)-1)/(exp(2x)+1), so it
     breaks well before infinity: exp(2x) loses precision and then overflows,
@@ -268,8 +295,8 @@ FLOAT_UNARY(float,f32,FROM_F32)
 
 kernel void unary_i64(device const long* x [[buffer(0)]],device long* out [[buffer(1)]],
  constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]],
- constant ulong& off [[buffer(5)]],constant ulong& len [[buffer(6)]],constant uint& op [[buffer(7)]],uint gid [[thread_position_in_grid]]){
- if(gid>=len)return;long v=x[view_offset(gid,d,s,r,off)];long neg=as_type<long>(0UL-as_type<ulong>(v));out[gid]=op==7?neg:(v<0?neg:v);
+ constant ulong& off [[buffer(5)]],constant ulong& len [[buffer(6)]],constant uint& op [[buffer(7)]],constant uint& contiguous [[buffer(8)]],uint gid [[thread_position_in_grid]]){
+ if(gid>=len)return;long v=x[contiguous ? gid : view_offset(gid,d,s,r,off)];long neg=as_type<long>(0UL-as_type<ulong>(v));out[gid]=op==7?neg:(v<0?neg:v);
 }
 
 #define SELECT_KERNELS(TYPE, NAME, FROM, FILL) \
@@ -277,11 +304,11 @@ kernel void where_##NAME(device const uchar* c [[buffer(0)]],device const TYPE* 
  constant ulong* cd [[buffer(4)]],constant ulong* cs [[buffer(5)]],constant uint& cr [[buffer(6)]],constant ulong& co [[buffer(7)]], \
  constant ulong* td [[buffer(8)]],constant ulong* ts [[buffer(9)]],constant uint& tr [[buffer(10)]],constant ulong& to [[buffer(11)]], \
  constant ulong* fd [[buffer(12)]],constant ulong* fs [[buffer(13)]],constant uint& fr [[buffer(14)]],constant ulong& fo [[buffer(15)]], \
- constant ulong& len [[buffer(16)]],uint gid [[thread_position_in_grid]]){if(gid<len)out[gid]=c[view_offset(gid,cd,cs,cr,co)]?t[view_offset(gid,td,ts,tr,to)]:f[view_offset(gid,fd,fs,fr,fo)];} \
+ constant ulong& len [[buffer(16)]],constant uint& contiguous [[buffer(17)]],uint gid [[thread_position_in_grid]]){if(gid<len)out[gid]=c[contiguous ? gid : view_offset(gid,cd,cs,cr,co)]?t[contiguous ? gid : view_offset(gid,td,ts,tr,to)]:f[contiguous ? gid : view_offset(gid,fd,fs,fr,fo)];} \
 kernel void masked_##NAME(device const TYPE* x [[buffer(0)]],device const uchar* m [[buffer(1)]],device TYPE* out [[buffer(2)]], \
  constant ulong* xd [[buffer(3)]],constant ulong* xs [[buffer(4)]],constant uint& xr [[buffer(5)]],constant ulong& xo [[buffer(6)]], \
  constant ulong* md [[buffer(7)]],constant ulong* ms [[buffer(8)]],constant uint& mr [[buffer(9)]],constant ulong& mo [[buffer(10)]], \
- constant ulong& len [[buffer(11)]],constant FILL& fill [[buffer(12)]],uint gid [[thread_position_in_grid]]){if(gid<len)out[gid]=m[view_offset(gid,md,ms,mr,mo)]?FROM(fill):x[view_offset(gid,xd,xs,xr,xo)];}
+ constant ulong& len [[buffer(11)]],constant FILL& fill [[buffer(12)]],constant uint& contiguous [[buffer(13)]],uint gid [[thread_position_in_grid]]){if(gid<len)out[gid]=m[contiguous ? gid : view_offset(gid,md,ms,mr,mo)]?FROM(fill):x[contiguous ? gid : view_offset(gid,xd,xs,xr,xo)];}
 SELECT_KERNELS(half,f16,FROM_F16,float)
 SELECT_KERNELS(float,f32,FROM_F32,float)
 SELECT_KERNELS(long,i64,FROM_I64,long)
@@ -290,7 +317,7 @@ SELECT_KERNELS(uchar,bool,uchar,float)
 #define CAST_KERNEL(FROM, TO, FN, TN, EXPR) \
 kernel void cast_##FN##_to_##TN(device const FROM* x [[buffer(0)]],device TO* out [[buffer(1)]], \
  constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]],constant ulong& off [[buffer(5)]], \
- constant ulong& len [[buffer(6)]],uint gid [[thread_position_in_grid]]){if(gid<len){FROM v=x[view_offset(gid,d,s,r,off)];out[gid]=(EXPR);}}
+ constant ulong& len [[buffer(6)]],constant uint& contiguous [[buffer(7)]],uint gid [[thread_position_in_grid]]){if(gid<len){FROM v=x[contiguous ? gid : view_offset(gid,d,s,r,off)];out[gid]=(EXPR);}}
 static long float_to_i64(float value) {
     if (isnan(value)) return 0;
     // f32 cannot represent i64::MAX. 2^63 is the first source value at or
@@ -346,6 +373,15 @@ INDEX_KERNELS(half,float,f16,IDENTITY_F32,FROM_F16)
 INDEX_KERNELS(float,float,f32,IDENTITY_F32,FROM_F32)
 INDEX_KERNELS(long,long,i64,IDENTITY_I64,FROM_I64)
 
+#define CONTIGUOUS_INDEX_KERNELS(TYPE, ACC, NAME, TO_ACC, FROM_ACC) \
+kernel void index_select_axis0_##NAME(device const TYPE* x [[buffer(0)]],device const long* idx [[buffer(1)]],device TYPE* out [[buffer(2)]],constant ulong& len [[buffer(3)]],constant ulong& inner [[buffer(4)]],uint gid [[thread_position_in_grid]]){if(gid<len){ulong q=gid/inner,c=gid%inner;out[gid]=x[ulong(idx[q])*inner+c];}} \
+kernel void index_add_axis0_##NAME(device const TYPE* x [[buffer(0)]],device const long* idx [[buffer(1)]],device const TYPE* src [[buffer(2)]],device TYPE* out [[buffer(3)]],constant ulong& rows [[buffer(4)]],constant ulong& indices [[buffer(5)]],constant ulong& inner [[buffer(6)]],constant ulong* sd [[buffer(7)]],constant ulong* ss [[buffer(8)]],constant uint& sr [[buffer(9)]],constant ulong& so [[buffer(10)]],uint row [[thread_position_in_grid]]){if(row<rows){for(ulong c=0;c<inner;c++)out[row*inner+c]=x[row*inner+c];for(ulong q=0;q<indices;q++)if(ulong(idx[q])==row)for(ulong c=0;c<inner;c++){ulong pos=row*inner+c;out[pos]=FROM_ACC(TO_ACC(out[pos])+TO_ACC(src[view_offset(q*inner+c,sd,ss,sr,so)]));}}} \
+kernel void gather_last_##NAME(device const TYPE* x [[buffer(0)]],device const long* idx [[buffer(1)]],device TYPE* out [[buffer(2)]],constant ulong& len [[buffer(3)]],constant ulong& classes [[buffer(4)]],constant ulong& picks [[buffer(5)]],uint gid [[thread_position_in_grid]]){if(gid<len){ulong row=gid/picks;out[gid]=x[row*classes+ulong(idx[gid])];}} \
+kernel void scatter_add_last_##NAME(device const TYPE* x [[buffer(0)]],device const long* idx [[buffer(1)]],device const TYPE* src [[buffer(2)]],device TYPE* out [[buffer(3)]],constant ulong& len [[buffer(4)]],constant ulong& classes [[buffer(5)]],constant ulong& picks [[buffer(6)]],constant ulong* sd [[buffer(7)]],constant ulong* ss [[buffer(8)]],constant uint& sr [[buffer(9)]],constant ulong& so [[buffer(10)]],uint gid [[thread_position_in_grid]]){if(gid<len){ulong row=gid/classes,c=gid%classes;ACC acc=TO_ACC(x[gid]);for(ulong q=0;q<picks;q++){ulong pos=row*picks+q;if(ulong(idx[pos])==c)acc+=TO_ACC(src[view_offset(pos,sd,ss,sr,so)]);}out[gid]=FROM_ACC(acc);}}
+CONTIGUOUS_INDEX_KERNELS(half,float,f16,IDENTITY_F32,FROM_F16)
+CONTIGUOUS_INDEX_KERNELS(float,float,f32,IDENTITY_F32,FROM_F32)
+CONTIGUOUS_INDEX_KERNELS(long,long,i64,IDENTITY_I64,FROM_I64)
+
 kernel void index_select_bool(device const uchar* x [[buffer(0)]],device const long* idx [[buffer(1)]],device uchar* out [[buffer(2)]],
  constant ulong* xd [[buffer(3)]],constant ulong* xs [[buffer(4)]],constant uint& xr [[buffer(5)]],constant ulong& xo [[buffer(6)]],
  constant ulong* id [[buffer(7)]],constant ulong* is [[buffer(8)]],constant uint& ir [[buffer(9)]],constant ulong& io [[buffer(10)]],
@@ -388,6 +424,51 @@ kernel void layer_norm_##NAME(device const TYPE* x [[buffer(0)]],device const TY
 kernel void layer_norm_backward_##NAME(device const TYPE* g [[buffer(0)]],device const float* xhat [[buffer(1)]],device const float* inv [[buffer(2)]],device const TYPE* w [[buffer(3)]],device TYPE* out [[buffer(4)]],constant ulong* gd [[buffer(5)]],constant ulong* gs [[buffer(6)]],constant uint& gr [[buffer(7)]],constant ulong& go [[buffer(8)]],constant ulong* hd [[buffer(9)]],constant ulong* hs [[buffer(10)]],constant uint& hr [[buffer(11)]],constant ulong& ho [[buffer(12)]],constant ulong* is [[buffer(13)]],constant ulong& io [[buffer(14)]],constant ulong* ws [[buffer(15)]],constant ulong& wo [[buffer(16)]],constant ulong& rows [[buffer(17)]],constant ulong& width [[buffer(18)]],uint row [[thread_position_in_grid]]){if(row>=rows)return;float sum=0,sumh=0;for(ulong c=0;c<width;c++){float dy=float(g[view_offset(row*width+c,gd,gs,gr,go)])*float(w[wo+c*ws[0]]),h=xhat[view_offset(row*width+c,hd,hs,hr,ho)];sum+=dy;sumh+=dy*h;}float iv=inv[io+row];for(ulong c=0;c<width;c++){float dy=float(g[view_offset(row*width+c,gd,gs,gr,go)])*float(w[wo+c*ws[0]]),h=xhat[view_offset(row*width+c,hd,hs,hr,ho)];out[row*width+c]=FROM(iv*(dy-(sum+h*sumh)/float(width)));}}
 FUSED_FLOAT(half,f16,FROM_F16)
 FUSED_FLOAT(float,f32,FROM_F32)
+
+#define PARALLEL_WIDTH 256
+static float parallel_sum(float value, uint tid, threadgroup float* scratch) {
+    float lane_sum = simd_sum(value);
+    if ((tid & 31) == 0) scratch[tid >> 5] = lane_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < PARALLEL_WIDTH / 32; ++i) total += scratch[i];
+        scratch[0] = total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return scratch[0];
+}
+static float parallel_max(float value, uint tid, threadgroup float* scratch) {
+    float lane_max = simd_max(value);
+    if ((tid & 31) == 0) scratch[tid >> 5] = lane_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float peak = -INFINITY;
+        for (uint i = 0; i < PARALLEL_WIDTH / 32; ++i) peak = max(peak, scratch[i]);
+        scratch[0] = peak;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return scratch[0];
+}
+static float parallel_min(float value, uint tid, threadgroup float* scratch) {
+    float lane_min = simd_min(value);
+    if ((tid & 31) == 0) scratch[tid >> 5] = lane_min;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float low = INFINITY;
+        for (uint i = 0; i < PARALLEL_WIDTH / 32; ++i) low = min(low, scratch[i]);
+        scratch[0] = low;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return scratch[0];
+}
+#define PARALLEL_FLOAT(TYPE, NAME, FROM) \
+kernel void reduce_parallel_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[buffer(1)]],constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]],constant ulong& off [[buffer(5)]],constant ulong& out_len [[buffer(6)]],constant uint& axis [[buffer(7)]],constant uint& op [[buffer(8)]],uint row [[threadgroup_position_in_grid]],uint tid [[thread_position_in_threadgroup]]){threadgroup float vals[PARALLEL_WIDTH];threadgroup float flags[PARALLEL_WIDTH];if(row>=out_len)return;ulong n=d[axis],base=reduced_offset(row,d,s,r,axis,off);float acc=op<2?0.0f:(op==2?-INFINITY:INFINITY),nan=0.0f;for(ulong i=tid;i<n;i+=PARALLEL_WIDTH){float v=float(x[base+i*s[axis]]);nan+=float(isnan(v));if(op<2)acc+=v;else if(op==2)acc=max(acc,v);else acc=min(acc,v);}nan=parallel_sum(nan,tid,flags);acc=op<2?parallel_sum(acc,tid,vals):(op==2?parallel_max(acc,tid,vals):parallel_min(acc,tid,vals));if(tid==0){float v=nan>0.0f?NAN:acc;if(op==1)v/=float(n);out[row]=FROM(v);}} \
+kernel void softmax_parallel_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[buffer(1)]],constant ulong* d [[buffer(2)]],constant ulong* s [[buffer(3)]],constant uint& r [[buffer(4)]],constant ulong& off [[buffer(5)]],constant ulong& rows [[buffer(6)]],constant ulong& width [[buffer(7)]],uint row [[threadgroup_position_in_grid]],uint tid [[thread_position_in_threadgroup]]){threadgroup float vals[PARALLEL_WIDTH];threadgroup float flags[PARALLEL_WIDTH];if(row>=rows)return;ulong base=reduced_offset(row,d,s,r,r-1,off);float peak=-INFINITY,nan=0.0f;for(ulong c=tid;c<width;c+=PARALLEL_WIDTH){float v=float(x[base+c*s[r-1]]);nan+=float(isnan(v));peak=max(peak,v);}peak=parallel_max(peak,tid,vals);nan=parallel_sum(nan,tid,flags);float sum=0.0f;if(nan==0.0f&&peak!=-INFINITY)for(ulong c=tid;c<width;c+=PARALLEL_WIDTH)sum+=exp(float(x[base+c*s[r-1]])-peak);sum=parallel_sum(sum,tid,vals);for(ulong c=tid;c<width;c+=PARALLEL_WIDTH)out[row*width+c]=nan>0.0f?FROM(NAN):(peak==-INFINITY?FROM(0):FROM(exp(float(x[base+c*s[r-1]])-peak)/sum));} \
+kernel void layer_norm_parallel_##NAME(device const TYPE* x [[buffer(0)]],device const TYPE* w [[buffer(1)]],device const TYPE* b [[buffer(2)]],device TYPE* out [[buffer(3)]],device float* xhat [[buffer(4)]],device float* invout [[buffer(5)]],constant ulong* xd [[buffer(6)]],constant ulong* xs [[buffer(7)]],constant uint& xr [[buffer(8)]],constant ulong& xo [[buffer(9)]],constant ulong* ws [[buffer(10)]],constant ulong& woff [[buffer(11)]],constant ulong* bs [[buffer(12)]],constant ulong& boff [[buffer(13)]],constant ulong& rows [[buffer(14)]],constant ulong& width [[buffer(15)]],constant float& eps [[buffer(16)]],constant uint& save [[buffer(17)]],uint row [[threadgroup_position_in_grid]],uint tid [[thread_position_in_threadgroup]]){threadgroup float vals[PARALLEL_WIDTH];if(row>=rows)return;ulong base=reduced_offset(row,xd,xs,xr,xr-1,xo);float sum=0.0f;for(ulong c=tid;c<width;c+=PARALLEL_WIDTH)sum+=float(x[base+c*xs[xr-1]]);float mean=parallel_sum(sum,tid,vals)/float(width),var=0.0f;for(ulong c=tid;c<width;c+=PARALLEL_WIDTH){float z=float(x[base+c*xs[xr-1]])-mean;var+=z*z;}float inv=rsqrt(parallel_sum(var,tid,vals)/float(width)+eps);if(save&&tid==0)invout[row]=inv;for(ulong c=tid;c<width;c+=PARALLEL_WIDTH){float z=(float(x[base+c*xs[xr-1]])-mean)*inv;if(save)xhat[row*width+c]=z;out[row*width+c]=FROM(z*float(w[woff+c*ws[0]])+float(b[boff+c*bs[0]]));}} \
+kernel void layer_norm_backward_parallel_##NAME(device const TYPE* g [[buffer(0)]],device const float* xhat [[buffer(1)]],device const float* inv [[buffer(2)]],device const TYPE* w [[buffer(3)]],device TYPE* out [[buffer(4)]],constant ulong* gd [[buffer(5)]],constant ulong* gs [[buffer(6)]],constant uint& gr [[buffer(7)]],constant ulong& go [[buffer(8)]],constant ulong* hd [[buffer(9)]],constant ulong* hs [[buffer(10)]],constant uint& hr [[buffer(11)]],constant ulong& ho [[buffer(12)]],constant ulong* is [[buffer(13)]],constant ulong& io [[buffer(14)]],constant ulong* ws [[buffer(15)]],constant ulong& wo [[buffer(16)]],constant ulong& rows [[buffer(17)]],constant ulong& width [[buffer(18)]],uint row [[threadgroup_position_in_grid]],uint tid [[thread_position_in_threadgroup]]){threadgroup float sums[PARALLEL_WIDTH];threadgroup float sumhs[PARALLEL_WIDTH];if(row>=rows)return;float sum=0.0f,sumh=0.0f;for(ulong c=tid;c<width;c+=PARALLEL_WIDTH){float dy=float(g[view_offset(row*width+c,gd,gs,gr,go)])*float(w[wo+c*ws[0]]),h=xhat[view_offset(row*width+c,hd,hs,hr,ho)];sum+=dy;sumh+=dy*h;}sum=parallel_sum(sum,tid,sums);sumh=parallel_sum(sumh,tid,sumhs);float iv=inv[io+row];for(ulong c=tid;c<width;c+=PARALLEL_WIDTH){float dy=float(g[view_offset(row*width+c,gd,gs,gr,go)])*float(w[wo+c*ws[0]]),h=xhat[view_offset(row*width+c,hd,hs,hr,ho)];out[row*width+c]=FROM(iv*(dy-(sum+h*sumh)/float(width)));}}
+PARALLEL_FLOAT(half,f16,FROM_F16)
+PARALLEL_FLOAT(float,f32,FROM_F32)
 
 #define OPT_KERNELS(TYPE, NAME, FROM) \
 kernel void sgd_##NAME(device const TYPE* p [[buffer(0)]],device const TYPE* g [[buffer(1)]],device const float* vin [[buffer(2)]],device TYPE* pout [[buffer(3)]],device float* vout [[buffer(4)]],constant ulong& len [[buffer(5)]],constant float* hp [[buffer(6)]],constant uint& hasv [[buffer(7)]],constant uint& usem [[buffer(8)]],uint gid [[thread_position_in_grid]]){if(gid>=len)return;float pv=float(p[gid]),grad=float(g[gid])+hp[2]*pv,dir=hasv?hp[1]*vin[gid]+grad:grad;if(usem)vout[gid]=dir;pout[gid]=FROM(pv-hp[0]*dir);} \

@@ -37,7 +37,10 @@ impl Prng {
 fn out_slice<E: CpuElement>(storage: &Storage) -> Vec<E> {
     match storage {
         Storage::Cpu(cpu) => E::slice(cpu).to_vec(),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
+        #[cfg(any(
+            all(feature = "metal", target_os = "macos"),
+            all(feature = "wgpu", not(target_arch = "wasm32"))
+        ))]
         _ => panic!("non-cpu storage in cpu test"),
     }
 }
@@ -142,8 +145,8 @@ fn cursor_matches_reference_on_contiguous_permuted_narrowed_broadcast() {
     let data = base.data();
 
     // Contiguous.
-    let l = base.layout.clone();
-    check_cursor(&data, &l);
+    let l = &base.layout;
+    check_cursor(&data, l);
 
     // Transposed / permuted.
     check_cursor(&data, &l.transpose(0, 2).unwrap());
@@ -179,7 +182,7 @@ fn binary_f32_over_broadcast_and_permuted_views() {
     let lhs = contig_f32(&[2, 3]);
     let rhs_base = contig_f32(&[1, 3]);
     let rhs_layout = rhs_base.layout.broadcast_to(&Shape::from([2, 3])).unwrap();
-    let rhs = Owned::<f32>::new(rhs_base.data(), rhs_layout);
+    let rhs = Owned::new(rhs_base.data(), rhs_layout);
 
     for op in [
         BinaryOp::Add,
@@ -206,7 +209,7 @@ fn binary_i64_arithmetic_matches_reference() {
     let lhs = contig_i64(&[2, 2, 2]);
     let rhs = contig_i64(&[2, 2, 2]);
     // Permute the lhs so a strided read is exercised.
-    let lhs_perm = Owned::<i64>::new(lhs.data(), lhs.layout.transpose(0, 2).unwrap());
+    let lhs_perm = Owned::new(lhs.data(), lhs.layout.transpose(0, 2).unwrap());
 
     for op in [
         BinaryOp::Add,
@@ -240,11 +243,11 @@ fn binary_i64_arithmetic_matches_reference() {
 #[test]
 fn i64_wrapping_and_division_edges_have_literal_values() {
     let dims = || Layout::contiguous([2, 3]).unwrap();
-    let lhs = Owned::<i64>::new(
+    let lhs = Owned::new(
         vec![i64::MAX, i64::MIN, i64::MIN, i64::MIN, i64::MAX, -7],
         dims(),
     );
-    let rhs = Owned::<i64>::new(vec![1, -1, -1, i64::MIN, 2, 0], dims());
+    let rhs = Owned::new(vec![1, -1, -1, i64::MIN, 2, 0], dims());
 
     // Addition, subtraction, and multiplication wrap (PyTorch's integer
     // overflow semantics), identically in debug and release.
@@ -315,7 +318,7 @@ fn binary_bool_is_unsupported() {
 fn binary_scalar_matches_reference() {
     let x = contig_f32(&[3, 4]).layout.transpose(0, 1).unwrap();
     let base = contig_f32(&[3, 4]);
-    let xv = Owned::<f32>::new(base.data(), x);
+    let xv = Owned::new(base.data(), x);
     let got = binary_scalar(BinaryOp::Add, xv.view(), 2.5).unwrap();
     let expected: Vec<f32> = gather(&xv.data(), &xv.layout)
         .iter()
@@ -338,8 +341,8 @@ fn unary_float_ops_match_reference_on_strided_view() {
     // Positive-only base so ln/sqrt are defined.
     let n = 12usize;
     let data: Vec<f32> = (0..n).map(|i| i as f32 * 0.25 + 0.1).collect();
-    let owned = Owned::<f32>::new(data, Layout::contiguous([3, 4]).unwrap());
-    let strided = Owned::<f32>::new(owned.data(), owned.layout.transpose(0, 1).unwrap());
+    let owned = Owned::new(data, Layout::contiguous([3, 4]).unwrap());
+    let strided = Owned::new(owned.data(), owned.layout.transpose(0, 1).unwrap());
 
     for op in [
         UnaryOp::Relu,
@@ -383,7 +386,7 @@ fn unary_bool_is_unsupported() {
 #[test]
 fn gelu_is_exact_not_tanh_approx() {
     // Exact GELU at x=1: 0.5 * 1 * (1 + erf(1/sqrt2)) = 0.8413447460685429...
-    let x = Owned::<f64>::new(vec![1.0], Layout::contiguous([1]).unwrap());
+    let x = Owned::new(vec![1.0], Layout::contiguous([1]).unwrap());
     let got = unary(UnaryOp::Gelu, x.view()).unwrap();
     let v = out_slice::<f64>(&got)[0];
     let exact = 0.5 * (1.0 + erf(std::f64::consts::FRAC_1_SQRT_2));
@@ -428,7 +431,7 @@ fn erf_matches_known_values() {
 fn compare_produces_bool_matching_reference() {
     let lhs = contig_i64(&[2, 3]);
     let rhs_base = contig_i64(&[3]);
-    let rhs = Owned::<i64>::new(
+    let rhs = Owned::new(
         rhs_base.data(),
         rhs_base.layout.broadcast_to(&Shape::from([2, 3])).unwrap(),
     );
@@ -481,12 +484,12 @@ fn compare_works_on_bool_and_f32() {
 fn where_selects_by_condition_over_broadcast() {
     // cond: [2,1] broadcast to [2,3]; on_true/on_false contiguous [2,3].
     let cond_base = contig_bool(&[2, 1]);
-    let cond = Owned::<bool>::new(
+    let cond = Owned::new(
         cond_base.data(),
         cond_base.layout.broadcast_to(&Shape::from([2, 3])).unwrap(),
     );
     let t = contig_f32(&[2, 3]);
-    let f = Owned::<f32>::new(vec![-1.0; 6], Layout::contiguous([2, 3]).unwrap());
+    let f = Owned::new(vec![-1.0; 6], Layout::contiguous([2, 3]).unwrap());
 
     let got = where_cond(cond.view(), t.view(), f.view()).unwrap();
     let c = gather(&cond.data(), &cond.layout);
@@ -500,7 +503,7 @@ fn where_selects_by_condition_over_broadcast() {
 fn where_works_for_i64_and_bool() {
     let cond = contig_bool(&[4]);
     let t = contig_i64(&[4]);
-    let f = Owned::<i64>::new(vec![99; 4], Layout::contiguous([4]).unwrap());
+    let f = Owned::new(vec![99; 4], Layout::contiguous([4]).unwrap());
     let got = where_cond(cond.view(), t.view(), f.view()).unwrap();
     let c = cond.data();
     let tt = t.data();
@@ -517,7 +520,7 @@ fn masked_fill_replaces_where_mask_true_over_broadcast_mask() {
     let x = contig_f32(&[2, 3]);
     // mask: [3] broadcast to [2,3].
     let mask_base = contig_bool(&[3]);
-    let mask = Owned::<bool>::new(
+    let mask = Owned::new(
         mask_base.data(),
         mask_base.layout.broadcast_to(&Shape::from([2, 3])).unwrap(),
     );
@@ -535,8 +538,8 @@ fn masked_fill_replaces_where_mask_true_over_broadcast_mask() {
 #[test]
 fn masked_fill_over_permuted_x() {
     let base = contig_i64(&[3, 4]);
-    let x = Owned::<i64>::new(base.data(), base.layout.transpose(0, 1).unwrap());
-    let mask = Owned::<bool>::new(
+    let x = Owned::new(base.data(), base.layout.transpose(0, 1).unwrap());
+    let mask = Owned::new(
         (0..12).map(|i| i % 2 == 0).collect(),
         Layout::contiguous([4, 3]).unwrap(),
     );
@@ -618,8 +621,8 @@ fn randomised_binary_matches_reference_f32() {
         let vn: usize = vshape.iter().product();
         let rhs_data: Vec<f32> = (0..vn).map(|i| (i as f32) * 0.7 + 0.2).collect();
 
-        let lhs = Owned::<f32>::new(base.clone(), lhs_layout);
-        let rhs = Owned::<f32>::new(rhs_data, Layout::contiguous(vshape).unwrap());
+        let lhs = Owned::new(base.clone(), lhs_layout);
+        let rhs = Owned::new(rhs_data, Layout::contiguous(vshape).unwrap());
 
         let op = [BinaryOp::Add, BinaryOp::Mul, BinaryOp::Maximum][rng.below(3)];
         let got = binary(op, lhs.view(), rhs.view()).unwrap();
@@ -647,8 +650,8 @@ fn randomised_compare_matches_reference_i64() {
         let vn: usize = vshape.iter().product();
         let rhs_data: Vec<i64> = (0..vn).map(|i| (i as i64) % 3 - 1).collect();
 
-        let lhs = Owned::<i64>::new(base.clone(), lhs_layout);
-        let rhs = Owned::<i64>::new(rhs_data, Layout::contiguous(vshape).unwrap());
+        let lhs = Owned::new(base.clone(), lhs_layout);
+        let rhs = Owned::new(rhs_data, Layout::contiguous(vshape).unwrap());
 
         let op = [CmpOp::Lt, CmpOp::Eq, CmpOp::Ge][rng.below(3)];
         let got = compare(op, lhs.view(), rhs.view()).unwrap();
@@ -678,13 +681,13 @@ fn randomised_masked_fill_matches_reference_bool_payload() {
         let dims: Vec<usize> = (0..rank).map(|_| 1 + rng.below(3)).collect();
         let n: usize = dims.iter().product();
         let x_data: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
-        let x = Owned::<bool>::new(x_data, Layout::contiguous(dims.clone()).unwrap());
+        let x = Owned::new(x_data, Layout::contiguous(dims.clone()).unwrap());
 
         let mask_layout = random_view(&mut rng, &dims);
         // A mask over the *same* logical shape but possibly strided: build it
         // over a contiguous base of the pre-view dims and re-view.
         let mask_base: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
-        let mask = Owned::<bool>::new(mask_base, mask_layout.clone());
+        let mask = Owned::new(mask_base, mask_layout.clone());
         // masked_fill requires mask shape == x shape; only use views that
         // preserve the shape (transpose keeps numel but not dims order), so
         // restrict to same-dims views here.
@@ -768,7 +771,7 @@ fn dense_and_strided<E: CpuElement>(
     cols: usize,
 ) -> (Owned<E>, Owned<E>) {
     assert_eq!(values.len(), rows * cols);
-    let dense = Owned::<E>::new(
+    let dense = Owned::new(
         values.to_vec(),
         Layout::contiguous(vec![rows, cols]).unwrap(),
     );
@@ -778,7 +781,7 @@ fn dense_and_strided<E: CpuElement>(
             col_major[j * rows + i] = values[i * cols + j];
         }
     }
-    let strided = Owned::<E>::new(
+    let strided = Owned::new(
         col_major,
         Layout::contiguous(vec![cols, rows])
             .unwrap()
@@ -997,7 +1000,7 @@ fn dense_path_covers_a_contiguous_prefix_of_a_larger_storage() {
     let prefix = base.layout.narrow(0, 0, 2).unwrap();
     assert!(prefix.is_contiguous());
     assert_eq!(prefix.num_elements(), 6);
-    let x = Owned::<f32>::new(base.data(), prefix);
+    let x = Owned::new(base.data(), prefix);
 
     let got = binary(BinaryOp::Mul, x.view(), x.view()).unwrap();
     let expected: Vec<f32> = gather(&x.data(), &x.layout).iter().map(|a| a * a).collect();
@@ -1082,8 +1085,8 @@ fn dense_classifies_layouts_and_clamps_to_the_view_length() {
 fn binary_op_matches_scalar_semantics_on_signed_zero() {
     use crate::backend::cpu::acc::NumAcc;
 
-    let lhs = Owned::<f32>::new(vec![0.0, 0.0, -0.0, -0.0], Layout::contiguous([4]).unwrap());
-    let rhs = Owned::<f32>::new(vec![0.0, -0.0, 0.0, -0.0], Layout::contiguous([4]).unwrap());
+    let lhs = Owned::new(vec![0.0, 0.0, -0.0, -0.0], Layout::contiguous([4]).unwrap());
+    let rhs = Owned::new(vec![0.0, -0.0, 0.0, -0.0], Layout::contiguous([4]).unwrap());
 
     let max = binary(BinaryOp::Maximum, lhs.view(), rhs.view()).unwrap();
     let min = binary(BinaryOp::Minimum, lhs.view(), rhs.view()).unwrap();
