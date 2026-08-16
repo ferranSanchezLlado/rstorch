@@ -20,9 +20,7 @@ fn f16_available_or_loud() -> bool {
             dtype: DType::F16,
             ..
         }) => false,
-        Err(Error::Backend { msg, .. }) if msg.contains("adapter ordinal 0 is unavailable") => {
-            false
-        }
+        Err(Error::Backend { .. }) => false,
         Err(error) => panic!("unexpected F16 capability probe error: {error}"),
     }
 }

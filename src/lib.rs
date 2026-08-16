@@ -25,7 +25,8 @@
 //! | `rayon` | Multi-threaded CPU kernels. Results are bit-identical to the single-threaded ones: kernels partition by output element, so no float is accumulated across threads in a racing order. |
 //! | `hub` | Downloads for the bundled datasets in [`data::hub`]. |
 //! | `metal` | The default macOS GPU backend. [`Device::best_available`] selects it when present, then considers WGPU and CPU. |
-//! | `wgpu` | Opt-in portable native GPU backend. Supports F32 compute plus lossless I64 index storage; unsupported dtypes fail loudly. |
+//! | `cuda` | Opt-in native NVIDIA GPU backend on Linux and Windows, including Linux under WSL. [`Device::best_available`] selects it when present before considering WGPU and CPU. Supports compute capability 6.0+, F16/F32 compute, and I64/Bool storage. Bundled PTX requires a compatible NVIDIA driver, but not the CUDA toolkit. |
+//! | `wgpu` | Opt-in portable native GPU backend. Supports F32 compute plus lossless I64/Bool storage and native F16 when the adapter exposes `SHADER_F16`; unsupported dtypes fail loudly. |
 //! | `testing` | The `testing` finite-difference gradient harness. The one public module outside the stability guarantee. |
 //!
 //! # Stability

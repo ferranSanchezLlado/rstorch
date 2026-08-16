@@ -301,4 +301,28 @@ mod tests {
             })
         ));
     }
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    #[test]
+    fn wrong_runtime_device_is_rejected_without_cuda_storage() {
+        use crate::typed::{Cuda, Tensor1};
+
+        let dynamic = Tensor::zeros([1], f32::DTYPE, &crate::Device::Cpu).unwrap();
+        let forged_cuda_binding = Arc::new(DeviceBinding {
+            device: crate::Device::Cuda(0),
+        });
+
+        assert!(matches!(
+            checked_wrap::<Tensor1<1, f32, Cuda<0>>>(
+                dynamic,
+                forged_cuda_binding,
+                "wrong_device_test"
+            ),
+            Err(Error::DeviceMismatch {
+                op: "wrong_device_test",
+                expected: crate::Device::Cuda(0),
+                got: crate::Device::Cpu,
+            })
+        ));
+    }
 }

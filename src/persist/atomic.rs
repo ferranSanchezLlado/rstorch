@@ -109,9 +109,10 @@ fn unique_temp_path(path: &Path) -> PathBuf {
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    let file_name = path
-        .file_name()
-        .map_or_else(|| "artifact".to_string(), |s| s.to_string_lossy().into_owned());
+    let file_name = path.file_name().map_or_else(
+        || "artifact".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
     let temp_name = format!(".{file_name}.tmp-{pid}-{n}");
     match path.parent().filter(|p| !p.as_os_str().is_empty()) {
         Some(parent) => parent.join(temp_name),

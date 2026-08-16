@@ -38,6 +38,8 @@
 pub(crate) mod conformance;
 pub(crate) mod conv_geometry;
 pub(crate) mod cpu;
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+pub(crate) mod cuda;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) mod metal;
 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
@@ -512,6 +514,8 @@ pub(crate) mod dispatch {
             Device::Cpu => &CPU,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Device::Metal(ordinal) => super::metal::backend(ordinal),
+            #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+            Device::Cuda(ordinal) => super::cuda::backend(ordinal),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
             Device::Wgpu(ordinal) => super::wgpu::backend(ordinal),
         }

@@ -8,5 +8,8 @@ pub use super::{
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use super::Metal;
 
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+pub use super::Cuda;
+
 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
 pub use super::Wgpu;

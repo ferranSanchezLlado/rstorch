@@ -195,6 +195,25 @@ impl<const N: usize> Placement for Metal<N> {
     }
 }
 
+/// A fixed NVIDIA CUDA logical placement with device ordinal `N`.
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Cuda<const N: usize>;
+
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+impl<const N: usize> Placement for Cuda<N> {
+    fn validate_device(device: Device) -> Result<()> {
+        if device == Device::Cuda(N) {
+            Ok(())
+        } else {
+            Err(Error::InvalidArg {
+                op: "DeviceCtx::bind",
+                msg: format!("Cuda<{N}> placement requires cuda:{N}, got {device}"),
+            })
+        }
+    }
+}
+
 /// A fixed portable WebGPU logical placement with adapter ordinal `N`.
 ///
 /// WGPU currently provides F32 compute and lossless I64/Bool storage for the
@@ -387,5 +406,13 @@ mod tests {
         assert!(Metal::<0>::validate_device(Device::Metal(0)).is_ok());
         assert!(Metal::<0>::validate_device(Device::Metal(1)).is_err());
         assert!(Metal::<0>::validate_device(Device::Cpu).is_err());
+    }
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    #[test]
+    fn fixed_cuda_placement_policy_rejects_other_devices() {
+        assert!(Cuda::<0>::validate_device(Device::Cuda(0)).is_ok());
+        assert!(Cuda::<0>::validate_device(Device::Cuda(1)).is_err());
+        assert!(Cuda::<0>::validate_device(Device::Cpu).is_err());
     }
 }

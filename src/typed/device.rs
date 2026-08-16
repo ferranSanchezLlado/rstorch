@@ -203,7 +203,7 @@ pub(crate) fn checked_relabel_binding<P: Placement, Q: Placement>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::{Cpu, Placement};
+    use crate::typed::Placement;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
@@ -435,7 +435,7 @@ mod tests {
 
         #[cfg(all(feature = "metal", target_os = "macos"))]
         assert!(matches!(
-            DeviceCtx::<Cpu>::bind(Device::Metal(0)),
+            DeviceCtx::<crate::typed::Cpu>::bind(Device::Metal(0)),
             Err(Error::InvalidArg { .. })
         ));
     }
@@ -448,6 +448,20 @@ mod tests {
         assert!(Metal::<2>::validate_device(Device::Metal(2)).is_ok());
         assert!(Metal::<2>::validate_device(Device::Metal(1)).is_err());
         assert!(Metal::<2>::validate_device(Device::Cpu).is_err());
+    }
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    #[test]
+    fn fixed_cuda_marker_rejects_other_devices() {
+        use crate::typed::Cuda;
+
+        assert!(matches!(
+            DeviceCtx::<Cuda<0>>::bind(Device::Cpu),
+            Err(Error::InvalidArg {
+                op: "DeviceCtx::bind",
+                ..
+            })
+        ));
     }
 
     struct BestAvailable;

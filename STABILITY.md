@@ -9,9 +9,9 @@ when its feature is enabled on a supported target.
 
 Everything reachable from `rstorch::` is covered, except the
 `rstorch::testing` module described below. This includes the dynamic API, the
-optional `typed`, `hub`, `rayon`, `metal`, and `wgpu` features, and the public
-derive macros. Removing an item, narrowing a signature, or moving a covered
-item to another module is a breaking change.
+optional `typed`, `hub`, `rayon`, `metal`, `cuda`, and `wgpu` features, and the
+public derive macros. Removing an item, narrowing a signature, or moving a
+covered item to another module is a breaking change.
 
 This is enforced by review and semantic versioning discipline rather than a
 mechanical baseline diff; an intentional public change is called out in the
@@ -26,8 +26,8 @@ The following are also covered contracts:
   Reusing a moved value is a compiler error; ignoring it emits the normal
   `#[must_use]` warning, which CI promotes to an error in the relevant suites.
 - `Device` has no public backend trait. CPU is the reference implementation;
-  Metal and WGPU are validated against it where their capability contracts
-  apply. Unsupported operations return `Error::Unsupported` rather than
+  Metal, CUDA, and WGPU are validated against it where their capability
+  contracts apply. Unsupported operations return `Error::Unsupported` rather than
   silently copying data to the host.
 
 ## Backend And Dtype Scope
@@ -42,11 +42,13 @@ with `Error::Unsupported`; it must not silently promote or reinterpret it.
 |---|---|
 | CPU | Reference kernels over all six dtypes, subject to each operation's documented contract. |
 | Metal | F16, F32, I64, and Bool storage with operation-specific kernel support. BF16 and F64 storage are unsupported. |
+| CUDA | Opt-in natively on Linux and Windows, including Linux under WSL. Compute capability 6.0 or newer; F16/F32 compute plus lossless I64 and Bool storage for the operations that support them. BF16 and F64 storage are unsupported. Kernels are bundled as PTX, so runtime use requires a compatible NVIDIA driver but not the CUDA toolkit. |
 | WGPU | F32 compute plus lossless I64 and Bool storage for the operations that support them. Native F16 is available when the adapter exposes `SHADER_F16`; BF16 and F64 storage are unsupported. |
 
 `Device::best_available` selects the first Metal device on macOS when the
-`metal` feature is enabled, then the first native WGPU adapter when `wgpu` is
-enabled, and otherwise CPU. Hardware availability is not guaranteed by the
+`metal` feature is enabled, then the first CUDA device on Linux or Windows when
+`cuda` is enabled, then the first hardware WGPU adapter when `wgpu` is enabled,
+and otherwise CPU. Hardware and driver availability are not guaranteed by the
 library. `to_device` is the explicit way to move a tensor between devices;
 missing operation kernels do not invoke it implicitly.
 
@@ -83,10 +85,10 @@ hatch and can intentionally omit any field, including a `Param`; an omitted
 parameter is not visited by the optimizer or state-dict utilities. The typed
 derive rejects `skip` on typed leaves and on `Option`/`Vec` containers.
 
-## Metal And WGPU Performance
+## Accelerator Performance
 
-The Metal and WGPU APIs are covered when their features are enabled, but their
-speed is not. CPU remains the reference for correctness, and backend
+The Metal, CUDA, and WGPU APIs are covered when their features are enabled, but
+their speed is not. CPU remains the reference for correctness, and backend
 optimizations may change performance in any release. The automatic device
 selection policy above is separate from any benchmark result.
 

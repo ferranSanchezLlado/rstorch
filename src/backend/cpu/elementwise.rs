@@ -253,6 +253,7 @@ where
             ),
         }),
         #[cfg(any(
+            all(feature = "cuda", any(target_os = "linux", target_os = "windows")),
             all(feature = "metal", target_os = "macos"),
             all(feature = "wgpu", not(target_arch = "wasm32"))
         ))]
@@ -431,18 +432,20 @@ fn binary_op_name(op: BinaryOp) -> &'static str {
 // instead of letting `maximum` quietly launder it out of the graph, which is
 // exactly what makes a diverging model diagnosable.
 //
-// These four bodies stay here rather than deferring to `NumAcc::max`/`min`:
-// once NaN is excluded they hand off to IEEE `max`/`min`, which on equal
-// operands may return *either* — `f32::max(-0.0, 0.0)` is `+0.0`, whereas
-// `NumAcc::max` keeps the receiver and answers `-0.0`. The two are not the
-// same function, and `binary_op_matches_scalar_semantics_on_signed_zero`
-// pins the difference.
+// These four bodies stay here rather than deferring to `NumAcc::max`/`min`.
+// Rust's primitive `max`/`min` signed-zero tie behavior changed across our
+// supported compiler range, so spell out IEEE maxNum/minNum: maximum prefers
+// +0 and minimum prefers -0. `NumAcc::max`/`min` instead keep the receiver.
 #[inline(always)]
 fn f32_maximum(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         f32::NAN
+    } else if a == 0.0 && b == 0.0 {
+        f32::from_bits(a.to_bits() & b.to_bits())
+    } else if a > b {
+        a
     } else {
-        a.max(b)
+        b
     }
 }
 
@@ -450,8 +453,12 @@ fn f32_maximum(a: f32, b: f32) -> f32 {
 fn f32_minimum(a: f32, b: f32) -> f32 {
     if a.is_nan() || b.is_nan() {
         f32::NAN
+    } else if a == 0.0 && b == 0.0 {
+        f32::from_bits(a.to_bits() | b.to_bits())
+    } else if a < b {
+        a
     } else {
-        a.min(b)
+        b
     }
 }
 
@@ -459,8 +466,12 @@ fn f32_minimum(a: f32, b: f32) -> f32 {
 fn f64_maximum(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
+    } else if a == 0.0 && b == 0.0 {
+        f64::from_bits(a.to_bits() & b.to_bits())
+    } else if a > b {
+        a
     } else {
-        a.max(b)
+        b
     }
 }
 
@@ -468,8 +479,12 @@ fn f64_maximum(a: f64, b: f64) -> f64 {
 fn f64_minimum(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
+    } else if a == 0.0 && b == 0.0 {
+        f64::from_bits(a.to_bits() | b.to_bits())
+    } else if a < b {
+        a
     } else {
-        a.min(b)
+        b
     }
 }
 

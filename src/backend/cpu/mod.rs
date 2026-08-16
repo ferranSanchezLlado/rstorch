@@ -29,6 +29,10 @@ pub(crate) mod reduce;
 pub(super) fn cpu_storage(x: View<'_>) -> &CpuStorage {
     match x.storage() {
         Storage::Cpu(s) => s,
+        #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+        Storage::Cuda(_) => {
+            unreachable!("CPU backend received non-CPU storage; dispatcher invariant violated")
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Storage::Metal(_) => {
             unreachable!("CPU backend received non-CPU storage; dispatcher invariant violated")

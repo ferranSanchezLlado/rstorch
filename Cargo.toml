@@ -51,6 +51,9 @@ ureq = { version = "2", optional = true }
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "26", optional = true, default-features = false, features = ["wgsl", "vulkan", "metal", "dx12", "gles"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+cudarc = { version = "0.19.9", optional = true, default-features = false, features = ["driver", "nvrtc", "f16", "cuda-13030", "dynamic-loading", "std"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", optional = true }
 objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSArray", "NSString"] }
@@ -80,6 +83,11 @@ required-features = ["metal"]
 name = "wgpu_ops"
 harness = false
 required-features = ["wgpu"]
+
+[[bench]]
+name = "cuda_ops"
+harness = false
+required-features = ["cuda"]
 
 [[bench]]
 name = "data_pipeline"
@@ -140,12 +148,14 @@ rayon = ["dep:rayon"]
 # `cargo bench`.
 bench-resnet = []
 # Conformance-tested GPU acceleration on macOS. On other targets this default
-# feature has no platform dependency; `Device::best_available` considers WGPU
-# before falling back to CPU when the opt-in WGPU feature is enabled.
+# feature has no platform dependency; `Device::best_available` considers a
+# hardware WGPU adapter before falling back to CPU when WGPU is enabled.
 metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
 # Portable native GPU compute through WebGPU. Kept opt-in because it adds a
 # substantial graphics dependency. F16 is negotiated per adapter at runtime.
 wgpu = ["dep:pollster", "dep:wgpu"]
+# NVIDIA CUDA acceleration on Linux and Windows.
+cuda = ["dep:cudarc"]
 # The finite-difference gradient harness (`rstorch::testing`). It is a test
 # utility, not frozen library surface, so it is the one public module outside
 # the semver guarantee in STABILITY.md — hence a feature rather than an

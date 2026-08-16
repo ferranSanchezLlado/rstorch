@@ -199,8 +199,7 @@ fn run_case(
     let manifest = format!(
         "[package]\nname = \"rstorch-typed-ui-{case_name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nrstorch = {{ path = {workspace:?}, features = [\"typed\"] }}\n\n[workspace]\n"
     );
-    fs::write(case_root.join("Cargo.toml"), manifest)
-    .map_err(|error| error.to_string())?;
+    fs::write(case_root.join("Cargo.toml"), manifest).map_err(|error| error.to_string())?;
 
     let output = Command::new("cargo")
         .arg(mode.command())

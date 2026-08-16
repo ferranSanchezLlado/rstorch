@@ -361,20 +361,16 @@ fn softmax(
         stride /= 2u;
     }
     maximum = softmax_shared[0];
-    if (is_inf(maximum) && maximum < 0.0) {
-        k = local.x;
-        loop {
-            if (k >= width) { break; }
-            out[start + k] = bitcast<u32>(0.0);
-            k += 256u;
-        }
-        return;
-    }
+    let all_negative_infinity = is_inf(maximum) && maximum < 0.0;
     var total = 0.0;
     k = local.x;
     loop {
         if (k >= width) { break; }
-        let value = exp(bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]) - maximum);
+        let value = select(
+            exp(bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]) - maximum),
+            0.0,
+            all_negative_infinity,
+        );
         out[start + k] = bitcast<u32>(value);
         total += value;
         k += 256u;
@@ -394,7 +390,12 @@ fn softmax(
     k = local.x;
     loop {
         if (k >= width) { break; }
-        out[start + k] = bitcast<u32>(bitcast<f32>(out[start + k]) / softmax_shared[0]);
+        let value = select(
+            bitcast<f32>(out[start + k]) / softmax_shared[0],
+            0.0,
+            all_negative_infinity,
+        );
+        out[start + k] = bitcast<u32>(value);
         k += 256u;
     }
 }

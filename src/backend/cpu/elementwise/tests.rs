@@ -39,6 +39,7 @@ fn out_slice<E: CpuElement>(storage: &Storage) -> Vec<E> {
         Storage::Cpu(cpu) => E::slice(cpu).to_vec(),
         #[cfg(any(
             all(feature = "metal", target_os = "macos"),
+            all(feature = "cuda", any(target_os = "linux", target_os = "windows")),
             all(feature = "wgpu", not(target_arch = "wasm32"))
         ))]
         _ => panic!("non-cpu storage in cpu test"),
@@ -1076,9 +1077,8 @@ fn dense_classifies_layouts_and_clamps_to_the_view_length() {
 /// `maximum`/`minimum` here are **not** `NumAcc::max`/`min`, and must not be
 /// refactored into them.
 ///
-/// Both propagate NaN, but they disagree on ±0: once NaN is excluded these
-/// bodies defer to IEEE `max`/`min`, which on equal operands may return
-/// either, while `NumAcc::max`/`min` keep the receiver. Pinned bitwise so a
+/// Both propagate NaN, but they disagree on ±0: the elementwise bodies use
+/// IEEE maxNum/minNum, while `NumAcc::max`/`min` keep the receiver. Pinned bitwise so a
 /// "these are the same function" cleanup fails loudly instead of silently
 /// flipping a zero's sign.
 #[test]

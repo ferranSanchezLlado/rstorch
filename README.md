@@ -108,6 +108,7 @@ cargo run --release --example typed_mnist --features typed,hub
 | `rayon` | off | Multi-threaded CPU kernels. Results stay bit-identical: kernels partition by output element, so no float is accumulated across threads in a racing order. |
 | `hub` | off | Downloads for the bundled MNIST and Tiny Shakespeare datasets. |
 | `metal` | on | GPU backend on macOS. `Device::best_available` selects the first Metal device when present, then considers WGPU and CPU. |
+| `cuda` | off | Native NVIDIA CUDA backend on Linux and Windows, including Linux under WSL. Supports F16/F32 compute and lossless I64/Bool storage on compute capability 6.0 or newer. Bundled PTX requires a compatible NVIDIA driver but not the CUDA toolkit. |
 | `wgpu` | off | Portable native WebGPU backend. F32 is always supported; native F16 is enabled only when the adapter advertises `SHADER_F16`. I64 index storage remains lossless. |
 | `testing` | off | The finite-difference gradient harness the crate tests itself with. The one public module outside the stability guarantee. |
 
@@ -115,17 +116,55 @@ cargo run --release --example typed_mnist --features typed,hub
 
 CPU is the reference backend and supports the six runtime dtypes subject to
 each operation's contract. On macOS, Metal supports F16/F32 arithmetic and
-F16/F32/I64/Bool storage; BF16 and F64 are rejected. WGPU is opt-in and
-supports F32 compute plus native F16 when `SHADER_F16` is available, with
-lossless I64 and Bool storage. Unsupported combinations return an error rather than silently
-promoting or copying through the host.
+F16/F32/I64/Bool storage; BF16 and F64 are rejected. On Linux and Windows,
+native CUDA is opt-in and supports F16/F32 compute plus lossless I64 and Bool
+storage on GPUs with compute capability 6.0 or newer. Its PTX kernels are
+bundled with the crate, so a compatible NVIDIA driver is required at runtime
+but a CUDA toolkit installation is not. WGPU is also opt-in and supports F32
+compute plus native F16 when `SHADER_F16` is available, with
+lossless I64 and Bool storage. Unsupported combinations return an error rather
+than silently promoting or copying through the host.
 
-`Device::best_available` chooses Metal first, then the first WGPU adapter, then
-CPU. WGPU uses native F16 when the adapter exposes `SHADER_F16`; otherwise F16
-operations fail loudly like other unsupported combinations. The feature and
-hardware must be available for a device to be selected; the selection order
-does not promise a performance win. The complete stability and capability
-policy is in [STABILITY.md](STABILITY.md).
+`Device::best_available` chooses Metal first on macOS, then CUDA on Linux or
+Windows, then the first hardware WGPU adapter, then CPU. WGPU uses native F16
+when the adapter exposes `SHADER_F16`; otherwise F16 operations fail loudly
+like other unsupported combinations. The feature and hardware must be
+available for a device to be selected; the selection order does not promise a
+performance win. The complete stability and capability policy is in
+[STABILITY.md](STABILITY.md).
+
+### NVIDIA from WSL
+
+For native Linux CUDA in WSL, enable the opt-in `cuda` feature:
+
+```sh
+cargo run --release --features cuda,hub --example mnist
+```
+
+The crate includes its CUDA kernels as bundled PTX, so no CUDA toolkit is
+needed at runtime. CUDA does require a compatible NVIDIA Windows driver with
+CUDA support for WSL; do not install a Linux display driver inside WSL.
+
+WGPU over DX12 remains an alternative. WSL does not expose the Windows NVIDIA
+Vulkan driver to Linux processes, so build the Windows target from WSL and let
+WGPU use the native DX12 driver. On Ubuntu, install the cross-linker and Rust
+target once:
+
+```sh
+sudo apt-get install gcc-mingw-w64-x86-64
+rustup target add x86_64-pc-windows-gnu
+```
+
+Then pass the Windows target and `wgpu` feature to the usual Cargo command:
+
+```sh
+cargo run --release --target x86_64-pc-windows-gnu --features wgpu,hub --example mnist
+```
+
+WSL interoperability runs the resulting `.exe` directly.
+`Device::best_available` ignores software-only WGPU adapters such as Vulkan
+`llvmpipe`, so their presence does not displace the NVIDIA adapter or prevent
+the CPU fallback.
 
 ## Compile-time shapes, if you want them
 

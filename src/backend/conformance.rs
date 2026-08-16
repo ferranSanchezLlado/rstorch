@@ -456,6 +456,20 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
                 } | Call::Cast(DType::BF16 | DType::F64)
             );
     }
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    if matches!(_device, Device::Cuda(_)) {
+        return case
+            .operands
+            .iter()
+            .any(|operand| matches!(operand.host.dtype(), DType::BF16 | DType::F64))
+            || matches!(
+                case.call,
+                Call::Full {
+                    dtype: DType::BF16 | DType::F64,
+                    ..
+                } | Call::Cast(DType::BF16 | DType::F64)
+            );
+    }
     #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
     if matches!(_device, Device::Wgpu(_)) {
         let f16 = crate::backend::wgpu::supports_f16(_device);

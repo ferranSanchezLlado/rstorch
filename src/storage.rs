@@ -58,6 +58,8 @@ impl CpuStorage {
     }
 }
 
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+pub(crate) use crate::backend::cuda::CudaStorage;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use crate::backend::metal::MetalStorage;
 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
@@ -71,6 +73,9 @@ pub(crate) enum Storage {
     /// Metal device buffer (see the `metal` feature).
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(MetalStorage),
+    /// CUDA device buffer.
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    Cuda(CudaStorage),
     /// WebGPU device buffer.
     #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
     Wgpu(WgpuStorage),
@@ -83,6 +88,8 @@ impl Storage {
             Storage::Cpu(s) => s.dtype(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Storage::Metal(s) => s.dtype(),
+            #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+            Storage::Cuda(s) => s.dtype(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
             Storage::Wgpu(s) => s.dtype(),
         }
@@ -94,6 +101,8 @@ impl Storage {
             Storage::Cpu(_) => Device::Cpu,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Storage::Metal(s) => s.device(),
+            #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+            Storage::Cuda(s) => s.device(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
             Storage::Wgpu(s) => s.device(),
         }
@@ -105,6 +114,8 @@ impl Storage {
             Storage::Cpu(s) => s.len(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Storage::Metal(s) => s.len(),
+            #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+            Storage::Cuda(s) => s.len(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
             Storage::Wgpu(s) => s.len(),
         }

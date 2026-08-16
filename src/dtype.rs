@@ -5,11 +5,11 @@
 //! `from_vec` / `to_vec` / `to_scalar`.
 //!
 //! The CPU backend implements all six dtypes. Accelerator support is narrower:
-//! Metal currently stores `F16`, `F32`, `I64`, and `Bool`, while WGPU stores
-//! `F32`, `I64`, and `Bool` and adds native `F16` when the adapter advertises
-//! it; unsupported pairs return a loud
-//! [`Error::Unsupported`]. All six [`Element`]
-//! implementations exist so host-transfer and tensor signatures stay stable.
+//! Metal and CUDA currently store `F16`, `F32`, `I64`, and `Bool`, with
+//! F16/F32 compute. WGPU stores `F32`, `I64`, and `Bool` and adds native `F16`
+//! when the adapter advertises it. Unsupported pairs return a loud
+//! [`Error::Unsupported`]. All six [`Element`] implementations exist so
+//! host-transfer and tensor signatures stay stable.
 
 use crate::error::{Error, Result};
 use crate::storage::CpuStorage;

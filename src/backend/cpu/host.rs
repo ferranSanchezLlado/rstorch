@@ -307,6 +307,14 @@ pub(crate) fn copy_into(src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -
     let src = cpu_storage(src);
     let dst = match dst {
         Storage::Cpu(dst) => dst,
+        #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+        Storage::Cuda(storage) => {
+            return Err(Error::DeviceMismatch {
+                op: "copy_into",
+                expected: crate::Device::Cpu,
+                got: storage.device(),
+            });
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Storage::Metal(storage) => {
             return Err(Error::DeviceMismatch {
@@ -470,6 +478,7 @@ mod tests {
             Storage::Cpu(s) => s,
             #[cfg(any(
                 all(feature = "metal", target_os = "macos"),
+                all(feature = "cuda", any(target_os = "linux", target_os = "windows")),
                 all(feature = "wgpu", not(target_arch = "wasm32"))
             ))]
             _ => panic!("expected CPU storage"),
@@ -772,20 +781,11 @@ mod tests {
 
     #[test]
     fn full_fills_each_dtype() {
-        assert_eq!(
-            as_f32(cpu(&full(3, DType::F32, 2.5))),
-            vec![2.5, 2.5, 2.5]
-        );
+        assert_eq!(as_f32(cpu(&full(3, DType::F32, 2.5))), vec![2.5, 2.5, 2.5]);
         assert_eq!(as_i64(cpu(&full(2, DType::I64, 7.0))), vec![7, 7]);
         // Bool: non-zero is true, zero is false.
-        assert_eq!(
-            as_bool(cpu(&full(2, DType::Bool, 1.0))),
-            vec![true, true]
-        );
-        assert_eq!(
-            as_bool(cpu(&full(2, DType::Bool, 0.0))),
-            vec![false, false]
-        );
+        assert_eq!(as_bool(cpu(&full(2, DType::Bool, 1.0))), vec![true, true]);
+        assert_eq!(as_bool(cpu(&full(2, DType::Bool, 0.0))), vec![false, false]);
         // Zero-length fill.
         assert!(as_f32(cpu(&full(0, DType::F32, 1.0))).is_empty());
     }

@@ -26,6 +26,9 @@ pub enum Device {
     /// Apple Metal GPU, identified by device ordinal.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(usize),
+    /// NVIDIA CUDA GPU, identified by device ordinal.
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    Cuda(usize),
     /// Portable WebGPU adapter, identified by deterministic adapter ordinal.
     #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
     Wgpu(usize),
@@ -35,8 +38,9 @@ impl Device {
     /// The best device available at runtime.
     ///
     /// Returns the first available device in this order: Metal on macOS when
-    /// the `metal` feature is enabled, the first native WGPU adapter when the
-    /// `wgpu` feature is enabled, and finally [`Device::Cpu`].
+    /// the `metal` feature is enabled, CUDA on Linux or Windows when the `cuda`
+    /// feature is enabled, the first hardware WGPU adapter when the `wgpu`
+    /// feature is enabled, and finally [`Device::Cpu`].
     ///
     /// Availability and performance are runtime properties; selecting a GPU
     /// does not promise that it is faster than CPU.
@@ -45,9 +49,13 @@ impl Device {
         if !objc2_metal::MTLCopyAllDevices().is_empty() {
             return Device::Metal(0);
         }
+        #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+        if crate::backend::cuda::is_available(0) {
+            return Device::Cuda(0);
+        }
         #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
-        if crate::backend::wgpu::adapter_count() != 0 {
-            return Device::Wgpu(0);
+        if let Some(ordinal) = crate::backend::wgpu::best_adapter_ordinal() {
+            return Device::Wgpu(ordinal);
         }
         Device::Cpu
     }
@@ -64,6 +72,8 @@ impl std::fmt::Display for Device {
             Device::Cpu => f.write_str("cpu"),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Device::Metal(idx) => write!(f, "metal:{idx}"),
+            #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+            Device::Cuda(idx) => write!(f, "cuda:{idx}"),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
             Device::Wgpu(idx) => write!(f, "wgpu:{idx}"),
         }
@@ -81,9 +91,14 @@ mod tests {
             assert_eq!(Device::best_available(), Device::Metal(0));
             return;
         }
+        #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+        if crate::backend::cuda::is_available(0) {
+            assert_eq!(Device::best_available(), Device::Cuda(0));
+            return;
+        }
         #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
-        if crate::backend::wgpu::adapter_count() != 0 {
-            assert_eq!(Device::best_available(), Device::Wgpu(0));
+        if let Some(ordinal) = crate::backend::wgpu::best_adapter_ordinal() {
+            assert_eq!(Device::best_available(), Device::Wgpu(ordinal));
             return;
         }
         assert_eq!(Device::best_available(), Device::Cpu);
@@ -92,6 +107,8 @@ mod tests {
     #[test]
     fn display() {
         assert_eq!(Device::Cpu.to_string(), "cpu");
+        #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+        assert_eq!(Device::Cuda(3).to_string(), "cuda:3");
         #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
         assert_eq!(Device::Wgpu(3).to_string(), "wgpu:3");
     }

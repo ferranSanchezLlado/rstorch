@@ -68,8 +68,15 @@ struct F16Shaders {
 
 type ContextResult = std::result::Result<Arc<Context>, String>;
 
-pub(crate) fn adapter_count() -> usize {
-    adapters().len()
+pub(crate) fn best_adapter_ordinal() -> Option<usize> {
+    adapters()
+        .iter()
+        .enumerate()
+        .find(|(ordinal, adapter)| {
+            !matches!(adapter.get_info().device_type, ::wgpu::DeviceType::Cpu)
+                && context(*ordinal).is_ok()
+        })
+        .map(|(ordinal, _)| ordinal)
 }
 
 pub(crate) fn supports_f16(device: Device) -> bool {
@@ -1566,7 +1573,7 @@ mod tests {
 
     #[test]
     fn transfer_and_compute_if_adapter_exists() {
-        if adapter_count() == 0 {
+        if context(0).is_err() {
             return;
         }
         let device = Device::Wgpu(0);
@@ -1594,7 +1601,7 @@ mod tests {
 
     #[test]
     fn f16_is_native_or_loudly_unsupported() {
-        if adapter_count() == 0 {
+        if context(0).is_err() {
             return;
         }
         let device = Device::Wgpu(0);
@@ -1624,7 +1631,7 @@ mod tests {
 
     #[test]
     fn conformance_if_adapter_exists() {
-        if adapter_count() == 0 {
+        if context(0).is_err() {
             return;
         }
         let report = crate::backend::conformance::run_device(Device::Wgpu(0));
