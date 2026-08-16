@@ -18,11 +18,10 @@
 use rstorch::nn;
 use rstorch::prelude::*;
 
-const CUDA: Device = Device::Cuda(0);
+#[path = "common/cuda.rs"]
+mod gpu;
 
-fn cuda_available() -> bool {
-    Tensor::zeros([0], DType::F32, &CUDA).is_ok()
-}
+const CUDA: Device = Device::Cuda(0);
 
 /// Deterministic host values.
 fn values(seed: u64, len: usize) -> Vec<f32> {
@@ -43,7 +42,7 @@ fn assert_close(what: &str, cpu: &[f32], cuda: &[f32]) {
 
 /// Run `build` on both devices and diff the results elementwise.
 fn compare(what: &str, build: impl Fn(&Device) -> Vec<f32>) {
-    if !cuda_available() {
+    if !gpu::available() {
         return;
     }
     assert_close(what, &build(&Device::Cpu), &build(&CUDA));

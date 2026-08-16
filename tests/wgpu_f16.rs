@@ -3,6 +3,9 @@
 use half::f16;
 use rstorch::prelude::*;
 
+#[path = "common/wgpu.rs"]
+mod gpu;
+
 const WGPU: Device = Device::Wgpu(0);
 
 fn values(seed: u64, len: usize) -> Vec<f16> {
@@ -13,6 +16,9 @@ fn values(seed: u64, len: usize) -> Vec<f16> {
 }
 
 fn f16_available_or_loud() -> bool {
+    if !gpu::available() {
+        return false;
+    }
     match Tensor::from_vec(vec![f16::ONE], [1], &WGPU) {
         Ok(_) => true,
         Err(Error::Unsupported {
@@ -20,7 +26,6 @@ fn f16_available_or_loud() -> bool {
             dtype: DType::F16,
             ..
         }) => false,
-        Err(Error::Backend { .. }) => false,
         Err(error) => panic!("unexpected F16 capability probe error: {error}"),
     }
 }

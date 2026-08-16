@@ -2,13 +2,10 @@
 
 use rstorch::prelude::*;
 
-const WGPU: Device = Device::Wgpu(0);
+#[path = "common/wgpu.rs"]
+mod gpu;
 
-fn wgpu_available() -> bool {
-    Tensor::from_vec(vec![1.0f32], [1], &WGPU)
-        .and_then(|x| x.to_vec::<f32>())
-        .is_ok()
-}
+const WGPU: Device = Device::Wgpu(0);
 
 struct Case {
     input: [usize; 4],
@@ -68,7 +65,7 @@ fn assert_close(what: &str, case: usize, cpu: &[f32], wgpu: &[f32]) {
 
 #[test]
 fn conv2d_backward_matches_cpu_across_representative_geometries() {
-    if !wgpu_available() {
+    if !gpu::available() {
         return;
     }
     let cases = [
@@ -124,7 +121,7 @@ fn conv2d_backward_matches_cpu_across_representative_geometries() {
 
 #[test]
 fn pool2d_backward_matches_cpu_across_stride_and_padding() {
-    if !wgpu_available() {
+    if !gpu::available() {
         return;
     }
     let dims = [2usize, 2, 7, 7];

@@ -3,13 +3,10 @@
 use rstorch::nn;
 use rstorch::prelude::*;
 
-const WGPU: Device = Device::Wgpu(0);
+#[path = "common/wgpu.rs"]
+mod gpu;
 
-fn wgpu_available() -> bool {
-    Tensor::from_vec(vec![1.0f32], [1], &WGPU)
-        .and_then(|x| x.to_vec::<f32>())
-        .is_ok()
-}
+const WGPU: Device = Device::Wgpu(0);
 
 fn values(seed: u64, len: usize) -> Vec<f32> {
     let mut rng = Rng::seed(seed);
@@ -60,7 +57,7 @@ fn value_and_grad(
 
 #[test]
 fn softmax_forward_and_backward_match_cpu() {
-    if !wgpu_available() {
+    if !gpu::available() {
         return;
     }
     for dims in [[4usize, 8], [3, 33], [2, 129]] {
@@ -80,7 +77,7 @@ fn softmax_forward_and_backward_match_cpu() {
 
 #[test]
 fn layer_norm_forward_backward_and_parameters_match_cpu() {
-    if !wgpu_available() {
+    if !gpu::available() {
         return;
     }
     for width in [4usize, 31, 128] {
@@ -124,7 +121,7 @@ fn layer_norm_forward_backward_and_parameters_match_cpu() {
 
 #[test]
 fn attention_and_indexing_backward_match_cpu() {
-    if !wgpu_available() {
+    if !gpu::available() {
         return;
     }
     compare("attention", |device| {
@@ -165,7 +162,7 @@ fn attention_and_indexing_backward_match_cpu() {
 
 #[test]
 fn cross_entropy_and_optimizers_match_cpu() {
-    if !wgpu_available() {
+    if !gpu::available() {
         return;
     }
     compare("cross_entropy", |device| {

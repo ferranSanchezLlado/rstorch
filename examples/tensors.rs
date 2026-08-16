@@ -5,7 +5,8 @@
 use rstorch::prelude::*;
 
 fn main() -> Result<()> {
-    let dev = Device::Cpu;
+    let dev = Device::best_available();
+    println!("device: {dev}");
 
     // One concrete `Tensor`. Rank, dtype and device are values it carries, not
     // type parameters, so a 2x2 f32 and a 3-D f64 have the same Rust type.
@@ -24,7 +25,13 @@ fn main() -> Result<()> {
         Err(e) => println!("\nrefused: {e}"),
         Ok(_) => unreachable!("f32 + i64 is not a promotion this crate performs"),
     }
-    let widened = a.add(&ints.to_dtype(DType::F32)?)?;
+    // Keep the tutorial portable across backends that store I64 but do not
+    // implement integer casts: both the cast and device moves stay explicit.
+    let widened_ints = ints
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::F32)?
+        .to_device(&dev)?;
+    let widened = a.add(&widened_ints)?;
     println!("after an explicit cast: {:?}", widened.to_vec::<f32>()?);
 
     // Rule 2: every error names the operation that raised it and the values

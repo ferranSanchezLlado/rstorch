@@ -2091,6 +2091,19 @@ mod tests {
 
     static HARDWARE_LANE: Mutex<()> = Mutex::new(());
 
+    fn hardware_available() -> bool {
+        if std::env::var_os("RSTORCH_SKIP_CUDA_TESTS").is_some() {
+            eprintln!("skipping CUDA hardware test: RSTORCH_SKIP_CUDA_TESTS is set");
+            return false;
+        }
+        assert!(
+            is_available(0),
+            "CUDA feature enabled but device initialization failed; set \
+             RSTORCH_SKIP_CUDA_TESTS=1 only when this test environment intentionally has no CUDA device"
+        );
+        true
+    }
+
     #[test]
     fn invalid_ordinal_is_loud() {
         let error = crate::Tensor::zeros([1], DType::F32, &Device::Cuda(usize::MAX)).unwrap_err();
@@ -2106,7 +2119,7 @@ mod tests {
     #[test]
     fn transfer_and_compute_if_device_exists() {
         let _lane = HARDWARE_LANE.lock().unwrap();
-        if !is_available(0) {
+        if !hardware_available() {
             return;
         }
         let device = Device::Cuda(0);
@@ -2120,7 +2133,7 @@ mod tests {
     #[test]
     fn conformance_if_device_exists() {
         let _lane = HARDWARE_LANE.lock().unwrap();
-        if !is_available(0) {
+        if !hardware_available() {
             return;
         }
         let report = crate::backend::conformance::run_device(Device::Cuda(0));
@@ -2135,7 +2148,7 @@ mod tests {
     #[test]
     fn invalid_indices_are_reported_at_the_next_host_read_if_device_exists() {
         let _lane = HARDWARE_LANE.lock().unwrap();
-        if !is_available(0) {
+        if !hardware_available() {
             return;
         }
         let device = Device::Cuda(0);
@@ -2159,7 +2172,7 @@ mod tests {
     #[test]
     fn deferred_index_errors_follow_program_order_if_device_exists() {
         let _lane = HARDWARE_LANE.lock().unwrap();
-        if !is_available(0) {
+        if !hardware_available() {
             return;
         }
         let device = Device::Cuda(0);

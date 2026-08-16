@@ -3,11 +3,10 @@
 use rstorch::models::{DecoderTransformer, TransformerConfig};
 use rstorch::prelude::*;
 
-const CUDA: Device = Device::Cuda(0);
+#[path = "common/cuda.rs"]
+mod gpu;
 
-fn cuda_available() -> bool {
-    Tensor::zeros([0], DType::F32, &CUDA).is_ok()
-}
+const CUDA: Device = Device::Cuda(0);
 
 #[derive(Module)]
 struct Mlp {
@@ -24,7 +23,7 @@ impl Forward for Mlp {
 
 #[test]
 fn seeded_mlp_and_transformer_losses_decrease_on_cuda() -> Result<()> {
-    if !cuda_available() {
+    if !gpu::available() {
         return Ok(());
     }
     let mut rng = Rng::seed(61);
@@ -109,7 +108,7 @@ impl Forward for Cnn {
 
 #[test]
 fn seeded_cnn_loss_decreases_on_cuda() -> Result<()> {
-    if !cuda_available() {
+    if !gpu::available() {
         return Ok(());
     }
     let mut rng = Rng::seed(9);
@@ -155,7 +154,7 @@ fn seeded_cnn_loss_decreases_on_cuda() -> Result<()> {
 /// a "loss decreased" assertion cannot see a gradient that is merely wrong.
 #[test]
 fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
-    if !cuda_available() {
+    if !gpu::available() {
         return Ok(());
     }
     // Deterministic, non-symmetric coefficients so an error cannot cancel.
@@ -213,7 +212,7 @@ fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
 /// the NaN so they agree with what `max`/`min` report.
 #[test]
 fn nan_semantics_match_between_cpu_and_cuda() -> Result<()> {
-    if !cuda_available() {
+    if !gpu::available() {
         return Ok(());
     }
     let a = vec![f32::NAN, 1.0, 2.0, -3.0];
@@ -265,7 +264,7 @@ fn nan_semantics_match_between_cpu_and_cuda() -> Result<()> {
 /// backends because they implement the guard separately.
 #[test]
 fn i64_division_overflow_matches_between_cpu_and_cuda() -> Result<()> {
-    if !cuda_available() {
+    if !gpu::available() {
         return Ok(());
     }
     for dev in [Device::Cpu, CUDA] {
@@ -286,7 +285,7 @@ fn i64_division_overflow_matches_between_cpu_and_cuda() -> Result<()> {
 /// on an empty axis, a panic where the CPU backend returns zeros.
 #[test]
 fn empty_axis_sum_matches_cpu_instead_of_panicking() -> Result<()> {
-    if !cuda_available() {
+    if !gpu::available() {
         return Ok(());
     }
     for dims in [vec![0usize, 3], vec![2, 0, 3], vec![3, 0]] {
@@ -310,7 +309,7 @@ fn empty_axis_sum_matches_cpu_instead_of_panicking() -> Result<()> {
 
 #[test]
 fn empty_axis_zero_indexing_and_backward_do_not_panic() -> Result<()> {
-    if !cuda_available() {
+    if !gpu::available() {
         return Ok(());
     }
 

@@ -2,13 +2,10 @@
 
 use rstorch::prelude::*;
 
-const WGPU: Device = Device::Wgpu(0);
+#[path = "common/wgpu.rs"]
+mod gpu;
 
-fn wgpu_available() -> bool {
-    Tensor::from_vec(vec![1.0f32], [1], &WGPU)
-        .and_then(|x| x.to_vec::<f32>())
-        .is_ok()
-}
+const WGPU: Device = Device::Wgpu(0);
 
 #[derive(Module)]
 struct Mlp {
@@ -40,7 +37,7 @@ impl Forward for Transformer {
 
 #[test]
 fn seeded_mlp_and_transformer_losses_decrease_on_wgpu() -> Result<()> {
-    if !wgpu_available() {
+    if !gpu::available() {
         return Ok(());
     }
 
@@ -127,7 +124,7 @@ impl Forward for Cnn {
 
 #[test]
 fn seeded_cnn_loss_decreases_on_wgpu() -> Result<()> {
-    if !wgpu_available() {
+    if !gpu::available() {
         return Ok(());
     }
 
@@ -158,7 +155,7 @@ fn seeded_cnn_loss_decreases_on_wgpu() -> Result<()> {
 
 #[test]
 fn nan_and_empty_axis_semantics_match_cpu() -> Result<()> {
-    if !wgpu_available() {
+    if !gpu::available() {
         return Ok(());
     }
 
@@ -196,7 +193,7 @@ fn nan_and_empty_axis_semantics_match_cpu() -> Result<()> {
 
 #[test]
 fn empty_index_select_still_validates_indices_on_wgpu() -> Result<()> {
-    if !wgpu_available() {
+    if !gpu::available() {
         return Ok(());
     }
 
@@ -218,7 +215,7 @@ fn empty_index_select_still_validates_indices_on_wgpu() -> Result<()> {
 
 #[test]
 fn arg_reductions_and_max_pool_nonfinite_values_match_cpu() -> Result<()> {
-    if !wgpu_available() {
+    if !gpu::available() {
         return Ok(());
     }
 

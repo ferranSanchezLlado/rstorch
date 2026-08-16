@@ -16,7 +16,7 @@ fn address_fast(logical:u32,base:u32,contiguous:bool)->u32{if(contiguous){return
 fn coord(logical:u32,base:u32,wanted:u32)->u32{var rem=logical;var axis=p[base+1u];loop{axis-=1u;let dim=p[base+2u+axis];let value=rem%dim;if(axis==wanted){return value;}rem/=dim;}return 0u;}
 fn address_mapped(logical:u32,input_base:u32,logical_base:u32,axis:u32,value:u32)->u32{var rem=logical;var addr=p[input_base];var i=p[logical_base+1u];loop{if(i==0u){break;}i-=1u;let dim=p[logical_base+2u+i];var at=rem%dim;rem/=dim;if(i==axis){at=value;}addr+=at*p[input_base+10u+i];}return addr;}
 fn logical_replacing(logical:u32,from_base:u32,to_base:u32,axis:u32,value:u32)->u32{var rem=logical;var result=0u;var multiplier=1u;var i=p[from_base+1u];loop{if(i==0u){break;}i-=1u;let dim=p[from_base+2u+i];var at=rem%dim;rem/=dim;if(i==axis){at=value;}result+=at*multiplier;multiplier*=p[to_base+2u+i];}return result;}
-fn report_bad(lo:u32,hi:u32,axis:u32){if(atomicCompareExchangeWeak(&status[0],0u,1u).exchanged){atomicStore(&status[1],lo);atomicStore(&status[2],hi);atomicStore(&status[3],axis);}}
+fn report_bad(lo:u32,hi:u32,axis:u32){loop{let claimed=atomicCompareExchangeWeak(&status[0],0u,1u);if(claimed.exchanged){atomicStore(&status[1],lo);atomicStore(&status[2],hi);atomicStore(&status[3],axis);return;}if(claimed.old_value!=0u){return;}}}
 fn index_from_b(logical:u32,bound:u32,axis:u32)->u32{let at=address(logical,26u)*2u;let lo=b[at];let hi=b[at+1u];if(hi!=0u||lo>=bound){report_bad(lo,hi,axis);return 0u;}return lo;}
 
 @compute @workgroup_size(256)

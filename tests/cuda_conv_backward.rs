@@ -17,11 +17,10 @@
 
 use rstorch::prelude::*;
 
-const CUDA: Device = Device::Cuda(0);
+#[path = "common/cuda.rs"]
+mod gpu;
 
-fn cuda_available() -> bool {
-    Tensor::zeros([0], DType::F32, &CUDA).is_ok()
-}
+const CUDA: Device = Device::Cuda(0);
 
 /// One geometry: input dims, weight dims, stride, padding, dilation.
 struct Case {
@@ -86,7 +85,7 @@ fn assert_close(what: &str, case: usize, cpu: &[f32], cuda: &[f32]) {
 
 #[test]
 fn conv2d_backward_matches_the_cpu_across_stride_padding_and_dilation() {
-    if !cuda_available() {
+    if !gpu::available() {
         return;
     }
     let cases = [
@@ -165,7 +164,7 @@ fn conv2d_backward_matches_the_cpu_across_stride_padding_and_dilation() {
 
 #[test]
 fn pool2d_backward_matches_the_cpu_across_stride_and_padding() {
-    if !cuda_available() {
+    if !gpu::available() {
         return;
     }
     let dims = [2usize, 3, 7, 7];

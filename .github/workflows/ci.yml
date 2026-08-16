@@ -71,6 +71,11 @@ jobs:
   surfaces:
     name: Surface (${{ matrix.name }})
     runs-on: ubuntu-latest
+    env:
+      # The all-features matrix entry validates feature composition on a
+      # generic runner; it is not a GPU hardware lane.
+      RSTORCH_SKIP_CUDA_TESTS: "1"
+      RSTORCH_SKIP_WGPU_TESTS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +107,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RSTORCH_UI: "1"
+      # This job compiles all features to exercise diagnostics, but GitHub's
+      # generic Ubuntu runner has no CUDA or required WGPU hardware contract.
+      RSTORCH_SKIP_CUDA_TESTS: "1"
+      RSTORCH_SKIP_WGPU_TESTS: "1"
       # Nested cargo commands in typed_ui must use the fixture-pinned compiler.
       RUSTUP_TOOLCHAIN: "1.88"
     steps:

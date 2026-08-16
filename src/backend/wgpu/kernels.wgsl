@@ -160,7 +160,7 @@ fn cast_kernel(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= p[0]) { return; }
     let src = a[address_fast(i, 8u, p[3] != 0u)];
     if (p[2] == 0u) { out[i] = bitcast<u32>(select(0.0, 1.0, src != 0u)); }
-    else { out[i] = select(0u, 1u, bitcast<f32>(src) != 0.0); }
+    else { out[i] = select(0u, 1u, (src & 0x7fffffffu) != 0u); }
 }
 
 @compute @workgroup_size(256)
@@ -227,7 +227,13 @@ fn compare(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y = bitcast<f32>(b[address_fast(i, 26u, p[5] != 0u)]);
     var yes = x == y;
     switch p[2] {
-        case 1u: { yes = x != y; }
+        case 1u: {
+            let xb = bitcast<u32>(x);
+            let yb = bitcast<u32>(y);
+            let x_nan = (xb & 0x7f800000u) == 0x7f800000u && (xb & 0x007fffffu) != 0u;
+            let y_nan = (yb & 0x7f800000u) == 0x7f800000u && (yb & 0x007fffffu) != 0u;
+            yes = x_nan || y_nan || x != y;
+        }
         case 2u: { yes = x < y; }
         case 3u: { yes = x <= y; }
         case 4u: { yes = x > y; }
@@ -495,8 +501,13 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 fn report_bad(lo: u32, hi: u32, axis: u32) {
-    if (atomicCompareExchangeWeak(&status[0], 0u, 1u).exchanged) {
-        atomicStore(&status[1], lo); atomicStore(&status[2], hi); atomicStore(&status[3], axis);
+    loop {
+        let claimed = atomicCompareExchangeWeak(&status[0], 0u, 1u);
+        if (claimed.exchanged) {
+            atomicStore(&status[1], lo); atomicStore(&status[2], hi); atomicStore(&status[3], axis);
+            return;
+        }
+        if (claimed.old_value != 0u) { return; }
     }
 }
 
@@ -520,6 +531,16 @@ fn index_select(@builtin(global_invocation_id) gid: vec3<u32>) {
     let axis = p[2]; let j = coord(oi, 44u, axis);
     let selected = index_from_b(j, p[3], axis);
     out[oi] = a[address_mapped(oi, 8u, 44u, axis, selected)];
+}
+
+@compute @workgroup_size(256)
+fn i64_index_select(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let oi = gid.x; if (oi >= p[0]) { return; }
+    let axis = p[2]; let j = coord(oi, 44u, axis);
+    let selected = index_from_b(j, p[3], axis);
+    let source = address_mapped(oi, 8u, 44u, axis, selected) * 2u;
+    out[oi * 2u] = a[source];
+    out[oi * 2u + 1u] = a[source + 1u];
 }
 
 @compute @workgroup_size(256)

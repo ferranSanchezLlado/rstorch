@@ -483,6 +483,10 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
                 matches!(dtype, DType::F32 | DType::I64 | DType::Bool)
                     || (dtype == DType::F16 && f16)
             }
+            (Call::IndexSelect(_), Some(dtype)) => {
+                matches!(dtype, DType::F32 | DType::I64 | DType::Bool)
+                    || (dtype == DType::F16 && f16)
+            }
             (Call::Cast(to), Some(from)) => {
                 matches!(
                     (from, to),

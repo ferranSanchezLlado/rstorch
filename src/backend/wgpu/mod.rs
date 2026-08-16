@@ -72,11 +72,48 @@ pub(crate) fn best_adapter_ordinal() -> Option<usize> {
     adapters()
         .iter()
         .enumerate()
-        .find(|(ordinal, adapter)| {
-            !matches!(adapter.get_info().device_type, ::wgpu::DeviceType::Cpu)
-                && context(*ordinal).is_ok()
+        .filter(|(ordinal, adapter)| {
+            adapter.get_info().device_type != ::wgpu::DeviceType::Cpu && context(*ordinal).is_ok()
         })
+        .min_by_key(|(ordinal, adapter)| adapter_rank(*ordinal, &adapter.get_info()))
         .map(|(ordinal, _)| ordinal)
+}
+
+fn adapter_rank(ordinal: usize, info: &::wgpu::AdapterInfo) -> (u8, u8, usize) {
+    let device = match info.device_type {
+        ::wgpu::DeviceType::DiscreteGpu => 0,
+        ::wgpu::DeviceType::IntegratedGpu => 1,
+        ::wgpu::DeviceType::VirtualGpu => 2,
+        ::wgpu::DeviceType::Other => 3,
+        ::wgpu::DeviceType::Cpu => 4,
+    };
+    #[cfg(target_os = "windows")]
+    let backend = match info.backend {
+        ::wgpu::Backend::Dx12 => 0,
+        ::wgpu::Backend::Vulkan => 1,
+        ::wgpu::Backend::Gl => 2,
+        _ => 3,
+    };
+    #[cfg(target_os = "macos")]
+    let backend = match info.backend {
+        ::wgpu::Backend::Metal => 0,
+        ::wgpu::Backend::Vulkan => 1,
+        ::wgpu::Backend::Gl => 2,
+        _ => 3,
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let backend = match info.backend {
+        ::wgpu::Backend::Vulkan => 0,
+        ::wgpu::Backend::Gl => 1,
+        _ => 2,
+    };
+    (device, backend, ordinal)
+}
+
+fn required_limits() -> ::wgpu::Limits {
+    let mut limits = ::wgpu::Limits::downlevel_defaults();
+    limits.max_storage_buffers_per_shader_stage = 6;
+    limits
 }
 
 pub(crate) fn supports_f16(device: Device) -> bool {
@@ -93,6 +130,8 @@ fn adapters() -> &'static Vec<::wgpu::Adapter> {
     ADAPTERS.get_or_init(|| {
         let instance = ::wgpu::Instance::new(&::wgpu::InstanceDescriptor::default());
         let mut adapters = instance.enumerate_adapters(::wgpu::Backends::all());
+        let required = required_limits();
+        adapters.retain(|adapter| required.check_limits(&adapter.limits()));
         adapters.sort_by_key(|adapter| {
             let info = adapter.get_info();
             (
@@ -138,8 +177,7 @@ fn create_context(ordinal: usize) -> std::result::Result<Arc<Context>, String> {
     let adapter = adapters()
         .get(ordinal)
         .ok_or_else(|| format!("adapter ordinal {ordinal} is unavailable"))?;
-    let mut limits = ::wgpu::Limits::downlevel_defaults();
-    limits.max_storage_buffers_per_shader_stage = 6;
+    let limits = required_limits();
     let shader_f16 = adapter.features().contains(::wgpu::Features::SHADER_F16);
     let required_features = if shader_f16 {
         ::wgpu::Features::SHADER_F16
@@ -895,7 +933,7 @@ impl BackendOps for WgpuBackend {
             },
             &[source],
             Arc::clone(&target.buffer),
-            target.len,
+            src.layout().num_elements(),
             target.len,
             target.dtype,
             &params,
@@ -1254,7 +1292,12 @@ impl BackendOps for WgpuBackend {
     }
 
     fn index_select(&self, x: View<'_>, axis: usize, indices: View<'_>) -> Result<Storage> {
-        let dtype = self.float_dtype("index_select", &[x])?;
+        let dtype = x.dtype();
+        if !matches!(dtype, DType::F16 | DType::F32 | DType::I64 | DType::Bool)
+            || (dtype == DType::F16 && !supports_f16(Device::Wgpu(self.ordinal)))
+        {
+            return Err(unsupported("index_select", x.device(), dtype));
+        }
         if indices.dtype() != DType::I64 {
             return Err(unsupported(
                 "index_select",
@@ -1271,10 +1314,11 @@ impl BackendOps for WgpuBackend {
         p[1] = u32_checked(indices.layout().num_elements(), "index_select")?;
         descriptor(&mut p, 44, &out, "index_select")?;
         self.compute(
-            if dtype == DType::F16 {
-                "f16_index_select"
-            } else {
-                "index_select"
+            match dtype {
+                DType::F16 => "f16_index_select",
+                DType::I64 => "i64_index_select",
+                DType::F32 | DType::Bool => "index_select",
+                _ => unreachable!(),
             },
             &[x, indices],
             dtype,
@@ -1571,10 +1615,24 @@ impl BackendOps for WgpuBackend {
 mod tests {
     use super::*;
 
+    fn adapter_available() -> bool {
+        if std::env::var_os("RSTORCH_SKIP_WGPU_TESTS").is_some() {
+            eprintln!("skipping WGPU hardware test: RSTORCH_SKIP_WGPU_TESTS is set");
+            return false;
+        }
+        context(0).unwrap_or_else(|error| {
+            panic!(
+                "WGPU feature enabled but adapter initialization failed: {error}. Set \
+                 RSTORCH_SKIP_WGPU_TESTS=1 only when this test environment intentionally has no WGPU adapter"
+            )
+        });
+        true
+    }
+
     #[test]
-    fn transfer_and_compute_if_adapter_exists() {
-        if context(0).is_err() {
-            return;
+    fn transfer_and_compute_if_adapter_exists() -> Result<()> {
+        if !adapter_available() {
+            return Ok(());
         }
         let device = Device::Wgpu(0);
         let x = crate::Tensor::from_vec(vec![1.0f32, -2.0, 3.0], [3], &device).unwrap();
@@ -1591,17 +1649,45 @@ mod tests {
             vec![3.0, 1.0]
         );
         assert_eq!(indices.to_vec::<i64>().unwrap(), vec![2, 0]);
+        assert_eq!(
+            indices
+                .index_select(
+                    0,
+                    &crate::Tensor::from_vec(vec![1i64, 0], [2], &device).unwrap(),
+                )
+                .unwrap()
+                .to_vec::<i64>()
+                .unwrap(),
+            vec![0, 2]
+        );
+        let wide = crate::Tensor::from_vec(
+            vec![i64::MIN, -1, i64::MAX, i64::from(u32::MAX) + 1],
+            [2, 2],
+            &device,
+        )?
+        .transpose(0, 1)?;
+        assert_eq!(
+            wide.index_select(0, &crate::Tensor::from_vec(vec![1i64, 0], [2], &device)?,)?
+                .to_vec::<i64>()?,
+            vec![-1, i64::from(u32::MAX) + 1, i64::MIN, i64::MAX]
+        );
+        let flags = crate::Tensor::from_vec(vec![true, false, true], [3], &device)?;
+        assert_eq!(
+            flags.index_select(0, &indices)?.to_vec::<bool>()?,
+            vec![true, true]
+        );
 
         let narrowed = crate::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &device)
             .unwrap()
             .narrow(0, 1, 1)
             .unwrap();
         assert_eq!(narrowed.to_vec::<f32>().unwrap(), vec![3.0, 4.0]);
+        Ok(())
     }
 
     #[test]
     fn f16_is_native_or_loudly_unsupported() {
-        if context(0).is_err() {
+        if !adapter_available() {
             return;
         }
         let device = Device::Wgpu(0);
@@ -1631,7 +1717,7 @@ mod tests {
 
     #[test]
     fn conformance_if_adapter_exists() {
-        if context(0).is_err() {
+        if !adapter_available() {
             return;
         }
         let report = crate::backend::conformance::run_device(Device::Wgpu(0));
