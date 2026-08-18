@@ -57,6 +57,12 @@ fn unwrap_op<T>(result: Result<T>) -> T {
 
 macro_rules! binary_numeric {
     ($method:ident) => {
+        #[doc = concat!(
+                    "Elementwise `",
+                    stringify!($method),
+                    "` with another tensor of the same typed shape, element type, and placement. \
+             The result has the same type and dimensions."
+                )]
         pub fn $method(&self, rhs: &Self) -> Result<Self> {
             let op = stringify!($method);
             validate_related(self, rhs, op)?;
@@ -67,6 +73,12 @@ macro_rules! binary_numeric {
 
 macro_rules! scalar_numeric {
     ($method:ident) => {
+        #[doc = concat!(
+                            "Elementwise `",
+                            stringify!($method),
+                            "` with an `f64` scalar. The result has the same type and dimensions; \
+             the runtime operation applies the crate's explicit scalar-cast rules."
+                        )]
         pub fn $method(&self, value: f64) -> Result<Self> {
             let op = stringify!($method);
             validate_operand(self, op)?;
@@ -79,6 +91,11 @@ macro_rules! scalar_numeric {
 /// serves both the `NumericElement` and the `FloatElement` unary methods.
 macro_rules! unary {
     ($method:ident) => {
+        #[doc = concat!(
+                    "Applies the elementwise `",
+                    stringify!($method),
+                    "` operation. The result has the same typed shape, element type, and placement."
+                )]
         pub fn $method(&self) -> Result<Self> {
             let op = stringify!($method);
             validate_operand(self, op)?;
@@ -89,6 +106,11 @@ macro_rules! unary {
 
 macro_rules! comparison {
     ($method:ident) => {
+        #[doc = concat!(
+                            "Compares this tensor with another tensor using `",
+                            stringify!($method),
+                            "`. The result has the same shape and placement with `bool` elements."
+                        )]
         pub fn $method(&self, rhs: &Self) -> Result<<Self as BooleanOutput>::Output> {
             let op = stringify!($method);
             validate_related(self, rhs, op)?;
@@ -118,6 +140,8 @@ macro_rules! impl_elementwise {
                 unary!(neg);
                 unary!(abs);
 
+                /// Squares every element, preserving the typed shape,
+                /// element type, and placement.
                 pub fn square(&self) -> Result<Self> {
                     validate_operand(self, "square")?;
                     wrap(self, self.as_dynamic().mul(self.as_dynamic())?, "square")
@@ -146,6 +170,8 @@ macro_rules! impl_elementwise {
                 comparison!(gt);
                 comparison!(ge);
 
+                /// Replaces elements selected by a same-shape boolean mask.
+                /// The result keeps this tensor's type and placement.
                 pub fn masked_fill(
                     &self,
                     mask: &$name<$($dim,)* bool, P>,
@@ -161,6 +187,8 @@ macro_rules! impl_elementwise {
             }
 
             impl<$(const $dim: usize,)* P: Placement> $name<$($dim,)* bool, P> {
+                /// Selects between two same-shape tensors according to this
+                /// boolean mask, returning the selected tensors' element type.
                 pub fn where_cond<E: Element>(
                     &self,
                     on_true: &$name<$($dim,)* E, P>,

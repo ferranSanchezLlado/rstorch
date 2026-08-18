@@ -2708,7 +2708,7 @@ impl BackendOps for MetalBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, atomic::Ordering};
+    use std::sync::{Mutex, MutexGuard, atomic::Ordering};
 
     use super::{COMMIT_THRESHOLD, INSTRUMENTATION};
     use crate::backend::{FusedOp, View, dispatch};
@@ -2721,9 +2721,34 @@ mod tests {
     const METAL: Device = Device::Metal(0);
     static HARDWARE_LANE: Mutex<()> = Mutex::new(());
 
+    /// Serialize hardware tests, but make ordinary no-GPU development runs
+    /// pass cleanly. A poisoned lane means an earlier hardware test already
+    /// reported the real failure; skipping the rest avoids a misleading
+    /// cascade of `PoisonError`s.
+    fn hardware_lane() -> Option<MutexGuard<'static, ()>> {
+        if std::env::var_os("RSTORCH_SKIP_METAL_TESTS").is_some() {
+            eprintln!("skipping Metal hardware test: RSTORCH_SKIP_METAL_TESTS is set");
+            return None;
+        }
+        let guard = match HARDWARE_LANE.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                eprintln!("skipping Metal hardware test: shared hardware lane is poisoned");
+                return None;
+            }
+        };
+        Tensor::zeros([1], DType::F32, &METAL).unwrap_or_else(|error| {
+            panic!(
+                "Metal is enabled but device initialization failed: {error}. Set \
+                 RSTORCH_SKIP_METAL_TESTS=1 only when this test environment intentionally has no Metal device"
+            )
+        });
+        Some(guard)
+    }
+
     #[test]
     fn storage_transfer_and_strided_copy_run_on_hardware() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3], &METAL)
             .expect("Metal device 0 must exist in the hardware lane");
         assert_eq!(x.device(), METAL);
@@ -2736,7 +2761,7 @@ mod tests {
 
     #[test]
     fn cat_and_stack_are_device_side() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let a = Tensor::from_vec(vec![1i64, 2], [2], &METAL).unwrap();
         let b = Tensor::from_vec(vec![3i64, 4], [2], &METAL).unwrap();
         assert_eq!(
@@ -2754,7 +2779,6 @@ mod tests {
 
     #[test]
     fn invalid_ordinal_is_a_structured_backend_error() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
         let err = Tensor::zeros([1], DType::F32, &Device::Metal(usize::MAX));
         assert!(matches!(
             err,
@@ -2767,7 +2791,7 @@ mod tests {
 
     #[test]
     fn required_backend_table_matches_cpu() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let report = crate::backend::conformance::run_device(METAL);
         eprintln!(
             "Metal conformance: {} matched, {} expected unsupported, {} unexpected skips, {} failed",
@@ -2801,7 +2825,7 @@ mod tests {
     /// whichever side reports `Unsupported`.
     #[test]
     fn declined_dtypes_report_unsupported_and_not_another_error() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let mask = Tensor::from_vec(vec![true, false, true, true], [2, 2], &METAL).unwrap();
         let other = Tensor::from_vec(vec![true, true, false, true], [2, 2], &METAL).unwrap();
         for (label, result) in [
@@ -2842,7 +2866,7 @@ mod tests {
     /// propagate.
     #[test]
     fn saturating_tanh_matches_the_cpu_through_the_overflow_region() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         // The finite values matter as much as the infinities: MSL's tanh
         // returned a silently wrong *0* on [43.75, 44.25] and NaN from 44.5 up,
         // both of which an infinity-only test walks straight past. This steps
@@ -2904,7 +2928,7 @@ mod tests {
 
     #[test]
     fn async_submission_batches_defers_waits_and_reaps() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let before_dispatch = INSTRUMENTATION.dispatches.load(Ordering::Relaxed);
         let before_commit = INSTRUMENTATION.commits.load(Ordering::Relaxed);
         let before_wait = INSTRUMENTATION.waits.load(Ordering::Relaxed);
@@ -2958,7 +2982,7 @@ mod tests {
 
     #[test]
     fn cat_and_stack_do_not_cross_the_host_boundary() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let input_count = INSTRUMENTATION.transfer_in.load(Ordering::Relaxed);
         let output_count = INSTRUMENTATION.transfer_out.load(Ordering::Relaxed);
         let a = Tensor::ones([2, 3], DType::F32, &METAL).unwrap();
@@ -2979,7 +3003,7 @@ mod tests {
 
     #[test]
     fn fused_mixed_layer_norm_and_optimizers_match_cpu() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let metal = dispatch::backend(METAL);
         let cpu = dispatch::backend(Device::Cpu);
 
@@ -3059,7 +3083,7 @@ mod tests {
 
     #[test]
     fn conv_and_pool_backward_execute_on_metal() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let x = Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
             [1, 1, 3, 3],
@@ -3111,7 +3135,7 @@ mod tests {
     /// so the cases do not contaminate each other.
     #[test]
     fn index_family_reports_public_bounds_errors() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let backend = dispatch::backend(METAL);
         let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &METAL).unwrap();
 
@@ -3171,7 +3195,7 @@ mod tests {
     /// reports the **first** failure in program order, not the last.
     #[test]
     fn deferred_bounds_checks_batch_and_report_in_program_order() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &METAL).unwrap();
         let good = Tensor::from_vec(vec![0i64], [1], &METAL).unwrap();
         let first_bad = Tensor::from_vec(vec![7i64], [1], &METAL).unwrap();
@@ -3191,7 +3215,7 @@ mod tests {
 
     #[test]
     fn gelu_matches_cpu_on_adversarial_inputs() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let mut values: Vec<f32> = (-12_000..=12_000)
             .map(|value| value as f32 / 1000.0)
             .collect();
@@ -3246,7 +3270,7 @@ mod tests {
 
     #[test]
     fn float_to_i64_casts_match_rust_saturation() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let values = vec![
             f32::NAN,
             f32::NEG_INFINITY,
@@ -3338,7 +3362,7 @@ mod tests {
 
     #[test]
     fn max_pool_first_tie_and_first_nan_own_gradient() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         for values in [
             vec![2.0f32, 2.0, 1.0, 0.0],
             vec![f32::NAN, f32::NAN, 1.0, 0.0],
@@ -3371,7 +3395,7 @@ mod tests {
 
     #[test]
     fn f16_accumulators_remain_wide_on_hardware() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let ones = Tensor::ones([4096], DType::F16, &METAL).unwrap();
         assert_eq!(ones.sum_all().unwrap().item().unwrap(), 4096.0);
 
@@ -3389,7 +3413,7 @@ mod tests {
 
     #[test]
     fn finite_differences_and_training_step_stay_device_resident() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         let input = Tensor::from_vec(vec![0.25f32, -0.5, 1.0, 0.75], [2, 2], &METAL).unwrap();
         crate::testing::check_grad(
             |xs| xs[0].matmul(&xs[0].transpose(0, 1)?)?.gelu()?.sum_all(),
@@ -3437,7 +3461,7 @@ mod tests {
 
     #[test]
     fn multithreaded_streams_remain_ordered() {
-        let _lane = HARDWARE_LANE.lock().unwrap();
+        let Some(_lane) = hardware_lane() else { return };
         // Collecting first spawns every thread before any join, which is the
         // point of the test: folding this into one iterator (as clippy
         // suggests) would spawn-then-immediately-join threads one at a time.

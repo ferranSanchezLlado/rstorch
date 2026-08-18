@@ -31,10 +31,10 @@
 //!
 //! # Stability
 //!
-//! This crate follows semantic versioning from 1.0. The covered surface is
-//! recorded per feature combination under `api/` in the repository and diffed
-//! by CI on every run; `STABILITY.md` states the scope, backend and dtype
-//! capability policy, checkpoint integrity limits, and MSRV policy.
+//! This crate follows semantic versioning from 1.0. `STABILITY.md` states the
+//! covered surface, backend and dtype capability policy, checkpoint integrity
+//! limits, and MSRV policy. Public API changes should be reviewed against that
+//! contract before release.
 
 // `#[derive(Module)]` (the `rstorch-derive` crate) generates paths
 // rooted at `::rstorch`; this alias lets that expansion resolve when the

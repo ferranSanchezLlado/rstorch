@@ -3,7 +3,7 @@
 //! [`Module::visit`](crate::nn::Module::visit) and
 //! [`visit_mut`](crate::nn::Module::visit_mut) walk a module tree, calling
 //! into a [`Visitor`]/[`VisitorMut`] which threads a dotted path prefix
-//! (`fc1.weight`, `blocks.3.attn.qkv.weight`) and forwards each leaf to a
+//! (`fc1.weight`, `blocks.3.attention.q_proj.weight`) and forwards each leaf to a
 //! single sink. `#[derive(Module)]` generates the walk: one method
 //! call per field — [`param`](Visitor::param) for a [`Param`],
 //! [`buffer`](Visitor::buffer) for a whitelisted `Tensor` buffer (e.g.

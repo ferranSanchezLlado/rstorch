@@ -48,14 +48,30 @@ pub fn num_params(module: &dyn Module) -> usize {
 /// map (ordered for stable, diffable output). Values are `Arc`-cheap clones.
 /// Buffers are included so a checkpoint reconstructs a model (running stats
 /// survive), matching `PyTorch` `state_dict` semantics.
+///
+/// # Panics
+///
+/// Panics if a hand-written [`Module`] emits the same path more than once or
+/// emits one leaf under multiple paths. Such a walk cannot represent a
+/// lossless state dictionary; derive-generated modules cannot produce either
+/// condition.
 pub fn state_dict(module: &dyn Module) -> BTreeMap<String, Tensor> {
     let mut out = BTreeMap::new();
+    let mut seen = BTreeMap::new();
     visit_all(module, &mut |path, leaf| {
+        let leaf_identity = identity(&leaf);
+        assert!(
+            seen.insert(leaf_identity, path.to_string()).is_none(),
+            "module visits one leaf under multiple state-dict paths; state_dict would duplicate state"
+        );
         let value = match leaf {
             Leaf::Param(p) => p.value().clone(),
             Leaf::Buffer(t) => t.clone(),
         };
-        out.insert(path.to_string(), value);
+        assert!(
+            out.insert(path.to_string(), value).is_none(),
+            "module emits the state-dict path `{path}` twice; state_dict would lose a leaf"
+        );
     });
     out
 }
@@ -115,41 +131,57 @@ pub fn load_state_dict(module: &mut dyn Module, state: &BTreeMap<String, Tensor>
                 format!("missing key `{path}` in state dict (expected by the target module)"),
             ));
         };
-        if value.dims() != target.dims() {
+        if value.dims() != target.value.dims() {
             return Err(invalid(
                 OP,
                 format!(
                     "`{path}` shape mismatch: state dict has {}, target expects {}",
                     value.shape(),
-                    target.shape()
+                    target.value.shape()
                 ),
             ));
         }
-        if value.dtype() != target.dtype() {
+        if value.dtype() != target.value.dtype() {
             return Err(invalid(
                 OP,
                 format!(
                     "`{path}` dtype mismatch: state dict has {}, target expects {} \
                      (cast explicitly with to_dtype)",
                     value.dtype(),
-                    target.dtype()
+                    target.value.dtype()
                 ),
             ));
         }
-        if value.device() != target.device() {
+        if value.device() != target.value.device() {
             return Err(invalid(
                 OP,
                 format!(
                     "`{path}` device mismatch: state dict has {}, target expects {} \
                      (move it explicitly with to_device)",
                     value.device(),
-                    target.device()
+                    target.value.device()
                 ),
             ));
         }
     }
 
-    commit(OP, module, state)
+    let values = current
+        .into_iter()
+        .map(|(path, target)| {
+            let value = state
+                .get(&path)
+                .expect("load_state_dict validated every current path")
+                .clone();
+            (
+                path,
+                Mapped {
+                    value,
+                    identity: target.identity,
+                },
+            )
+        })
+        .collect();
+    commit(OP, module, &values)
 }
 
 /// Move every parameter and buffer of `module` to `device` (constructors
@@ -158,6 +190,10 @@ pub fn load_state_dict(module: &mut dyn Module, state: &BTreeMap<String, Tensor>
 /// All-or-nothing: every value is converted first, and only a fully converted
 /// module is committed, so a failure never leaves parameters split across two
 /// devices.
+///
+/// This helper does not own or convert an optimizer's moment buffers. Move the
+/// model before creating optimizer state, or rebuild/reload the optimizer for
+/// the new device before stepping it again.
 ///
 /// # Errors
 ///
@@ -179,6 +215,10 @@ pub fn to_device(module: &mut dyn Module, device: &Device) -> Result<()> {
 ///
 /// All-or-nothing: every value is converted first, and only a fully converted
 /// module is committed, so a failure never leaves a model in mixed precision.
+///
+/// This helper does not own or convert an optimizer's moment buffers. Cast the
+/// model before creating optimizer state, or rebuild/reload the optimizer for
+/// the new dtype before stepping it again.
 ///
 /// # Errors
 ///
@@ -215,6 +255,49 @@ fn invalid(op: &'static str, msg: String) -> Error {
     Error::InvalidArg { op, msg }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LeafKind {
+    Param,
+    Buffer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LeafIdentity {
+    kind: LeafKind,
+    address: usize,
+}
+
+struct Mapped {
+    value: Tensor,
+    identity: LeafIdentity,
+}
+
+fn identity(leaf: &Leaf<'_>) -> LeafIdentity {
+    match leaf {
+        Leaf::Param(p) => LeafIdentity {
+            kind: LeafKind::Param,
+            address: (*p as *const crate::nn::Param) as usize,
+        },
+        Leaf::Buffer(t) => LeafIdentity {
+            kind: LeafKind::Buffer,
+            address: (*t as *const Tensor) as usize,
+        },
+    }
+}
+
+fn identity_mut(leaf: &LeafMut<'_>) -> LeafIdentity {
+    match leaf {
+        LeafMut::Param(p) => LeafIdentity {
+            kind: LeafKind::Param,
+            address: (*p as *const crate::nn::Param) as usize,
+        },
+        LeafMut::Buffer(t) => LeafIdentity {
+            kind: LeafKind::Buffer,
+            address: (*t as *const Tensor) as usize,
+        },
+    }
+}
+
 /// Apply `f` to every leaf value, collecting the results by dotted path — the
 /// fallible half of every mutating helper here, run to completion **before**
 /// anything is swapped.
@@ -231,20 +314,40 @@ fn mapped(
     op: &'static str,
     module: &dyn Module,
     mut f: impl FnMut(&Tensor) -> Result<Tensor>,
-) -> Result<BTreeMap<String, Tensor>> {
-    let mut out: BTreeMap<String, Tensor> = BTreeMap::new();
+) -> Result<BTreeMap<String, Mapped>> {
+    let mut out: BTreeMap<String, Mapped> = BTreeMap::new();
+    let mut seen = BTreeMap::new();
     let mut failure: Option<Error> = None;
     visit_all(module, &mut |path, leaf| {
         if failure.is_some() {
             return;
         }
-        let current = match leaf {
+        let leaf_identity = identity(&leaf);
+        let current = match &leaf {
             Leaf::Param(p) => p.value(),
             Leaf::Buffer(t) => t,
         };
         match f(current) {
             Ok(value) => {
-                if out.insert(path.to_string(), value).is_some() {
+                let path = path.to_string();
+                if seen.insert(leaf_identity, path.clone()).is_some() {
+                    failure = Some(invalid(
+                        op,
+                        format!(
+                            "module visits one leaf under multiple paths, including `{path}`; \
+                             a state dict would duplicate that leaf"
+                        ),
+                    ));
+                } else if out
+                    .insert(
+                        path.clone(),
+                        Mapped {
+                            value,
+                            identity: leaf_identity,
+                        },
+                    )
+                    .is_some()
+                {
                     failure = Some(invalid(
                         op,
                         format!(
@@ -276,20 +379,35 @@ fn mapped(
 fn commit(
     op: &'static str,
     module: &mut dyn Module,
-    values: &BTreeMap<String, Tensor>,
+    values: &BTreeMap<String, Mapped>,
 ) -> Result<()> {
     let mut failure: Option<Error> = None;
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    visit_all_mut(module, &mut |path, _leaf| {
+    visit_all_mut(module, &mut |path, leaf| {
         if failure.is_some() {
             return;
         }
-        if !values.contains_key(path) {
+        let Some(expected) = values.get(path) else {
             failure = Some(invalid(
                 op,
                 format!(
                     "`{path}` is emitted by visit_mut but not by visit: the module's \
                      two walks disagree"
+                ),
+            ));
+            return;
+        };
+        let actual = identity_mut(&leaf);
+        if actual != expected.identity {
+            failure = Some(invalid(
+                op,
+                format!(
+                    "`{path}` is emitted by visit_mut for a different {} leaf than visit; \
+                     the module's two walks disagree",
+                    match actual.kind {
+                        LeafKind::Param => "parameter",
+                        LeafKind::Buffer => "buffer",
+                    }
                 ),
             ));
         } else if !seen.insert(path.to_string()) {
@@ -328,7 +446,7 @@ fn commit(
         let Some(value) = values.get(path) else {
             return;
         };
-        let value = value.detach();
+        let value = value.value.detach();
         let result = match leaf {
             LeafMut::Param(p) => p.set(value),
             LeafMut::Buffer(t) => {
@@ -518,9 +636,58 @@ mod tests {
             a: Param::new(t(&[1.0], &[1])),
             b: Param::new(t(&[2.0], &[1])),
         };
-        let state = state_dict(&m);
+        let state = BTreeMap::from([(String::from("w"), t(&[9.0], &[1]))]);
         let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
         assert!(msg.contains("emits the path `w` twice"), "{msg}");
+    }
+
+    #[test]
+    fn state_dict_panics_instead_of_dropping_duplicate_paths() {
+        struct Collide {
+            a: Param,
+            b: Param,
+        }
+        impl Module for Collide {
+            fn visit(&self, v: &mut Visitor) {
+                v.param("w", &self.a);
+                v.param("w", &self.b);
+            }
+            fn visit_mut(&mut self, v: &mut VisitorMut) {
+                v.param("w", &mut self.a);
+                v.param("w", &mut self.b);
+            }
+        }
+        let m = Collide {
+            a: Param::new(t(&[1.0], &[1])),
+            b: Param::new(t(&[2.0], &[1])),
+        };
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| state_dict(&m)));
+        assert!(panic.is_err());
+    }
+
+    #[test]
+    fn disagreeing_leaf_identities_are_rejected_before_swapping() {
+        struct Swapped {
+            a: Param,
+            b: Param,
+        }
+        impl Module for Swapped {
+            fn visit(&self, v: &mut Visitor) {
+                v.param("w", &self.a);
+            }
+            fn visit_mut(&mut self, v: &mut VisitorMut) {
+                v.param("w", &mut self.b);
+            }
+        }
+        let mut m = Swapped {
+            a: Param::new(t(&[0.0], &[1])),
+            b: Param::new(t(&[0.0], &[1])),
+        };
+        let state = BTreeMap::from([(String::from("w"), t(&[1.0], &[1]))]);
+        let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
+        assert!(msg.contains("different parameter leaf"), "{msg}");
+        assert_eq!(values(m.a.value()), vec![0.0]);
+        assert_eq!(values(m.b.value()), vec![0.0]);
     }
 
     #[test]

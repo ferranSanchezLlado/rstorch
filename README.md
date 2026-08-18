@@ -168,13 +168,16 @@ the CPU fallback.
 
 ### GPU tests
 
-Enabling `cuda` or `wgpu` makes that backend's hardware tests required: an
-initialization failure fails the test run instead of being treated as a skip.
-Environments that intentionally validate feature composition without GPU
-hardware must opt out explicitly:
+On macOS, Metal is enabled by default; when a Metal device is present its
+hardware tests are required. Enabling `cuda` or `wgpu` likewise makes that
+backend's hardware tests required: an initialization failure fails the test
+run instead of being treated as a skip. Environments that intentionally
+validate feature composition without accelerator hardware must opt out
+explicitly:
 
 ```sh
-RSTORCH_SKIP_CUDA_TESTS=1 RSTORCH_SKIP_WGPU_TESTS=1 cargo test --all-features
+RSTORCH_SKIP_METAL_TESTS=1 RSTORCH_SKIP_CUDA_TESTS=1 \
+RSTORCH_SKIP_WGPU_TESTS=1 cargo test --all-features
 ```
 
 Do not set these variables on a hardware test lane; they are intended for

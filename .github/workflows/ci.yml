@@ -1,6 +1,5 @@
 # restart-v3 CI (implementation-plan §1.2): stable + MSRV, fmt, clippy
-# -D warnings, doc build, and a cargo-public-api diff against the committed
-# baselines in `api/`. Branch filters keep pushed task branches from triggering
+# -D warnings, and doc build. Branch filters keep pushed task branches from triggering
 # this; only integration branches and PRs targeting them run.
 name: CI
 

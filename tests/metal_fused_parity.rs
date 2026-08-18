@@ -15,6 +15,9 @@
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
 
+#[path = "common/metal.rs"]
+mod metal;
+
 use rstorch::nn;
 use rstorch::prelude::*;
 
@@ -72,6 +75,9 @@ fn value_and_grad(
 
 #[test]
 fn softmax_and_log_softmax_match_the_cpu() {
+    if !metal::available() {
+        return;
+    }
     for dims in [[4usize, 8], [3, 33], [1, 129], [17, 5]] {
         compare(&format!("softmax{dims:?}"), |device| {
             value_and_grad(device, dims, 1, |x| x.softmax(1).unwrap())
@@ -87,6 +93,9 @@ fn softmax_and_log_softmax_match_the_cpu() {
 /// it assumes a packed row.
 #[test]
 fn softmax_over_a_strided_view_matches_the_cpu() {
+    if !metal::available() {
+        return;
+    }
     compare("softmax.transposed", |device| {
         let x = Param::new(Tensor::from_vec(values(3, 24), [4, 6], device).unwrap());
         let transposed = x.get(Mode::TRAIN).transpose(0, 1).unwrap();
@@ -100,6 +109,9 @@ fn softmax_over_a_strided_view_matches_the_cpu() {
 
 #[test]
 fn layer_norm_and_rms_norm_match_the_cpu() {
+    if !metal::available() {
+        return;
+    }
     for width in [4usize, 31, 128] {
         compare(&format!("layer_norm.{width}"), |device| {
             value_and_grad(device, [5, width], 4, |x| {
@@ -122,6 +134,9 @@ fn layer_norm_and_rms_norm_match_the_cpu() {
 
 #[test]
 fn wide_parallel_reductions_match_the_cpu_forward_and_backward() {
+    if !metal::available() {
+        return;
+    }
     compare("softmax.parallel.1024", |device| {
         value_and_grad(device, [7, 1024], 51, |x| x.softmax(1).unwrap())
     });
@@ -137,6 +152,9 @@ fn wide_parallel_reductions_match_the_cpu_forward_and_backward() {
 
 #[test]
 fn contiguous_index_backward_fast_paths_match_the_cpu_with_duplicates() {
+    if !metal::available() {
+        return;
+    }
     compare("index_select.axis0.backward", |device| {
         let table = Param::new(Tensor::from_vec(values(53, 257 * 64), [257, 64], device).unwrap());
         let ids = Tensor::from_vec(vec![3i64, 200, 3, 0, 256, 200, 17], [7], device).unwrap();
@@ -164,6 +182,9 @@ fn contiguous_index_backward_fast_paths_match_the_cpu_with_duplicates() {
 /// that gets the input gradient right can still get `weight`/`bias` wrong.
 #[test]
 fn layer_norm_parameter_gradients_match_the_cpu() {
+    if !metal::available() {
+        return;
+    }
     compare("layer_norm.params", |device| {
         let mut layer = LayerNorm::new([9usize], device).unwrap();
         let x = Tensor::from_vec(values(6, 7 * 9), [7, 9], device).unwrap();
@@ -187,6 +208,9 @@ fn layer_norm_parameter_gradients_match_the_cpu() {
 
 #[test]
 fn cross_entropy_matches_the_cpu() {
+    if !metal::available() {
+        return;
+    }
     compare("cross_entropy", |device| {
         let logits = Param::new(Tensor::from_vec(values(8, 6 * 10), [6, 10], device).unwrap());
         let targets = Tensor::from_vec(vec![0i64, 3, 9, 5, 1, 7], [6], device).unwrap();
@@ -202,6 +226,9 @@ fn cross_entropy_matches_the_cpu() {
 /// when a momentum or a bias-correction term is mishandled; ten cannot.
 #[test]
 fn optimizer_steps_match_the_cpu() {
+    if !metal::available() {
+        return;
+    }
     #[derive(rstorch::Module)]
     struct Model {
         first: Linear,
@@ -256,6 +283,9 @@ fn optimizer_steps_match_the_cpu() {
 /// where a fused softmax meets non-contiguous operands.
 #[test]
 fn attention_matches_the_cpu() {
+    if !metal::available() {
+        return;
+    }
     compare("attention", |device| {
         let mut rng = Rng::seed(11);
         let mut attention = MultiHeadAttention::new(16, 4, device, &mut rng).unwrap();
@@ -278,6 +308,9 @@ fn attention_matches_the_cpu() {
 /// forwards instead of showing up in one.
 #[test]
 fn batch_norm_running_statistics_match_the_cpu() {
+    if !metal::available() {
+        return;
+    }
     compare("batch_norm", |device| {
         let mut layer = BatchNorm2d::new(3, device).unwrap();
         for step in 0..5 {

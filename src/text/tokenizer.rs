@@ -1,10 +1,14 @@
 //! Character-level and byte-pair-encoding tokenizers.
 //!
-//! Tokenization here is **loud rather than lossy** — every way of losing
-//! information is an [`Error::Tokenizer`] instead of a silent substitution:
+//! Tokenization is strict by default, with one explicit exception: the
+//! character tokenizer maps out-of-vocabulary characters to its `unk` token.
+//! BPE encoding/decoding and invalid token ids remain **loud rather than
+//! lossy** — unsupported input is an [`Error::Tokenizer`] instead of an
+//! accidental substitution:
 //!
 //! - [`encode`](Tokenizer::encode) and [`decode`](Tokenizer::decode) return
-//!   [`Result`]. An id that maps to nothing is an error.
+//!   [`Result`]. An id that maps to nothing is an error; see
+//!   [`CharTokenizer::encode`] for its documented `unk` exception.
 //! - Decoding is **strict UTF-8**: a byte sequence that is not valid UTF-8 is
 //!   an error, never a `U+FFFD` replacement.
 //! - [`BpeTokenizer::train`] **validates** the requested vocabulary size
@@ -30,8 +34,10 @@ fn tokenizer_error(msg: impl Into<String>) -> Error {
 ///
 /// [`encode`](Self::encode) and [`decode`](Self::decode) are fallible: an id
 /// that maps to nothing, or a byte sequence that is not valid UTF-8, is
-/// reported through the crate [`Error`] rather than being silently
-/// substituted or lossily decoded.
+/// reported through the crate [`Error`] rather than being silently skipped.
+/// Implementations may define an explicit unknown-token policy; for example,
+/// [`CharTokenizer`] maps out-of-vocabulary characters to `unk` and decodes
+/// that token as `?`.
 ///
 /// # Examples
 ///
@@ -91,6 +97,8 @@ pub trait Tokenizer {
 ///
 /// Ids `0..4` are reserved for the `pad`, `unk`, `bos`, and `eos` special
 /// tokens; corpus characters occupy ids `4..4 + n` in sorted order.
+/// Characters not present in the corpus are encoded as `unk` and therefore do
+/// not round-trip losslessly: decoding them yields `?`.
 ///
 /// # Examples
 ///

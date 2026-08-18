@@ -25,10 +25,13 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use rstorch::prelude::*;
 
 fn benchmark_devices() -> Vec<Device> {
+    let mut devices = vec![Device::Cpu];
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    let devices = vec![Device::Cpu, Device::Metal(0)];
-    #[cfg(not(all(feature = "metal", target_os = "macos")))]
-    let devices = vec![Device::Cpu];
+    if std::env::var_os("RSTORCH_SKIP_METAL_TESTS").is_none()
+        && Tensor::zeros([1], DType::F32, &Device::Metal(0)).is_ok()
+    {
+        devices.push(Device::Metal(0));
+    }
     devices
 }
 

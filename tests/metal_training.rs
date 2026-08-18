@@ -1,5 +1,8 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 
+#[path = "common/metal.rs"]
+mod metal;
+
 use rstorch::models::{DecoderTransformer, TransformerConfig};
 use rstorch::prelude::*;
 
@@ -20,6 +23,9 @@ impl Forward for Mlp {
 
 #[test]
 fn seeded_mlp_and_transformer_losses_decrease_on_metal() -> Result<()> {
+    if !metal::available() {
+        return Ok(());
+    }
     let mut rng = Rng::seed(61);
     let mut mlp = Mlp {
         first: Linear::new(4, 8, &METAL, &mut rng)?,
@@ -102,6 +108,9 @@ impl Forward for Cnn {
 
 #[test]
 fn seeded_cnn_loss_decreases_on_metal() -> Result<()> {
+    if !metal::available() {
+        return Ok(());
+    }
     let mut rng = Rng::seed(9);
     let mut cnn = Cnn {
         weight: Param::new(Tensor::randn([2, 1, 2, 2], DType::F32, &METAL, &mut rng)?),
@@ -145,6 +154,9 @@ fn seeded_cnn_loss_decreases_on_metal() -> Result<()> {
 /// a "loss decreased" assertion cannot see a gradient that is merely wrong.
 #[test]
 fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
+    if !metal::available() {
+        return Ok(());
+    }
     // Deterministic, non-symmetric coefficients so an error cannot cancel.
     fn coefficients(n: usize) -> Vec<f32> {
         (0..n).map(|i| 0.25 + (i as f32) * 0.5).collect()
@@ -200,6 +212,9 @@ fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
 /// the NaN so they agree with what `max`/`min` report.
 #[test]
 fn nan_semantics_match_between_cpu_and_metal() -> Result<()> {
+    if !metal::available() {
+        return Ok(());
+    }
     let a = vec![f32::NAN, 1.0, 2.0, -3.0];
     let b = vec![5.0f32, f32::NAN, 3.0, -4.0];
 
@@ -249,6 +264,9 @@ fn nan_semantics_match_between_cpu_and_metal() -> Result<()> {
 /// backends because they implement the guard separately.
 #[test]
 fn i64_division_overflow_matches_between_cpu_and_metal() -> Result<()> {
+    if !metal::available() {
+        return Ok(());
+    }
     for dev in [Device::Cpu, METAL] {
         let a = Tensor::from_vec(vec![i64::MIN, i64::MIN, -8, 7], [4], &dev)?;
         let b = Tensor::from_vec(vec![-1i64, 1, 2, 0], [4], &dev)?;
@@ -267,6 +285,9 @@ fn i64_division_overflow_matches_between_cpu_and_metal() -> Result<()> {
 /// on an empty axis — a panic where the CPU backend returns zeros.
 #[test]
 fn empty_axis_sum_matches_cpu_instead_of_panicking() -> Result<()> {
+    if !metal::available() {
+        return Ok(());
+    }
     for dims in [vec![0usize, 3], vec![2, 0, 3], vec![3, 0]] {
         let axis = dims.iter().position(|&d| d == 0).unwrap();
         let mut results = Vec::new();

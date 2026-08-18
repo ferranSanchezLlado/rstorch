@@ -15,6 +15,9 @@
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
 
+#[path = "common/metal.rs"]
+mod metal;
+
 use rstorch::prelude::*;
 
 const METAL: Device = Device::Metal(0);
@@ -82,6 +85,9 @@ fn assert_close(what: &str, case: usize, cpu: &[f32], metal: &[f32]) {
 
 #[test]
 fn conv2d_backward_matches_the_cpu_across_stride_padding_and_dilation() {
+    if !metal::available() {
+        return;
+    }
     let cases = [
         // The identity geometry the in-crate test already pins, as a control.
         Case {
@@ -158,6 +164,9 @@ fn conv2d_backward_matches_the_cpu_across_stride_padding_and_dilation() {
 
 #[test]
 fn pool2d_backward_matches_the_cpu_across_stride_and_padding() {
+    if !metal::available() {
+        return;
+    }
     let dims = [2usize, 3, 7, 7];
     let x = values(4, dims.iter().product());
 

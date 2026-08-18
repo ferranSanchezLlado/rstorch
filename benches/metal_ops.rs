@@ -125,7 +125,14 @@ mod macos {
 
     fn benchmarks(c: &mut Criterion) {
         bench_device(c, Device::Cpu);
-        bench_device(c, Device::Metal(0));
+        if std::env::var_os("RSTORCH_SKIP_METAL_TESTS").is_some() {
+            eprintln!("skipping Metal benchmark: RSTORCH_SKIP_METAL_TESTS is set");
+            return;
+        }
+        match Tensor::zeros([1], DType::F32, &Device::Metal(0)) {
+            Ok(_) => bench_device(c, Device::Metal(0)),
+            Err(error) => eprintln!("skipping Metal benchmark: {error}"),
+        }
     }
 
     pub fn run() {

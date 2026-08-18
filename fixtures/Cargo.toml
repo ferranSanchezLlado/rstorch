@@ -12,7 +12,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-rstorch = { path = ".." }
+rstorch = { path = "..", default-features = false }
 # `half::f16`/`half::bf16` are public rstorch contract surface: a downstream
 # crate must depend on `half` itself in order to name a reduced-precision typed
 # tensor at all, so depending on it here reproduces the real first-hour user

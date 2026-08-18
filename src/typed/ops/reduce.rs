@@ -21,6 +21,13 @@ fn dynamic_reduction<T: TypedTensor>(
 
 macro_rules! remove_axis_reduction {
     ($method:ident) => {
+        #[doc = concat!(
+                            "Reduces axis `AXIS` with `",
+                            stringify!($method),
+                            "`, removing that axis from the output type. `AXIS` is checked at \
+             compile time when it is statically known and the operation still \
+             validates the runtime binding."
+                        )]
         pub fn $method<const AXIS: usize>(&self) -> Result<<Self as RemoveAxisOutput<AXIS>>::Output>
         where
             Self: RemoveAxisOutput<AXIS>,
@@ -33,6 +40,11 @@ macro_rules! remove_axis_reduction {
 
 macro_rules! keepdim_reduction {
     ($method:ident) => {
+        #[doc = concat!(
+                                    "Reduces axis `AXIS` with `",
+                                    stringify!($method),
+                                    "`, retaining that axis with length one in the output type."
+                                )]
         pub fn $method<const AXIS: usize>(&self) -> Result<<Self as KeepDimOutput<AXIS>>::Output>
         where
             Self: KeepDimOutput<AXIS>,
@@ -45,6 +57,11 @@ macro_rules! keepdim_reduction {
 
 macro_rules! whole_reduction {
     ($method:ident) => {
+        #[doc = concat!(
+                    "Reduces all elements with `",
+                    stringify!($method),
+                    "` and returns a rank-zero tensor with the same element type and placement."
+                )]
         pub fn $method(&self) -> Result<<Self as ScalarOutput>::Output> {
             let op = stringify!($method);
             wrap(self, dynamic(self, op)?.$method()?, op)
@@ -54,6 +71,11 @@ macro_rules! whole_reduction {
 
 macro_rules! arg_reduction {
     ($method:ident) => {
+        #[doc = concat!(
+                            "Returns the `i64` index of the `",
+                            stringify!($method),
+                            "` value along axis `AXIS`, removing that axis from the output type."
+                        )]
         pub fn $method<const AXIS: usize>(&self) -> Result<<Self as ArgOutput<AXIS>>::Output>
         where
             Self: ArgOutput<AXIS>,
@@ -66,6 +88,11 @@ macro_rules! arg_reduction {
 
 macro_rules! arg_keepdim_reduction {
     ($method:ident) => {
+        #[doc = concat!(
+                            "Returns the `i64` index of the `",
+                            stringify!($method),
+                            "` value along axis `AXIS`, retaining that axis with length one."
+                        )]
         pub fn $method<const AXIS: usize>(&self) -> Result<<Self as ArgKeepDimOutput<AXIS>>::Output>
         where
             Self: ArgKeepDimOutput<AXIS>,
@@ -78,6 +105,11 @@ macro_rules! arg_keepdim_reduction {
 
 macro_rules! shape_preserving_reduction {
     ($method:ident) => {
+        #[doc = concat!(
+                    "Applies `",
+                    stringify!($method),
+                    "` along axis `AXIS` while preserving the input shape and typed markers."
+                )]
         pub fn $method<const AXIS: usize>(&self) -> Result<Self>
         where
             Self: KeepDimOutput<AXIS>,
@@ -92,6 +124,12 @@ macro_rules! shape_preserving_reduction {
 // only at runtime, so the enclosing rank macro passes it in.
 macro_rules! dyn_reduction {
     ($method:ident, $runtime:ident, $output:ty) => {
+        #[doc = concat!(
+                            "Runtime-axis form of `",
+                            stringify!($method),
+                            "`. Because the axis is not a const generic, dynamic dimensions are \
+             used for the affected output axes."
+                        )]
         pub fn $method(&self, axis: isize) -> Result<$output> {
             let op = stringify!($method);
             wrap(self, dynamic_reduction(self, op, |x| x.$runtime(axis))?, op)

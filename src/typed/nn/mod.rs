@@ -172,8 +172,8 @@ pub trait Module {
 /// construct-plus-checked-load, preserving the runtime parameter's stable
 /// gradient identity, cached leaf, and freeze state within each model.
 ///
-/// The value-preserving constructors and accessors. Those
-/// accessors return `T`, never a mutable runtime parameter or tensor.
+/// Its value-preserving constructors and accessors return `T`, never a mutable
+/// runtime parameter or tensor.
 pub struct TypedParam<T>
 where
     T: TypedTensor,

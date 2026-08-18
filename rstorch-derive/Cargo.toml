@@ -20,5 +20,5 @@ syn = { version = "2", features = ["full"] }
 # the derive's own tests need the real `nn` contracts to expand against, and
 # `trybuild` drives the pinned-toolchain UI suite (see `tests/`).
 [dev-dependencies]
-rstorch = { path = ".." }
+rstorch = { path = "..", default-features = false }
 trybuild = "1"

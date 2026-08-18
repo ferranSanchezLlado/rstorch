@@ -121,13 +121,7 @@ impl Envelope {
     /// Returns [`Error::Persistence`] if `name` is empty or contains a `.`.
     pub fn set_section(&mut self, name: impl Into<String>, value: impl Into<String>) -> Result<()> {
         let name = name.into();
-        if name.is_empty() || name.contains('.') {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "invalid section name `{name}` (must be non-empty and contain no `.`)"
-                ),
-            });
-        }
+        validate_section_name(&name)?;
         self.sections.insert(name, value.into());
         Ok(())
     }
@@ -159,8 +153,8 @@ impl Envelope {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Persistence`] if `limits` reject the payload, or if
-    /// the underlying write fails.
+    /// Returns [`Error::Persistence`] if `limits` reject the payload, and
+    /// [`Error::Io`] if the underlying filesystem operation fails.
     pub fn save(&self, path: impl AsRef<Path>, limits: &Limits) -> Result<()> {
         save_tensors(
             path.as_ref(),
@@ -178,8 +172,9 @@ impl Envelope {
     /// # Errors
     ///
     /// Returns [`Error::Persistence`] if `limits` reject the file, its magic
-    /// is not this format family, its version fields are malformed, or its
-    /// major version is not [`FORMAT_MAJOR`].
+    /// is not this format family, its version fields are malformed, its
+    /// section names are invalid, or its major version is not
+    /// [`FORMAT_MAJOR`]. Returns [`Error::Io`] for filesystem failures.
     pub fn load(path: impl AsRef<Path>, limits: &Limits) -> Result<Self> {
         let (tensors, meta) = load_tensors(path.as_ref(), limits)?;
 
@@ -188,7 +183,7 @@ impl Envelope {
             return Err(Error::Persistence {
                 msg: format!(
                     "not an rstorch checkpoint: magic {magic:?} (expected {MAGIC:?}); \
-                     use load_tensors for a plain safetensors file"
+                     use load_safetensors for a plain safetensors file"
                 ),
             });
         }
@@ -209,6 +204,7 @@ impl Envelope {
         let mut sections = BTreeMap::new();
         for (key, value) in &meta {
             if let Some(name) = key.strip_prefix(SECTION_PREFIX) {
+                validate_section_name(name)?;
                 sections.insert(name.to_string(), value.clone());
             }
         }
@@ -220,6 +216,15 @@ impl Envelope {
             minor,
         })
     }
+}
+
+fn validate_section_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('.') {
+        return Err(Error::Persistence {
+            msg: format!("invalid section name `{name}` (must be non-empty and contain no `.`)"),
+        });
+    }
+    Ok(())
 }
 
 /// Parse a reserved `u32` version key, erroring on absence or non-numeric.
@@ -380,5 +385,23 @@ mod tests {
         assert!(e.set_section("has.dot", "x").is_err());
         assert!(e.set_section("", "x").is_err());
         assert!(e.set_section("ok", "x").is_ok());
+    }
+
+    #[test]
+    fn invalid_section_name_is_rejected_when_loading() {
+        let dir = tmpdir("invalid-loaded-section");
+        let path = dir.join("run.rstorch");
+        let mut meta = HashMap::new();
+        meta.insert(KEY_MAGIC.to_string(), MAGIC.to_string());
+        meta.insert(KEY_MAJOR.to_string(), FORMAT_MAJOR.to_string());
+        meta.insert(KEY_MINOR.to_string(), FORMAT_MINOR.to_string());
+        meta.insert(format!("{SECTION_PREFIX}bad.name"), "value".to_string());
+        save_tensors(&path, &BTreeMap::new(), Some(meta), &Limits::defaults()).unwrap();
+
+        assert!(matches!(
+            Envelope::load(&path, &Limits::defaults()),
+            Err(Error::Persistence { .. })
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

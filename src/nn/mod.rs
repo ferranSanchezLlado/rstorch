@@ -14,7 +14,8 @@
 //! statistics). Both are moved by [`to_device`]/[`to_dtype`] and both land in
 //! [`state_dict`], so a checkpoint reconstructs a model — only `Param`s count
 //! toward [`num_params`] and receive gradients. Every leaf is named by the
-//! dotted path its walk emits (`fc1.weight`, `blocks.3.attn.qkv.weight`);
+//! dotted path its walk emits (for example, `fc1.weight` or
+//! `blocks.3.attention.q_proj.weight`);
 //! those names are the `state_dict` keys.
 //!
 //! # Replication (EMA, target networks, per-thread inference)
@@ -109,6 +110,12 @@ use crate::tensor::Tensor;
 /// therefore untrained) parameter is a compile error unless the caller has
 /// explicitly opted that field out with `skip`.
 ///
+/// A safe implementation must emit each parameter or buffer exactly once from
+/// both walks, under the same dotted path and leaf kind. The model utilities
+/// validate this contract before mutating state, but the trait itself remains
+/// safe so custom implementations can report malformed walks as ordinary
+/// errors rather than creating undefined behavior.
+///
 /// Object-safe: `&dyn Module` drives the model-level utilities and, via
 /// stable dyn upcasting (Rust 1.86), the crate-private `Sequential` layer.
 pub trait Module {
@@ -123,8 +130,12 @@ pub trait Module {
 /// §4.1). `&mut self` is honest about layer state (dropout RNG, `BatchNorm`
 /// running stats as plain fields — no interior mutability, no mutexes).
 pub trait Forward {
-    /// Run the forward pass. `mode` selects layer behavior and whether the
-    /// computation is recorded for autograd.
+    /// Run the forward pass.
+    ///
+    /// `mode` selects layer behavior and whether parameter access returns
+    /// traced leaves. It is not a global no-grad switch: operations can still
+    /// propagate an existing input graph, and layers without parameters (such
+    /// as [`Dropout`]) follow the input's tracing state.
     ///
     /// # Errors
     ///

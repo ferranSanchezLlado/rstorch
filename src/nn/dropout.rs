@@ -1,6 +1,5 @@
 //! [`Dropout`] — inverted dropout over a layer-owned [`Rng`] stream.
 //!
-//!
 //! Two design points, both consequences of the crate having **no ambient
 //! state**:
 //!
@@ -8,8 +7,8 @@
 //!   construction — there is no thread-local, no global seed, and no
 //!   "dropout context" threaded through `forward`; and
 //! * whether the mask is applied is read off [`Mode::is_training`], the
-//!   behavior axis, so [`Mode::TRAIN`]`.frozen()` (MC-dropout sampling) still
-//!   drops while [`Mode::EVAL`]`.recorded()` (fine-tuning) does not.
+//!   behavior axis, so `Mode::TRAIN.frozen()` (MC-dropout sampling) still
+//!   drops while `Mode::EVAL.recorded()` (fine-tuning) does not.
 
 use crate::dtype::DType;
 use crate::error::{Error, Result};
@@ -33,6 +32,9 @@ const MASK_DTYPE: DType = DType::F32;
 /// The layer holds no parameters and no buffers; its only state is the `Rng`
 /// stream, which is `#[module(skip)]`ed out of the parameter walk (it is
 /// neither trainable nor part of a checkpoint's tensor set).
+/// Consequently, a tensor state dictionary does not preserve the exact next
+/// dropout mask; applications that require bit-for-bit resume must persist and
+/// restore the layer's random stream as separate application state.
 ///
 /// ```
 /// use rstorch::nn::{Dropout, Forward, Mode};

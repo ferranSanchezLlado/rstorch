@@ -6,6 +6,10 @@ use rstorch::typed::{
 };
 use rstorch::{DType, Device, Error, Tensor};
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[path = "common/metal.rs"]
+mod metal;
+
 fn cpu() -> DeviceCtx<Cpu> {
     DeviceCtx::cpu().unwrap()
 }
@@ -232,6 +236,10 @@ fn public_relabel_is_zero_copy_for_every_rank() {
 #[test]
 fn public_relabel_rejects_a_different_physical_device() {
     use rstorch::typed::Metal;
+
+    if !metal::available() {
+        return;
+    }
 
     let cpu = cpu();
     let metal = DeviceCtx::<Metal<0>>::bind(Device::Metal(0)).unwrap();
