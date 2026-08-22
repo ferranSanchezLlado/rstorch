@@ -87,7 +87,7 @@ fn shape_mismatch_reports_the_required_shape_on_every_axis() {
     // Two axes contradict their markers at once.
     let both_wrong = Tensor::zeros([2, 5], DType::F32, &Device::Cpu).unwrap();
     match Tensor2::<4, 3>::try_from_dynamic(both_wrong, &ctx) {
-        Err(Error::ShapeMismatch { op, lhs, rhs }) => {
+        Err(Error::ShapeMismatch { op, lhs, rhs, .. }) => {
             assert_eq!(op, "try_from_dynamic");
             assert_eq!(lhs.dims(), [2, 5], "lhs is the observed shape");
             assert_eq!(rhs.dims(), [4, 3], "rhs must be a shape the target accepts");
@@ -98,7 +98,7 @@ fn shape_mismatch_reports_the_required_shape_on_every_axis() {
     // `from_vec` reports the same required shape for the same contradiction,
     // and describes `lhs` as the requested dims rather than the data length.
     match Tensor2::<4, 3>::from_vec(vec![0.0f32; 10], [2, 5], &ctx) {
-        Err(Error::ShapeMismatch { op, lhs, rhs }) => {
+        Err(Error::ShapeMismatch { op, lhs, rhs, .. }) => {
             assert_eq!(op, "from_vec");
             assert_eq!(lhs.dims(), [2, 5], "lhs is the requested dims");
             assert_eq!(rhs.dims(), [4, 3]);
@@ -125,7 +125,8 @@ fn dynamic_reentry_rejects_rank_static_dimension_and_dtype() {
         Err(Error::RankMismatch {
             op: "try_from_dynamic",
             expected: 2,
-            got: 1
+            got: 1,
+            ..
         })
     ));
 
@@ -144,7 +145,8 @@ fn dynamic_reentry_rejects_rank_static_dimension_and_dtype() {
         Err(Error::DTypeMismatch {
             op: "try_from_dynamic",
             expected: DType::F32,
-            got: DType::I64
+            got: DType::I64,
+            ..
         })
     ));
 }
@@ -250,6 +252,7 @@ fn public_relabel_rejects_a_different_physical_device() {
             op: "relabel",
             expected: Device::Cpu,
             got: Device::Metal(0),
+            ..
         })
     ));
 }

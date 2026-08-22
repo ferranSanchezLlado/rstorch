@@ -156,6 +156,15 @@ pub(crate) enum Call {
     Gather(usize),
     /// [`BackendOps::scatter_add`] over `(x, indices, src)` along the axis.
     ScatterAdd(usize),
+    /// [`BackendOps::arg_sort`] along the axis. The only entry point whose
+    /// result is a *permutation*: the output is the source position of each
+    /// element in sorted order, so it is `I64` whatever the sorted dtype was.
+    ArgSort {
+        /// Axis whose lines are sorted.
+        axis: usize,
+        /// Sort direction; NaN orders above every number either way.
+        descending: bool,
+    },
     /// [`BackendOps::conv`] with the given geometry.
     Conv(ConvOp, Conv2dParams),
     /// [`BackendOps::fused`] with the given scalar tail. Multi-output by
@@ -209,6 +218,9 @@ impl Call {
             (Call::IndexAdd(axis), [x, i, s]) => one(backend.index_add(*x, *axis, *i, *s)),
             (Call::Gather(axis), [x, i]) => one(backend.gather(*x, *axis, *i)),
             (Call::ScatterAdd(axis), [x, i, s]) => one(backend.scatter_add(*x, *axis, *i, *s)),
+            (Call::ArgSort { axis, descending }, [x]) => {
+                one(backend.arg_sort(*x, *axis, *descending))
+            }
             (Call::Conv(op, params), inputs) => one(backend.conv(*op, inputs, params)),
             (Call::Fused(op, scalars), inputs) => backend.fused(*op, inputs, scalars),
             (Call::Full { .. }, _) => Err(arity(0)),
@@ -219,7 +231,8 @@ impl Call {
                 | Call::CopyInto { .. }
                 | Call::Unary(_)
                 | Call::Reduce(..)
-                | Call::ArgReduce(..),
+                | Call::ArgReduce(..)
+                | Call::ArgSort { .. },
                 _,
             ) => Err(arity(1)),
             (
@@ -252,7 +265,7 @@ impl Case {
         let output_dtype = match &call {
             Call::Full { dtype, .. } | Call::Cast(dtype) => *dtype,
             Call::Compare(_) => DType::Bool,
-            Call::ArgReduce(..) => DType::I64,
+            Call::ArgReduce(..) | Call::ArgSort { .. } => DType::I64,
             Call::WhereCond => operands[1].host.dtype(),
             Call::MaskedFill(_)
             | Call::CopyStrided
@@ -290,6 +303,10 @@ impl Case {
                 | Call::ArgReduce(..)
                 | Call::IndexSelect(_)
                 | Call::Gather(_)
+                // A permutation of source positions is exact by construction:
+                // there is no arithmetic to round, so a backend that names a
+                // different position is wrong, never merely imprecise.
+                | Call::ArgSort { .. }
         );
         let tol = if exact_output {
             0.0
@@ -388,19 +405,59 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
     report
 }
 
+/// The ops that exist **only** in the CPU kernel set.
+///
+/// Not a contract and not a capability declaration: a hole, written down.
+/// Metal, WGPU, and CUDA implement none of these and return
+/// [`Error::Unsupported`], so every row naming one would otherwise land in
+/// `Report::skipped` and fail all three lane tests, which require that set to
+/// be empty.
+///
+/// This list *is* the record of that hole — it is the only place the crate
+/// admits it, so it is deliberately one explicit list of named variants rather
+/// than arms scattered through [`expected_unsupported`] or folded into the
+/// common-contract tier, where it would read as a rule instead of a debt.
+/// Nothing here is out of scope for an accelerator; every entry is a kernel
+/// nobody has written yet.
+///
+/// **An entry must be deleted the moment its kernel lands.** That deletion is
+/// the promotion gate: it is what starts the row being compared against the
+/// CPU reference for real. An entry left behind after the kernel exists goes
+/// on silently excusing a kernel that could be checked.
+fn has_no_accelerator_kernel(call: &Call) -> bool {
+    matches!(
+        call,
+        Call::Binary(BinaryOp::Pow)
+            | Call::BinaryScalar(BinaryOp::Pow, _)
+            | Call::Unary(
+                UnaryOp::Sign
+                    | UnaryOp::Recip
+                    | UnaryOp::Floor
+                    | UnaryOp::Ceil
+                    | UnaryOp::Round
+                    | UnaryOp::Erf
+            )
+            | Call::Reduce(ReduceOp::Prod, _)
+            | Call::ArgSort { .. }
+    )
+}
+
 /// Whether a declined case is *declared* out of contract rather than a hole.
 ///
-/// Two tiers, and the distinction matters: the first is the **common** backend
-/// contract — combinations the op enums themselves put out of scope, which
-/// every backend including the CPU reference declines, so the row exists to
-/// prove the decline is loud and universal. The second is a **per-backend**
-/// capability declaration (Metal has no BF16 and no F64 storage at all).
+/// Three tiers, and the distinction matters. The first is the **common**
+/// backend contract — combinations the op enums themselves put out of scope,
+/// which every backend including the CPU reference declines, so the row exists
+/// to prove the decline is loud and universal. The second is the
+/// **accelerator gap** of [`has_no_accelerator_kernel`], which is the one tier
+/// that *is* a hole rather than a rule, and is written as a single named list
+/// for exactly that reason. The third is a **per-backend** capability
+/// declaration (Metal has no BF16 and no F64 storage at all).
 ///
-/// Nothing here may name a combination one backend implements and another
-/// merely has not got round to: that is the entry that would silently excuse a
-/// real gap, so every arm below is justified by a rule stated in
-/// [`crate::backend`] or in the kernel module that enforces it.
-fn expected_unsupported(_device: Device, case: &Case) -> bool {
+/// Outside that middle tier, nothing here may name a combination one backend
+/// implements and another merely has not got round to: that is the entry that
+/// would silently excuse a real gap, so every arm below is justified by a rule
+/// stated in [`crate::backend`] or in the kernel module that enforces it.
+fn expected_unsupported(device: Device, case: &Case) -> bool {
     let input_dtype = case.operands.first().map(|operand| operand.host.dtype());
     // Left un-nested on purpose: each top-level `|` group below is one rule
     // from the doc comment above, with its own justifying comment; flattening
@@ -409,7 +466,9 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
     let outside_common_contract =
         matches!(
             (&case.call, input_dtype),
-            // `UnaryOp`'s doc comment: the transcendental unaries are float-only.
+            // `UnaryOp`'s doc comment: the transcendental unaries are float-only,
+            // and so are the rounding and reciprocal ones — `Neg`/`Abs` are the
+            // whole of the integer unary surface.
             (
             Call::Unary(
                 UnaryOp::Relu
@@ -419,14 +478,30 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
                     | UnaryOp::Sqrt
                     | UnaryOp::Tanh
                     | UnaryOp::Sigmoid
+                    | UnaryOp::Sign
+                    | UnaryOp::Recip
+                    | UnaryOp::Floor
+                    | UnaryOp::Ceil
+                    | UnaryOp::Round
+                    | UnaryOp::Erf
             ),
             Some(DType::I64)
         )
+        // `BinaryOp::Pow`'s doc comment: an integer lane would have to invent a
+        // meaning for a fractional or negative exponent, so it declines rather
+        // than answer differently per device.
+            | (
+                Call::Binary(BinaryOp::Pow) | Call::BinaryScalar(BinaryOp::Pow, _),
+                Some(DType::I64)
+            )
         // `bool` has no `NumAcc`, so it has no accumulation and hence no
-        // reduction, arg-reduction, matmul, conv, or accumulating scatter
+        // reduction, arg-reduction, sort, matmul, conv, or accumulating scatter
         // (see `cpu::acc`'s module docs). `Bool` also has no arithmetic:
         // comparisons live in `compare`, and `where`/`masked_fill` carry it.
-            | (Call::Reduce(..) | Call::ArgReduce(..), Some(DType::Bool))
+            | (
+                Call::Reduce(..) | Call::ArgReduce(..) | Call::ArgSort { .. },
+                Some(DType::Bool)
+            )
             | (Call::Matmul | Call::Conv(..), Some(DType::Bool))
             | (Call::IndexAdd(_) | Call::ScatterAdd(_), Some(DType::Bool))
             | (Call::Binary(_) | Call::BinaryScalar(..) | Call::Unary(_), Some(DType::Bool))
@@ -442,8 +517,14 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
     if outside_common_contract {
         return true;
     }
+    // Tier two. Gated on the candidate being an accelerator: the CPU reference
+    // implements every one of these, so the self-check must keep comparing
+    // them for real and would go blind the moment this list covered it too.
+    if !matches!(device, Device::Cpu) && has_no_accelerator_kernel(&case.call) {
+        return true;
+    }
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    if matches!(_device, Device::Metal(_)) {
+    if matches!(device, Device::Metal(_)) {
         return case
             .operands
             .iter()
@@ -457,7 +538,7 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
             );
     }
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-    if matches!(_device, Device::Cuda(_)) {
+    if matches!(device, Device::Cuda(_)) {
         return case
             .operands
             .iter()
@@ -471,8 +552,8 @@ fn expected_unsupported(_device: Device, case: &Case) -> bool {
             );
     }
     #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
-    if matches!(_device, Device::Wgpu(_)) {
-        let f16 = crate::backend::wgpu::supports_f16(_device);
+    if matches!(device, Device::Wgpu(_)) {
+        let f16 = crate::backend::wgpu::supports_f16(device);
         let float_supported = |dtype| dtype == DType::F32 || (dtype == DType::F16 && f16);
         let supported = match (&case.call, input_dtype) {
             (Call::Full { dtype, .. }, _) => {
@@ -1116,15 +1197,16 @@ fn clone_operand(o: &Operand) -> Operand {
 /// sweep exactly the same set the main sections do — a variant added to an
 /// enum and forgotten in one list would then be missing from both, which is a
 /// compile-time-visible omission rather than a silent hole.
-const BINARY_OPS: [BinaryOp; 6] = [
+const BINARY_OPS: [BinaryOp; 7] = [
     BinaryOp::Add,
     BinaryOp::Sub,
     BinaryOp::Mul,
     BinaryOp::Div,
     BinaryOp::Maximum,
     BinaryOp::Minimum,
+    BinaryOp::Pow,
 ];
-const UNARY_OPS: [UnaryOp; 9] = [
+const UNARY_OPS: [UnaryOp; 15] = [
     UnaryOp::Relu,
     UnaryOp::Gelu,
     UnaryOp::Exp,
@@ -1134,6 +1216,12 @@ const UNARY_OPS: [UnaryOp; 9] = [
     UnaryOp::Sigmoid,
     UnaryOp::Neg,
     UnaryOp::Abs,
+    UnaryOp::Sign,
+    UnaryOp::Recip,
+    UnaryOp::Floor,
+    UnaryOp::Ceil,
+    UnaryOp::Round,
+    UnaryOp::Erf,
 ];
 const CMP_OPS: [CmpOp; 6] = [
     CmpOp::Eq,
@@ -1143,11 +1231,17 @@ const CMP_OPS: [CmpOp; 6] = [
     CmpOp::Gt,
     CmpOp::Ge,
 ];
-const REDUCE_OPS: [ReduceOp; 4] = [ReduceOp::Sum, ReduceOp::Mean, ReduceOp::Max, ReduceOp::Min];
+const REDUCE_OPS: [ReduceOp; 5] = [
+    ReduceOp::Sum,
+    ReduceOp::Mean,
+    ReduceOp::Max,
+    ReduceOp::Min,
+    ReduceOp::Prod,
+];
 
 /// Binary, scalar-binary, unary, comparison, `where`, and `masked_fill`.
 fn push_elementwise(cases: &mut Vec<Case>) {
-    const BINARY: [BinaryOp; 6] = BINARY_OPS;
+    const BINARY: [BinaryOp; 7] = BINARY_OPS;
     for op in BINARY {
         cases.push(Case::new(
             format!("binary.{op:?}.f32"),
@@ -1200,7 +1294,7 @@ fn push_elementwise(cases: &mut Vec<Case>) {
         ));
     }
 
-    const UNARY: [UnaryOp; 9] = UNARY_OPS;
+    const UNARY: [UnaryOp; 15] = UNARY_OPS;
     for op in UNARY {
         // Strictly positive data keeps `ln`/`sqrt` in-domain; the signed
         // sample below covers the sign-sensitive unaries.
@@ -1323,7 +1417,7 @@ fn push_elementwise(cases: &mut Vec<Case>) {
 /// Axis reductions and index-producing reductions, over dense and strided
 /// views, on every axis.
 fn push_reduce(cases: &mut Vec<Case>) {
-    const REDUCE: [ReduceOp; 4] = REDUCE_OPS;
+    const REDUCE: [ReduceOp; 5] = REDUCE_OPS;
     for op in REDUCE {
         for axis in [0usize, 1] {
             cases.push(Case::new(
@@ -1587,6 +1681,83 @@ fn push_index(cases: &mut Vec<Case>) {
             ],
         ));
     }
+
+    // `arg_sort` is the index-*producing* kernel, so its output is a
+    // permutation and every property worth pinning is an ordering rule rather
+    // than a number: direction, tie stability, where NaN lands, and that the
+    // positions it reports are positions along the *axis* of a strided view
+    // rather than into flat storage.
+    cases.push(Case::new(
+        "arg_sort.ascending.f32".to_string(),
+        Call::ArgSort {
+            axis: 1,
+            descending: false,
+        },
+        vec![f32s(&[2, 3], &A_F32)],
+    ));
+    cases.push(Case::new(
+        "arg_sort.descending.f32".to_string(),
+        Call::ArgSort {
+            axis: 1,
+            descending: true,
+        },
+        vec![f32s(&[2, 3], &A_F32)],
+    ));
+    // Equal values: the sort is documented stable, so ties keep their source
+    // order. A kernel that reaches for an unstable sort still returns a valid
+    // permutation and only diverges on a line like this one.
+    cases.push(Case::new(
+        "arg_sort.ties.f32".to_string(),
+        Call::ArgSort {
+            axis: 1,
+            descending: false,
+        },
+        vec![f32s(&[2, 3], &[2.0, 1.0, 2.0, 1.0, 1.0, 2.0])],
+    ));
+    // NaN has a *position* here, unlike in `arg_reduce` where it wins both
+    // directions: `cpu::index::total_order` puts it above every number, so an
+    // ascending line ends in NaN and a descending one starts with it. Both
+    // directions are rows because a kernel that sorts NaN to the bottom
+    // matches the ascending row's shape and only diverges on one of them.
+    for (label, descending) in [("non_finite", false), ("non_finite_descending", true)] {
+        cases.push(Case::new(
+            format!("arg_sort.{label}.f32"),
+            Call::ArgSort {
+                axis: 1,
+                descending,
+            },
+            vec![f32s(&[2, 4], &NAN_A)],
+        ));
+    }
+    // A transposed view sorted along its outer axis: the reported positions
+    // are coordinates along that axis, so a kernel that hands back storage
+    // indices produces plausible-looking garbage here and nowhere else.
+    cases.push(Case::new(
+        "arg_sort.strided.f32".to_string(),
+        Call::ArgSort {
+            axis: 0,
+            descending: false,
+        },
+        vec![f32s_transposed(&A_F32)],
+    ));
+    // Comparison happens in the wide `Acc`, so a reduced line is ordered
+    // exactly rather than through a lossy round trip.
+    cases.push(Case::new(
+        "arg_sort.ascending.f16".to_string(),
+        Call::ArgSort {
+            axis: 1,
+            descending: false,
+        },
+        vec![reduceds(DType::F16, &[2, 3], &A_F32)],
+    ));
+    cases.push(Case::new(
+        "arg_sort.ascending.i64".to_string(),
+        Call::ArgSort {
+            axis: 1,
+            descending: false,
+        },
+        vec![i64s(&[2, 3], &A_I64)],
+    ));
 }
 
 /// Convolution and pooling geometry, including stride/padding/dilation.
@@ -2001,6 +2172,18 @@ fn push_bool_declines(cases: &mut Vec<Case>) {
     cases.push(Case::new(
         "arg_reduce.ArgMax.bool".to_string(),
         Call::ArgReduce(ArgReduceOp::ArgMax, 1),
+        vec![bools(&[2, 3], &A_BOOL)],
+    ));
+    // `arg_sort` compares in `Acc`, so it routes through `dispatch_numeric!`
+    // and declines `Bool` for the same reason the reductions do — not because
+    // booleans have no order, but because they have no wide accumulator to be
+    // ordered in.
+    cases.push(Case::new(
+        "arg_sort.bool".to_string(),
+        Call::ArgSort {
+            axis: 1,
+            descending: false,
+        },
         vec![bools(&[2, 3], &A_BOOL)],
     ));
     cases.push(Case::new(
@@ -2842,18 +3025,32 @@ mod tests {
         assert!(matched > 100, "suite is too thin: {matched} matched cases");
         // Exactly the rows the op enums put out of contract — nothing else may
         // appear here, because anything else means a kernel silently lost a
-        // dtype and `expected_unsupported` quietly excused it:
+        // dtype and `expected_unsupported` quietly excused it. Note that the
+        // accelerator-gap tier is invisible from here by construction: it is
+        // gated on a non-CPU candidate, so every op in it is still compared
+        // against the reference for real on this lane.
         //
+        // - `BinaryOp::Pow`'s integer lanes, which it declines rather than
+        //   invent a meaning for a fractional exponent;
         // - the float-only unaries on `I64` (`UnaryOp`'s contract);
         // - every accumulating or arithmetic entry point on `Bool`, which has
-        //   no `NumAcc` and no arithmetic;
+        //   no `NumAcc` and no arithmetic — `arg_sort` included, since it
+        //   orders in `Acc`;
         // - every fused variant on `I64`/`Bool`, which have no `FloatAcc`;
         // - both `F64` cast lanes, which `BackendOps::cast` defers.
-        let expected: Vec<String> = ["Relu", "Gelu", "Exp", "Ln", "Sqrt", "Tanh", "Sigmoid"]
+        let expected: Vec<String> = ["binary.Pow.i64", "binary_scalar.Pow.i64"]
             .iter()
-            .map(|op| format!("unary.{op}.i64"))
+            .map(|name| (*name).to_string())
             .chain(
-                ["Sum", "Mean", "Max", "Min"]
+                [
+                    "Relu", "Gelu", "Exp", "Ln", "Sqrt", "Tanh", "Sigmoid", "Sign", "Recip",
+                    "Floor", "Ceil", "Round", "Erf",
+                ]
+                .iter()
+                .map(|op| format!("unary.{op}.i64")),
+            )
+            .chain(
+                ["Sum", "Mean", "Max", "Min", "Prod"]
                     .iter()
                     .map(|op| format!("reduce.{op}.bool")),
             )
@@ -2864,12 +3061,16 @@ mod tests {
                     "fused.LayerNorm.i64",
                     "fused.SgdStep.i64",
                     "fused.AdamStep.i64",
+                    "binary.Pow.i64.extremes",
+                    "binary_scalar.Pow.i64.zero",
+                    "binary_scalar.Pow.i64.minus_one",
                     "cast.f32_to_f64",
                     "cast.f64_to_f32",
                     "binary.Add.bool",
                     "binary_scalar.Add.bool",
                     "unary.Neg.bool",
                     "arg_reduce.ArgMax.bool",
+                    "arg_sort.bool",
                     "matmul.bool",
                     "index_add.bool",
                     "scatter_add.bool",

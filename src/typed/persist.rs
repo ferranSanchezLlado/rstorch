@@ -23,6 +23,7 @@
 //! section all fail the load and leave both halves untouched.
 
 use super::nn::{self, Module, RuntimeModuleAdapter, TypedStateDict, stable_state};
+use crate::nn::ModuleExt as _;
 use crate::persist::{Envelope, Expected, Limits, LoadOptions};
 use crate::{Error, Result};
 use std::collections::BTreeMap;
@@ -88,7 +89,8 @@ pub fn save_model_state<M: Module + ?Sized>(model: &mut M, envelope: &mut Envelo
     let state = stable_state(model, "typed::persist::save_model_state")?;
     reject_reserved_paths(state.paths(), "typed::persist::save_model_state")?;
     let adapter = RuntimeModuleAdapter::new(model);
-    let staged = crate::nn::state_dict(&adapter)
+    let staged = adapter
+        .state_dict()
         .into_iter()
         .map(|(path, tensor)| Ok((path, crate::checkpoint::to_host_tensor(&tensor)?)))
         .collect::<Result<Vec<_>>>()?;
@@ -121,17 +123,14 @@ pub fn load_model_state<M: Module + ?Sized>(
     options: &LoadOptions,
 ) -> Result<()> {
     if envelope.section("optimizer").is_some() {
-        return Err(Error::Persistence {
-            msg: "model-only load rejects an `optimizer` section; use a combined typed optimizer checkpoint loader"
-                .into(),
-        });
+        return Err(Error::persistence(
+            "model-only load rejects an `optimizer` section; use a combined typed optimizer checkpoint loader",
+        ));
     }
     if let Some(path) = envelope.tensors().keys().find(|path| reserved(path)) {
-        return Err(Error::Persistence {
-            msg: format!(
-                "model-only load rejects reserved optimizer tensor {path:?}; use a combined typed optimizer checkpoint loader"
-            ),
-        });
+        return Err(Error::persistence(format!(
+            "model-only load rejects reserved optimizer tensor {path:?}; use a combined typed optimizer checkpoint loader"
+        )));
     }
     load_model_state_impl(model, envelope, options, false)
 }
@@ -142,15 +141,14 @@ pub(in crate::typed) fn load_combined_model_state<M: Module + ?Sized>(
     options: &LoadOptions,
 ) -> Result<()> {
     if envelope.section("optimizer").is_none() {
-        return Err(Error::Persistence {
-            msg: "combined checkpoint has no `optimizer` section".into(),
-        });
+        return Err(Error::persistence(
+            "combined checkpoint has no `optimizer` section",
+        ));
     }
     if envelope.tensor("optim").is_some() {
-        return Err(Error::Persistence {
-            msg: "combined checkpoint contains bare reserved tensor `optim`; optimizer tensors require `optim.<path>.<buffer>`"
-                .into(),
-        });
+        return Err(Error::persistence(
+            "combined checkpoint contains bare reserved tensor `optim`; optimizer tensors require `optim.<path>.<buffer>`",
+        ));
     }
     load_model_state_impl(model, envelope, options, true)
 }
@@ -165,7 +163,7 @@ fn load_model_state_impl<M: Module + ?Sized>(
     reject_reserved_paths(state.paths(), "typed::persist::load_model_state")?;
     let current = {
         let adapter = RuntimeModuleAdapter::new(model);
-        crate::nn::state_dict(&adapter)
+        adapter.state_dict()
     };
     let schema = current
         .iter()
@@ -184,7 +182,7 @@ fn load_model_state_impl<M: Module + ?Sized>(
         let device = replacements[&path].device();
         replacements.insert(path, crate::checkpoint::from_host_tensor(&host, &device)?);
     }
-    crate::nn::load_state_dict(&mut RuntimeModuleAdapter::new(model), &replacements)
+    RuntimeModuleAdapter::new(model).load_state_dict(&replacements)
 }
 
 /// Saves only typed model state through [`Envelope::save`].

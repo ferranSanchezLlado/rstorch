@@ -4,7 +4,9 @@
 # skipped when the pinned-toolchain assertion panics first, which left an
 # untracked directory that root-anchored /target does not cover.
 target/
-Cargo.lock
+# `Cargo.lock` is committed: the trybuild UI expectations are pinned to a
+# compiler version, so an upstream patch release must not be able to redden CI
+# with no local change. The UI lanes run `--locked`.
 /.test_cache
 /data
 .DS_Store

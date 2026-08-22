@@ -26,6 +26,8 @@ struct Mlp {
 }
 
 impl Forward for Mlp {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let hidden = self.fc1.forward(x, mode)?.relu()?;
         self.fc2.forward(&hidden, mode)
@@ -42,6 +44,14 @@ fn train_step(model: &mut Mlp, optimizer: &mut Adam, x: &Tensor, y: &Tensor) -> 
 
 There is no `zero_grad`. Gradients never live in the parameters, so there is
 nothing to clear. The full loop is [`examples/mlp.rs`](examples/mlp.rs).
+
+`Forward` is `Forward<Input = Tensor>`, so a layer that needs more than one
+tensor — an attention mask, a conditioning embedding — declares a struct and
+implements `Forward<ThatStruct>` instead of smuggling the extra state through
+`&mut self` in call order. `MultiHeadAttention` is the crate's own case:
+`Forward<AttentionInput>`, where the mask is an explicit `Option` field that
+has to be written out rather than hidden state a layer picks for you. `Mode`
+stays crate-owned and closed; the *input* is the user's channel.
 
 ## What "safer" means here
 
@@ -69,17 +79,32 @@ is missing, and a parameter that never got a gradient fails at the next step
 instead of quietly never training.
 
 **Two tiers of fallibility.** Every named method returns `Result`. Operator
-sugar (`+`, `-`, `*`, `/`) panics with the identical message under
-`#[track_caller]`, so exploratory code stays terse and library code stays
-total.
+sugar (`+`, `-`, `*`, `/`, unary `-`, and the scalar forms on either side)
+panics with the identical message under `#[track_caller]`, so exploratory code
+stays terse and library code stays total.
+
+**Errors land where you can act on them.** Every argument error — mismatched
+shapes, ranks, dtypes or devices, an out-of-range axis, a rejected argument —
+is decided from tensor metadata before any kernel runs, so it is reported at
+the call site, which is what makes the `#[track_caller]` panic location useful.
+`Unsupported` and `Backend` come from execution, and backends batch work: on
+Metal, dispatches are encoded into a command buffer and flushed on a threshold,
+so a kernel failure can surface at the next transfer rather than at the
+operation that queued it. Both name the operation that failed, so the message
+identifies what broke even when the location belongs to the transfer. An
+out-of-range value *inside an index tensor* is the one case that belongs to
+both groups: the CPU backend reads it on the host and reports immediately, the
+GPU backends validate on device and report at the next transfer — never later
+than the moment a wrong value would have become visible. `STABILITY.md` states
+the split precisely.
 
 ## What is in the box
 
 | | |
 |---|---|
 | **Tensors** | elementwise, broadcasting, matmul, reductions, indexing/gather, `conv2d`, `max_pool2d`, softmax and losses over six runtime dtypes, with operation-specific support and loud `Unsupported` errors |
-| **Autograd** | reverse-mode over the whole op set, `Grads::clip_norm`/`scale`/`merge`, input gradients for saliency |
-| **`nn`** | `Linear`, `Dropout`, `Relu`, `Gelu`, `Embedding`, `MultiHeadAttention`, `LayerNorm`, `RMSNorm`, `BatchNorm2d`, `Sequential`, `#[derive(Module)]` |
+| **Autograd** | reverse-mode over the whole op set, `Grads::norm`/`clip_norm`/`scale`/`merge`, input gradients for saliency |
+| **`nn`** | `Linear`, `Conv2d`, `MaxPool2d`, `AvgPool2d`, `Flatten`, `Identity`, `Dropout`, `Relu`, `Gelu`, `Embedding`, `MultiHeadAttention`, `LayerNorm`, `RMSNorm`, `BatchNorm2d`, `Sequential`, `nn::init`, `ModuleExt`, `#[derive(Module)]` |
 | **`optim`** | `Sgd`, `Adam`, `AdamW`, parameter groups, learning-rate schedules |
 | **`data`** | `Dataset`, `DataLoader` with seeded shuffling, `TensorDataset`, `VecDataset`, MNIST and Tiny Shakespeare loaders |
 | **`text`** | `CharTokenizer`, `BpeTokenizer` |
@@ -91,6 +116,7 @@ total.
 ```sh
 cargo run --example tensors                  # tensors, errors, autograd
 cargo run --example mlp                      # a full training loop on two spirals
+cargo run --example custom_optimizer          # RMSprop from public items only
 cargo run --example typed --features typed   # compile-time shapes
 cargo run --release --example mnist --features hub
                                               # real MNIST, best device, cosine LR
@@ -105,10 +131,10 @@ cargo run --release --example typed_mnist --features typed,hub
 | Feature | Default | What it does |
 |---|---|---|
 | `typed` | off | Compile-time checked rank, dimensions, dtype and device placement, as a wrapper over the same `Tensor`. Mismatched shapes become type errors. |
-| `rayon` | off | Multi-threaded CPU kernels. Results stay bit-identical: kernels partition by output element, so no float is accumulated across threads in a racing order. |
+| `rayon` | off | Multi-threaded CPU kernels. Results stay bit-identical to the single-threaded kernels of the same build: kernels partition by output element, so no float is accumulated across threads in a racing order. |
 | `hub` | off | Downloads for the bundled MNIST and Tiny Shakespeare datasets. |
-| `metal` | on | GPU backend on macOS. `Device::best_available` selects the first Metal device when present, then considers WGPU and CPU. |
-| `cuda` | off | Native NVIDIA CUDA backend on Linux and Windows, including Linux under WSL. Supports F16/F32 compute and lossless I64/Bool storage on compute capability 6.0 or newer. Bundled PTX requires a compatible NVIDIA driver but not the CUDA toolkit. |
+| `metal` | on | GPU backend on macOS. `Device::best_available` selects the first Metal device when present, then considers CUDA, WGPU and CPU. |
+| `cuda` | off | Native NVIDIA CUDA backend on Linux and Windows, including Linux under WSL. Supports F16/F32 compute and lossless I64/Bool storage on compute capability 6.0 or newer. Bundled PTX requires a compatible NVIDIA driver but not the CUDA toolkit. **Validated locally, not CI-gated** — see [STABILITY.md](STABILITY.md). |
 | `wgpu` | off | Portable native WebGPU backend. F32 is always supported; native F16 is enabled only when the adapter advertises `SHADER_F16`. I64 index storage remains lossless. |
 | `testing` | off | The finite-difference gradient harness the crate tests itself with. The one public module outside the stability guarantee. |
 
@@ -120,13 +146,20 @@ F16/F32/I64/Bool storage; BF16 and F64 are rejected. On Linux and Windows,
 native CUDA is opt-in and supports F16/F32 compute plus lossless I64 and Bool
 storage on GPUs with compute capability 6.0 or newer. Its PTX kernels are
 bundled with the crate, so a compatible NVIDIA driver is required at runtime
-but a CUDA toolkit installation is not. WGPU is also opt-in and supports F32
+but a CUDA toolkit installation is not. CUDA is validated locally against the
+CPU reference rather than in CI (no CI runner has CUDA hardware), so its
+*behaviour* carries a weaker claim than the other backends' — its API is
+covered like everything else; see [STABILITY.md](STABILITY.md). WGPU is also
+opt-in and supports F32
 compute plus native F16 when `SHADER_F16` is available, with
-lossless I64 and Bool storage. Unsupported combinations return an error rather
+lossless I64 and Bool storage, and its kernels do execute in CI against a
+software Vulkan adapter. Unsupported combinations return an error rather
 than silently promoting or copying through the host.
 
 `Device::best_available` chooses Metal first on macOS, then CUDA on Linux or
-Windows, then the first hardware WGPU adapter, then CPU. WGPU uses native F16
+Windows, then the highest-ranked hardware WGPU adapter — ranked by device type
+(discrete, then integrated, then virtual, then other) and, within a tie, by
+backend (DX12 or Metal, then Vulkan, then GL) — then CPU. WGPU uses native F16
 when the adapter exposes `SHADER_F16`; otherwise F16 operations fail loudly
 like other unsupported combinations. The feature and hardware must be
 available for a device to be selected; the selection order does not promise a

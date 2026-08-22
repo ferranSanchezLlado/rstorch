@@ -1,7 +1,7 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 
 #[path = "common/metal.rs"]
-mod metal;
+mod gpu;
 
 use rstorch::models::{DecoderTransformer, TransformerConfig};
 use rstorch::prelude::*;
@@ -15,6 +15,8 @@ struct Mlp {
 }
 
 impl Forward for Mlp {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         self.second
             .forward(&self.first.forward(x, mode)?.gelu()?, mode)
@@ -23,7 +25,7 @@ impl Forward for Mlp {
 
 #[test]
 fn seeded_mlp_and_transformer_losses_decrease_on_metal() -> Result<()> {
-    if !metal::available() {
+    if !gpu::available() {
         return Ok(());
     }
     let mut rng = Rng::seed(61);
@@ -56,14 +58,7 @@ fn seeded_mlp_and_transformer_losses_decrease_on_metal() -> Result<()> {
     eprintln!("metal MLP final loss: {last}");
     assert!(last < first, "MLP loss did not decrease: {first} -> {last}");
 
-    let config = TransformerConfig {
-        vocab_size: 6,
-        max_seq_len: 3,
-        embed_dim: 4,
-        num_heads: 2,
-        num_layers: 1,
-        feed_forward_dim: 8,
-    };
+    let config = TransformerConfig::new(6, 3, 4, 2, 1).with_feed_forward_dim(8);
     let mut transformer = DecoderTransformer::new(config, &METAL, &mut Rng::seed(7))?;
     let ids = Tensor::from_vec(vec![0i64, 1, 2, 1, 2, 3], [2, 3], &METAL)?;
     let targets = Tensor::from_vec(vec![1i64, 2, 3, 2, 3, 4], [6], &METAL)?;
@@ -96,6 +91,8 @@ struct Cnn {
 }
 
 impl Forward for Cnn {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let features = x
             .conv2d(&self.weight.get(mode), (1, 1), (0, 0), (1, 1))?
@@ -108,7 +105,7 @@ impl Forward for Cnn {
 
 #[test]
 fn seeded_cnn_loss_decreases_on_metal() -> Result<()> {
-    if !metal::available() {
+    if !gpu::available() {
         return Ok(());
     }
     let mut rng = Rng::seed(9);
@@ -154,7 +151,7 @@ fn seeded_cnn_loss_decreases_on_metal() -> Result<()> {
 /// a "loss decreased" assertion cannot see a gradient that is merely wrong.
 #[test]
 fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
-    if !metal::available() {
+    if !gpu::available() {
         return Ok(());
     }
     // Deterministic, non-symmetric coefficients so an error cannot cancel.
@@ -212,7 +209,7 @@ fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
 /// the NaN so they agree with what `max`/`min` report.
 #[test]
 fn nan_semantics_match_between_cpu_and_metal() -> Result<()> {
-    if !metal::available() {
+    if !gpu::available() {
         return Ok(());
     }
     let a = vec![f32::NAN, 1.0, 2.0, -3.0];
@@ -264,7 +261,7 @@ fn nan_semantics_match_between_cpu_and_metal() -> Result<()> {
 /// backends because they implement the guard separately.
 #[test]
 fn i64_division_overflow_matches_between_cpu_and_metal() -> Result<()> {
-    if !metal::available() {
+    if !gpu::available() {
         return Ok(());
     }
     for dev in [Device::Cpu, METAL] {
@@ -285,7 +282,7 @@ fn i64_division_overflow_matches_between_cpu_and_metal() -> Result<()> {
 /// on an empty axis — a panic where the CPU backend returns zeros.
 #[test]
 fn empty_axis_sum_matches_cpu_instead_of_panicking() -> Result<()> {
-    if !metal::available() {
+    if !gpu::available() {
         return Ok(());
     }
     for dims in [vec![0usize, 3], vec![2, 0, 3], vec![3, 0]] {

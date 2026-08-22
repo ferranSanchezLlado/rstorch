@@ -16,7 +16,7 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 
 #[path = "common/metal.rs"]
-mod metal;
+mod gpu;
 
 use rstorch::prelude::*;
 
@@ -85,7 +85,7 @@ fn assert_close(what: &str, case: usize, cpu: &[f32], metal: &[f32]) {
 
 #[test]
 fn conv2d_backward_matches_the_cpu_across_stride_padding_and_dilation() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     let cases = [
@@ -164,7 +164,7 @@ fn conv2d_backward_matches_the_cpu_across_stride_padding_and_dilation() {
 
 #[test]
 fn pool2d_backward_matches_the_cpu_across_stride_and_padding() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     let dims = [2usize, 3, 7, 7];

@@ -112,6 +112,8 @@ impl Cnn {
 }
 
 impl Forward for Cnn {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let batch = x.dims()[0];
         let features = x

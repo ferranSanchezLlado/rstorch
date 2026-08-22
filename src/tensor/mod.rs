@@ -133,8 +133,18 @@ impl Tensor {
         self.0.storage.device()
     }
 
-    /// Whether the layout is contiguous (row-major, offset 0).
-    pub fn is_contiguous(&self) -> bool {
+    /// Whether the recorded layout is canonical row-major at offset 0
+    /// (crate-internal).
+    ///
+    /// Deliberately not public: an infallible layout predicate would let
+    /// callers branch on how a tensor is stored, which commits every tensor to
+    /// a decided physical layout before execution and forecloses a fusion pass
+    /// picking one (NCHW↔NHWC, a transposed operand folded into a GEMM). What
+    /// this reports is the logical layout as recorded, not a promise about
+    /// physical storage — so the only place it surfaces outside the crate is
+    /// the `contiguous` field of [`Debug`](std::fmt::Debug), as a debugging
+    /// aid rather than a contract.
+    pub(crate) fn is_contiguous(&self) -> bool {
         self.0.layout.is_contiguous()
     }
 
@@ -146,7 +156,7 @@ impl Tensor {
     pub fn dims1(&self) -> Result<usize> {
         match self.dims() {
             &[a] => Ok(a),
-            d => Err(Self::rank_err("dims1", 1, d.len())),
+            d => Err(Error::rank_mismatch("dims1", 1, d.len())),
         }
     }
 
@@ -158,7 +168,7 @@ impl Tensor {
     pub fn dims2(&self) -> Result<(usize, usize)> {
         match self.dims() {
             &[a, b] => Ok((a, b)),
-            d => Err(Self::rank_err("dims2", 2, d.len())),
+            d => Err(Error::rank_mismatch("dims2", 2, d.len())),
         }
     }
 
@@ -170,7 +180,7 @@ impl Tensor {
     pub fn dims3(&self) -> Result<(usize, usize, usize)> {
         match self.dims() {
             &[a, b, c] => Ok((a, b, c)),
-            d => Err(Self::rank_err("dims3", 3, d.len())),
+            d => Err(Error::rank_mismatch("dims3", 3, d.len())),
         }
     }
 
@@ -182,12 +192,8 @@ impl Tensor {
     pub fn dims4(&self) -> Result<(usize, usize, usize, usize)> {
         match self.dims() {
             &[a, b, c, d] => Ok((a, b, c, d)),
-            d => Err(Self::rank_err("dims4", 4, d.len())),
+            d => Err(Error::rank_mismatch("dims4", 4, d.len())),
         }
-    }
-
-    fn rank_err(op: &'static str, expected: usize, got: usize) -> Error {
-        Error::RankMismatch { op, expected, got }
     }
 
     // ---- autograd (delegated to the engine) ------------------------------
@@ -284,6 +290,41 @@ impl Tensor {
         Ok(Tensor::from_parts(storage, layout))
     }
 
+    /// A tensor of zeros shaped, typed and placed like `self`.
+    ///
+    /// # Errors
+    ///
+    /// As [`full`](Self::full).
+    pub fn zeros_like(&self) -> Result<Tensor> {
+        self.full_like(0.0)
+    }
+
+    /// A tensor of ones shaped, typed and placed like `self`.
+    ///
+    /// # Errors
+    ///
+    /// As [`full`](Self::full).
+    pub fn ones_like(&self) -> Result<Tensor> {
+        self.full_like(1.0)
+    }
+
+    /// A tensor filled with `value`, inheriting `self`'s shape, dtype **and**
+    /// device — the three things a companion tensor otherwise respells at
+    /// every call site.
+    ///
+    /// Like [`full`](Self::full) this is an untraced constructor: the result
+    /// is a fresh constant with `node: None`, so `self`'s autograd graph is
+    /// never propagated into it. Calling it on a traced tensor is how the
+    /// crate's own backwards spell "no gradient here"; the result is
+    /// deliberately not differentiable with respect to `self`.
+    ///
+    /// # Errors
+    ///
+    /// As [`full`](Self::full).
+    pub fn full_like(&self, value: f64) -> Result<Tensor> {
+        Tensor::full(self.dims(), value, self.dtype(), &self.device())
+    }
+
     /// A tensor from a host vector; the dtype is `T`'s. `data.len()` must
     /// equal the shape's element count
     /// ([`Error::ShapeMismatch`](crate::Error::ShapeMismatch)).
@@ -331,6 +372,12 @@ impl Tensor {
     /// only floating-point tensors participate in autograd, and a "random
     /// integer tensor" has no single obvious meaning here.
     ///
+    /// A given seed reproduces a given tensor for a fixed shape, dtype,
+    /// backend, feature set and build. Reproducibility is scoped to that
+    /// tuple: values are not promised to match across backends or across
+    /// versions, because whether samples are drawn on the host and uploaded or
+    /// generated on the device is an implementation detail.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidArg`](crate::Error::InvalidArg) if `dtype` is
@@ -365,8 +412,12 @@ impl Tensor {
     /// Shared body of [`rand`](Tensor::rand)/[`randn`](Tensor::randn): draw
     /// `num_elements` host samples as `f64` (each via `draw`), narrow them into
     /// the float `dtype`'s host buffer, and upload. Samples are drawn in
-    /// row-major order so a given `rng` state is reproducible independent of
-    /// the backend.
+    /// row-major order, so a given `rng` state reproduces a given tensor for a
+    /// fixed (seed, shape, dtype, backend, build) — that tuple, and no wider.
+    /// Reproducibility across backends is deliberately **not** promised: it
+    /// would freeze host-draw-then-upload as the only legal strategy and
+    /// foreclose a counter-based on-device generator, which is what makes
+    /// sampling fusible into a surrounding elementwise chain.
     fn sampled(
         op: &'static str,
         shape: impl Into<Shape>,
@@ -557,6 +608,66 @@ impl Tensor {
         Ok(v)
     }
 
+    /// Force this tensor's value to be materialized: block until the work
+    /// behind it has actually run.
+    ///
+    /// # What this does today
+    ///
+    /// Execution is eager, so the kernels producing this tensor have already
+    /// been *submitted* by the time you hold it — but on a batching backend
+    /// they may not have *run*. `realize` therefore delegates to
+    /// [`Device::synchronize`](crate::Device::synchronize) on this tensor's
+    /// device, and inherits its reach: it is **device-wide, not
+    /// tensor-scoped**. It waits for every operation submitted on that device,
+    /// not only the ones this tensor depends on, and on
+    /// [`Cpu`](crate::Device::Cpu) it waits for nothing at all, because CPU
+    /// kernels are complete when they return. Do not write code that depends on
+    /// it being finer-grained than that.
+    ///
+    /// # Why it exists under this name
+    ///
+    /// It is the spelling that survives if execution ever stops being eager. A
+    /// backend that defers and fuses within a step would make `realize` a flush
+    /// of the graph *up to this tensor*, narrowing the wait from the whole
+    /// device to this tensor's dependencies. That narrowing is the only change
+    /// reserved here: `realize` will never wait for less than this tensor's own
+    /// work. Code written against `realize` keeps working across that change,
+    /// whereas code that calls [`to_vec`](Tensor::to_vec) purely to force the
+    /// queue pays a whole host copy it does not want.
+    ///
+    /// Nothing is returned — reading values is [`to_vec`](Tensor::to_vec),
+    /// [`to_scalar`](Tensor::to_scalar) or [`item`](Tensor::item), each of
+    /// which is a host boundary that synchronizes on its own.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the flush turns up:
+    /// [`Error::Backend`](crate::Error::Backend) if the drained work failed,
+    /// or, on Metal and CUDA,
+    /// [`Error::IndexOutOfBounds`](crate::Error::IndexOutOfBounds) for an
+    /// earlier indexing op whose bounds check was encoded but not yet read.
+    /// Because the wait is device-wide, an error here need not come from this
+    /// tensor's own dependencies.
+    ///
+    /// WGPU keeps a pending bounds verdict on the storage that carries it
+    /// rather than on the device, so this flush cannot report one; it surfaces
+    /// at the host read of the tensor that carries it instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::{DType, Device, Tensor};
+    ///
+    /// let device = Device::best_available();
+    /// let x = Tensor::ones([128, 128], DType::F32, &device)?;
+    /// let y = x.matmul(&x)?;
+    /// y.realize()?; // the matmul has run, and nothing was copied to the host
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn realize(&self) -> Result<()> {
+        self.device().synchronize()
+    }
+
     /// Move to `device`. A differentiable op: the backward pass moves the
     /// cotangent back to the source device. Equal devices are returned without
     /// a copy; different devices use the explicit host transfer path.
@@ -606,9 +717,14 @@ impl Tensor {
         ))
     }
 
-    /// A contiguous copy in row-major order, or `self` unchanged when already
-    /// contiguous. Value-identity, so it is transparent to autograd (the
-    /// cotangent flows straight through).
+    /// A copy whose recorded layout is canonical row-major, or `self` unchanged
+    /// when its layout already is. Value-identity, so it is transparent to
+    /// autograd (the cotangent flows straight through).
+    ///
+    /// That is a statement about the logical layout as recorded, not a promise
+    /// about physical storage: a backend stays free to hold the elements
+    /// however it likes, so long as they read back in row-major logical order.
+    /// Call this when an op wants a dense operand, not to reason about bytes.
     ///
     /// # Errors
     ///

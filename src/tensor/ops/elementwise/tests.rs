@@ -304,6 +304,115 @@ fn unary_materializes_strided_inputs() {
     assert_eq!(v(&out), vec![-1.0, -4.0, -2.0, -5.0, -3.0, -6.0]);
 }
 
+#[test]
+fn sign_recip_and_erf_values() {
+    let x = t(&[-2.0, -0.5, 0.0, 0.5, 2.0], [5]);
+    assert_eq!(v(&x.sign().unwrap()), vec![-1.0, -1.0, 0.0, 1.0, 1.0]);
+
+    // Reciprocals chosen to be exact in binary floating point, so this is an
+    // equality and not a tolerance.
+    let r = t(&[-2.0, -0.5, 0.25, 4.0], [4]);
+    assert_eq!(v(&r.recip().unwrap()), vec![-0.5, -2.0, 4.0, 0.25]);
+
+    // erf at points a high-precision reference was evaluated at.
+    close(
+        &v(&x.erf().unwrap()),
+        &[-0.995_322_3, -0.520_499_9, 0.0, 0.520_499_9, 0.995_322_3],
+        1e-6,
+    );
+    // The identity `gelu(x) = ½·x·(1 + erf(x/√2))` ties the exposed
+    // primitive to the activation it was factored out of.
+    let scaled = x.mul_scalar(std::f64::consts::FRAC_1_SQRT_2).unwrap();
+    let composed = x
+        .mul(&scaled.erf().unwrap().add_scalar(1.0).unwrap())
+        .unwrap()
+        .mul_scalar(0.5)
+        .unwrap();
+    close(&v(&composed), &v(&x.gelu().unwrap()), 1e-6);
+}
+
+#[test]
+fn round_breaks_ties_to_even_not_away_from_zero() {
+    // Halves in both signs, plus one non-tie for the ordinary case.
+    let x = t(&[-2.5, -0.5, 0.5, 1.5, 2.5, 2.7], [6]);
+    assert_eq!(v(&x.floor().unwrap()), vec![-3.0, -1.0, 0.0, 1.0, 2.0, 2.0]);
+    assert_eq!(v(&x.ceil().unwrap()), vec![-2.0, -0.0, 1.0, 2.0, 3.0, 3.0]);
+    // Ties to even: 0.5 -> 0, 1.5 -> 2, 2.5 -> 2. Rust's away-from-zero
+    // `f32::round` would answer 1, 2, 3 and fail here.
+    assert_eq!(v(&x.round().unwrap()), vec![-2.0, -0.0, 0.0, 2.0, 2.0, 3.0]);
+    let away_from_zero: Vec<f32> = v(&x).iter().map(|v| v.round()).collect();
+    assert_ne!(v(&x.round().unwrap()), away_from_zero);
+}
+
+#[test]
+fn sign_and_recip_follow_ieee_at_zero_and_nan() {
+    let x = t(&[f32::NAN, 0.0, -0.0, -3.0], [4]);
+    let s = v(&x.sign().unwrap());
+    // NaN is propagated, not collapsed to one of the three outcomes.
+    assert!(s[0].is_nan(), "sign(NaN) was {}", s[0]);
+    // Both zeros answer `+0`: the sign of a zero is not its direction.
+    for (i, z) in [(1usize, 0.0f32), (2, -0.0)] {
+        assert_eq!(s[i], 0.0, "sign({z}) was {}", s[i]);
+        assert!(s[i].is_sign_positive(), "sign({z}) was a negative zero");
+    }
+    assert_eq!(s[3], -1.0);
+
+    // `1/±0` is an infinity, not an error — and it keeps the zero's sign.
+    let z = t(&[0.0, -0.0], [2]);
+    let r = v(&z.recip().unwrap());
+    assert_eq!(r[0], f32::INFINITY);
+    assert_eq!(r[1], f32::NEG_INFINITY);
+    // …and NaN survives the round trip too.
+    assert!(v(&t(&[f32::NAN], [1]).recip().unwrap())[0].is_nan());
+}
+
+#[test]
+fn clamp_rejects_an_empty_or_nan_interval() {
+    let x = t(&[-1.0, 0.5, 2.0], [3]);
+    for (min, max) in [(1.0, 0.0), (f64::NAN, 1.0), (0.0, f64::NAN)] {
+        let got = x.clamp(min, max);
+        assert!(
+            matches!(got, Err(Error::InvalidArg { op: "clamp", .. })),
+            "clamp({min}, {max}) should be an InvalidArg"
+        );
+    }
+
+    // An *infinite* bound is not degenerate: it is the one-sided spelling,
+    // and it must keep working.
+    assert_eq!(
+        v(&x.clamp(0.0, f64::INFINITY).unwrap()),
+        vec![0.0, 0.5, 2.0]
+    );
+    assert_eq!(
+        v(&x.clamp(f64::NEG_INFINITY, 1.0).unwrap()),
+        vec![-1.0, 0.5, 1.0]
+    );
+    // An empty interval is rejected even when the two bounds are equal only
+    // by a hair, so the check is `min > max` and not a tolerance.
+    assert!(x.clamp(1.0, 1.0).is_ok());
+
+    // The ordinary two-sided case, for reference.
+    assert_eq!(v(&x.clamp(0.0, 1.0).unwrap()), vec![0.0, 0.5, 1.0]);
+}
+
+#[test]
+fn pow_values_and_dtype_rule() {
+    let x = t(&[1.0, 4.0, 9.0], [3]);
+    close(&v(&x.pow(0.5).unwrap()), &[1.0, 2.0, 3.0], 1e-6);
+    close(&v(&x.pow(2.0).unwrap()), &[1.0, 16.0, 81.0], 1e-5);
+    close(&v(&x.pow(-1.0).unwrap()), &[1.0, 0.25, 1.0 / 9.0], 1e-6);
+    // `x^0` is 1 everywhere, the `powf` convention.
+    assert_eq!(v(&x.pow(0.0).unwrap()), vec![1.0, 1.0, 1.0]);
+
+    // A fractional exponent has no integer meaning, so integers decline
+    // rather than invent one.
+    let i = Tensor::from_vec(vec![2i64, 3], [2], &CPU).unwrap();
+    assert!(matches!(
+        i.pow(2.0),
+        Err(Error::Unsupported { op: "pow", .. })
+    ));
+}
+
 // ------------------------------------------------------------------
 // Comparisons
 // ------------------------------------------------------------------
@@ -520,14 +629,37 @@ fn grad_scalar_variants() {
     for f in cases {
         check_grad(f, &[lhs()], EPS, TOL).unwrap();
     }
+
+    // `pow` needs its own point: a non-integer exponent is undefined on the
+    // negatives `lhs` holds, and `p·xᵖ⁻¹` is best conditioned away from 0.
+    check_grad(
+        |i: &[Tensor]| wsum(&i[0].pow(1.5)?),
+        &[t(&[0.7, 1.3, 2.5], [3])],
+        EPS,
+        TOL,
+    )
+    .unwrap();
+
+    // `clamp`'s mask has three regions, and `lhs` straddles [0, 2]: two
+    // elements below, two inside, two above. None sits *on* a bound, so
+    // ±EPS never crosses one and the closed-interval rule stays visible as
+    // a gradient of exactly 1 inside and exactly 0 outside.
+    check_grad(
+        |i: &[Tensor]| wsum(&i[0].clamp(0.0, 2.0)?),
+        &[lhs()],
+        EPS,
+        TOL,
+    )
+    .unwrap();
 }
 
 #[test]
 fn grad_unary_family() {
     // Several points per op, both signs where the domain allows, all far
-    // enough from a kink (`relu`/`abs` at 0) that `±EPS` stays on one side.
+    // enough from a kink (`relu`/`abs` at 0, the step of a rounding op at an
+    // integer or of `round` at a half-integer) that `±EPS` stays on one side.
     type UnaryCase = (fn(&[Tensor]) -> Result<Tensor>, &'static [f32]);
-    let cases: [UnaryCase; 9] = [
+    let cases: [UnaryCase; 15] = [
         (|i| wsum(&i[0].relu()?), &[0.7, -1.3, 2.5]),
         (|i| wsum(&i[0].gelu()?), &[0.7, -1.3, 2.5, -0.2]),
         (|i| wsum(&i[0].exp()?), &[0.3, -1.1, 1.4]),
@@ -537,6 +669,16 @@ fn grad_unary_family() {
         (|i| wsum(&i[0].sigmoid()?), &[0.4, -1.5, 2.2]),
         (|i| wsum(&i[0].neg()?), &[0.9, -2.0, 0.1]),
         (|i| wsum(&i[0].abs()?), &[-1.2, 0.8, 2.6]),
+        (|i| wsum(&i[0].erf()?), &[0.4, -1.1, 1.6]),
+        (|i| wsum(&i[0].recip()?), &[0.7, -1.3, 2.5]),
+        // The four piecewise-constant ops. Their gradient is an exact zero
+        // away from a step, and the finite difference agrees only because
+        // both perturbed evaluations land in the same step — which is what
+        // pins the "subgradient is 0" contract rather than skipping it.
+        (|i| wsum(&i[0].sign()?), &[0.7, -1.3, 2.5]),
+        (|i| wsum(&i[0].floor()?), &[0.3, -1.2, 2.7]),
+        (|i| wsum(&i[0].ceil()?), &[0.3, -1.2, 2.7]),
+        (|i| wsum(&i[0].round()?), &[0.3, -1.2, 2.7]),
     ];
     for (f, at) in cases {
         check_grad(f, &[t(at, [at.len()])], EPS, TOL).unwrap();

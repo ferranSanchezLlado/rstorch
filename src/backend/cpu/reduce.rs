@@ -77,9 +77,9 @@ where
     let axis_len = layout.dims()[axis];
     let mut out = Vec::with_capacity(out_len);
     for outer in 0..out_len {
-        // Seed per op: Sum/Mean from ZERO; Max/Min from the first element so
-        // an empty axis (guarded by the op layer's empty-reduction policy)
-        // never dereferences a missing element here.
+        // Seed per op: Sum/Mean from ZERO; Max/Min/Prod from the first
+        // element so an empty axis (guarded by the op layer's
+        // empty-reduction policy) never dereferences a missing element here.
         let mut acc = <E::Acc as NumAcc>::ZERO;
         let mut first = true;
         for_each_on_axis(layout, axis, outer, |_pos, idx| {
@@ -98,6 +98,13 @@ where
                         v
                     } else {
                         acc.min(v)
+                    }
+                }
+                ReduceOp::Prod => {
+                    if first {
+                        v
+                    } else {
+                        acc.mul(v)
                     }
                 }
             };
@@ -348,12 +355,22 @@ mod tests {
                 }
             };
             for axis in 0..3 {
-                for op in [ReduceOp::Sum, ReduceOp::Max, ReduceOp::Min] {
+                for op in [
+                    ReduceOp::Sum,
+                    ReduceOp::Mean,
+                    ReduceOp::Max,
+                    ReduceOp::Min,
+                    ReduceOp::Prod,
+                ] {
                     let got = as_f32(&reduce(op, f32_view(&s, &layout), axis).unwrap());
                     let expected = naive_reduce(op, &data, &base, &layout, axis);
                     for (g, e) in got.iter().zip(expected.iter()) {
+                        // Relative: a product of up to four values in
+                        // [-10, 10) spans decades, so a fixed absolute bound
+                        // would be vacuous at the top of the range and
+                        // unmeetable at the bottom.
                         assert!(
-                            (g - e).abs() < 1e-4,
+                            (g - e).abs() <= 1e-4 * e.abs().max(1.0),
                             "mismatch op {op:?} axis {axis}: {g} vs {e}"
                         );
                     }
@@ -396,6 +413,7 @@ mod tests {
                     ReduceOp::Sum | ReduceOp::Mean => 0.0,
                     ReduceOp::Max => f32::NEG_INFINITY,
                     ReduceOp::Min => f32::INFINITY,
+                    ReduceOp::Prod => 1.0,
                 };
                 for p in 0..dims[axis] {
                     coords[axis] = p;
@@ -410,9 +428,13 @@ mod tests {
                         ReduceOp::Sum | ReduceOp::Mean => acc + v,
                         ReduceOp::Max => acc.max(v),
                         ReduceOp::Min => acc.min(v),
+                        ReduceOp::Prod => acc * v,
                     };
                 }
-                *slot = acc;
+                *slot = match op {
+                    ReduceOp::Mean => acc / dims[axis] as f32,
+                    _ => acc,
+                };
             }
             out
         }

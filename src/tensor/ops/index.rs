@@ -8,7 +8,13 @@
 //! | [`index_select`](Tensor::index_select) | 1-D, whole slices | `index_add` |
 //! | [`gather`](Tensor::gather) | same rank as the source, per element | `scatter_add` |
 //!
-//! plus the index/mask builders that feed them:
+//! plus the ops built on them and the index/mask builders that feed them:
+//! [`take_along_dim`](Tensor::take_along_dim) and
+//! [`flip`](Tensor::flip) (both `index_select`/`gather` in disguise, so both
+//! inherit a scatter-accumulate backward), the CPU-only
+//! [`sort`](Tensor::sort)/[`topk`](Tensor::topk) pair over the `arg_sort`
+//! kernel, the non-differentiable builders
+//! [`tril`](Tensor::tril)/[`triu`](Tensor::triu)/[`one_hot`](Tensor::one_hot),
 //! [`index_range`](Tensor::index_range) (the `arange`-built `[0, len)` index
 //! vector), [`index_vec`](Tensor::index_vec) (host positions → an `I64` index
 //! tensor), and [`causal_mask`](Tensor::causal_mask) (the comparison-built
@@ -90,7 +96,7 @@ impl Tensor {
     /// [`I64`](crate::DType::I64) tensor `indices` (`PyTorch` `index_select`).
     ///
     /// The result has this tensor's shape with `axis` resized to
-    /// `indices.num_elements()`, is contiguous, and keeps the dtype and
+    /// `indices.num_elements()`, is freshly allocated, and keeps the dtype and
     /// device. This is the embedding lookup: `weight.index_select(0, &ids)`
     /// on a `[vocab, embed]` table with `[n]` ids yields `[n, embed]`.
     /// Repeated indices are fine (and the reason the backward accumulates).
@@ -162,7 +168,7 @@ impl Tensor {
     /// `out[c0, .., c_axis, ..] = self[c0, .., indices[c0, .., c_axis, ..], ..]`:
     /// every coordinate except `axis` is taken from the output position, and
     /// the `axis` coordinate comes from the index grid. The result has
-    /// `indices`' shape, is contiguous, and keeps this tensor's dtype and
+    /// `indices`' shape, is freshly allocated, and keeps this tensor's dtype and
     /// device. Picking one logit per row — `logits.gather(1, &targets)` on
     /// `[n, classes]` with an `[n, 1]` index — is the canonical use.
     ///
@@ -341,6 +347,239 @@ impl Tensor {
             View::new(positions.storage(), &queries),
         )?;
         Ok(Tensor::from_parts(storage, Layout::contiguous(square)?))
+    }
+
+    // ---- triangular masks, one-hot, flip, sort -----------------------
+
+    /// Zero every element above the `diagonal`-th diagonal of the trailing
+    /// `[rows, cols]` matrix (`diagonal = 0` keeps the main diagonal;
+    /// positive shifts it toward the upper-right, negative toward the
+    /// lower-left) — `PyTorch`'s `tril`. Batched over any leading axes.
+    ///
+    /// Built the same way as [`causal_mask`](Tensor::causal_mask): an
+    /// on-device comparison of two broadcast index vectors, never a host
+    /// loop.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArg`] if `self` has rank < 2.
+    ///
+    /// ```
+    /// # use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![1.0f32; 9], [3, 3], &Device::Cpu)?;
+    /// let m = x.tril(0)?;
+    /// assert_eq!(
+    ///     m.to_vec::<f32>()?,
+    ///     vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0]
+    /// );
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn tril(&self, diagonal: isize) -> Result<Tensor> {
+        self.triangular("tril", diagonal, true)
+    }
+
+    /// Zero every element below the `diagonal`-th diagonal — the mirror of
+    /// [`tril`](Tensor::tril) (`PyTorch`'s `triu`).
+    ///
+    /// # Errors
+    /// As [`tril`](Tensor::tril).
+    ///
+    /// ```
+    /// # use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![1.0f32; 9], [3, 3], &Device::Cpu)?;
+    /// let m = x.triu(0)?;
+    /// assert_eq!(
+    ///     m.to_vec::<f32>()?,
+    ///     vec![1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]
+    /// );
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn triu(&self, diagonal: isize) -> Result<Tensor> {
+        self.triangular("triu", diagonal, false)
+    }
+
+    /// Shared body of [`tril`](Tensor::tril)/[`triu`](Tensor::triu): keep an
+    /// element where `lower` says `col - row <= diagonal` (or, for `triu`,
+    /// `col - row >= diagonal`), zero it otherwise. Differentiable — the
+    /// mask is a constant, so the cotangent passes straight through the kept
+    /// positions ([`where_cond`](Tensor::where_cond)'s own backward).
+    fn triangular(&self, op: &'static str, diagonal: isize, lower: bool) -> Result<Tensor> {
+        if self.rank() < 2 {
+            return Err(Error::InvalidArg {
+                op,
+                msg: format!(
+                    "{op} requires rank >= 2 ([.., rows, cols]), got shape {}",
+                    self.shape()
+                ),
+            });
+        }
+        let dims = self.dims();
+        let (rows, cols) = (dims[dims.len() - 2], dims[dims.len() - 1]);
+        let device = self.device();
+        let row_idx = Tensor::index_range(rows, &device)?
+            .reshape([rows, 1])?
+            .broadcast_to([rows, cols])?;
+        let col_idx = Tensor::index_range(cols, &device)?
+            .reshape([1, cols])?
+            .broadcast_to([rows, cols])?;
+        let shifted = row_idx.add_scalar(diagonal as f64)?;
+        let keep = if lower {
+            col_idx.le(&shifted)?
+        } else {
+            col_idx.ge(&shifted)?
+        };
+        let zero = self.zeros_like()?;
+        keep.where_cond(self, &zero)
+    }
+
+    /// One-hot encode `self` (an [`I64`](crate::DType::I64) tensor of class
+    /// ids) into a fresh trailing `num_classes` axis, as
+    /// [`F32`](crate::DType::F32).
+    ///
+    /// Not differentiable: the input is integral. Validating every id is a
+    /// host round trip — acceptable here because `one_hot` is not a hot-path
+    /// op, unlike the on-device comparisons the rest of this module uses.
+    ///
+    /// # Errors
+    /// [`Error::DTypeMismatch`] if `self` is not `I64`,
+    /// [`Error::InvalidArg`] if any id is negative or `>= num_classes`.
+    /// Not [`Error::IndexOutOfBounds`]: that variant names *an axis of the
+    /// operand* being indexed, and `num_classes` is an axis this input does
+    /// not have — it is the one the output gains.
+    ///
+    /// ```
+    /// # use rstorch::{Device, Tensor};
+    /// let ids = Tensor::from_vec(vec![2i64, 0], [2], &Device::Cpu)?;
+    /// let oh = ids.one_hot(3)?;
+    /// assert_eq!(oh.dims(), &[2, 3]);
+    /// assert_eq!(oh.to_vec::<f32>()?, vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn one_hot(&self, num_classes: usize) -> Result<Tensor> {
+        const OP: &str = "one_hot";
+        require_dtype(OP, self, DType::I64)?;
+        for id in self.to_vec::<i64>()? {
+            if id < 0 || id as usize >= num_classes {
+                return Err(Error::InvalidArg {
+                    op: OP,
+                    msg: format!("class id {id} is out of range for num_classes={num_classes}"),
+                });
+            }
+        }
+        let classes = Tensor::index_range(num_classes, &self.device())?;
+        let mut expanded = self.dims().to_vec();
+        expanded.push(1);
+        self.reshape(expanded)?.eq(&classes)?.to_dtype(DType::F32)
+    }
+
+    /// Reverse the order of elements along `axis` (negative indexing
+    /// allowed). Implemented as an [`index_select`](Tensor::index_select)
+    /// with a reversed index vector, so it inherits that op's
+    /// scatter-accumulate backward — flipping the cotangent right back.
+    ///
+    /// # Errors
+    /// [`Error::InvalidAxis`] if `axis` is out of range.
+    ///
+    /// ```
+    /// # use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &Device::Cpu)?;
+    /// assert_eq!(x.flip(0)?.to_vec::<f32>()?, vec![3.0, 2.0, 1.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn flip(&self, axis: isize) -> Result<Tensor> {
+        const OP: &str = "flip";
+        let ax = self.shape().resolve_axis(axis, OP)?;
+        let n = self.dims()[ax];
+        let reversed = Tensor::index_vec(&(0..n).rev().collect::<Vec<_>>(), &self.device())?;
+        self.index_select(ax as isize, &reversed)
+    }
+
+    /// Gather elements along `axis` through an index grid that may be
+    /// smaller than `self` on every other axis (`PyTorch`'s
+    /// `take_along_dim` spelling of [`gather`](Tensor::gather); the two are
+    /// the same operation under this crate's `gather` contract).
+    ///
+    /// # Errors
+    /// As [`gather`](Tensor::gather).
+    pub fn take_along_dim(&self, axis: isize, indices: &Tensor) -> Result<Tensor> {
+        self.gather(axis, indices)
+    }
+
+    /// Sort along `axis`, returning `(values, indices)`: `indices` is the
+    /// [`I64`](crate::DType::I64) source position of each output element
+    /// (`PyTorch`'s `sort`). The sort is **stable** (equal elements keep
+    /// their source order) and NaN sorts as greater than every number in
+    /// both directions, so an ascending sort ends in NaNs and a descending
+    /// one starts with them. That is the same total order
+    /// [`argmax`](Tensor::argmax) uses, and it has one consequence worth
+    /// stating: on a line containing a NaN, `topk(1, axis, false)` names the
+    /// smallest *number*, while [`argmin`](Tensor::argmin) names the NaN.
+    ///
+    /// `values` is obtained by [`gather`](Tensor::gather)ing through
+    /// `indices`, so it inherits `gather`'s backward; `indices` is integral
+    /// and carries no gradient.
+    ///
+    /// # Errors
+    /// [`Error::InvalidAxis`] if `axis` is out of range, or
+    /// [`Error::Unsupported`] for [`Bool`](crate::DType::Bool) and on any
+    /// device other than [`Cpu`](crate::Device::Cpu). `Bool` is not a matter
+    /// of order — booleans do order — but of accumulation: the CPU kernel goes
+    /// through the numeric dispatch, which has no accumulator type for `Bool`
+    /// and declines there rather than inventing one. The device restriction is
+    /// that only the CPU backend implements the underlying permutation kernel;
+    /// no accelerator does yet, and none round-trips through the host behind
+    /// the caller's back.
+    pub fn sort(&self, axis: isize, descending: bool) -> Result<(Tensor, Tensor)> {
+        const OP: &str = "sort";
+        let ax = self.shape().resolve_axis(axis, OP)?;
+        let storage = dispatch::backend(self.device())
+            .arg_sort(self.view(), ax, descending)
+            .map_err(|e| e.with_op(OP))?;
+        let indices = Tensor::from_parts(storage, Layout::contiguous(self.dims())?);
+        let values = self.gather(ax as isize, &indices)?;
+        Ok((values, indices))
+    }
+
+    /// The `k` largest (or, with `largest = false`, smallest) elements along
+    /// `axis`, returning `(values, indices)` in sorted order — the prefix of
+    /// [`sort`](Tensor::sort).
+    ///
+    /// # Errors
+    /// [`Error::InvalidAxis`] if `axis` is out of range,
+    /// [`Error::InvalidArg`] if `k` exceeds the axis size, or
+    /// [`Error::Unsupported`] for [`Bool`](crate::DType::Bool) and on any
+    /// device other than [`Cpu`](crate::Device::Cpu), for the reasons
+    /// [`sort`](Tensor::sort) gives: `Bool` has no accumulator type in the CPU
+    /// numeric dispatch, and only the CPU backend implements the permutation
+    /// kernel both ops are built on.
+    ///
+    /// ```
+    /// # use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![3.0f32, 1.0, 4.0, 1.0, 5.0], [5], &Device::Cpu)?;
+    /// let (values, indices) = x.topk(2, 0, true)?;
+    /// assert_eq!(values.to_vec::<f32>()?, vec![5.0, 4.0]);
+    /// assert_eq!(indices.to_vec::<i64>()?, vec![4, 2]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn topk(&self, k: usize, axis: isize, largest: bool) -> Result<(Tensor, Tensor)> {
+        const OP: &str = "topk";
+        let ax = self.shape().resolve_axis(axis, OP)?;
+        let n = self.dims()[ax];
+        if k > n {
+            return Err(Error::InvalidArg {
+                op: OP,
+                msg: format!("k={k} exceeds axis {ax} size {n}"),
+            });
+        }
+        let storage = dispatch::backend(self.device())
+            .arg_sort(self.view(), ax, largest)
+            .map_err(|e| e.with_op(OP))?;
+        let indices = Tensor::from_parts(storage, Layout::contiguous(self.dims())?).narrow(
+            ax as isize,
+            0,
+            k,
+        )?;
+        let values = self.gather(ax as isize, &indices)?;
+        Ok((values, indices))
     }
 }
 
@@ -704,5 +943,255 @@ mod tests {
         let idx = ids(&[2, 0, 2, 2], [2, 2]);
         crate::testing::check_grad(|inputs| wsum(&inputs[0].gather(0, &idx)?), &[x], EPS, TOL)
             .unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // one_hot
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn one_hot_encodes_ids_into_a_new_trailing_axis() {
+        let oh = ids(&[2, 0, 1], [3]).one_hot(3).unwrap();
+        assert_eq!(oh.dims(), &[3, 3]);
+        assert_eq!(oh.dtype(), DType::F32);
+        assert_eq!(oh.device(), CPU);
+        assert!(oh.is_contiguous());
+        assert_eq!(
+            oh.to_vec::<f32>().unwrap(),
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        );
+
+        // `num_classes` wider than the ids need: the unused columns are zero,
+        // and every row still sums to exactly one.
+        let wide = ids(&[1], [1]).one_hot(4).unwrap();
+        assert_eq!(wide.to_vec::<f32>().unwrap(), vec![0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(wide.sum_all().unwrap().item().unwrap(), 1.0);
+
+        // The axis is *gained*, not replaced: a [2, 2] id grid encodes to
+        // [2, 2, num_classes].
+        let grid = ids(&[0, 1, 1, 0], [2, 2]).one_hot(2).unwrap();
+        assert_eq!(grid.dims(), &[2, 2, 2]);
+        assert_eq!(
+            grid.to_vec::<f32>().unwrap(),
+            vec![1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn one_hot_rejects_an_out_of_range_class_as_an_invalid_argument() {
+        // `InvalidArg`, *not* `IndexOutOfBounds`: that variant names an axis
+        // of the operand being indexed, and `num_classes` is the axis the
+        // output gains — one this input does not have. The message names it.
+        for bad in [3i64, 7, -1, i64::MIN] {
+            let err = ids(&[0, bad], [2]).one_hot(3).unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidArg { op: "one_hot", .. }),
+                "id {bad}: {err:?}"
+            );
+            assert!(err.to_string().contains("num_classes"), "id {bad}: {err}");
+        }
+
+        // `num_classes = 0` has no valid id at all.
+        assert!(matches!(
+            ids(&[0], [1]).one_hot(0),
+            Err(Error::InvalidArg { op: "one_hot", .. })
+        ));
+
+        // Float ids are a dtype error, never silently truncated.
+        assert!(matches!(
+            t_f32(&[1.0], [1]).one_hot(3),
+            Err(Error::DTypeMismatch {
+                op: "one_hot",
+                expected: DType::I64,
+                got: DType::F32
+            })
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // sort / topk
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sort_returns_values_and_source_positions_in_both_directions() {
+        // The tie (two 1.0s, at positions 1 and 3) is the interesting part:
+        // the sort is stable, so they keep their *source* order whichever
+        // direction is asked for — a reversed comparator would emit 3 before
+        // 1 in the descending case.
+        let x = t_f32(&[3.0, 1.0, 4.0, 1.0, 5.0], [5]);
+
+        let (values, indices) = x.sort(0, false).unwrap();
+        assert_eq!(values.dims(), &[5]);
+        assert_eq!(indices.dtype(), DType::I64);
+        assert_eq!(
+            values.to_vec::<f32>().unwrap(),
+            vec![1.0, 1.0, 3.0, 4.0, 5.0]
+        );
+        assert_eq!(indices.to_vec::<i64>().unwrap(), vec![1, 3, 0, 2, 4]);
+
+        let (values, indices) = x.sort(0, true).unwrap();
+        assert_eq!(
+            values.to_vec::<f32>().unwrap(),
+            vec![5.0, 4.0, 3.0, 1.0, 1.0]
+        );
+        assert_eq!(indices.to_vec::<i64>().unwrap(), vec![4, 2, 0, 1, 3]);
+
+        // Per line along the last axis, and `-1` is that axis.
+        let m = t_f32(&[3.0, 1.0, 2.0, 0.0, 5.0, 4.0], [2, 3]);
+        let (values, indices) = m.sort(1, false).unwrap();
+        assert_eq!(values.dims(), &[2, 3]);
+        assert_eq!(
+            values.to_vec::<f32>().unwrap(),
+            vec![1.0, 2.0, 3.0, 0.0, 4.0, 5.0]
+        );
+        assert_eq!(indices.to_vec::<i64>().unwrap(), vec![1, 2, 0, 0, 2, 1]);
+        let (_, same) = m.sort(-1, false).unwrap();
+        assert_eq!(
+            same.to_vec::<i64>().unwrap(),
+            indices.to_vec::<i64>().unwrap()
+        );
+
+        // …and along the leading axis, where the sorted stride is not 1.
+        let (values, indices) = m.sort(0, false).unwrap();
+        assert_eq!(
+            values.to_vec::<f32>().unwrap(),
+            vec![0.0, 1.0, 2.0, 3.0, 5.0, 4.0]
+        );
+        assert_eq!(indices.to_vec::<i64>().unwrap(), vec![1, 0, 0, 0, 1, 1]);
+
+        // `values` is exactly `gather` through `indices`, by construction.
+        assert_eq!(
+            m.gather(0, &indices).unwrap().to_vec::<f32>().unwrap(),
+            values.to_vec::<f32>().unwrap()
+        );
+    }
+
+    #[test]
+    fn topk_is_the_sorted_prefix_and_refuses_a_k_past_the_axis() {
+        let x = t_f32(&[3.0, 1.0, 4.0, 1.0, 5.0], [5]);
+
+        let (values, indices) = x.topk(2, 0, true).unwrap();
+        assert_eq!(values.dims(), &[2]);
+        assert_eq!(values.to_vec::<f32>().unwrap(), vec![5.0, 4.0]);
+        assert_eq!(indices.to_vec::<i64>().unwrap(), vec![4, 2]);
+
+        // The smallest `k`, which is the ascending prefix — and the tie keeps
+        // its source order here too.
+        let (values, indices) = x.topk(2, 0, false).unwrap();
+        assert_eq!(values.to_vec::<f32>().unwrap(), vec![1.0, 1.0]);
+        assert_eq!(indices.to_vec::<i64>().unwrap(), vec![1, 3]);
+
+        // `k == n` is the whole sort.
+        let (values, indices) = x.topk(5, 0, true).unwrap();
+        assert_eq!(
+            values.to_vec::<f32>().unwrap(),
+            vec![5.0, 4.0, 3.0, 1.0, 1.0]
+        );
+        assert_eq!(indices.to_vec::<i64>().unwrap(), vec![4, 2, 0, 1, 3]);
+        // `k == 0` is empty, not an error.
+        assert_eq!(x.topk(0, 0, true).unwrap().0.dims(), &[0]);
+
+        // Per row along the last axis.
+        let m = t_f32(&[3.0, 1.0, 2.0, 0.0, 5.0, 4.0], [2, 3]);
+        let (values, indices) = m.topk(2, -1, true).unwrap();
+        assert_eq!(values.dims(), &[2, 2]);
+        assert_eq!(values.to_vec::<f32>().unwrap(), vec![3.0, 2.0, 5.0, 4.0]);
+        assert_eq!(indices.to_vec::<i64>().unwrap(), vec![0, 2, 1, 2]);
+
+        // `k` past the axis is a loud argument error, naming the op.
+        assert!(matches!(
+            x.topk(6, 0, true),
+            Err(Error::InvalidArg { op: "topk", .. })
+        ));
+        assert!(matches!(
+            m.topk(4, 1, true),
+            Err(Error::InvalidArg { op: "topk", .. })
+        ));
+        assert!(matches!(
+            x.topk(1, 1, true),
+            Err(Error::InvalidAxis { op: "topk", .. })
+        ));
+    }
+
+    #[test]
+    fn sort_and_topk_scatter_the_cotangent_back_through_the_permutation() {
+        // Distinct, widely separated values: a tie is a discontinuity of the
+        // permutation (perturbing one of two equal elements decides which
+        // weight it collects), which finite differences cannot see through.
+        let x = t_f32(&[3.0, 1.0, 4.0, 1.5, 5.0], [5]);
+
+        // Ascending order is [1, 3, 0, 2, 4], so `wsum`'s weights
+        // [0.25, 0.75, 1.25, 1.75, 2.25] land on x as
+        // x0 <- 1.25, x1 <- 0.25, x2 <- 1.75, x3 <- 0.75, x4 <- 2.25.
+        let traced = x.traced().unwrap();
+        let grads = wsum(&traced.sort(0, false).unwrap().0)
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(
+            grads.wrt_input(&traced).unwrap().to_vec::<f32>().unwrap(),
+            vec![1.25, 0.25, 1.75, 0.75, 2.25]
+        );
+
+        // Descending order is [4, 2, 0, 3, 1] — the exact reverse, since the
+        // values are distinct — so the same weights land the other way round
+        // and a backward that ignored `descending` fails here.
+        let traced = x.traced().unwrap();
+        let grads = wsum(&traced.sort(0, true).unwrap().0)
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(
+            grads.wrt_input(&traced).unwrap().to_vec::<f32>().unwrap(),
+            vec![1.25, 2.25, 0.75, 1.75, 0.25]
+        );
+
+        // `topk` selects positions 4 and 2 with weights 0.25 and 0.75; the
+        // three unselected positions must receive *exactly* zero, not a
+        // leaked neighbour's cotangent.
+        let traced = x.traced().unwrap();
+        let grads = wsum(&traced.topk(2, 0, true).unwrap().0)
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_eq!(
+            grads.wrt_input(&traced).unwrap().to_vec::<f32>().unwrap(),
+            vec![0.0, 0.0, 0.75, 0.0, 0.25]
+        );
+
+        // …and the same agreement against finite differences, which also
+        // checks the zeros (an input with no gradient is compared to zero,
+        // never skipped).
+        crate::testing::check_grad(
+            |inputs| wsum(&inputs[0].sort(0, false)?.0),
+            std::slice::from_ref(&x),
+            EPS,
+            TOL,
+        )
+        .unwrap();
+        crate::testing::check_grad(
+            |inputs| wsum(&inputs[0].topk(3, 0, true)?.0),
+            std::slice::from_ref(&x),
+            EPS,
+            TOL,
+        )
+        .unwrap();
+
+        // Per line, along both axes of a matrix.
+        let m = t_f32(&[3.0, 1.0, 2.0, 0.5, 5.0, 4.0], [2, 3]);
+        crate::testing::check_grad(
+            |inputs| wsum(&inputs[0].sort(1, true)?.0),
+            std::slice::from_ref(&m),
+            EPS,
+            TOL,
+        )
+        .unwrap();
+        crate::testing::check_grad(
+            |inputs| wsum(&inputs[0].topk(1, 0, false)?.0),
+            &[m],
+            EPS,
+            TOL,
+        )
+        .unwrap();
     }
 }

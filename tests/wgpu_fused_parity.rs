@@ -1,6 +1,5 @@
 #![cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
 
-use rstorch::nn;
 use rstorch::prelude::*;
 
 #[path = "common/wgpu.rs"]
@@ -112,7 +111,8 @@ fn layer_norm_forward_backward_and_parameters_match_cpu() {
             .backward()
             .unwrap();
         Sgd::new(0.5).step(&mut layer, grads).unwrap();
-        nn::state_dict(&layer)
+        layer
+            .state_dict()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect()
@@ -132,7 +132,8 @@ fn attention_and_indexing_backward_match_cpu() {
         let grads = out.sum_all().unwrap().backward().unwrap();
         Sgd::new(0.1).step(&mut attention, grads).unwrap();
         result.extend(
-            nn::state_dict(&attention)
+            attention
+                .state_dict()
                 .into_values()
                 .flat_map(|tensor| tensor.to_vec::<f32>().unwrap()),
         );
@@ -178,6 +179,8 @@ fn cross_entropy_and_optimizers_match_cpu() {
         second: Linear,
     }
     impl Forward for Model {
+        type Output = Tensor;
+
         fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
             self.second
                 .forward(&self.first.forward(x, mode)?.relu()?, mode)
@@ -208,7 +211,8 @@ fn cross_entropy_and_optimizers_match_cpu() {
                 _ => adamw.step(&mut model, grads).unwrap(),
             }
         }
-        nn::state_dict(&model)
+        model
+            .state_dict()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect::<Vec<_>>()

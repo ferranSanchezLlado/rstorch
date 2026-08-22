@@ -41,14 +41,8 @@ use rstorch::text::{BpeTokenizer, Tokenizer};
 const SEQ_LEN: usize = 16;
 
 fn config(vocab_size: usize, embed_dim: usize, num_layers: usize) -> TransformerConfig {
-    TransformerConfig {
-        vocab_size,
-        max_seq_len: SEQ_LEN,
-        embed_dim,
-        num_heads: 2,
-        num_layers,
-        feed_forward_dim: embed_dim * 2,
-    }
+    TransformerConfig::new(vocab_size, SEQ_LEN, embed_dim, 2, num_layers)
+        .with_feed_forward_dim(embed_dim * 2)
 }
 
 /// Next-token cross-entropy over a `[batch, sequence, vocab]` logit tensor.

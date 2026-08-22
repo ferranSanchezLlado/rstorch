@@ -82,8 +82,8 @@ impl Param {
     /// layer's arithmetic, and every `state_dict` consumer assume it, so a
     /// wrongly-shaped update is a bug caught here rather than a model that
     /// quietly changes geometry. Dtype and device *may* change — that is
-    /// precisely what [`nn::to_dtype`](crate::nn::to_dtype) and
-    /// [`nn::to_device`](crate::nn::to_device) do.
+    /// precisely what [`ModuleExt::to_dtype`](crate::nn::ModuleExt::to_dtype) and
+    /// [`ModuleExt::to_device`](crate::nn::ModuleExt::to_device) do.
     pub fn set(&mut self, value: Tensor) -> crate::error::Result<()> {
         if value.shape() != self.value.shape() {
             return Err(crate::error::Error::ShapeMismatch {

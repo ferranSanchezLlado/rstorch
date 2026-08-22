@@ -30,15 +30,16 @@ fn validate_advancing_clocks(envelope: &Envelope) -> Result<()> {
             continue;
         };
         if key == "steps" || key.starts_with("clock.") {
-            let value = value.parse::<u64>().map_err(|_| Error::Persistence {
-                msg: format!("optimizer state `{key}` is not a u64 clock: {value:?}"),
+            let value = value.parse::<u64>().map_err(|source| {
+                Error::persistence_with(
+                    format!("optimizer state `{key}` is not a u64 clock: {value:?}"),
+                    source,
+                )
             })?;
             if value == u64::MAX {
-                return Err(Error::Persistence {
-                    msg: format!(
-                        "optimizer state `{key}` is u64::MAX and cannot advance on another step"
-                    ),
-                });
+                return Err(Error::persistence(format!(
+                    "optimizer state `{key}` is u64::MAX and cannot advance on another step"
+                )));
             }
         }
     }
@@ -241,12 +242,19 @@ pub fn adam_param_steps<M: Module + ?Sized>(
 /// The message for the doubly-unlucky case: the optimizer half failed *and*
 /// putting the model back failed too. Named rather than inlined so the test
 /// suite can pin its wording — no reachable input produces it.
+///
+/// The optimizer failure started the rollback, so it is the cause and stays
+/// reachable through [`std::error::Error::source`] instead of being spliced
+/// into the message. The rollback failure has nowhere else to go, so it is the
+/// one spelled out here.
 fn rollback_error(load: Error, model: Error) -> Error {
-    Error::Persistence {
-        msg: format!(
-            "combined checkpoint optimizer load failed ({load}); model rollback failed ({model})"
+    Error::persistence_with(
+        format!(
+            "combined checkpoint optimizer load failed, and restoring the model \
+             snapshot then failed too: {model}"
         ),
-    }
+        load,
+    )
 }
 
 /// Load a combined model + optimizer checkpoint, restoring the model if the

@@ -2,7 +2,7 @@
 //! statistics, plus gradcheck, mode behaviour and the running-buffer rules.
 
 use super::*;
-use crate::nn::{self, Module, Sequential};
+use crate::nn::{Module, ModuleExt, Sequential};
 use crate::testing::check_grad;
 use std::collections::BTreeMap;
 
@@ -44,7 +44,7 @@ fn load(module: &mut dyn Module, values: &[(&str, Tensor)]) {
         .iter()
         .map(|(k, t)| ((*k).to_string(), t.clone()))
         .collect();
-    nn::load_state_dict(module, &state).unwrap();
+    module.load_state_dict(&state).unwrap();
 }
 
 // -- LayerNorm forward numerics -------------------------------------
@@ -186,6 +186,13 @@ fn norm_constructors_validate_their_arguments() {
     assert!(matches!(
         RMSNorm::with_eps([2], f64::NAN, &CPU),
         Err(Error::InvalidArg {
+            op: "RMSNorm::with_eps",
+            ..
+        })
+    ));
+    assert!(matches!(
+        RMSNorm::new([0], &CPU),
+        Err(Error::InvalidArg {
             op: "RMSNorm::new",
             ..
         })
@@ -231,7 +238,7 @@ fn rms_norm_does_not_center_and_has_no_bias() {
     close(&ln.forward(&x, Mode::EVAL).unwrap(), &[0.0; 4], 1e-6);
     close(&rms.forward(&x, Mode::EVAL).unwrap(), &[1.0; 4], 1e-6);
     assert_eq!(
-        nn::state_dict(&rms).keys().collect::<Vec<_>>(),
+        rms.state_dict().keys().collect::<Vec<_>>(),
         ["weight"],
         "RMSNorm has no bias"
     );
@@ -555,7 +562,7 @@ fn reduced_precision_layer_norm_uses_the_fused_wide_path() {
 fn reduced_precision_layer_norm_backward_reaches_input_and_affine_params() {
     for dtype in [DType::F16, DType::BF16] {
         let mut norm = LayerNorm::with_eps([3], 1e-3, &CPU).unwrap();
-        crate::nn::to_dtype(&mut norm, dtype).unwrap();
+        norm.to_dtype(dtype).unwrap();
         norm.weight
             .set(t(&[1.5, -0.5, 2.0], [3]).to_dtype(dtype).unwrap())
             .unwrap();
@@ -998,18 +1005,18 @@ fn batch_norm_rejects_bad_inputs() {
 fn state_dict_paths_are_the_documented_leaf_names() {
     let bn = BatchNorm2d::new(3, &CPU).unwrap();
     assert_eq!(
-        nn::state_dict(&bn).keys().collect::<Vec<_>>(),
+        bn.state_dict().keys().collect::<Vec<_>>(),
         ["bias", "running_mean", "running_var", "weight"]
     );
     // Buffers are not trainable, so they do not count as parameters.
-    assert_eq!(nn::num_params(&bn), 6);
+    assert_eq!(bn.num_params(), 6);
 
     let ln = LayerNorm::new([2, 3], &CPU).unwrap();
     assert_eq!(
-        nn::state_dict(&ln).keys().collect::<Vec<_>>(),
+        ln.state_dict().keys().collect::<Vec<_>>(),
         ["bias", "weight"]
     );
-    assert_eq!(nn::num_params(&ln), 12);
+    assert_eq!(ln.num_params(), 12);
 }
 
 #[test]
@@ -1018,7 +1025,7 @@ fn norms_nest_in_a_sequential_and_survive_replication() {
         .push(LayerNorm::new([4], &CPU).unwrap())
         .push(RMSNorm::new([4], &CPU).unwrap());
     assert_eq!(
-        nn::state_dict(&net).keys().collect::<Vec<_>>(),
+        net.state_dict().keys().collect::<Vec<_>>(),
         ["0.bias", "0.weight", "1.weight"]
     );
     let x = t(&[1.0, 2.0, 3.0, 4.0], [4]);
@@ -1028,7 +1035,7 @@ fn norms_nest_in_a_sequential_and_survive_replication() {
     let mut replica = Sequential::new()
         .push(LayerNorm::new([4], &CPU).unwrap())
         .push(RMSNorm::new([4], &CPU).unwrap());
-    nn::load_state_dict(&mut replica, &nn::state_dict(&net)).unwrap();
+    replica.load_state_dict(&net.state_dict()).unwrap();
     assert_eq!(v(&replica.forward(&x, Mode::EVAL).unwrap()), want);
 }
 
@@ -1039,7 +1046,7 @@ fn a_batch_norm_checkpoint_restores_the_eval_branch() {
     let want = v(&trained.forward(&bn_input(), Mode::EVAL).unwrap());
 
     let mut restored = BatchNorm2d::new(2, &CPU).unwrap();
-    nn::load_state_dict(&mut restored, &nn::state_dict(&trained)).unwrap();
+    restored.load_state_dict(&trained.state_dict()).unwrap();
     assert_eq!(v(&restored.forward(&bn_input(), Mode::EVAL).unwrap()), want);
 }
 
@@ -1052,7 +1059,7 @@ fn a_device_move_carries_the_running_statistics() {
     bn.forward(&bn_input(), Mode::TRAIN).unwrap();
     let want = v(&bn.forward(&bn_input(), Mode::EVAL).unwrap());
 
-    nn::to_device(&mut bn, &CPU).unwrap();
+    bn.to_device(&CPU).unwrap();
     assert_eq!(bn.running_mean().dtype(), DType::F32);
     close(bn.running_mean(), &[0.6, 0.4], 1e-6);
     assert_eq!(v(&bn.forward(&bn_input(), Mode::EVAL).unwrap()), want);
@@ -1070,7 +1077,7 @@ fn a_dtype_conversion_visits_the_running_statistics() {
     bn.forward(&bn_input(), Mode::TRAIN).unwrap();
     let want = v(&bn.forward(&bn_input(), Mode::EVAL).unwrap());
 
-    nn::to_dtype(&mut bn, DType::F32).unwrap();
+    bn.to_dtype(DType::F32).unwrap();
     assert_eq!(bn.running_mean().dtype(), DType::F32);
     close(bn.running_mean(), &[0.6, 0.4], 1e-6);
     assert_eq!(v(&bn.forward(&bn_input(), Mode::EVAL).unwrap()), want);

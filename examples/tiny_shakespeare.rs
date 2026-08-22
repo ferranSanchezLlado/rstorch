@@ -54,14 +54,8 @@ fn main() -> Result<()> {
         .map(|i| validation_start + i * (dataset.len() - validation_start) / batch_size)
         .collect();
 
-    let config = TransformerConfig {
-        vocab_size: dataset.vocab_size(),
-        max_seq_len: SEQ_LEN,
-        embed_dim: 32,
-        num_heads: 4,
-        num_layers: 1,
-        feed_forward_dim: 64,
-    };
+    let config =
+        TransformerConfig::new(dataset.vocab_size(), SEQ_LEN, 32, 4, 1).with_feed_forward_dim(64);
     let mut rng = Rng::seed(42);
     let mut model = DecoderTransformer::new(config, &device, &mut rng)?;
     // Weight decay belongs on learned matrices, not additive biases or

@@ -1074,3 +1074,102 @@ fn scatter_add_accumulates_collisions_in_grid_order() {
     // Ascending grid order: 1.0 first, then the crumbs, each lost.
     assert_eq!(got[0], 1.0f32);
 }
+
+// ----- arg_sort -------------------------------------------------------
+
+#[test]
+fn arg_sort_is_stable_in_both_directions() {
+    // Two pairs of equal values. `sort_by` is stable, so equal elements keep
+    // their source order whichever direction is asked for — descending must
+    // reverse the *keys*, never the tie order.
+    let s = f32_storage(vec![2.0, 1.0, 2.0, 1.0]);
+    let l = lay([4]);
+    let up = arg_sort(View::new(&s, &l), 0, false).unwrap();
+    assert_eq!(as_i64(&up), vec![1, 3, 0, 2]);
+    let down = arg_sort(View::new(&s, &l), 0, true).unwrap();
+    assert_eq!(as_i64(&down), vec![0, 2, 1, 3]);
+}
+
+#[test]
+fn arg_sort_places_nan_above_every_number() {
+    // The documented total order, matching `argmax`/`max`: NaN is greater
+    // than every number, so it lands last ascending and first descending.
+    let s = f32_storage(vec![1.0, f32::NAN, -1.0]);
+    let l = lay([3]);
+    assert_eq!(
+        as_i64(&arg_sort(View::new(&s, &l), 0, false).unwrap()),
+        vec![2, 0, 1]
+    );
+    assert_eq!(
+        as_i64(&arg_sort(View::new(&s, &l), 0, true).unwrap()),
+        vec![1, 0, 2]
+    );
+}
+
+#[test]
+fn arg_sort_orders_adjacent_f16_values() {
+    // One f16 ulp apart, which is the tightest ordering the dtype can be
+    // asked to resolve. `f16::from_f32(1.0).to_f32().next_up()` would *not*
+    // work here: that is the next f32, which rounds back to f16 1.0 and makes
+    // the two lanes equal.
+    let one = half::f16::ONE;
+    let next = half::f16::from_bits(one.to_bits() + 1);
+    assert!(next > one);
+    let s = Storage::Cpu(CpuStorage::F16(Arc::new(vec![next, one])));
+    let l = lay([2]);
+    assert_eq!(
+        as_i64(&arg_sort(View::new(&s, &l), 0, false).unwrap()),
+        vec![1, 0]
+    );
+}
+
+#[test]
+fn arg_sort_follows_a_transposed_view() {
+    // [[3,1],[2,4]] transposed is [[3,2],[1,4]]: sorting each row of the
+    // *view* must read through the strides, not the backing order.
+    let s = f32_storage(vec![3.0, 1.0, 2.0, 4.0]);
+    let l = lay([2, 2]).transpose(0, 1).unwrap();
+    let out = arg_sort(View::new(&s, &l), 1, false).unwrap();
+    assert_eq!(as_i64(&out), vec![1, 0, 0, 1]);
+}
+
+#[test]
+fn arg_sort_follows_an_offset_view() {
+    // Narrow away the first column: the surviving line is [2, 5, 1], whose
+    // ascending order is 2, 0, 1 — wrong if the kernel ignores the offset.
+    let s = f32_storage(vec![9.0, 2.0, 5.0, 1.0]);
+    let l = lay([4]).narrow(0, 1, 3).unwrap();
+    let out = arg_sort(View::new(&s, &l), 0, false).unwrap();
+    assert_eq!(as_i64(&out), vec![2, 0, 1]);
+}
+
+#[test]
+fn arg_sort_handles_i64_and_declines_bool() {
+    let s = i64_storage(vec![5, -3, 5, 0]);
+    let l = lay([4]);
+    assert_eq!(
+        as_i64(&arg_sort(View::new(&s, &l), 0, false).unwrap()),
+        vec![1, 3, 0, 2]
+    );
+
+    // `dispatch_numeric!` has no `NumAcc` for Bool, so the kernel declines
+    // rather than inventing an accumulator it does not need.
+    let s = bool_storage(vec![true, false]);
+    let l = lay([2]);
+    assert!(matches!(
+        arg_sort(View::new(&s, &l), 0, false),
+        Err(Error::Unsupported {
+            op: "arg_sort",
+            dtype: DType::Bool,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn arg_sort_on_an_empty_axis_is_empty() {
+    let s = f32_storage(Vec::new());
+    let l = lay([0, 3]);
+    assert!(as_i64(&arg_sort(View::new(&s, &l), 0, false).unwrap()).is_empty());
+    assert!(as_i64(&arg_sort(View::new(&s, &l), 1, false).unwrap()).is_empty());
+}

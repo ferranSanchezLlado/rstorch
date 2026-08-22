@@ -33,6 +33,8 @@ use crate::tensor::Tensor;
 pub struct Relu;
 
 impl Forward for Relu {
+    type Output = Tensor;
+
     /// `max(x, 0)`, ignoring `mode` (there is no state and no parameter to
     /// read, so nothing here depends on it).
     ///
@@ -63,6 +65,8 @@ impl Forward for Relu {
 pub struct Gelu;
 
 impl Forward for Gelu {
+    type Output = Tensor;
+
     /// `x · Φ(x)`, ignoring `mode` (see [`Relu::forward`]).
     ///
     /// # Errors
@@ -77,7 +81,7 @@ impl Forward for Gelu {
 mod tests {
     use super::*;
     use crate::device::Device;
-    use crate::nn::{self, Module, Sequential};
+    use crate::nn::{self, Module, ModuleExt, Sequential};
     use crate::testing::check_grad;
 
     const CPU: Device = Device::Cpu;
@@ -136,9 +140,9 @@ mod tests {
 
     #[test]
     fn they_hold_no_parameters() {
-        assert!(nn::state_dict(&Relu).is_empty());
-        assert!(nn::state_dict(&Gelu).is_empty());
-        assert_eq!(nn::num_params(&Relu) + nn::num_params(&Gelu), 0);
+        assert!(Relu.state_dict().is_empty());
+        assert!(Gelu.state_dict().is_empty());
+        assert_eq!(Relu.num_params() + Gelu.num_params(), 0);
     }
 
     #[test]
@@ -179,10 +183,10 @@ mod tests {
         // Only the two `Linear`s contribute leaves, and they are indexed by
         // position in the chain.
         assert_eq!(
-            nn::state_dict(&net).into_keys().collect::<Vec<_>>(),
+            net.state_dict().into_keys().collect::<Vec<_>>(),
             ["0.bias", "0.weight", "3.bias", "3.weight"]
         );
-        assert_eq!(nn::num_params(&net), (4 * 3 + 3) + (3 * 2 + 2));
+        assert_eq!(net.num_params(), (4 * 3 + 3) + (3 * 2 + 2));
 
         let x = Tensor::from_vec(vec![1.0f32, 2.0, -1.0, 0.5], [1, 4], &CPU).unwrap();
         let y = net.forward(&x, Mode::EVAL).unwrap();

@@ -13,9 +13,10 @@
 //!
 //! **Params vs buffers**: a `Param` is trainable
 //! and optimizer-visited; a `Tensor` buffer is non-trainable persistent state
-//! (running statistics). Both are moved by `nn::to_device`/`to_dtype` and both
-//! land in `state_dict` (so a checkpoint reconstructs a model, as `PyTorch`
-//! does); only `Param`s count toward `num_params` and receive gradients.
+//! (running statistics). Both are moved by `ModuleExt::to_device`/`to_dtype`
+//! and both land in `state_dict` (so a checkpoint reconstructs a model, as
+//! `PyTorch` does); only `Param`s count toward `num_params` and receive
+//! gradients.
 
 use crate::nn::{Module, Param};
 use crate::tensor::Tensor;
@@ -52,8 +53,8 @@ pub(crate) enum Leaf<'a> {
 }
 
 /// The mutable counterpart of [`Leaf`], destructured by the mutable-walk
-/// consumers (`nn::load_state_dict`/`to_device`/`to_dtype`, and the optimizer
-/// step).
+/// consumers (`ModuleExt::load_state_dict`/`to_device`/`to_dtype`, and the
+/// optimizer step).
 pub(crate) enum LeafMut<'a> {
     Param(&'a mut Param),
     Buffer(&'a mut Tensor),
@@ -141,14 +142,17 @@ impl<'a> VisitorMut<'a> {
 
 /// Run `sink` over every `(dotted_path, Leaf)` in `module` — parameters and
 /// buffers (the shared engine behind `num_params` and `state_dict`).
-pub(crate) fn visit_all(module: &dyn Module, sink: &mut dyn FnMut(&str, Leaf<'_>)) {
+pub(crate) fn visit_all<M: Module + ?Sized>(module: &M, sink: &mut dyn FnMut(&str, Leaf<'_>)) {
     let mut v = Visitor::new(sink);
     module.visit(&mut v);
 }
 
 /// Run `sink` over every `(dotted_path, LeafMut)` in `module` (optimizer
 /// step, `load_state_dict`, device/dtype conversion).
-pub(crate) fn visit_all_mut(module: &mut dyn Module, sink: &mut dyn FnMut(&str, LeafMut<'_>)) {
+pub(crate) fn visit_all_mut<M: Module + ?Sized>(
+    module: &mut M,
+    sink: &mut dyn FnMut(&str, LeafMut<'_>),
+) {
     let mut v = VisitorMut::new(sink);
     module.visit_mut(&mut v);
 }
@@ -157,7 +161,7 @@ pub(crate) fn visit_all_mut(module: &mut dyn Module, sink: &mut dyn FnMut(&str, 
 mod tests {
     use super::*;
     use crate::device::Device;
-    use crate::nn::Mode;
+    use crate::nn::{Mode, ModuleExt};
 
     fn t(values: &[f32]) -> Tensor {
         Tensor::from_vec(values.to_vec(), [values.len()], &Device::Cpu).unwrap()
@@ -397,8 +401,8 @@ mod tests {
         };
         let paths: Vec<_> = walk(&m).into_iter().map(|(p, _)| p).collect();
         assert_eq!(paths, vec!["embed"], "a tied param must appear once");
-        assert_eq!(crate::nn::num_params(&m), 3);
-        assert_eq!(crate::nn::state_dict(&m).len(), 1);
+        assert_eq!(m.num_params(), 3);
+        assert_eq!(m.state_dict().len(), 1);
 
         // Both uses still contribute: d/de of sum(e ⊙ e) is 2e.
         let grads = m.forward(Mode::TRAIN).backward().unwrap();

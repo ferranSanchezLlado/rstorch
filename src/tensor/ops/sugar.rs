@@ -1,15 +1,24 @@
 //! Operator sugar: the panicking tier of the two-tier fallibility policy.
 //!
 //! Every named method returns [`Result`](crate::Result). The `std::ops`
-//! spellings — `a + b`, `a - b`, `a * b`, `a / b`, plus the `tensor <op>
-//! f64` forms — call exactly those methods and **panic with the identical
-//! structured message** when they fail. The impls are `#[track_caller]`, so
-//! the panic is reported at the user's expression, not inside this file:
+//! spellings — `a + b`, `a - b`, `a * b`, `a / b`, `-a`, plus the `tensor
+//! <op> f64` and `f64 <op> tensor` forms — call exactly those methods and
+//! **panic with the identical structured message** when they fail. The impls
+//! are `#[track_caller]`, so the panic is reported at the user's expression,
+//! not inside this file:
 //!
 //! ```text
 //! thread 'main' panicked at src/main.rs:12:17:
 //! add: shape mismatch: lhs [2, 3] vs rhs [4, 5]
 //! ```
+//!
+//! That location is exact for the errors the sugar can actually raise:
+//! shape, rank, dtype, device and rejected-argument failures are decided from
+//! metadata before any kernel runs, so the reported line is the
+//! offending expression. Backend failures are the other tier — execution is
+//! batched, so an `Unsupported` or `Backend` error can be reported by a later
+//! named call that forces completion rather than by the operator that queued
+//! the work. See [`crate::Error`] for the full timing split.
 //!
 //! Nothing else lives here: there is no separate operator semantics, no
 //! implicit promotion, and no in-place variant. `&a + &b` and
@@ -18,7 +27,7 @@
 
 use crate::error::Result;
 use crate::tensor::Tensor;
-use std::ops::{Add, Div, Mul, Sub};
+use std::ops::{Add, Div, Mul, Neg, Sub};
 
 /// Unwrap an op result, panicking with the error's `Display` message — the
 /// same text the `Result` tier carries. `#[track_caller]` here and on the
@@ -96,6 +105,90 @@ binary_sugar!(Add, add, add, add_scalar, "+");
 binary_sugar!(Sub, sub, sub, sub_scalar, "-");
 binary_sugar!(Mul, mul, mul, mul_scalar, "*");
 binary_sugar!(Div, div, div, div_scalar, "/");
+
+/// Generate the two scalar-left-hand-side forms of one binary operator:
+/// `f64 op Tensor` and `f64 op &Tensor`. `$reversed` computes `scalar op
+/// tensor` — the operand order matters for `-` and `/` — and every error it
+/// produces is relabelled to `$scalar`, so `2.0 - t` and `t - 2.0` fail with
+/// the same op name even though the reversed form is a composition.
+macro_rules! scalar_lhs_sugar {
+    ($trait:ident, $method:ident, $reversed:ident, $scalar:ident, $sym:literal) => {
+        #[doc = concat!("`f64 ", $sym, " tensor` — the panicking spelling of the reversed [`Tensor::", stringify!($scalar), "`].")]
+        impl $trait<&Tensor> for f64 {
+            type Output = Tensor;
+            #[track_caller]
+            fn $method(self, rhs: &Tensor) -> Tensor {
+                unwrap_op($reversed(self, rhs).map_err(|e| e.with_op(stringify!($scalar))))
+            }
+        }
+
+        #[doc = concat!("`f64 ", $sym, " tensor` — the panicking spelling of the reversed [`Tensor::", stringify!($scalar), "`].")]
+        impl $trait<Tensor> for f64 {
+            type Output = Tensor;
+            #[track_caller]
+            fn $method(self, rhs: Tensor) -> Tensor {
+                unwrap_op($reversed(self, &rhs).map_err(|e| e.with_op(stringify!($scalar))))
+            }
+        }
+    };
+}
+
+/// `scalar + tensor`. Addition commutes, so this *is* `add_scalar`.
+fn scalar_add(scalar: f64, tensor: &Tensor) -> Result<Tensor> {
+    tensor.add_scalar(scalar)
+}
+
+/// `scalar - tensor`. There is no reversed primitive and adding one would mean
+/// a new kernel on every backend for no new semantics, so this is the
+/// composition `(-tensor) + scalar`: two passes over the elements, both
+/// through the cheap unary/scalar path, and two temporaries — the same count
+/// as `full_like(scalar).sub(tensor)` but without materialising a broadcast
+/// operand. The existing `neg` and `add_scalar` backwards already compose to
+/// the correct `-1` derivative, so no gradient rule is added either.
+///
+/// The named methods are spelled as paths because the operator traits are in
+/// scope in this module and would otherwise win method resolution.
+fn scalar_sub(scalar: f64, tensor: &Tensor) -> Result<Tensor> {
+    Tensor::neg(tensor)?.add_scalar(scalar)
+}
+
+/// `scalar * tensor`. Multiplication commutes, so this *is* `mul_scalar`.
+fn scalar_mul(scalar: f64, tensor: &Tensor) -> Result<Tensor> {
+    tensor.mul_scalar(scalar)
+}
+
+/// `scalar / tensor`. There is no reciprocal primitive to scale, so this is
+/// `full_like(scalar) / tensor`: one fill plus one divide, both already on
+/// every backend. The constant left operand is untraced and already the
+/// output shape, so `div` broadcasts nothing and its existing backward yields
+/// `-scalar / tensor²` with no new rule.
+fn scalar_div(scalar: f64, tensor: &Tensor) -> Result<Tensor> {
+    let numerator = tensor.full_like(scalar)?;
+    Tensor::div(&numerator, tensor)
+}
+
+scalar_lhs_sugar!(Add, add, scalar_add, add_scalar, "+");
+scalar_lhs_sugar!(Sub, sub, scalar_sub, sub_scalar, "-");
+scalar_lhs_sugar!(Mul, mul, scalar_mul, mul_scalar, "*");
+scalar_lhs_sugar!(Div, div, scalar_div, div_scalar, "/");
+
+/// `-tensor` — the panicking spelling of [`Tensor::neg`].
+impl Neg for &Tensor {
+    type Output = Tensor;
+    #[track_caller]
+    fn neg(self) -> Tensor {
+        unwrap_op(Tensor::neg(self))
+    }
+}
+
+/// `-tensor` — the panicking spelling of [`Tensor::neg`].
+impl Neg for Tensor {
+    type Output = Tensor;
+    #[track_caller]
+    fn neg(self) -> Tensor {
+        unwrap_op(Tensor::neg(&self))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -205,5 +298,82 @@ mod tests {
         assert_eq!(out.dtype(), DType::I64);
         assert_eq!(out.device(), CPU);
         assert_eq!(out.to_vec::<i64>().unwrap(), vec![3, 6]);
+    }
+
+    #[test]
+    fn negation_agrees_with_the_named_method_in_both_ownership_forms() {
+        let a = t(&[1.0, -2.0, 0.0], [3]);
+        let expected = v(&a.neg().unwrap());
+        assert_eq!(expected, vec![-1.0, 2.0, 0.0]);
+        assert_eq!(v(&-&a), expected);
+        assert_eq!(v(&-a), expected);
+    }
+
+    #[test]
+    fn scalar_left_hand_sides_agree_with_the_named_spelling() {
+        let a = t(&[1.0, 2.0], [2]);
+        assert_eq!(v(&(1.0 + &a)), v(&a.add_scalar(1.0).unwrap()));
+        assert_eq!(v(&(3.0 * &a)), v(&a.mul_scalar(3.0).unwrap()));
+        // The reversed forms have no named spelling; they equal the
+        // composition the impl documents.
+        assert_eq!(
+            v(&(3.0 - &a)),
+            v(&a.neg().unwrap().add_scalar(3.0).unwrap())
+        );
+        assert_eq!(
+            v(&(8.0 / &a)),
+            v(&Tensor::full([2], 8.0, DType::F32, &CPU)
+                .unwrap()
+                .div(&a)
+                .unwrap())
+        );
+        // Both ownership forms of the right-hand side.
+        assert_eq!(v(&(1.0 + a.clone())), vec![2.0, 3.0]);
+        assert_eq!(v(&(3.0 * a.clone())), vec![3.0, 6.0]);
+        assert_eq!(v(&(3.0 - a.clone())), vec![2.0, 1.0]);
+        assert_eq!(v(&(8.0 / a)), vec![8.0, 4.0]);
+    }
+
+    #[test]
+    fn reversed_scalar_operators_do_not_commute_their_operands() {
+        // `[1, 4]` is chosen so every reversed result differs element-wise
+        // from the forward one: an operand-order bug cannot pass this.
+        let a = t(&[1.0, 4.0], [2]);
+        assert_eq!(v(&(3.0 - &a)), vec![2.0, -1.0]);
+        assert_eq!(v(&(&a - 3.0)), vec![-2.0, 1.0]);
+        assert_eq!(v(&(8.0 / &a)), vec![8.0, 2.0]);
+        assert_eq!(v(&(&a / 8.0)), vec![0.125, 0.5]);
+    }
+
+    #[test]
+    fn reversed_scalar_operators_differentiate_through_their_composition() {
+        let x = t(&[1.0, 2.0], [2]).traced().unwrap();
+
+        // d/dx (3 - x) = -1.
+        let g = (3.0 - &x).sum_all().unwrap().backward().unwrap();
+        assert_eq!(v(&g.wrt_input(&x).unwrap()), vec![-1.0, -1.0]);
+
+        // d/dx (8 / x) = -8/x²: -8 at x = 1, -2 at x = 2.
+        let g = (8.0 / &x).sum_all().unwrap().backward().unwrap();
+        assert_eq!(v(&g.wrt_input(&x).unwrap()), vec![-8.0, -2.0]);
+    }
+
+    #[test]
+    fn a_failing_reversed_operator_panics_with_the_forward_scalar_op_name() {
+        let b = Tensor::from_vec(vec![true, false], [2], &CPU).unwrap();
+        let expected = err_text(b.sub_scalar(2.0));
+        assert_eq!(expected, "sub_scalar: unsupported on cpu for dtype bool");
+        assert_eq!(panic_message(|| 2.0 - &b), expected);
+
+        let expected = err_text(b.div_scalar(2.0));
+        assert_eq!(expected, "div_scalar: unsupported on cpu for dtype bool");
+        assert_eq!(panic_message(|| 2.0 / &b), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "neg: unsupported on cpu for dtype bool")]
+    fn negating_a_bool_tensor_panics_with_the_named_error_message() {
+        let b = Tensor::from_vec(vec![true], [1], &CPU).unwrap();
+        let _ = -&b;
     }
 }

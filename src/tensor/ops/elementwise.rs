@@ -1,6 +1,8 @@
-//! Element-wise ops: arithmetic (`add`/`sub`/`mul`/`div` and their scalar
-//! spellings), `maximum`/`minimum`, the unary math family, comparisons to
-//! [`Bool`](crate::DType::Bool), `masked_fill` and `where_cond`.
+//! Element-wise ops: arithmetic (`add`/`sub`/`mul`/`div`/`pow` and their
+//! scalar spellings), `maximum`/`minimum`/`clamp`, the unary math family
+//! (activations, `exp`/`ln`/`sqrt`, and the rounding/sign/reciprocal/`erf`
+//! set), comparisons to [`Bool`](crate::DType::Bool), `masked_fill` and
+//! `where_cond`.
 //!
 //! Every op here follows the same three-step shape:
 //!
@@ -18,11 +20,11 @@
 //!
 //! - Broadcasting is undone in the backward pass by `Tensor::sum_to`, which
 //!   is exactly the transpose of `Layout::broadcast_to`.
-//! - Output-dependent formulas (`exp`, `sqrt`, `tanh`, `sigmoid`, `div`,
-//!   `gelu`) capture the op's output in **detached** form, built before the
-//!   traced output is assembled (the detached-output capture rule) —
-//!   capturing the traced output would create an `Arc`
-//!   cycle through the closure.
+//! - Output-dependent formulas (`exp`, `sqrt`, `tanh`, `sigmoid`, `recip`,
+//!   `div`, `gelu`) capture the op's output in **detached** form, built
+//!   before the traced output is assembled (the detached-output capture
+//!   rule) — capturing the traced output would create an `Arc` cycle through
+//!   the closure.
 //! - Comparisons produce [`Bool`](crate::DType::Bool) and are therefore not
 //!   differentiable: they do not go through the record seam at all. For the
 //!   same reason the [`Bool`](crate::DType::Bool) operand of `masked_fill`
@@ -32,7 +34,7 @@ use super::{require_dtype, same_device, same_dtype};
 use crate::autograd;
 use crate::backend::{BinaryOp, CmpOp, UnaryOp, View, dispatch};
 use crate::dtype::DType;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::tensor::Tensor;
 
@@ -106,17 +108,11 @@ fn compare_forward(op: &'static str, kind: CmpOp, lhs: &Tensor, rhs: &Tensor) ->
     Ok(Tensor::from_parts(storage, Layout::contiguous(out_shape)?))
 }
 
-/// A zero tensor shaped, typed and placed like `like` — the "no gradient
-/// here" branch of the mask-driven backwards.
-fn zeros_like(like: &Tensor) -> Result<Tensor> {
-    Tensor::zeros(like.dims(), like.dtype(), &like.device())
-}
-
 /// One side of the `maximum`/`minimum` backward: the cotangent where this
 /// operand strictly wins, plus half of it where the two tie (`PyTorch`'s
 /// tie-splitting rule), reduced back to `dims`.
 fn extremum_side(g: &Tensor, win: &Tensor, tie: &Tensor, dims: &[usize]) -> Result<Tensor> {
-    let zero = zeros_like(g)?;
+    let zero = g.zeros_like()?;
     let full = win.where_cond(g, &zero)?;
     let half = tie.where_cond(&g.mul_scalar(0.5)?, &zero)?;
     full.add(&half)?.sum_to(dims)
@@ -345,7 +341,7 @@ impl Tensor {
             out,
             &[self],
             Box::new(move |g| {
-                let zero = zeros_like(&x)?;
+                let zero = x.zeros_like()?;
                 Ok(vec![Some(x.gt(&zero)?.where_cond(g, &zero)?)])
             }),
         ))
@@ -370,8 +366,8 @@ impl Tensor {
                 // singularity at x == 0 (where Φ(0) = 1/2) filled in
                 // explicitly. `where_cond` evaluates both branches, so the
                 // NaN produced by 0/0 is computed and then discarded.
-                let zero = zeros_like(&x)?;
-                let half = Tensor::full(x.dims(), 0.5, x.dtype(), &x.device())?;
+                let zero = x.zeros_like()?;
+                let half = x.full_like(0.5)?;
                 let cdf = x.eq(&zero)?.where_cond(&half, &out_d.div(&x)?)?;
                 let pdf = x
                     .mul(&x)?
@@ -500,12 +496,337 @@ impl Tensor {
             &[self],
             Box::new(move |g| {
                 // sign(x)·g, with sign(0) = 0.
-                let zero = zeros_like(&x)?;
+                let zero = x.zeros_like()?;
                 let pos = x.gt(&zero)?.where_cond(g, &zero)?;
                 let neg = x.lt(&zero)?.where_cond(g, &zero)?;
                 Ok(vec![Some(pos.sub(&neg)?)])
             }),
         ))
+    }
+
+    /// `-1`/`0`/`+1` by the sign of each element, NaN preserved.
+    ///
+    /// The subgradient is `0` everywhere — `sign` is piecewise constant.
+    ///
+    /// # Errors
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
+    pub fn sign(&self) -> Result<Tensor> {
+        let out = unary_forward(UnaryOp::Sign, self)?;
+        Ok(autograd::record(
+            "sign",
+            out,
+            &[self],
+            Box::new(move |g| Ok(vec![Some(g.zeros_like()?)])),
+        ))
+    }
+
+    /// Element-wise reciprocal `1/x`. IEEE: `1/±0` is an infinity, not an
+    /// error.
+    ///
+    /// # Errors
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
+    pub fn recip(&self) -> Result<Tensor> {
+        let out = unary_forward(UnaryOp::Recip, self)?;
+        let out_d = out.detach();
+        Ok(autograd::record(
+            "recip",
+            out,
+            &[self],
+            // d(1/x)/dx = -1/x² = -(1/x)².
+            Box::new(move |g| Ok(vec![Some(out_d.mul(&out_d)?.neg()?.mul(g)?)])),
+        ))
+    }
+
+    /// Round toward `-∞`. The subgradient is `0` everywhere.
+    ///
+    /// # Errors
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float dtype.
+    pub fn floor(&self) -> Result<Tensor> {
+        let out = unary_forward(UnaryOp::Floor, self)?;
+        Ok(autograd::record(
+            "floor",
+            out,
+            &[self],
+            Box::new(move |g| Ok(vec![Some(g.zeros_like()?)])),
+        ))
+    }
+
+    /// Round toward `+∞`. The subgradient is `0` everywhere.
+    ///
+    /// # Errors
+    /// As [`floor`](Tensor::floor).
+    pub fn ceil(&self) -> Result<Tensor> {
+        let out = unary_forward(UnaryOp::Ceil, self)?;
+        Ok(autograd::record(
+            "ceil",
+            out,
+            &[self],
+            Box::new(move |g| Ok(vec![Some(g.zeros_like()?)])),
+        ))
+    }
+
+    /// Round to the nearest integer, **ties to even** (`PyTorch`'s `round`),
+    /// not Rust's away-from-zero [`f64::round`]. The subgradient is `0`
+    /// everywhere.
+    ///
+    /// # Errors
+    /// As [`floor`](Tensor::floor).
+    pub fn round(&self) -> Result<Tensor> {
+        let out = unary_forward(UnaryOp::Round, self)?;
+        Ok(autograd::record(
+            "round",
+            out,
+            &[self],
+            Box::new(move |g| Ok(vec![Some(g.zeros_like()?)])),
+        ))
+    }
+
+    /// The Gaussian error function `erf(x)` — the primitive
+    /// [`gelu`](Tensor::gelu) is built from, exposed on its own.
+    ///
+    /// # Errors
+    /// As [`floor`](Tensor::floor).
+    pub fn erf(&self) -> Result<Tensor> {
+        let out = unary_forward(UnaryOp::Erf, self)?;
+        let x = self.detach();
+        Ok(autograd::record(
+            "erf",
+            out,
+            &[self],
+            // d(erf(x))/dx = (2/√π)·exp(-x²).
+            Box::new(move |g| {
+                const TWO_OVER_SQRT_PI: f64 = std::f64::consts::FRAC_2_SQRT_PI;
+                Ok(vec![Some(
+                    x.mul(&x)?
+                        .neg()?
+                        .exp()?
+                        .mul_scalar(TWO_OVER_SQRT_PI)?
+                        .mul(g)?,
+                )])
+            }),
+        ))
+    }
+
+    /// Raise every element to the fixed scalar power `exponent`
+    /// (`self^exponent`, `powf` under the hood).
+    ///
+    /// Float-only: a fractional or negative exponent has no integer meaning,
+    /// so this declines rather than invent one.
+    ///
+    /// # Errors
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a non-float
+    /// dtype, or on any non-CPU device: `BinaryOp::Pow` has no accelerator
+    /// kernel, so Metal, CUDA and WGPU all decline it.
+    pub fn pow(&self, exponent: f64) -> Result<Tensor> {
+        const OP: &str = "pow";
+        if !self.dtype().is_float() {
+            return Err(Error::Unsupported {
+                op: OP,
+                device: self.device(),
+                dtype: self.dtype(),
+            });
+        }
+        let out = binary_scalar_forward(OP, BinaryOp::Pow, self, exponent)?;
+        let x = self.detach();
+        Ok(autograd::record(
+            OP,
+            out,
+            &[self],
+            // d(xᵖ)/dx = p·xᵖ⁻¹.
+            Box::new(move |g| {
+                Ok(vec![Some(
+                    x.pow(exponent - 1.0)?.mul_scalar(exponent)?.mul(g)?,
+                )])
+            }),
+        ))
+    }
+
+    /// Clamp every element into `[min, max]`.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if either bound is
+    /// `NaN` or if `min > max` — the interval would be empty, and the
+    /// unordered comparisons would quietly collapse the call to a `max`
+    /// or to an all-`NaN` tensor with a zero gradient.
+    /// [`Error::Unsupported`](crate::Error::Unsupported) on a dtype without
+    /// arithmetic. An infinite bound is fine: `clamp(0.0, f64::INFINITY)` is
+    /// the one-sided spelling.
+    ///
+    /// # Gradient
+    /// `1` where `min <= x <= max`, `0` outside — the boundary itself
+    /// receives a gradient (a closed interval), matching `PyTorch`.
+    ///
+    /// ```
+    /// # use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![-1.0f32, 0.5, 2.0], [3], &Device::Cpu)?;
+    /// assert_eq!(x.clamp(0.0, 1.0)?.to_vec::<f32>()?, vec![0.0, 0.5, 1.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn clamp(&self, min: f64, max: f64) -> Result<Tensor> {
+        const OP: &str = "clamp";
+        if min.is_nan() || max.is_nan() || min > max {
+            return Err(Error::InvalidArg {
+                op: OP,
+                msg: format!("clamp requires min <= max and neither NaN, got [{min}, {max}]"),
+            });
+        }
+        let lo = binary_scalar_forward(OP, BinaryOp::Maximum, self, min)?;
+        let out = binary_scalar_forward(OP, BinaryOp::Minimum, &lo, max)?;
+        let x = self.detach();
+        Ok(autograd::record(
+            OP,
+            out,
+            &[self],
+            Box::new(move |g| {
+                let zero = g.zeros_like()?;
+                let ge_min = x.ge(&x.full_like(min)?)?;
+                let le_max = x.le(&x.full_like(max)?)?;
+                let inside = ge_min.where_cond(&le_max.where_cond(g, &zero)?, &zero)?;
+                Ok(vec![Some(inside)])
+            }),
+        ))
+    }
+
+    // ---- composed activations ---------------------------------------------
+
+    /// SiLU / swish: `x · σ(x)`. Composed from
+    /// [`sigmoid`](Tensor::sigmoid) and [`mul`](Tensor::mul), so it inherits
+    /// their backward exactly rather than a hand-written one.
+    ///
+    /// # Errors
+    /// As [`sigmoid`](Tensor::sigmoid).
+    pub fn silu(&self) -> Result<Tensor> {
+        self.mul(&self.sigmoid()?)
+    }
+
+    /// Leaky ReLU: `x` where `x > 0`, `negative_slope * x` otherwise.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `negative_slope` is
+    /// not finite, as [`mul_scalar`](Tensor::mul_scalar) otherwise.
+    ///
+    /// # Gradient
+    /// `1` above zero and `negative_slope` at or below it — the one-sided
+    /// convention `PyTorch` uses, and the one that keeps
+    /// `leaky_relu(0.0)` agreeing with [`relu`](Tensor::relu) at the origin.
+    ///
+    /// Selecting with [`where_cond`](Tensor::where_cond) rather than composing
+    /// `max(x, 0) + slope · min(x, 0)` is what buys that: `maximum`/`minimum`
+    /// split the cotangent evenly on a tie, so the composed form returns
+    /// `(1 + slope)/2` at exactly zero — `0.55` for the usual `0.1`, and `0.5`
+    /// where `relu` returns `0`.
+    pub fn leaky_relu(&self, negative_slope: f64) -> Result<Tensor> {
+        const OP: &str = "leaky_relu";
+        if !negative_slope.is_finite() {
+            return Err(Error::InvalidArg {
+                op: OP,
+                msg: format!("negative_slope must be finite, got {negative_slope}"),
+            });
+        }
+        let zero = self.zeros_like()?;
+        self.gt(&zero)?
+            .where_cond(self, &self.mul_scalar(negative_slope)?)
+    }
+
+    /// Numerically stable softplus: `ln(1 + exp(x))`, computed as
+    /// `max(x, 0) + ln(1 + exp(-|x|))` so a large `x` never overflows `exp`.
+    ///
+    /// # Errors
+    /// As [`exp`](Tensor::exp).
+    pub fn softplus(&self) -> Result<Tensor> {
+        let zero = self.zeros_like()?;
+        let linear_part = self.maximum(&zero)?;
+        let stable = self.abs()?.neg()?.exp()?.add_scalar(1.0)?.ln()?;
+        linear_part.add(&stable)
+    }
+
+    /// Exponential linear unit: `x` where `x > 0`, `alpha * (exp(x) - 1)`
+    /// otherwise.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `alpha` is not
+    /// finite, as [`exp`](Tensor::exp) otherwise.
+    ///
+    /// # Gradient
+    /// `1` above zero, `alpha · exp(x)` at or below it.
+    ///
+    /// The exponential is evaluated on `min(x, 0)`, not on `x`. Both branches
+    /// of a [`where_cond`](Tensor::where_cond) stay in the graph, and the
+    /// discarded one is handed a zero cotangent — so an unbounded `exp(x)`
+    /// would saturate to infinity for `x` past the dtype's exponent range
+    /// (about `88` in `F32`) and produce `0 · inf = NaN`, poisoning the
+    /// accumulated gradient of a perfectly ordinary large activation. Masking
+    /// the input first keeps the exponent at or below zero, so it cannot
+    /// overflow, and leaves the selected branch's value and derivative
+    /// unchanged.
+    pub fn elu(&self, alpha: f64) -> Result<Tensor> {
+        const OP: &str = "elu";
+        if !alpha.is_finite() {
+            return Err(Error::InvalidArg {
+                op: OP,
+                msg: format!("alpha must be finite, got {alpha}"),
+            });
+        }
+        let zero = self.zeros_like()?;
+        let positive = self.gt(&zero)?;
+        let bounded = positive.where_cond(&zero, self)?;
+        let negative_branch = bounded.exp()?.sub_scalar(1.0)?.mul_scalar(alpha)?;
+        positive.where_cond(self, &negative_branch)
+    }
+
+    // ---- cumulative sum -----------------------------------------------
+
+    /// Inclusive prefix sum along `axis`: element `i` of each line holds the
+    /// running total of elements `0..=i`.
+    ///
+    /// Implemented as one [`matmul`](Tensor::matmul) against a lower
+    /// triangular ones matrix built with [`tril`](Tensor::tril)
+    /// (`out = x @ Lᵀ`), so the backward (a reverse cumulative sum) comes for
+    /// free from `matmul`'s own recorded gradient rather than a hand-written
+    /// scan.
+    ///
+    /// # Errors
+    /// [`Error::InvalidAxis`](crate::Error::InvalidAxis) if `axis` is out of
+    /// range, [`Error::Unsupported`](crate::Error::Unsupported) on a
+    /// non-float dtype.
+    ///
+    /// ```
+    /// # use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [4], &Device::Cpu)?;
+    /// assert_eq!(x.cumsum(0)?.to_vec::<f32>()?, vec![1.0, 3.0, 6.0, 10.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn cumsum(&self, axis: isize) -> Result<Tensor> {
+        const OP: &str = "cumsum";
+        let ax = self.shape().resolve_axis(axis, OP)?;
+        if !self.dtype().is_float() {
+            return Err(Error::Unsupported {
+                op: OP,
+                device: self.device(),
+                dtype: self.dtype(),
+            });
+        }
+        let n = self.dims()[ax];
+        if n == 0 {
+            return Ok(self.clone());
+        }
+        let rank = self.rank();
+        let last = rank - 1;
+        let moved = if ax == last {
+            self.clone()
+        } else {
+            self.transpose(ax as isize, last as isize)?
+        };
+        let outer = moved.num_elements() / n;
+        let flat = moved.reshape([outer, n])?;
+        let lower = Tensor::ones([n, n], self.dtype(), &self.device())?.tril(0)?;
+        let scanned = flat.matmul(&lower.transpose(0, 1)?)?;
+        let restored = scanned.reshape(moved.dims().to_vec())?;
+        if ax == last {
+            Ok(restored)
+        } else {
+            restored.transpose(ax as isize, last as isize)
+        }
     }
 
     // ---- comparisons -----------------------------------------------------
@@ -644,7 +965,7 @@ impl Tensor {
             &[on_true, on_false],
             Box::new(move |g| {
                 let split = |take_true: bool, dims: &[usize]| -> Result<Tensor> {
-                    let zero = zeros_like(g)?;
+                    let zero = g.zeros_like()?;
                     let picked = if take_true {
                         cond.where_cond(g, &zero)?
                     } else {

@@ -4,8 +4,9 @@
 //! the same graph); Conv2d/pooling forward and backward at small image sizes;
 //! and a whole-tensor-reduction rank scan.
 //!
-//! Group ids (`transformer/forward`, `mlp/train_epoch_sgd/8x64x784`, …) are
-//! stable across revisions so successive runs compare row for row.
+//! Group ids carry the device the row was measured on
+//! (`transformer/cpu/forward`, `mlp/metal:0/train_epoch_sgd/8x64x784`, …) and
+//! are stable across revisions, so successive runs compare row for row.
 //!
 //! Two things about the workload are worth knowing before reading a number:
 //!
@@ -25,6 +26,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use rstorch::prelude::*;
 
 fn benchmark_devices() -> Vec<Device> {
+    #[allow(unused_mut)]
     let mut devices = vec![Device::Cpu];
     #[cfg(all(feature = "metal", target_os = "macos"))]
     if std::env::var_os("RSTORCH_SKIP_METAL_TESTS").is_none()
@@ -48,8 +50,9 @@ fn labels(rows: usize, classes: usize, offset: usize, device: &Device) -> Tensor
     Tensor::from_vec(values, [rows], device).expect("bench labels")
 }
 
-fn observe_model(module: &dyn Module) {
-    let value = rstorch::nn::state_dict(module)
+fn observe_model(module: &impl Module) {
+    let value = module
+        .state_dict()
         .into_values()
         .next()
         .expect("bench model has parameters");
@@ -200,7 +203,7 @@ fn bench_transformer(c: &mut Criterion) {
             // head. Pinning it means a later edit to the ported model cannot quietly
             // change the workload these numbers describe.
             assert_eq!(
-                rstorch::nn::num_params(&model),
+                model.num_params(),
                 418,
                 "ported transformer must match the v2 tiny config's parameter count"
             );

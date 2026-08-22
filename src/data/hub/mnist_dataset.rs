@@ -121,9 +121,9 @@ impl MnistDataset {
     /// image — plus anything the tensor upload reports.
     pub fn new(raw: &Mnist, layout: MnistLayout, device: &Device) -> Result<MnistDataset> {
         let (rows, cols) = raw.image_shape();
-        let per_image = rows.checked_mul(cols).ok_or_else(|| Error::Data {
-            msg: format!("MNIST image geometry {rows}x{cols} overflows"),
-        })?;
+        let per_image = rows
+            .checked_mul(cols)
+            .ok_or_else(|| Error::data(format!("MNIST image geometry {rows}x{cols} overflows")))?;
 
         let mut pixels = Vec::with_capacity(raw.len().saturating_mul(per_image));
         for image in raw.images() {
@@ -131,12 +131,10 @@ impl MnistDataset {
             // exact `rows * cols` chunks; kept so a future raw-layer change
             // fails loudly instead of silently mis-shaping the split.
             if image.len() != per_image {
-                return Err(Error::Data {
-                    msg: format!(
-                        "MNIST image has {} pixels but the header declares {rows}x{cols}",
-                        image.len()
-                    ),
-                });
+                return Err(Error::data(format!(
+                    "MNIST image has {} pixels but the header declares {rows}x{cols}",
+                    image.len()
+                )));
             }
             pixels.extend_from_slice(image);
         }

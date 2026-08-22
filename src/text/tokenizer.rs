@@ -25,11 +25,6 @@ const SPECIALS: usize = 4;
 /// Number of single-byte base tokens the BPE vocabulary always contains.
 const BYTE_BASE: usize = 256;
 
-/// Builds a [`Error::Tokenizer`] from a message.
-fn tokenizer_error(msg: impl Into<String>) -> Error {
-    Error::Tokenizer { msg: msg.into() }
-}
-
 /// A reversible mapping between text and integer token ids.
 ///
 /// [`encode`](Self::encode) and [`decode`](Self::decode) are fallible: an id
@@ -230,7 +225,7 @@ impl CharTokenizer {
             } else if let Some(&ch) = self.chars.get(id.saturating_sub(SPECIALS)) {
                 out.push(ch);
             } else {
-                return Err(tokenizer_error(format!(
+                return Err(Error::tokenizer(format!(
                     "unknown token id {id} (vocab size {})",
                     self.vocab_size()
                 )));
@@ -309,7 +304,7 @@ impl BpeTokenizer {
     pub fn train(corpus: &str, target_vocab: usize) -> Result<Self> {
         let floor = SPECIALS + BYTE_BASE;
         if target_vocab < floor {
-            return Err(tokenizer_error(format!(
+            return Err(Error::tokenizer(format!(
                 "target vocabulary size {target_vocab} is below the minimum of {floor} \
                  ({SPECIALS} special tokens + {BYTE_BASE} byte tokens)"
             )));
@@ -376,7 +371,7 @@ impl Tokenizer for BpeTokenizer {
                 continue;
             }
             let Some(piece) = self.token_bytes.get(id) else {
-                return Err(tokenizer_error(format!(
+                return Err(Error::tokenizer(format!(
                     "unknown token id {id} (vocab size {})",
                     self.vocab_size()
                 )));
@@ -386,10 +381,13 @@ impl Tokenizer for BpeTokenizer {
         // Strict UTF-8: an invalid byte sequence is an error, never a
         // `U+FFFD` replacement.
         String::from_utf8(bytes).map_err(|err| {
-            tokenizer_error(format!(
-                "decoded bytes are not valid UTF-8 at offset {}",
-                err.utf8_error().valid_up_to()
-            ))
+            Error::tokenizer_with(
+                format!(
+                    "decoded bytes are not valid UTF-8 at offset {}",
+                    err.utf8_error().valid_up_to()
+                ),
+                err,
+            )
         })
     }
 

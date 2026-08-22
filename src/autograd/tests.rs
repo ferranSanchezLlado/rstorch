@@ -388,6 +388,34 @@ fn clip_norm_only_bites_above_the_budget() {
 }
 
 #[test]
+fn norm_is_the_value_clip_norm_measures_against_its_budget() {
+    // Two leaves with gradients [3, 0] and [4]: global norm exactly 5 in f64.
+    let a = t(&[1.0, 1.0], [2]).traced().unwrap();
+    let b = t(&[1.0], [1]).traced().unwrap();
+    let build = || {
+        let lhs = a.mul(&t(&[3.0, 0.0], [2])).unwrap();
+        let rhs = b.mul_scalar(4.0).unwrap();
+        lhs.sum_all().unwrap().add(&rhs.sum_all().unwrap()).unwrap()
+    };
+
+    let g = build().backward().unwrap();
+    assert_eq!(g.norm().unwrap(), 5.0);
+
+    // A clip that does not trigger leaves the norm alone…
+    let g = g.clip_norm(10.0).unwrap();
+    assert_eq!(g.norm().unwrap(), 5.0);
+
+    // …and one that does reports the clipped gradients: the budget itself.
+    let g = g.clip_norm(1.0).unwrap();
+    assert!((g.norm().unwrap() - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn norm_of_an_empty_grads_is_zero() {
+    assert_eq!(Grads::from_pairs(HashMap::new()).norm().unwrap(), 0.0);
+}
+
+#[test]
 fn clip_norm_of_an_empty_grads_is_a_no_op() {
     let g = Grads::from_pairs(HashMap::new());
     assert!(g.is_empty());

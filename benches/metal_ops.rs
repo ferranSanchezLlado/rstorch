@@ -1,8 +1,8 @@
 //! Synchronized CPU-vs-Metal kernel-family benchmarks.
 //!
-//! Every measured operation is followed by a host read. This intentionally
-//! includes submission and synchronization latency and prevents Metal's
-//! asynchronous encoder from being compared with completed CPU work.
+//! Every measured operation is followed by a `Tensor::realize`, so what is
+//! timed is *completed* work: Metal's asynchronous encoder is never compared
+//! against already-finished CPU work. See `finish`.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
@@ -30,8 +30,22 @@ mod macos {
         .unwrap()
     }
 
+    /// Force the measured work to completion.
+    ///
+    /// This used to be `to_vec::<f32>()`, which drained the queue only as a
+    /// side effect of copying the whole result to the host.
+    /// `Tensor::realize` drains it on purpose, so **every row in
+    /// `bench_device` changed meaning**: the device-to-host transfer of the
+    /// result is no longer inside the measurement — 4 MB per iteration for the
+    /// 1024×1024 rows, 8 MB for `gather_backward` — on either device. Metal
+    /// rows still include commit and wait; CPU rows lose a copy they were never
+    /// meant to be paying for. What is left on both sides is the kernel.
+    ///
+    /// Deferred bounds verdicts are still collected by the flush, so the
+    /// `embedding_backward` and `gather_backward` rows continue to pay for the
+    /// validation read that a host boundary would have charged them.
     fn finish(tensor: Tensor) {
-        black_box(tensor.to_vec::<f32>().unwrap());
+        black_box(&tensor).realize().unwrap();
     }
 
     fn bench_device(c: &mut Criterion, device: Device) {

@@ -407,9 +407,9 @@ impl<R: Rule> Engine<R> {
     /// Restore the state [`save`](Self::save) wrote, resolving paths against
     /// `model`.
     ///
-    /// All-or-nothing: the hyperparameters are adopted onto copies and every
-    /// buffer is decoded and checked against its parameter before *any* of this
-    /// optimizer's own state is replaced.
+    /// All-or-nothing: the hyperparameters are adopted onto copies, range
+    /// checked, and every buffer is decoded and checked against its parameter
+    /// before *any* of this optimizer's own state is replaced.
     pub(crate) fn load(&mut self, model: &dyn Module, envelope: &Envelope) -> Result<()> {
         let incoming = state::load(envelope, R::KIND)?;
         incoming.expect_hypers(R::HYPERS)?;
@@ -417,6 +417,7 @@ impl<R: Rule> Engine<R> {
         let mut rule = self.rule;
         let mut base = *self.groups.base();
         rule.adopt(&mut base, &incoming)?;
+        self.check_adopted(model, &rule, lr, base)?;
         let restored = state::restore(model, &incoming, &self.rule, &self.groups)?;
 
         self.lr = lr;
@@ -425,6 +426,35 @@ impl<R: Rule> Engine<R> {
         self.steps = incoming.steps();
         self.state = restored;
         Ok(())
+    }
+
+    /// Range-check hyperparameters read off disk, against the same validator
+    /// [`prepass`](Self::prepass) uses, before they are committed.
+    ///
+    /// Without this a file carrying `lr=-1` or `beta1=nan` loads successfully
+    /// and then makes every subsequent `step` fail in the pre-pass, with no
+    /// way to repair the optimizer — the opposite of the all-or-nothing load
+    /// this method's caller documents. The clock is `1` rather than the
+    /// restored count: the checked quantity is the *scalars*, and every
+    /// reachable clock produces a bias correction in the same validated range.
+    fn check_adopted(&self, model: &dyn Module, rule: &R, lr: f64, base: R::Hyper) -> Result<()> {
+        let mut invalid = None;
+        visit_all(model, &mut |path, leaf| {
+            let Leaf::Param(param) = leaf else {
+                return;
+            };
+            if param.is_frozen() || invalid.is_some() {
+                return;
+            }
+            let hyper = self.groups.resolve_with_base(base, path);
+            if let Err(error) = rule.check(param, hyper, lr * R::lr_scale(&hyper), 1) {
+                invalid = Some(error);
+            }
+        });
+        match invalid {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -457,7 +487,7 @@ impl<R: Rule> Engine<R> {
 ///    forgets a leaf would otherwise leave that parameter silently untrained,
 ///    which is the same bug class as a missing gradient and gets the same loud
 ///    treatment (the sibling of the check in
-///    [`nn::load_state_dict`](crate::nn::load_state_dict)).
+///    [`ModuleExt::load_state_dict`](crate::nn::ModuleExt::load_state_dict)).
 /// 3. **Apply.** `update` is called with each parameter's path, the parameter,
 ///    and its gradient (moved out of `grads`); passes 1–2 have already proved
 ///    the lookups and shapes, so only a backend failure can stop it here.
@@ -524,6 +554,7 @@ fn apply(
             Ok(grad) => grad,
             Err(Error::NotTraced { .. }) => {
                 failure = Some(Error::MissingGrad {
+                    op,
                     path: path.to_string(),
                 });
                 return;
@@ -619,6 +650,7 @@ fn apply(
             }
         }) else {
             failure = Some(Error::MissingGrad {
+                op,
                 path: path.to_string(),
             });
             return;

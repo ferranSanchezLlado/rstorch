@@ -208,20 +208,24 @@ fn finish(context: &Arc<Context>, dtype: DType, len: usize, buffer: CudaSlice<u8
     }
 }
 
-fn storage<'a>(op: &'static str, view: View<'a>) -> Result<&'a CudaStorage> {
+/// `ordinal` is the CUDA device the caller is running on, and is what a
+/// non-CUDA view is reported against: `view.device()` describes the storage
+/// that is *present*, so using it on both sides of the mismatch would print
+/// "expected cpu, got cpu" and never name the backend actually asked for.
+fn storage<'a>(op: &'static str, ordinal: usize, view: View<'a>) -> Result<&'a CudaStorage> {
     match view.storage() {
         Storage::Cuda(storage) => Ok(storage),
-        other => Err(Error::DeviceMismatch {
+        other => Err(Error::device_mismatch(
             op,
-            expected: view.device(),
-            got: other.device(),
-        }),
+            Device::Cuda(ordinal),
+            other.device(),
+        )),
     }
 }
 
 fn check_context(op: &'static str, context: &Arc<Context>, views: &[View<'_>]) -> Result<()> {
     for &view in views {
-        let value = storage(op, view)?;
+        let value = storage(op, context.ordinal, view)?;
         if !Arc::ptr_eq(context, &value.context) {
             return Err(Error::DeviceMismatch {
                 op,
@@ -405,6 +409,11 @@ fn check_axis(op: &'static str, view: View<'_>, axis: usize) -> Result<()> {
     }
 }
 
+/// PTX op codes. Only reachable for the ops the entry points below admit;
+/// every declining guard is stated there, so an op that has no CUDA kernel
+/// never gets here. The matches carry no `_` arm on purpose: a new
+/// [`BinaryOp`]/[`UnaryOp`] variant must fail to compile here rather than
+/// silently pick up another op's code.
 fn op_code_binary(op: BinaryOp) -> u32 {
     match op {
         BinaryOp::Add => 0,
@@ -413,6 +422,7 @@ fn op_code_binary(op: BinaryOp) -> u32 {
         BinaryOp::Div => 3,
         BinaryOp::Maximum => 4,
         BinaryOp::Minimum => 5,
+        BinaryOp::Pow => unreachable!("Pow is declined before dispatch"),
     }
 }
 
@@ -427,6 +437,12 @@ fn op_code_unary(op: UnaryOp) -> u32 {
         UnaryOp::Sigmoid => 6,
         UnaryOp::Neg => 7,
         UnaryOp::Abs => 8,
+        UnaryOp::Sign
+        | UnaryOp::Recip
+        | UnaryOp::Floor
+        | UnaryOp::Ceil
+        | UnaryOp::Round
+        | UnaryOp::Erf => unreachable!("declined before dispatch"),
     }
 }
 
@@ -452,7 +468,7 @@ fn validate_indices(
     axis: usize,
     bound: usize,
 ) -> Result<()> {
-    let input = storage(op, indices)?;
+    let input = storage(op, context.ordinal, indices)?;
     let layout = device_layout(context, indices.layout())?;
     let len = indices.layout().num_elements() as u64;
     let bound64 = bound as u64;
@@ -465,7 +481,7 @@ fn validate_indices(
         })?;
         if validation.pending.len() >= VALIDATION_SLOTS {
             drop(validation);
-            collect_validations(context)?;
+            collect_validations(context, op)?;
             continue;
         }
 
@@ -483,9 +499,14 @@ fn validate_indices(
     }
 }
 
-fn collect_validations(context: &Arc<Context>) -> Result<()> {
+/// Read the status table and report the first bounds check that failed, in
+/// program order.
+///
+/// `op` names the caller for a failure of the read itself; a collected verdict
+/// keeps the name of the indexing op that launched it.
+fn collect_validations(context: &Arc<Context>, op: &'static str) -> Result<()> {
     let mut validation = context.validation.lock().map_err(|_| Error::Backend {
-        op: "transfer_out",
+        op,
         msg: "CUDA validation state poisoned".to_owned(),
     })?;
     if validation.pending.is_empty() {
@@ -497,7 +518,7 @@ fn collect_validations(context: &Arc<Context>) -> Result<()> {
     let words = context
         .stream
         .clone_dtoh(&validation.status)
-        .map_err(|error| backend_error("transfer_out", error))?;
+        .map_err(|error| backend_error(op, error))?;
     let failure = validation
         .pending
         .iter()
@@ -663,8 +684,8 @@ impl CudaBackend {
         let dtype = same_dtype(base, &[lhs, rhs])?;
         let context = self.context()?;
         check_context(base, &context, &[lhs, rhs])?;
-        let a = storage(base, lhs)?;
-        let b = storage(base, rhs)?;
+        let a = storage(base, self.ordinal, lhs)?;
+        let b = storage(base, self.ordinal, rhs)?;
         let ll = device_layout(&context, lhs.layout())?;
         let rl = device_layout(&context, rhs.layout())?;
         let len = lhs.layout().num_elements();
@@ -746,10 +767,10 @@ impl CudaBackend {
             let rows = grad.layout().num_elements() / width;
             let context = self.context()?;
             check_context("fused_layer_norm_backward_input", &context, inputs)?;
-            let g = storage("fused_layer_norm_backward_input", *grad)?;
-            let h = storage("fused_layer_norm_backward_input", *xhat)?;
-            let i = storage("fused_layer_norm_backward_input", *inv)?;
-            let w = storage("fused_layer_norm_backward_input", *weight)?;
+            let g = storage("fused_layer_norm_backward_input", self.ordinal, *grad)?;
+            let h = storage("fused_layer_norm_backward_input", self.ordinal, *xhat)?;
+            let i = storage("fused_layer_norm_backward_input", self.ordinal, *inv)?;
+            let w = storage("fused_layer_norm_backward_input", self.ordinal, *weight)?;
             let gl = device_layout(&context, grad.layout())?;
             let hl = device_layout(&context, xhat.layout())?;
             let il = device_layout(&context, inv.layout())?;
@@ -844,9 +865,9 @@ impl CudaBackend {
         let rows = x.layout().num_elements() / width;
         let context = self.context()?;
         check_context("fused_layer_norm", &context, inputs)?;
-        let xv = storage("fused_layer_norm", *x)?;
-        let wv = storage("fused_layer_norm", *weight)?;
-        let bv = storage("fused_layer_norm", *bias)?;
+        let xv = storage("fused_layer_norm", self.ordinal, *x)?;
+        let wv = storage("fused_layer_norm", self.ordinal, *weight)?;
+        let bv = storage("fused_layer_norm", self.ordinal, *bias)?;
         let xl = device_layout(&context, x.layout())?;
         let ws = upload_u64(
             &context,
@@ -1082,7 +1103,7 @@ impl BackendOps for CudaBackend {
         check_context("transfer_out", &context, &[x])?;
         let dense = if x.layout().is_contiguous()
             && x.layout().offset() == 0
-            && x.layout().num_elements() == storage("transfer_out", x)?.len
+            && x.layout().num_elements() == storage("transfer_out", self.ordinal, x)?.len
         {
             None
         } else {
@@ -1091,7 +1112,7 @@ impl BackendOps for CudaBackend {
         let value = match &dense {
             Some(Storage::Cuda(value)) => value,
             Some(_) => unreachable!(),
-            None => storage("transfer_out", x)?,
+            None => storage("transfer_out", self.ordinal, x)?,
         };
         let len = x.layout().num_elements();
         let result = match value.dtype {
@@ -1133,15 +1154,30 @@ impl BackendOps for CudaBackend {
             }
             DType::BF16 | DType::F64 => unreachable!("unsupported CUDA storage"),
         };
-        collect_validations(&context)?;
+        collect_validations(&context, "transfer_out")?;
         Ok(result)
+    }
+
+    /// Wait for the stream to drain, then read the deferred bounds verdicts.
+    ///
+    /// Kernel launches on this backend are asynchronous — a launch returns as
+    /// soon as the driver has queued it — so this stream synchronize is what
+    /// turns "submitted" into "completed", and the only point at which a launch
+    /// failure or an out-of-range index can be observed without a host copy.
+    fn synchronize(&self) -> Result<()> {
+        let context = self.context()?;
+        context
+            .stream
+            .synchronize()
+            .map_err(|error| backend_error("synchronize", error))?;
+        collect_validations(&context, "synchronize")
     }
 
     fn copy_strided(&self, x: View<'_>) -> Result<Storage> {
         supported("copy_strided", x.dtype(), x.device())?;
         let context = self.context()?;
         check_context("copy_strided", &context, &[x])?;
-        let input = storage("copy_strided", x)?;
+        let input = storage("copy_strided", self.ordinal, x)?;
         let layout = device_layout(&context, x.layout())?;
         let len = x.layout().num_elements();
         let mut output = allocate_raw(&context, x.dtype(), len)?;
@@ -1156,13 +1192,15 @@ impl BackendOps for CudaBackend {
 
     fn copy_into(&self, src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -> Result<()> {
         if src.layout().shape() != dst_layout.shape() {
-            return Err(Error::ShapeMismatch {
-                op: "copy_into",
-                lhs: src.layout().shape().clone(),
-                rhs: dst_layout.shape().clone(),
-            });
+            // Destination-shaped op, so the destination is the requirement on
+            // both this check and the dtype check below.
+            return Err(Error::shape_mismatch(
+                "copy_into",
+                dst_layout.shape(),
+                src.layout().shape(),
+            ));
         }
-        let input = storage("copy_into", src)?;
+        let input = storage("copy_into", self.ordinal, src)?;
         let Storage::Cuda(output) = dst else {
             return Err(Error::DeviceMismatch {
                 op: "copy_into",
@@ -1171,11 +1209,13 @@ impl BackendOps for CudaBackend {
             });
         };
         if input.dtype != output.dtype {
-            return Err(Error::DTypeMismatch {
-                op: "copy_into",
-                expected: input.dtype,
-                got: output.dtype,
-            });
+            // The destination's dtype is likewise the requirement, matching
+            // the CPU, Metal and WGPU backends.
+            return Err(Error::dtype_mismatch(
+                "copy_into",
+                output.dtype,
+                input.dtype,
+            ));
         }
         if !Arc::ptr_eq(&input.context, &output.context) {
             return Err(Error::DeviceMismatch {
@@ -1236,7 +1276,7 @@ impl BackendOps for CudaBackend {
         }
         let context = self.context()?;
         check_context("to_dtype", &context, &[x])?;
-        let input = storage("to_dtype", x)?;
+        let input = storage("to_dtype", self.ordinal, x)?;
         let layout = device_layout(&context, x.layout())?;
         let len = x.layout().num_elements();
         let mut output = allocate_raw(&context, to, len)?;
@@ -1251,7 +1291,9 @@ impl BackendOps for CudaBackend {
     }
 
     fn binary(&self, op: BinaryOp, lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
-        if lhs.dtype() == DType::Bool {
+        // `Pow` has no PTX kernel yet — a loud decline, not a silent CPU
+        // fallback, matching Metal and WGPU.
+        if lhs.dtype() == DType::Bool || matches!(op, BinaryOp::Pow) {
             return Err(unsupported("binary", lhs));
         }
         self.binary_kernel("binary", lhs, rhs, lhs.dtype(), op_code_binary(op))
@@ -1259,12 +1301,12 @@ impl BackendOps for CudaBackend {
 
     fn binary_scalar(&self, op: BinaryOp, x: View<'_>, scalar: f64) -> Result<Storage> {
         supported("binary_scalar", x.dtype(), x.device())?;
-        if x.dtype() == DType::Bool {
+        if x.dtype() == DType::Bool || matches!(op, BinaryOp::Pow) {
             return Err(unsupported("binary_scalar", x));
         }
         let context = self.context()?;
         check_context("binary_scalar", &context, &[x])?;
-        let input = storage("binary_scalar", x)?;
+        let input = storage("binary_scalar", self.ordinal, x)?;
         let layout = device_layout(&context, x.layout())?;
         let len = x.layout().num_elements();
         let mut output = allocate_raw(&context, x.dtype(), len)?;
@@ -1291,12 +1333,23 @@ impl BackendOps for CudaBackend {
         supported("unary", x.dtype(), x.device())?;
         if x.dtype() == DType::Bool
             || (x.dtype() == DType::I64 && !matches!(op, UnaryOp::Neg | UnaryOp::Abs))
+            // No PTX kernel yet for these — a loud decline, not a silent CPU
+            // fallback, matching Metal and WGPU.
+            || matches!(
+                op,
+                UnaryOp::Sign
+                    | UnaryOp::Recip
+                    | UnaryOp::Floor
+                    | UnaryOp::Ceil
+                    | UnaryOp::Round
+                    | UnaryOp::Erf
+            )
         {
             return Err(unsupported("unary", x));
         }
         let context = self.context()?;
         check_context("unary", &context, &[x])?;
-        let input = storage("unary", x)?;
+        let input = storage("unary", self.ordinal, x)?;
         let layout = device_layout(&context, x.layout())?;
         let len = x.layout().num_elements();
         let mut output = allocate_raw(&context, x.dtype(), len)?;
@@ -1325,9 +1378,9 @@ impl BackendOps for CudaBackend {
         let dtype = same_dtype("where", &[on_true, on_false])?;
         let context = self.context()?;
         check_context("where", &context, &[cond, on_true, on_false])?;
-        let c = storage("where", cond)?;
-        let t = storage("where", on_true)?;
-        let f = storage("where", on_false)?;
+        let c = storage("where", self.ordinal, cond)?;
+        let t = storage("where", self.ordinal, on_true)?;
+        let f = storage("where", self.ordinal, on_false)?;
         let cl = device_layout(&context, cond.layout())?;
         let tl = device_layout(&context, on_true.layout())?;
         let fl = device_layout(&context, on_false.layout())?;
@@ -1359,8 +1412,8 @@ impl BackendOps for CudaBackend {
         }
         let context = self.context()?;
         check_context("masked_fill", &context, &[x, mask])?;
-        let input = storage("masked_fill", x)?;
-        let mask_storage = storage("masked_fill", mask)?;
+        let input = storage("masked_fill", self.ordinal, x)?;
+        let mask_storage = storage("masked_fill", self.ordinal, mask)?;
         let xl = device_layout(&context, x.layout())?;
         let ml = device_layout(&context, mask.layout())?;
         let len = x.layout().num_elements();
@@ -1393,12 +1446,14 @@ impl BackendOps for CudaBackend {
     fn reduce(&self, op: ReduceOp, x: View<'_>, axis: usize) -> Result<Storage> {
         supported("reduce", x.dtype(), x.device())?;
         check_axis("reduce", x, axis)?;
-        if x.dtype() == DType::Bool {
+        // `Prod` has no PTX reduction kernel yet — a loud decline, matching
+        // Metal and WGPU.
+        if x.dtype() == DType::Bool || matches!(op, ReduceOp::Prod) {
             return Err(unsupported("reduce", x));
         }
         let context = self.context()?;
         check_context("reduce", &context, &[x])?;
-        let input = storage("reduce", x)?;
+        let input = storage("reduce", self.ordinal, x)?;
         let layout = device_layout(&context, x.layout())?;
         let len = reduced_len(x.layout(), axis);
         let mut output = allocate_raw(&context, x.dtype(), len)?;
@@ -1409,6 +1464,7 @@ impl BackendOps for CudaBackend {
             ReduceOp::Mean => 1,
             ReduceOp::Max => 2,
             ReduceOp::Min => 3,
+            ReduceOp::Prod => unreachable!("Prod is declined before dispatch"),
         };
         let parallel =
             matches!(x.dtype(), DType::F16 | DType::F32) && x.layout().dims()[axis] >= 64;
@@ -1442,7 +1498,7 @@ impl BackendOps for CudaBackend {
         }
         let context = self.context()?;
         check_context("arg_reduce", &context, &[x])?;
-        let input = storage("arg_reduce", x)?;
+        let input = storage("arg_reduce", self.ordinal, x)?;
         let layout = device_layout(&context, x.layout())?;
         let len = reduced_len(x.layout(), axis);
         let mut output = allocate_raw(&context, DType::I64, len)?;
@@ -1464,8 +1520,8 @@ impl BackendOps for CudaBackend {
         let plan = matmul_plan(lhs.layout(), rhs.layout())?;
         let context = self.context()?;
         check_context("matmul", &context, &[lhs, rhs])?;
-        let a = storage("matmul", lhs)?;
-        let b = storage("matmul", rhs)?;
+        let a = storage("matmul", self.ordinal, lhs)?;
+        let b = storage("matmul", self.ordinal, rhs)?;
         let bd = upload_u64(&context, plan.batch.iter().copied())?;
         let lbs = upload_u64(&context, plan.lhs_batch.iter().copied())?;
         let rbs = upload_u64(&context, plan.rhs_batch.iter().copied())?;
@@ -1516,8 +1572,8 @@ impl BackendOps for CudaBackend {
             axis,
             x.layout().dims()[axis],
         )?;
-        let xv = storage("index_select", x)?;
-        let iv = storage("index_select", indices)?;
+        let xv = storage("index_select", self.ordinal, x)?;
+        let iv = storage("index_select", self.ordinal, indices)?;
         let mut dims = x.layout().dims().to_vec();
         dims[axis] = indices.layout().num_elements();
         let len = checked_product("index_select", dims.iter().copied())?;
@@ -1593,9 +1649,9 @@ impl BackendOps for CudaBackend {
             axis,
             x.layout().dims()[axis],
         )?;
-        let xv = storage("index_add", x)?;
-        let iv = storage("index_add", indices)?;
-        let sv = storage("index_add", src)?;
+        let xv = storage("index_add", self.ordinal, x)?;
+        let iv = storage("index_add", self.ordinal, indices)?;
+        let sv = storage("index_add", self.ordinal, src)?;
         let len = x.layout().num_elements();
         let mut output = allocate_raw(&context, dtype, len)?;
         let fast =
@@ -1659,8 +1715,8 @@ impl BackendOps for CudaBackend {
         let context = self.context()?;
         check_context("gather", &context, &[x, indices])?;
         validate_indices(&context, "gather", indices, axis, x.layout().dims()[axis])?;
-        let xv = storage("gather", x)?;
-        let iv = storage("gather", indices)?;
+        let xv = storage("gather", self.ordinal, x)?;
+        let iv = storage("gather", self.ordinal, indices)?;
         let len = indices.layout().num_elements();
         let mut output = allocate_raw(&context, x.dtype(), len)?;
         let fast = x.dtype() != DType::Bool
@@ -1712,9 +1768,9 @@ impl BackendOps for CudaBackend {
             axis,
             x.layout().dims()[axis],
         )?;
-        let xv = storage("scatter_add", x)?;
-        let iv = storage("scatter_add", indices)?;
-        let sv = storage("scatter_add", src)?;
+        let xv = storage("scatter_add", self.ordinal, x)?;
+        let iv = storage("scatter_add", self.ordinal, indices)?;
+        let sv = storage("scatter_add", self.ordinal, src)?;
         let len = x.layout().num_elements();
         let mut output = allocate_raw(&context, dtype, len)?;
         let fast = axis + 1 == x.layout().rank()
@@ -1772,6 +1828,13 @@ impl BackendOps for CudaBackend {
         Ok(Storage::Cuda(finish(&context, dtype, len, output)))
     }
 
+    /// No device sort kernel yet: loud
+    /// [`Error::Unsupported`](crate::Error::Unsupported), never a host
+    /// round-trip behind the caller's back.
+    fn arg_sort(&self, x: View<'_>, _axis: usize, _descending: bool) -> Result<Storage> {
+        Err(unsupported("arg_sort", x))
+    }
+
     fn conv(&self, op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Result<Storage> {
         let Some(input) = inputs.first() else {
             return Err(Error::InvalidArg {
@@ -1786,8 +1849,10 @@ impl BackendOps for CudaBackend {
         let (geometry, kernel, len, first, second, code) = conv_plan(op, inputs, params)?;
         let context = self.context()?;
         check_context("conv", &context, inputs)?;
-        let a = storage("conv", first)?;
-        let b = second.map(|view| storage("conv", view)).transpose()?;
+        let a = storage("conv", self.ordinal, first)?;
+        let b = second
+            .map(|view| storage("conv", self.ordinal, view))
+            .transpose()?;
         let as_ = upload_u64(&context, first.layout().strides().iter().map(|&v| v as u64))?;
         let ao = first.layout().offset() as u64;
         let packed = conv_params(&geometry, params);
@@ -1863,7 +1928,7 @@ impl BackendOps for CudaBackend {
                 let rows = input.layout().num_elements() / width;
                 let context = self.context()?;
                 check_context("fused_softmax", &context, inputs)?;
-                let x = storage("fused_softmax", *input)?;
+                let x = storage("fused_softmax", self.ordinal, *input)?;
                 let layout = device_layout(&context, input.layout())?;
                 let mut output =
                     allocate_raw(&context, input.dtype(), input.layout().num_elements())?;

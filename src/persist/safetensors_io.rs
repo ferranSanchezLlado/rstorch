@@ -19,10 +19,12 @@ use std::path::Path;
 
 /// Turn a [`safetensors`] error into a persistence error without leaking the
 /// dependency's type into our public surface.
+///
+/// `context` names the step that failed and is the whole message: the original
+/// error is the [`source`](std::error::Error::source), not a substring, so a
+/// reporter that walks the chain does not print the same sentence twice.
 pub(crate) fn st_err(context: &str, e: safetensors::SafeTensorError) -> Error {
-    Error::Persistence {
-        msg: format!("{context}: {e}"),
-    }
+    Error::persistence_with(format!("safetensors {context} failed"), e)
 }
 
 /// Serialize a name → [`HostTensor`] map plus an optional string-keyed
@@ -84,9 +86,9 @@ fn add_canonical_metadata(bytes: Vec<u8>, metadata: HashMap<String, String>) -> 
         header.pop();
     }
     if header.pop() != Some(b'}') {
-        return Err(Error::Persistence {
-            msg: "serialized safetensors header is not a JSON object".to_string(),
-        });
+        return Err(Error::persistence(
+            "serialized safetensors header is not a JSON object",
+        ));
     }
     if header.len() > 1 {
         header.push(b',');
@@ -149,19 +151,31 @@ pub(crate) fn save_tensors(
     write_atomic(path, &bytes)
 }
 
+/// The reserved header key `add_canonical_metadata` injects. A tensor of this
+/// name would be serialized as an ordinary header entry beside it, giving the
+/// object two identical keys — which `reject_duplicate_json_keys` then refuses
+/// on read, so the writer would have produced a file it cannot load.
+const RESERVED_HEADER_KEY: &str = "__metadata__";
+
 /// Writer-side limit check: mirrors every reader bound so the writer can never
 /// produce a file the default reader would reject.
 pub(crate) fn check_writer(tensors: &BTreeMap<String, HostTensor>, limits: &Limits) -> Result<()> {
     Limits::check("record count", tensors.len() as u64, limits.max_records)?;
     let mut total: u64 = 0;
     for (name, t) in tensors {
+        if name == RESERVED_HEADER_KEY {
+            return Err(Error::persistence(format!(
+                "`{RESERVED_HEADER_KEY}` is reserved for the safetensors header \
+                 and cannot be used as a tensor name"
+            )));
+        }
         Limits::check("name length", name.len() as u64, limits.max_string_bytes)?;
         Limits::check("rank", t.dims().len() as u64, limits.max_rank)?;
         let n = t.bytes().len() as u64;
         Limits::check("tensor bytes", n, limits.max_tensor_bytes)?;
-        total = total.checked_add(n).ok_or_else(|| Error::Persistence {
-            msg: "total byte length overflow".to_string(),
-        })?;
+        total = total
+            .checked_add(n)
+            .ok_or_else(|| Error::persistence("total byte length overflow"))?;
     }
     Limits::check("total bytes", total, limits.max_total_bytes)?;
     Ok(())
@@ -190,9 +204,10 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
     let file = std::fs::File::open(path)?;
     let file_meta = file.metadata()?;
     if !file_meta.is_file() {
-        return Err(Error::Persistence {
-            msg: format!("{} is not a regular file", path.display()),
-        });
+        return Err(Error::persistence(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
     }
     let file_cap = limits
         .max_metadata_bytes
@@ -210,25 +225,23 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
     // 2. Header (metadata) size cap: the first 8 bytes are the little-endian
     //    header length. Check it before trusting the rest of the header.
     if buffer.len() < 8 {
-        return Err(Error::Persistence {
-            msg: format!("file too short: {} bytes", buffer.len()),
-        });
+        return Err(Error::persistence(format!(
+            "file too short: {} bytes",
+            buffer.len()
+        )));
     }
     let header_len = u64::from_le_bytes(buffer[..8].try_into().expect("8-byte slice"));
     Limits::check("metadata bytes", header_len, limits.max_metadata_bytes)?;
 
-    let header_end = 8usize
-        .checked_add(header_len.try_into().map_err(|_| Error::Persistence {
-            msg: "metadata byte length does not fit this platform".to_string(),
-        })?)
-        .ok_or_else(|| Error::Persistence {
-            msg: "metadata byte length overflow".to_string(),
-        })?;
+    let header_end =
+        8usize
+            .checked_add(header_len.try_into().map_err(|_| {
+                Error::persistence("metadata byte length does not fit this platform")
+            })?)
+            .ok_or_else(|| Error::persistence("metadata byte length overflow"))?;
     let raw_header = buffer
         .get(8..header_end)
-        .ok_or_else(|| Error::Persistence {
-            msg: "declared metadata extends past end of file".to_string(),
-        })?;
+        .ok_or_else(|| Error::persistence("declared metadata extends past end of file"))?;
     reject_duplicate_json_keys(raw_header)?;
 
     // 3. Parse the header only (no tensor allocation) and validate structure.
@@ -246,9 +259,9 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
         let (start, end) = info.data_offsets;
         let n = end.saturating_sub(start) as u64;
         Limits::check("tensor bytes", n, limits.max_tensor_bytes)?;
-        total = total.checked_add(n).ok_or_else(|| Error::Persistence {
-            msg: "total byte length overflow".to_string(),
-        })?;
+        total = total
+            .checked_add(n)
+            .ok_or_else(|| Error::persistence("total byte length overflow"))?;
     }
     Limits::check("total bytes", total, limits.max_total_bytes)?;
     if let Some(values) = metadata.metadata() {
@@ -269,9 +282,7 @@ pub(crate) fn read_and_validate(path: &Path, limits: &Limits) -> Result<(Metadat
 fn reject_duplicate_json_keys(header: &[u8]) -> Result<()> {
     serde_json::from_slice::<Checked>(header)
         .map(|_| ())
-        .map_err(|e| Error::Persistence {
-            msg: format!("invalid safetensors JSON header: {e}"),
-        })
+        .map_err(|e| Error::persistence_with("invalid safetensors JSON header", e))
 }
 
 /// Ordinary safetensors headers use only a few levels. The visitor recurses
@@ -407,12 +418,10 @@ pub(crate) fn load_tensors(
         let expected = byte_len(dtype, &dims)?;
         let data = view.data();
         if data.len() != expected {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "tensor `{name}` byte length {} does not match dtype {dtype} dims {dims:?} ({expected})",
-                    data.len()
-                ),
-            });
+            return Err(Error::persistence(format!(
+                "tensor `{name}` byte length {} does not match dtype {dtype} dims {dims:?} ({expected})",
+                data.len()
+            )));
         }
         out.insert(name, HostTensor::from_bytes(dtype, dims, data.to_vec())?);
     }
@@ -501,7 +510,7 @@ mod tests {
         let err = load_tensors(&path, &Limits::defaults())
             .expect_err("a FIFO must not be accepted as a checkpoint");
         assert!(
-            matches!(&err, Error::Persistence { msg } if msg.contains("not a regular file")),
+            matches!(&err, Error::Persistence { msg, .. } if msg.contains("not a regular file")),
             "expected a regular-file rejection, got {err:?}"
         );
 
@@ -526,7 +535,7 @@ mod tests {
 
         let err = load_tensors(&path, &limits).expect_err("over-cap file must be rejected");
         assert!(
-            matches!(&err, Error::Persistence { msg } if msg.contains("file bytes")),
+            matches!(&err, Error::Persistence { msg, .. } if msg.contains("file bytes")),
             "expected a file-bytes cap error, got {err:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -603,15 +612,40 @@ mod tests {
         for (index, header) in cases.iter().enumerate() {
             let path = dir.join(format!("duplicate-{index}.safetensors"));
             std::fs::write(&path, raw_file(header)).unwrap();
-            let message = load_tensors(&path, &Limits::defaults())
-                .unwrap_err()
-                .to_string();
+            // The reader's own message names the step; the rule that was
+            // violated is the `serde_json` cause, not a substring of it.
+            let error = load_tensors(&path, &Limits::defaults()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "persistence: invalid safetensors JSON header"
+            );
+            let cause =
+                std::error::Error::source(&error).expect("the JSON failure is kept as the cause");
             assert!(
-                message.contains("duplicate safetensors header field"),
-                "{message}"
+                cause
+                    .to_string()
+                    .contains("duplicate safetensors header field"),
+                "{cause}"
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_tensor_named_metadata_is_rejected_on_write() {
+        // Without this guard the writer emits `__metadata__` twice — once as
+        // an ordinary tensor entry, once as the canonical metadata object —
+        // and `raw_duplicate_metadata_and_tensor_names_are_rejected` above is
+        // exactly the reader that would then refuse the file we just wrote.
+        let mut tensors = BTreeMap::new();
+        tensors.insert(
+            "__metadata__".to_string(),
+            HostTensor::from_bytes(DType::F32, vec![1], vec![0; 4]).unwrap(),
+        );
+        let message = serialize_tensors(&tensors, None, &Limits::defaults())
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("is reserved"), "{message}");
     }
 
     #[test]
@@ -634,9 +668,11 @@ mod tests {
                 .stack_size(64 * 1024)
                 .spawn(move || {
                     let error = reject_duplicate_json_keys(header.as_bytes()).unwrap_err();
+                    let cause = std::error::Error::source(&error)
+                        .expect("the JSON failure is kept as the cause");
                     assert!(
-                        error.to_string().contains("nesting exceeds limit"),
-                        "{error}"
+                        cause.to_string().contains("nesting exceeds limit"),
+                        "{cause}"
                     );
                 })
                 .unwrap()
@@ -674,6 +710,31 @@ mod tests {
                 "accepted malformed header {header:?}"
             );
         }
+    }
+
+    /// The two halves of the error-cause contract, on the exact pair of paths
+    /// that distinguish them: a **malformed header** is a `Persistence` error
+    /// that keeps the `serde_json` failure reachable through
+    /// `std::error::Error::source`, while a **missing file** is an `Io` error
+    /// whose cause is the `io::Error` itself.
+    #[test]
+    fn a_malformed_header_keeps_its_cause_and_a_missing_file_is_io() {
+        use std::error::Error as _;
+
+        let err = reject_duplicate_json_keys(br#"{"a":[}"#).expect_err("malformed header");
+        assert!(matches!(err, Error::Persistence { .. }), "{err}");
+        let cause = err
+            .source()
+            .expect("the serde_json failure stays reachable");
+        assert!(cause.downcast_ref::<serde_json::Error>().is_some());
+
+        let missing = load_tensors(
+            std::path::Path::new("/nonexistent/rstorch/model.safetensors"),
+            &Limits::defaults(),
+        )
+        .expect_err("missing file");
+        assert!(matches!(missing, Error::Io(_)), "{missing}");
+        assert!(missing.source().is_some());
     }
 
     #[test]

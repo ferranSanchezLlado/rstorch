@@ -1,0 +1,342 @@
+# Tag-triggered publish, in the one order that resolves: `rstorch` depends on
+# `rstorch-derive` *by version*, so the derive has to be live on crates.io before
+# `cargo publish -p rstorch` can resolve it (RELEASING.md). Everything before the
+# publish job is the "Before tagging" checklist from that file, run again on the
+# exact commit the tag points at — GitHub cannot express `needs:` across
+# workflows, and a `v*` tag push matches neither of ci.yml's triggers, so the
+# gate is reproduced here rather than referenced from ci.yml.
+#
+# Deliberately not reproduced: ci.yml's per-combination lanes (`features`:
+# hub+rayon; `surfaces`: default, typed, all features), which exist to catch
+# feature-composition breakage on a generic runner. `verify` runs the two ends of
+# that range (`--all-features` and `--no-default-features`), so a release is
+# gated on the widest and the narrowest feature set rather than on every
+# intermediate combination.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Release gate (Linux)
+    runs-on: ubuntu-latest
+    env:
+      # No accelerator hardware on this runner, and this is not the WGPU lane:
+      # `verify-wgpu` below is the job that executes WGSL, so a skip here
+      # cannot hide a broken shader. CUDA has no execution lane anywhere in CI.
+      RSTORCH_SKIP_CUDA_TESTS: "1"
+      RSTORCH_SKIP_WGPU_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable and the MSRV toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup toolchain install 1.88 --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      # The tag *is* the version being published. If it disagrees with the
+      # manifest, every step after this one would be verifying the wrong number.
+      - name: Check the tag matches the workspace version
+        run: |
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "rstorch") | .version')
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$manifest" != "$tag" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the Cargo.toml version $manifest"
+            exit 1
+          fi
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (all features)
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test (all features)
+        run: cargo test --locked --workspace --all-features
+      - name: Test without default features
+        run: cargo test --locked --workspace --no-default-features
+      - name: Docs (all features)
+        run: cargo doc --locked --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: MSRV check
+        run: cargo +1.88 check --locked --workspace --all-features
+      - name: Package and verify rstorch-derive
+        run: cargo package --locked -p rstorch-derive
+      - name: List the rstorch package contents
+        run: cargo package --locked -p rstorch --list
+
+  verify-macos:
+    name: Release gate (macOS Metal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      # RELEASING.md: "the macOS lanes are green" is a release condition,
+      # because they are the only ones that build the Metal surface at all.
+      - name: Test the Metal suites
+        run: >
+          cargo test --locked --features metal
+          --test metal_training --test metal_fused_parity --test metal_conv_backward
+      # Separate invocation: a `cargo test` filter applies to every selected
+      # target, and the conformance table only runs from the in-crate test
+      # `backend::metal::tests::required_backend_table_matches_cpu`. A filter
+      # that matches nothing prints `running 0 tests` and exits 0, so the pass
+      # count is asserted: a module rename must fail here, not go green over
+      # an empty selection.
+      - name: Test the Metal backend and the conformance table
+        run: |
+          set -o pipefail
+          cargo test --locked --features metal --lib backend::metal:: -- --nocapture \
+            | tee "$RUNNER_TEMP/metal-lib.log"
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/metal-lib.log"
+      # docs.rs renders `aarch64-apple-darwin` (`[package.metadata.docs.rs]`),
+      # and that render is the one that can fail on the `metal` cfg surface.
+      # The Linux docs step in `verify` never compiles those items.
+      - name: Docs (all features, native aarch64-apple-darwin)
+        run: cargo doc --locked --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # A tag push does not match ci.yml's `branches:` filter, so ci.yml does not
+  # run for a tagged commit at all: without this job the release gate would
+  # execute Metal kernels and no WGSL, while STABILITY.md claims both backends
+  # are validated in CI. This is `wgpu-software-adapter` from ci.yml, reproduced
+  # for the same reason as the rest of the gate.
+  verify-wgpu:
+    name: Release gate (WGPU, lavapipe software adapter)
+    runs-on: ubuntu-latest
+    # Software rasterization is slow: the transformer and CNN training suites
+    # run the same graphs the Metal lane runs, on a CPU-backed Vulkan driver.
+    timeout-minutes: 60
+    env:
+      # Deliberately *not* set here: RSTORCH_SKIP_WGPU_TESTS. This is the lane
+      # that executes WGSL, so a failed adapter initialization must fail the
+      # release rather than turn into a skip.
+      #
+      # `Device::Wgpu(0)` — what every WGPU test names — is an index into the
+      # crate's adapter list, which is sorted by backend name, so a software GL
+      # adapter would take ordinal 0 ahead of Vulkan. glvnd reads its EGL vendor
+      # list from this variable, and pointing it at an empty file leaves the GL
+      # backend with no vendor to load, so ordinal 0 is the lavapipe Vulkan
+      # adapter installed below.
+      __EGL_VENDOR_LIBRARY_FILENAMES: /dev/null
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the lavapipe software Vulkan driver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools
+      # Pin the loader to lavapipe rather than trusting enumeration order, and
+      # fail here — with a readable message — if the package ever stops
+      # shipping the ICD this lane is built on.
+      - name: Point the Vulkan loader at lavapipe
+        run: |
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+      # Adapter evidence. Without a visible device the suites below panic in
+      # `tests/common/wgpu.rs`; this step is what distinguishes "no driver" from
+      # "kernel is wrong".
+      - name: Show the Vulkan adapter
+        run: vulkaninfo --summary
+      # `backend::conformance` is a `#[cfg(test)] pub(crate) mod`, not a test
+      # target: there is no `--test conformance` to name. Its op × dtype table
+      # runs from the in-crate test `backend::wgpu::tests::conformance_if_adapter_exists`,
+      # so this filtered `--lib` run is what executes those lines against WGSL.
+      # The pass count is asserted because a filter that matches nothing prints
+      # `running 0 tests` and exits 0.
+      - name: Test the WGPU backend and the conformance table
+        run: |
+          set -o pipefail
+          cargo test --locked --features wgpu --lib backend::wgpu:: -- --nocapture \
+            | tee "$RUNNER_TEMP/wgpu-lib.log"
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/wgpu-lib.log"
+      - name: Test the WGPU integration suites
+        run: >
+          cargo test --locked --features wgpu
+          --test wgpu_training --test wgpu_fused_parity
+          --test wgpu_conv_backward --test wgpu_f16
+      # `wgpu_f16` is not skipped: it asks the adapter for `SHADER_F16` and
+      # asserts native F16 results when the feature is present and a loud
+      # `Error::Unsupported` when it is not, so it is meaningful either way on
+      # lavapipe. No WGPU suite is skipped on this lane.
+
+  # ci.yml's `ui` and `ui-stable`, merged into one job. Every trybuild suite in
+  # the tree early-returns unless RSTORCH_UI is set (tests/typed_ui.rs,
+  # tests/linearity_ui.rs, rstorch-derive/tests/ui.rs and
+  # rstorch-derive/tests/typed_ui.rs), so no other job here asserts a single
+  # compile-fail diagnostic — while CHANGELOG.md's Infrastructure section claims
+  # CI enforces those suites on a pinned toolchain.
+  verify-ui:
+    name: Release gate (compile-fail diagnostics)
+    runs-on: ubuntu-latest
+    env:
+      RSTORCH_UI: "1"
+      # All features are compiled to exercise diagnostics, but this generic
+      # Ubuntu runner has no CUDA and no required WGPU hardware contract.
+      RSTORCH_SKIP_CUDA_TESTS: "1"
+      RSTORCH_SKIP_WGPU_TESTS: "1"
+      # The recorded diagnostics are pinned to this compiler, and the nested
+      # cargo commands in typed_ui must use the same one.
+      RUSTUP_TOOLCHAIN: "1.88"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.88 and stable
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      # `--locked` on every step here: trybuild compares rustc diagnostics
+      # against recorded text pinned to this compiler, so a dependency's patch
+      # release must not be able to change the expectations without a lockfile
+      # change in the tree.
+      - name: Test all UI suites (all features)
+        run: cargo test --locked --workspace --all-features
+      - name: Test typed check and build diagnostics
+        run: cargo test --locked --test typed_ui --features typed
+      - name: Test Grads linearity diagnostics
+        run: cargo test --locked --test linearity_ui
+      - name: Test derive diagnostics
+        run: cargo test --locked -p rstorch-derive --test ui
+      # ci.yml's `ui-stable`: the typed diagnostics also assert semantic
+      # fragments that must hold on the compiler a consumer actually has, whose
+      # exact wording is not pinned. Overrides the job toolchain for this step
+      # only.
+      - name: Test typed diagnostic semantics (stable)
+        run: cargo test --locked --test typed_ui --features typed
+        env:
+          RUSTUP_TOOLCHAIN: stable
+
+  # ci.yml runs the suite *on* the MSRV; `verify`'s `MSRV check` step only type
+  # checks it, so an MSRV-only runtime failure would pass this gate. Feature
+  # selection mirrors ci.yml's `test` matrix: `testing` owns the
+  # finite-difference suites, and the defaults-off run is the CPU-only library a
+  # non-macOS consumer gets.
+  verify-msrv:
+    name: Release gate (MSRV 1.88 execution)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          rustup default 1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Test with the finite-difference harness
+        run: cargo +1.88 test --locked --workspace --features testing
+      - name: Test without default features
+        run: cargo +1.88 test --locked --workspace --no-default-features
+
+  # The only lane in either workflow that builds the library for windows-msvc,
+  # and the one backing the Windows/CUDA claim in README.md and STABILITY.md.
+  verify-windows:
+    name: Release gate (Windows build and CPU-only tests)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      # `metal` is a default feature and macOS-only, so the Windows library is
+      # only reachable with the defaults off.
+      - name: Test without default features
+        run: cargo test --locked --workspace --no-default-features
+      # A build claim and nothing more: GitHub-hosted Windows runners have no
+      # NVIDIA hardware, so no CUDA kernel executes here. `cudarc` is configured
+      # with `dynamic-loading`, so the CUDA surface links without the toolkit and
+      # without a driver — which is exactly the claim those two files make.
+      - name: Check the CUDA feature
+        run: cargo check --locked --workspace --features cuda
+
+  # ci.yml's `ct20-macos-boundary`. Both selections need the `metal` cfg surface,
+  # which no ubuntu job has, and the macOS jobs above run only the Metal suites,
+  # so this is the only place either one executes.
+  verify-ct20-boundary:
+    name: Release gate (CT20 wrong-device boundary, macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      # The filter names a single test, and a filter that matches nothing prints
+      # `running 0 tests` and exits 0: assert the pass count so a rename cannot
+      # quietly drop the only lane that covers this rejection.
+      - name: Test hardware-independent wrong-device rejection
+        run: |
+          set -o pipefail
+          cargo +1.88 test --locked --features typed,metal --lib wrong_runtime_device_is_rejected_without_metal_storage \
+            | tee "$RUNNER_TEMP/wrong-device.log"
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/wrong-device.log"
+      - name: Test typed boundary placement rejections
+        run: cargo +1.88 test --locked --features typed,metal --test typed_boundary
+
+  # `deny.toml` is the dependency gate for this lane, but the job that runs it
+  # lives in ci.yml, which a `v*` tag push does not trigger. Without this job an
+  # advisory, a license change or a new wildcard requirement could not block a
+  # publish.
+  deny:
+    name: Dependency gate (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Config and the reasoning behind every allowed license live in
+      # `deny.toml`; run the identical check locally with
+      # `cargo deny check advisories licenses bans sources`.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  publish:
+    name: Publish to crates.io
+    needs:
+      - verify
+      - verify-msrv
+      - verify-ui
+      - verify-macos
+      - verify-wgpu
+      - verify-windows
+      - verify-ct20-boundary
+      - deny
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Publish rstorch-derive
+        run: cargo publish --locked -p rstorch-derive
+      # `cargo publish` waits for the new version to appear in the registry
+      # index, but that wait is bounded: on timeout it warns and exits 0, and
+      # `rstorch-derive = "<version>"` is then still unresolvable. Retry rather
+      # than burn a version number on a slow index.
+      - name: Publish rstorch
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if cargo publish --locked -p rstorch; then
+              exit 0
+            fi
+            echo "publish attempt $attempt failed; the derive may not be in the index yet"
+            sleep 30
+          done
+          echo "rstorch failed to publish after five attempts"
+          exit 1

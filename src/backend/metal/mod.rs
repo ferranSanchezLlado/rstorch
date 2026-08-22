@@ -300,26 +300,24 @@ impl MetalStorage {
     }
 }
 
-fn metal_storage<'a>(op: &'static str, view: View<'a>) -> Result<&'a MetalStorage> {
+/// `ordinal` is the Metal device the caller is running on, and is what a
+/// non-Metal view is reported against: `view.device()` describes the storage
+/// that is *present*, so using it on both sides of the mismatch would print
+/// "expected cpu, got cpu" and never name the backend actually asked for.
+fn metal_storage<'a>(op: &'static str, ordinal: usize, view: View<'a>) -> Result<&'a MetalStorage> {
     match view.storage() {
         Storage::Metal(storage) => Ok(storage),
-        Storage::Cpu(_) => Err(Error::DeviceMismatch {
+        _ => Err(Error::device_mismatch(
             op,
-            expected: view.device(),
-            got: Device::Cpu,
-        }),
-        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
-        Storage::Wgpu(storage) => Err(Error::DeviceMismatch {
-            op,
-            expected: view.device(),
-            got: storage.device(),
-        }),
+            Device::Metal(ordinal),
+            view.device(),
+        )),
     }
 }
 
 fn check_context(op: &'static str, context: &Arc<Context>, views: &[View<'_>]) -> Result<()> {
     for view in views {
-        let storage = metal_storage(op, *view)?;
+        let storage = metal_storage(op, context.ordinal, *view)?;
         if !Arc::ptr_eq(context, &storage.context) {
             return Err(Error::DeviceMismatch {
                 op,
@@ -660,12 +658,19 @@ fn threads_per_group(pipeline: &MetalPipelineRef) -> usize {
 
 /// Drain the queue, then report any bounds check that failed while it ran.
 ///
-/// This is the host boundary. Deferred [`Validation`] verdicts are collected
-/// here — after the wait, so the status buffer is complete — which is what
-/// lets the indexed ops encode without a round trip of their own. A drain
-/// failure is reported ahead of a bounds failure: a command buffer that errored
-/// may be why a verdict never landed.
-fn synchronize(context: &Arc<Context>) -> Result<()> {
+/// This is the host boundary, and — reached through
+/// [`BackendOps::synchronize`] — the explicit flush behind
+/// [`Device::synchronize`](crate::Device::synchronize) and
+/// [`Tensor::realize`](crate::Tensor::realize). Deferred [`Validation`]
+/// verdicts are collected here — after the wait, so the status buffer is
+/// complete — which is what lets the indexed ops encode without a round trip of
+/// their own. A drain failure is reported ahead of a bounds failure: a command
+/// buffer that errored may be why a verdict never landed.
+///
+/// `op` names the caller for a drain failure only; a collected bounds failure
+/// keeps the name of the indexing op that encoded it, which is the one worth
+/// reporting.
+fn synchronize(context: &Arc<Context>, op: &'static str) -> Result<()> {
     autoreleasepool(|_| {
         // Validation reservations are held through encoding and publication of
         // their descriptor. Take this lock before submission so a concurrent
@@ -692,7 +697,7 @@ fn synchronize(context: &Arc<Context>) -> Result<()> {
                         pending.command.waitUntilCompleted();
                         if pending.command.status() == MTLCommandBufferStatus::Error {
                             Err(Error::Backend {
-                                op: "transfer_out",
+                                op,
                                 msg: "Metal command buffer completed with an error".to_owned(),
                             })
                         } else {
@@ -806,6 +811,8 @@ fn op_code_binary(op: BinaryOp) -> u32 {
         BinaryOp::Div => 3,
         BinaryOp::Maximum => 4,
         BinaryOp::Minimum => 5,
+        // No Metal shader; every caller declines `Pow` before reaching here.
+        BinaryOp::Pow => unreachable!("guarded by the caller"),
     }
 }
 
@@ -820,6 +827,15 @@ fn op_code_unary(op: UnaryOp) -> u32 {
         UnaryOp::Sigmoid => 6,
         UnaryOp::Neg => 7,
         UnaryOp::Abs => 8,
+        // No Metal shader; `unary` declines these before reaching here.
+        UnaryOp::Sign
+        | UnaryOp::Recip
+        | UnaryOp::Floor
+        | UnaryOp::Ceil
+        | UnaryOp::Round
+        | UnaryOp::Erf => {
+            unreachable!("guarded by the caller")
+        }
     }
 }
 
@@ -908,26 +924,18 @@ fn validate_fused_optimizer_views(
     Ok(())
 }
 
-fn validate_indices(op: &'static str, indices: View<'_>, axis: usize, bound: usize) -> Result<()> {
-    let context = context(match indices.device() {
-        Device::Metal(ordinal) => ordinal,
-        Device::Cpu => {
-            return Err(Error::DeviceMismatch {
-                op,
-                expected: indices.device(),
-                got: Device::Cpu,
-            });
-        }
-        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
-        Device::Wgpu(ordinal) => {
-            return Err(Error::DeviceMismatch {
-                op,
-                expected: Device::Metal(0),
-                got: Device::Wgpu(ordinal),
-            });
-        }
-    })?;
-    let input = metal_storage(op, indices)?;
+/// `ordinal` names the Metal device the caller is dispatching on. Every caller
+/// has already run `check_context` against that same device, so `indices` is
+/// known to live there and the lookup cannot disagree with the dispatch.
+fn validate_indices(
+    op: &'static str,
+    ordinal: usize,
+    indices: View<'_>,
+    axis: usize,
+    bound: usize,
+) -> Result<()> {
+    let context = context(ordinal)?;
+    let input = metal_storage(op, ordinal, indices)?;
 
     let pipe = pipeline(&context, PipelineKey::Named("validate_indices"))?;
     loop {
@@ -945,7 +953,7 @@ fn validate_indices(op: &'static str, indices: View<'_>, axis: usize, bound: usi
             // A full slot table means the verdicts must be collected before
             // this check can claim a slot. Draining here costs what every
             // check used to cost, and only after 256 un-read checks.
-            synchronize(&context)?;
+            synchronize(&context, op)?;
             continue;
         }
 
@@ -1039,8 +1047,8 @@ fn encode_binary(
     let dtype = same_dtype(name, &[lhs, rhs])?;
     let context = context(backend.ordinal)?;
     check_context(name, &context, &[lhs, rhs])?;
-    let a = metal_storage(name, lhs)?;
-    let b = metal_storage(name, rhs)?;
+    let a = metal_storage(name, backend.ordinal, lhs)?;
+    let b = metal_storage(name, backend.ordinal, rhs)?;
     let output = output_for(&context, output_dtype, lhs.layout().num_elements())?;
     let pipe = pipeline_typed(&context, name, dtype)?;
     encode(
@@ -1215,10 +1223,10 @@ impl MetalBackend {
             let rows = grad.layout().num_elements() / width;
             let context = context(self.ordinal)?;
             check_context("fused_layer_norm_backward_input", &context, inputs)?;
-            let g = metal_storage("fused_layer_norm_backward_input", *grad)?;
-            let h = metal_storage("fused_layer_norm_backward_input", *xhat)?;
-            let i = metal_storage("fused_layer_norm_backward_input", *inv_std)?;
-            let w = metal_storage("fused_layer_norm_backward_input", *weight)?;
+            let g = metal_storage("fused_layer_norm_backward_input", self.ordinal, *grad)?;
+            let h = metal_storage("fused_layer_norm_backward_input", self.ordinal, *xhat)?;
+            let i = metal_storage("fused_layer_norm_backward_input", self.ordinal, *inv_std)?;
+            let w = metal_storage("fused_layer_norm_backward_input", self.ordinal, *weight)?;
             let output = output_for(&context, grad.dtype(), grad.layout().num_elements())?;
             let parallel = width >= 64;
             let pipe = pipeline_typed(
@@ -1305,9 +1313,9 @@ impl MetalBackend {
         let save = scalars.get(1).is_some_and(|&value| value == 1.0);
         let context = context(self.ordinal)?;
         check_context("fused_layer_norm", &context, inputs)?;
-        let xv = metal_storage("fused_layer_norm", *x)?;
-        let wv = metal_storage("fused_layer_norm", *weight)?;
-        let bv = metal_storage("fused_layer_norm", *bias)?;
+        let xv = metal_storage("fused_layer_norm", self.ordinal, *x)?;
+        let wv = metal_storage("fused_layer_norm", self.ordinal, *weight)?;
+        let bv = metal_storage("fused_layer_norm", self.ordinal, *bias)?;
         let output = output_for(&context, dtype, x.layout().num_elements())?;
         let xhat = output_for(
             &context,
@@ -1420,6 +1428,23 @@ impl MetalBackend {
             });
         }
         validate_fused_optimizer_views("fused_sgd_step", inputs, 2)?;
+        // The same range check CPU and CUDA apply. Without it a NaN `lr` or an
+        // out-of-range `momentum` is an error on those two and silent garbage
+        // here, and `conformance` cannot see the difference: it compares
+        // successful values and declared declines, never rejections.
+        crate::backend::cpu::fused::validate_sgd_scalars(
+            "fused_sgd_step",
+            *lr,
+            *momentum,
+            *decay,
+            dtype,
+        )?;
+        if inputs.len() == 3 && *momentum as f32 == 0.0 {
+            return Err(Error::InvalidArg {
+                op: "fused_sgd_step",
+                msg: "a velocity input requires non-zero momentum".to_owned(),
+            });
+        }
         let context = context(self.ordinal)?;
         check_context("fused_sgd_step", &context, inputs)?;
         let dense = inputs
@@ -1440,7 +1465,7 @@ impl MetalBackend {
                 Some(Storage::Cpu(_)) => unreachable!(),
                 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
                 Some(Storage::Wgpu(_)) => unreachable!(),
-                None => metal_storage("fused_sgd_step", input),
+                None => metal_storage("fused_sgd_step", self.ordinal, input),
             })
             .collect::<Result<Vec<_>>>()?;
         let p = values[0];
@@ -1492,6 +1517,8 @@ impl MetalBackend {
             return Err(unsupported("fused_adam_step", inputs[0]));
         }
         validate_fused_optimizer_views("fused_adam_step", inputs, 2)?;
+        // As in `fused_sgd`: the scalar range check CPU and CUDA both apply.
+        crate::backend::cpu::fused::validate_adam_scalars("fused_adam_step", scalars, dtype)?;
         let context = context(self.ordinal)?;
         check_context("fused_adam_step", &context, inputs)?;
         let dense = inputs
@@ -1512,7 +1539,7 @@ impl MetalBackend {
                 Some(Storage::Cpu(_)) => unreachable!(),
                 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
                 Some(Storage::Wgpu(_)) => unreachable!(),
-                None => metal_storage("fused_adam_step", input),
+                None => metal_storage("fused_adam_step", self.ordinal, input),
             })
             .collect::<Result<Vec<_>>>()?;
         let [p, g, m, v] = values.as_slice() else {
@@ -1602,7 +1629,7 @@ impl BackendOps for MetalBackend {
     fn transfer_out(&self, x: View<'_>) -> Result<CpuStorage> {
         #[cfg(test)]
         INSTRUMENTATION.transfer_out.fetch_add(1, Ordering::Relaxed);
-        metal_storage("transfer_out", x)?;
+        metal_storage("transfer_out", self.ordinal, x)?;
         let context = context(self.ordinal)?;
         check_context("transfer_out", &context, &[x])?;
         let dense = if x.layout().is_contiguous() {
@@ -1610,13 +1637,13 @@ impl BackendOps for MetalBackend {
         } else {
             Some(self.copy_strided(x)?)
         };
-        synchronize(&context)?;
+        synchronize(&context, "transfer_out")?;
         let storage = match &dense {
             Some(Storage::Metal(storage)) => storage,
             Some(Storage::Cpu(_)) => unreachable!(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
             Some(Storage::Wgpu(_)) => unreachable!(),
-            None => metal_storage("transfer_out", x)?,
+            None => metal_storage("transfer_out", self.ordinal, x)?,
         };
         let len = x.layout().num_elements();
         // SAFETY: `storage` is either the contiguous input or the dense copy
@@ -1661,8 +1688,17 @@ impl BackendOps for MetalBackend {
         }
     }
 
+    /// Commit the open command buffer and wait for every submitted one, which
+    /// is the only way to observe work this backend has batched up to
+    /// [`COMMIT_THRESHOLD`] dispatches deep. Deferred bounds verdicts are
+    /// collected here too, so an out-of-range index surfaces from the flush
+    /// rather than waiting for the next host read.
+    fn synchronize(&self) -> Result<()> {
+        synchronize(&context(self.ordinal)?, "synchronize")
+    }
+
     fn copy_strided(&self, x: View<'_>) -> Result<Storage> {
-        let input = metal_storage("copy_strided", x)?;
+        let input = metal_storage("copy_strided", self.ordinal, x)?;
         supported_dtype("copy_strided", x.dtype(), x.device())?;
         let context = context(self.ordinal)?;
         check_context("copy_strided", &context, &[x])?;
@@ -1686,13 +1722,15 @@ impl BackendOps for MetalBackend {
 
     fn copy_into(&self, src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -> Result<()> {
         if src.layout().shape() != dst_layout.shape() {
-            return Err(Error::ShapeMismatch {
-                op: "copy_into",
-                lhs: src.layout().shape().clone(),
-                rhs: dst_layout.shape().clone(),
-            });
+            // Destination-shaped op, so the destination is the requirement on
+            // both this check and the dtype check below.
+            return Err(Error::shape_mismatch(
+                "copy_into",
+                dst_layout.shape(),
+                src.layout().shape(),
+            ));
         }
-        let input = metal_storage("copy_into", src)?;
+        let input = metal_storage("copy_into", self.ordinal, src)?;
         let Storage::Metal(output) = dst else {
             return Err(Error::DeviceMismatch {
                 op: "copy_into",
@@ -1701,11 +1739,13 @@ impl BackendOps for MetalBackend {
             });
         };
         if input.dtype != output.dtype {
-            return Err(Error::DTypeMismatch {
-                op: "copy_into",
-                expected: input.dtype,
-                got: output.dtype,
-            });
+            // The destination's dtype is likewise the requirement, matching
+            // the CPU, CUDA and WGPU backends.
+            return Err(Error::dtype_mismatch(
+                "copy_into",
+                output.dtype,
+                input.dtype,
+            ));
         }
         if !Arc::ptr_eq(&input.context, &output.context) {
             return Err(Error::DeviceMismatch {
@@ -1785,7 +1825,7 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("to_dtype", &context, &[x])?;
-        let input = metal_storage("to_dtype", x)?;
+        let input = metal_storage("to_dtype", self.ordinal, x)?;
         let output = output_for(&context, to, x.layout().num_elements())?;
         let pipe = pipeline(&context, PipelineKey::Cast(x.dtype(), to))?;
         encode(
@@ -1811,19 +1851,21 @@ impl BackendOps for MetalBackend {
         // which does not exist, and reports a shader-lookup `Backend` error.
         // Every sibling entry point (`binary_scalar`, `unary`, `matmul`,
         // `conv`, `index_add`, `scatter_add`) already guards the same way.
-        if lhs.dtype() == DType::Bool {
+        // `Pow` has no Metal shader yet — a loud decline, not a silent CPU
+        // fallback.
+        if lhs.dtype() == DType::Bool || matches!(op, BinaryOp::Pow) {
             return Err(unsupported("binary", lhs));
         }
         encode_binary(self, "binary", lhs, rhs, lhs.dtype(), op_code_binary(op))
     }
     fn binary_scalar(&self, op: BinaryOp, x: View<'_>, scalar: f64) -> Result<Storage> {
         supported_dtype("binary_scalar", x.dtype(), x.device())?;
-        if x.dtype() == DType::Bool {
+        if x.dtype() == DType::Bool || matches!(op, BinaryOp::Pow) {
             return Err(unsupported("binary_scalar", x));
         }
         let context = context(self.ordinal)?;
         check_context("binary_scalar", &context, &[x])?;
-        let input = metal_storage("binary_scalar", x)?;
+        let input = metal_storage("binary_scalar", self.ordinal, x)?;
         let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
         let pipe = pipeline_typed(&context, "scalar", x.dtype())?;
         encode(
@@ -1851,12 +1893,18 @@ impl BackendOps for MetalBackend {
         supported_dtype("unary", x.dtype(), x.device())?;
         if x.dtype() == DType::Bool
             || (x.dtype() == DType::I64 && !matches!(op, UnaryOp::Neg | UnaryOp::Abs))
+            // No Metal shader yet for these — a loud decline, not a silent
+            // CPU fallback.
+            || matches!(
+                op,
+                UnaryOp::Sign | UnaryOp::Recip | UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Round | UnaryOp::Erf
+            )
         {
             return Err(unsupported("unary", x));
         }
         let context = context(self.ordinal)?;
         check_context("unary", &context, &[x])?;
-        let input = metal_storage("unary", x)?;
+        let input = metal_storage("unary", self.ordinal, x)?;
         let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
         let pipe = pipeline_typed(&context, "unary", x.dtype())?;
         encode(
@@ -1889,9 +1937,9 @@ impl BackendOps for MetalBackend {
         let dtype = same_dtype("where", &[on_true, on_false])?;
         let context = context(self.ordinal)?;
         check_context("where", &context, &[cond, on_true, on_false])?;
-        let c = metal_storage("where", cond)?;
-        let t = metal_storage("where", on_true)?;
-        let f = metal_storage("where", on_false)?;
+        let c = metal_storage("where", self.ordinal, cond)?;
+        let t = metal_storage("where", self.ordinal, on_true)?;
+        let f = metal_storage("where", self.ordinal, on_false)?;
         let output = output_for(&context, dtype, cond.layout().num_elements())?;
         let pipe = pipeline_typed(&context, "where", dtype)?;
         encode(
@@ -1932,8 +1980,8 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("masked_fill", &context, &[x, mask])?;
-        let input = metal_storage("masked_fill", x)?;
-        let mask_storage = metal_storage("masked_fill", mask)?;
+        let input = metal_storage("masked_fill", self.ordinal, x)?;
+        let mask_storage = metal_storage("masked_fill", self.ordinal, mask)?;
         let output = output_for(&context, x.dtype(), x.layout().num_elements())?;
         let pipe = pipeline_typed(&context, "masked", x.dtype())?;
         encode(
@@ -1968,12 +2016,14 @@ impl BackendOps for MetalBackend {
     }
     fn reduce(&self, op: ReduceOp, x: View<'_>, axis: usize) -> Result<Storage> {
         supported_dtype("reduce", x.dtype(), x.device())?;
-        if matches!(x.dtype(), DType::Bool) {
+        // No Metal shader yet for `Prod` — a loud decline, not a silent CPU
+        // fallback.
+        if matches!(x.dtype(), DType::Bool) || matches!(op, ReduceOp::Prod) {
             return Err(unsupported("reduce", x));
         }
         let context = context(self.ordinal)?;
         check_context("reduce", &context, &[x])?;
-        let input = metal_storage("reduce", x)?;
+        let input = metal_storage("reduce", self.ordinal, x)?;
         let len = reduced_len(x.layout(), axis);
         let output = output_for(&context, x.dtype(), len)?;
         let parallel =
@@ -1992,6 +2042,7 @@ impl BackendOps for MetalBackend {
             ReduceOp::Mean => 1,
             ReduceOp::Max => 2,
             ReduceOp::Min => 3,
+            ReduceOp::Prod => unreachable!("guarded above"),
         };
         let resources = [&input.buffer, &output.buffer];
         let set_args = |encoder: &MetalEncoderRef| {
@@ -2031,7 +2082,7 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("arg_reduce", &context, &[x])?;
-        let input = metal_storage("arg_reduce", x)?;
+        let input = metal_storage("arg_reduce", self.ordinal, x)?;
         let len = reduced_len(x.layout(), axis);
         let output = output_for(&context, DType::I64, len)?;
         let pipe = pipeline_typed(&context, "arg_reduce", x.dtype())?;
@@ -2059,8 +2110,8 @@ impl BackendOps for MetalBackend {
         let plan = matmul_plan(lhs.layout(), rhs.layout())?;
         let context = context(self.ordinal)?;
         check_context("matmul", &context, &[lhs, rhs])?;
-        let a = metal_storage("matmul", lhs)?;
-        let b = metal_storage("matmul", rhs)?;
+        let a = metal_storage("matmul", self.ordinal, lhs)?;
+        let b = metal_storage("matmul", self.ordinal, rhs)?;
         let output = output_for(&context, dtype, plan.len)?;
         // A partial 16x16 tile costs more than the scalar kernel for the tiny
         // projections used by small transformers. Keep that latency path while
@@ -2132,9 +2183,15 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("index_select", &context, &[x, indices])?;
-        validate_indices("index_select", indices, axis, x.layout().dims()[axis])?;
-        let input = metal_storage("index_select", x)?;
-        let index = metal_storage("index_select", indices)?;
+        validate_indices(
+            "index_select",
+            self.ordinal,
+            indices,
+            axis,
+            x.layout().dims()[axis],
+        )?;
+        let input = metal_storage("index_select", self.ordinal, x)?;
+        let index = metal_storage("index_select", self.ordinal, indices)?;
         let mut dims = x.layout().dims().to_vec();
         dims[axis] = indices.layout().num_elements();
         let len = checked_product("index_select", dims.iter().copied())?;
@@ -2215,10 +2272,16 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("index_add", &context, &[x, indices, src])?;
-        validate_indices("index_add", indices, axis, x.layout().dims()[axis])?;
-        let xv = metal_storage("index_add", x)?;
-        let iv = metal_storage("index_add", indices)?;
-        let sv = metal_storage("index_add", src)?;
+        validate_indices(
+            "index_add",
+            self.ordinal,
+            indices,
+            axis,
+            x.layout().dims()[axis],
+        )?;
+        let xv = metal_storage("index_add", self.ordinal, x)?;
+        let iv = metal_storage("index_add", self.ordinal, indices)?;
+        let sv = metal_storage("index_add", self.ordinal, src)?;
         let output = output_for(&context, dtype, x.layout().num_elements())?;
         let contiguous_axis0 = axis == 0
             && x.layout().is_contiguous()
@@ -2302,9 +2365,15 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("gather", &context, &[x, indices])?;
-        validate_indices("gather", indices, axis, x.layout().dims()[axis])?;
-        let xv = metal_storage("gather", x)?;
-        let iv = metal_storage("gather", indices)?;
+        validate_indices(
+            "gather",
+            self.ordinal,
+            indices,
+            axis,
+            x.layout().dims()[axis],
+        )?;
+        let xv = metal_storage("gather", self.ordinal, x)?;
+        let iv = metal_storage("gather", self.ordinal, indices)?;
         let output = output_for(&context, x.dtype(), indices.layout().num_elements())?;
         let contiguous_last = axis + 1 == x.layout().rank()
             && x.layout().is_contiguous()
@@ -2400,10 +2469,16 @@ impl BackendOps for MetalBackend {
         }
         let context = context(self.ordinal)?;
         check_context("scatter_add", &context, &[x, indices, src])?;
-        validate_indices("scatter_add", indices, axis, x.layout().dims()[axis])?;
-        let xv = metal_storage("scatter_add", x)?;
-        let iv = metal_storage("scatter_add", indices)?;
-        let sv = metal_storage("scatter_add", src)?;
+        validate_indices(
+            "scatter_add",
+            self.ordinal,
+            indices,
+            axis,
+            x.layout().dims()[axis],
+        )?;
+        let xv = metal_storage("scatter_add", self.ordinal, x)?;
+        let iv = metal_storage("scatter_add", self.ordinal, indices)?;
+        let sv = metal_storage("scatter_add", self.ordinal, src)?;
         let output = output_for(&context, dtype, x.layout().num_elements())?;
         let contiguous_last = axis + 1 == x.layout().rank()
             && x.layout().is_contiguous()
@@ -2445,6 +2520,12 @@ impl BackendOps for MetalBackend {
             },
         )?;
         Ok(Storage::Metal(output))
+    }
+    /// No device sort kernel yet: loud
+    /// [`Error::Unsupported`](crate::Error::Unsupported), never a host
+    /// round-trip behind the caller's back.
+    fn arg_sort(&self, x: View<'_>, _axis: usize, _descending: bool) -> Result<Storage> {
+        Err(unsupported("arg_sort", x))
     }
     fn conv(&self, op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Result<Storage> {
         let Some(input) = inputs.first() else {
@@ -2565,8 +2646,10 @@ impl BackendOps for MetalBackend {
         };
         let context = context(self.ordinal)?;
         check_context("conv", &context, inputs)?;
-        let a = metal_storage("conv", first)?;
-        let b = second.map(|view| metal_storage("conv", view)).transpose()?;
+        let a = metal_storage("conv", self.ordinal, first)?;
+        let b = second
+            .map(|view| metal_storage("conv", self.ordinal, view))
+            .transpose()?;
         let output = output_for(&context, dtype, output_len)?;
         let pipe = pipeline_typed(&context, kernel_name, dtype)?;
         let packed = conv_params(&geometry, params);
@@ -2657,7 +2740,7 @@ impl BackendOps for MetalBackend {
                 let rows = input.layout().num_elements() / width;
                 let context = context(self.ordinal)?;
                 check_context("fused_softmax", &context, inputs)?;
-                let x = metal_storage("fused_softmax", *input)?;
+                let x = metal_storage("fused_softmax", self.ordinal, *input)?;
                 let output = output_for(&context, dtype, input.layout().num_elements())?;
                 let parallel = width >= 64;
                 let pipe = pipeline_typed(
@@ -2787,6 +2870,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// `expected` names the backend that was asked for; `got` names the
+    /// storage that actually turned up. Reporting `view.device()` on both
+    /// sides printed "expected cpu, got cpu" and never mentioned Metal at
+    /// all, so the two sides are pinned here to differ. `copy_strided`
+    /// rejects before it touches the device, so this leaves no bounds
+    /// verdict queued for a sibling test to trip over.
+    #[test]
+    fn device_mismatch_names_the_backend_that_was_asked_for() {
+        let Some(_lane) = hardware_lane() else { return };
+        let host = Tensor::from_vec(vec![1.0f32, 2.0], [2], &Device::Cpu).unwrap();
+        let Err(error) = dispatch::backend(METAL).copy_strided(host.view()) else {
+            panic!("the Metal backend must not read CPU storage")
+        };
+        assert_eq!(
+            error.to_string(),
+            "copy_strided: device mismatch: expected metal:0, got cpu"
+        );
+        let Error::DeviceMismatch { op, expected, got } = error else {
+            panic!("a CPU view must be refused with a device mismatch")
+        };
+        assert_eq!(op, "copy_strided");
+        assert_eq!(expected, METAL);
+        assert_eq!(got, Device::Cpu);
+        assert_ne!(expected, got);
     }
 
     #[test]
@@ -3081,6 +3190,92 @@ mod tests {
         }
     }
 
+    /// A rejected hyperparameter must be rejected on *every* backend.
+    ///
+    /// `conformance` structurally cannot cover this: a `Case` either compares
+    /// successful values or records a declared `Unsupported` decline, so it
+    /// has no rejection-parity dimension. Metal skipped both scalar
+    /// validators for exactly that reason — CPU and CUDA errored, Metal
+    /// computed garbage, and no lane noticed.
+    #[test]
+    fn fused_optimizer_scalar_rejections_match_cpu() {
+        let Some(_lane) = hardware_lane() else { return };
+        let cpu = dispatch::backend(Device::Cpu);
+        let metal = dispatch::backend(METAL);
+        let host = crate::storage::CpuStorage::F32(std::sync::Arc::new(vec![1.0f32, 2.0]));
+        let layout = Layout::contiguous([2]).unwrap();
+
+        // (scalars, what makes them invalid)
+        let sgd_cases = [
+            ([f64::NAN, 0.0, 0.0], "lr is NaN"),
+            ([-1.0, 0.0, 0.0], "lr is negative"),
+            ([0.1, 1.5, 0.0], "momentum is outside [0, 1]"),
+            ([0.1, 0.0, -1.0], "weight_decay is negative"),
+        ];
+        for (scalars, why) in sgd_cases {
+            for backend in [cpu, metal] {
+                let p = backend.transfer_in(host.clone()).unwrap();
+                let g = backend.transfer_in(host.clone()).unwrap();
+                let result = backend.fused(
+                    FusedOp::SgdStep,
+                    &[View::new(&p, &layout), View::new(&g, &layout)],
+                    &scalars,
+                );
+                assert!(result.is_err(), "SgdStep accepted scalars where {why}");
+            }
+        }
+
+        // A velocity input with no momentum is the other shared rule.
+        for backend in [cpu, metal] {
+            let p = backend.transfer_in(host.clone()).unwrap();
+            let g = backend.transfer_in(host.clone()).unwrap();
+            let v = backend.transfer_in(host.clone()).unwrap();
+            let result = backend.fused(
+                FusedOp::SgdStep,
+                &[
+                    View::new(&p, &layout),
+                    View::new(&g, &layout),
+                    View::new(&v, &layout),
+                ],
+                &[0.1, 0.0, 0.0],
+            );
+            assert!(
+                result.is_err(),
+                "SgdStep accepted a velocity buffer with zero momentum"
+            );
+        }
+
+        // Adam: eight scalars (lr, beta1, beta2, eps, weight_decay,
+        // decoupled, correction1, correction2).
+        let adam_cases = [
+            (
+                [f64::NAN, 0.9, 0.999, 1e-8, 0.0, 0.0, 1.0, 1.0],
+                "lr is NaN",
+            ),
+            ([0.1, 1.5, 0.999, 1e-8, 0.0, 0.0, 1.0, 1.0], "beta1 > 1"),
+            ([0.1, 0.9, 0.999, -1e-8, 0.0, 0.0, 1.0, 1.0], "eps <= 0"),
+        ];
+        for (scalars, why) in adam_cases {
+            for backend in [cpu, metal] {
+                let p = backend.transfer_in(host.clone()).unwrap();
+                let g = backend.transfer_in(host.clone()).unwrap();
+                let m = backend.transfer_in(host.clone()).unwrap();
+                let v = backend.transfer_in(host.clone()).unwrap();
+                let result = backend.fused(
+                    FusedOp::AdamStep,
+                    &[
+                        View::new(&p, &layout),
+                        View::new(&g, &layout),
+                        View::new(&m, &layout),
+                        View::new(&v, &layout),
+                    ],
+                    &scalars,
+                );
+                assert!(result.is_err(), "AdamStep accepted scalars where {why}");
+            }
+        }
+    }
+
     #[test]
     fn conv_and_pool_backward_execute_on_metal() {
         let Some(_lane) = hardware_lane() else { return };
@@ -3211,6 +3406,44 @@ mod tests {
             Err(Error::IndexOutOfBounds { index: 7, .. })
         ));
         assert_eq!(x.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+    }
+
+    /// [`Device::synchronize`] and [`Tensor::realize`] exist to drain the
+    /// batched queue and surface a deferred verdict *before* a host read.
+    /// The test above forces the queue with `to_vec`, which is the path that
+    /// already worked; these two are the explicit flush, and nothing else
+    /// exercises them on hardware.
+    ///
+    /// Under `hardware_lane()` because the validation queue is device-global:
+    /// a verdict left undrained here would surface inside whichever test ran
+    /// next.
+    #[test]
+    fn an_explicit_flush_reports_a_deferred_bounds_verdict() {
+        let Some(_lane) = hardware_lane() else { return };
+        let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &METAL).unwrap();
+        let bad = Tensor::from_vec(vec![7i64], [1], &METAL).unwrap();
+        let _ = x.index_select(0, &bad).unwrap();
+
+        // No host read above: the verdict is encoded but unread, and the
+        // flush is what has to produce it.
+        assert!(matches!(
+            METAL.synchronize(),
+            Err(Error::IndexOutOfBounds { index: 7, .. })
+        ));
+        // Collected, not sticky — the device is usable again.
+        METAL.synchronize().unwrap();
+        assert_eq!(x.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+
+        // `Tensor::realize` is the same flush spelled on a tensor.
+        let y = Tensor::from_vec(vec![4.0f32, 5.0], [2], &METAL).unwrap();
+        let worse = Tensor::from_vec(vec![9i64], [1], &METAL).unwrap();
+        let _ = y.index_select(0, &worse).unwrap();
+        assert!(matches!(
+            y.realize(),
+            Err(Error::IndexOutOfBounds { index: 9, .. })
+        ));
+        y.realize().unwrap();
+        assert_eq!(y.to_vec::<f32>().unwrap(), vec![4.0, 5.0]);
     }
 
     #[test]
@@ -3428,6 +3661,8 @@ mod tests {
             linear: Linear,
         }
         impl Forward for Tiny {
+            type Output = Tensor;
+
             fn forward(&mut self, x: &Tensor, mode: Mode) -> crate::Result<Tensor> {
                 self.linear.forward(x, mode)
             }

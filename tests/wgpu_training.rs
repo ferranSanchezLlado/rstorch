@@ -14,6 +14,8 @@ struct Mlp {
 }
 
 impl Forward for Mlp {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         self.second
             .forward(&self.first.forward(x, mode)?.gelu()?, mode)
@@ -28,6 +30,8 @@ struct Transformer {
 }
 
 impl Forward for Transformer {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let attended = self.attention.attend(x, None, mode)?.add(x)?;
         self.head
@@ -112,6 +116,8 @@ struct Cnn {
 }
 
 impl Forward for Cnn {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let features = x
             .conv2d(&self.weight.get(mode), (1, 1), (0, 0), (1, 1))?
@@ -208,6 +214,7 @@ fn empty_index_select_still_validates_indices_on_wgpu() -> Result<()> {
             index: 3,
             axis: 0,
             size: 3,
+            ..
         })
     ));
     Ok(())

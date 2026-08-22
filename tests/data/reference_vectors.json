@@ -1,5 +1,5 @@
 {
-  "_comment": "GENERATED FILE - do not edit by hand; see tools/gen_reference_vectors.py",
+  "_comment": "GENERATED FILE - do not edit by hand; see test-tools/gen_reference_vectors.py",
   "cases": {
     "empty_reduction_policy": {
       "divergence": "rstorch returns the identity for `sum`/`sum_all` and raises Error::InvalidArg for every other reduction over an empty axis, rather than returning torch's NaN / -inf / arbitrary index.",
@@ -455,7 +455,7 @@
     }
   },
   "dtype": "float64",
-  "generator": "tools/gen_reference_vectors.py",
+  "generator": "test-tools/gen_reference_vectors.py",
   "nonfinite_encoding": "NaN / Infinity / -Infinity as JSON strings",
   "pinned_torch": "2.13.0",
   "seed": 20260725,

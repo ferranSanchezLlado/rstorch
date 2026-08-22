@@ -38,6 +38,37 @@
 //! reported, not swallowed, but a run must treat it as fatal rather than retry
 //! the step.
 //!
+//! # Writing your own optimizer
+//!
+//! Closed extension point, on paper: `Rule`/`Engine` are `pub(crate)`
+//! (`src/optim/engine.rs`), and the generic parameter walk they run on cannot
+//! be *started* from outside:
+//! [`Module::visit_mut`](crate::nn::Module::visit_mut) and
+//! [`VisitorMut`](crate::nn::VisitorMut) are public, but the walk's sink type
+//! `LeafMut` and `VisitorMut::new` are `pub(crate)` (`src/nn/visit.rs`), so a
+//! third-party type can *be* visited without being able to visit. Neither
+//! omission actually closes it — an optimizer for *your own* model never
+//! needed a generic walk, because you already wrote the struct and can name its
+//! [`Param`](crate::nn::Param) fields directly. `examples/custom_optimizer.rs`
+//! builds RMSprop this way from [`Param::get`](crate::nn::Param::get)/
+//! [`set`](crate::nn::Param::set)/[`is_frozen`](crate::nn::Param::is_frozen),
+//! [`Grads::wrt`](crate::Grads::wrt), and
+//! [`Envelope::set_section`](crate::persist::Envelope::set_section)/
+//! [`insert_tensor`](crate::persist::Envelope::insert_tensor) for its own
+//! checkpoint state.
+//!
+//! What that recipe does **not** inherit, so nobody assumes it comes free:
+//!
+//! - **The all-or-nothing pre-pass.** `Sgd`/`Adam::step` validate every
+//!   parameter — a missing gradient, a shape/dtype/device mismatch — before
+//!   touching any of them; a rejected step leaves the model untouched. A
+//!   hand-written loop that updates parameters one at a time as it visits
+//!   them can leave a partially-stepped model on a failure partway through.
+//! - **Path-predicate parameter groups.** `AdamW::new(..).group(path_predicate,
+//!   overrides)` gives one optimizer instance different hyperparameters for
+//!   different parameters by dotted `state_dict` path. A hand-written
+//!   optimizer has no such mechanism unless it builds one.
+//!
 //! # There is no `Optimizer` trait
 //!
 //! [`Sgd`] and [`Adam`] are concrete types — every layer and every optimizer
@@ -106,10 +137,12 @@
 //!
 //! # Cost
 //!
-//! An update is written in the public op vocabulary, so each parameter costs a
-//! handful of small tensor allocations per step — a measured hotspot at MLP
-//! scale. The fix is a fused backend kernel behind the same public surface,
-//! not a different API here.
+//! An update is defined in the public op vocabulary — that spelling is the
+//! reference definition, and each parameter costs a handful of small tensor
+//! allocations per step, a measured hotspot at MLP scale. So where the backend
+//! offers a fused step kernel it is the path taken, and the composed form is
+//! the fallback for a backend that declines the fused op. Either way the
+//! public surface is the same one; nothing here changes shape with it.
 //!
 //! # Reduced precision
 //!

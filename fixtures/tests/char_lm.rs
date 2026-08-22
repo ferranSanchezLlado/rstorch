@@ -13,14 +13,7 @@ Whether 'tis nobler in the mind to suffer.\n\
 To be, or not to be, that is the question.\n";
 
 fn config(vocab_size: usize) -> TransformerConfig {
-    TransformerConfig {
-        vocab_size,
-        max_seq_len: 16,
-        embed_dim: 8,
-        num_heads: 2,
-        num_layers: 1,
-        feed_forward_dim: 16,
-    }
+    TransformerConfig::new(vocab_size, 16, 8, 2, 1).with_feed_forward_dim(16)
 }
 
 fn checkpoint_path() -> PathBuf {

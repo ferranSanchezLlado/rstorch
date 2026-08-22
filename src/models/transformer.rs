@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::nn::{
-    self, Embedding, Forward, LayerNorm, Linear, Mode, MultiHeadAttention,
+    Embedding, Forward, LayerNorm, Linear, Mode, ModuleExt, MultiHeadAttention,
     scaled_dot_product_attention,
 };
 use crate::persist::{Envelope, Limits};
@@ -19,7 +19,24 @@ use crate::tensor::Tensor;
 /// The complete value is stored in every model checkpoint, so loading a
 /// checkpoint reconstructs the model without a separately supplied
 /// architecture definition.
+///
+/// `#[non_exhaustive]`: the knob set is crate-owned and may grow in a minor
+/// release, so build a config with [`TransformerConfig::new`] and the `with_*`
+/// setters rather than a struct literal. That is what keeps a later field
+/// addition non-breaking — a new field arrives with its own `with_*` setter
+/// and a default, and existing builder chains keep compiling untouched.
+///
+/// # Examples
+///
+/// ```
+/// use rstorch::models::TransformerConfig;
+///
+/// let config = TransformerConfig::new(16, 8, 4, 2, 1).with_num_layers(2);
+/// assert_eq!(config.num_layers, 2);
+/// assert_eq!(config.feed_forward_dim, 16); // 4 * embed_dim, the default
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TransformerConfig {
     /// Number of tokens in the vocabulary.
     pub vocab_size: usize,
@@ -36,6 +53,90 @@ pub struct TransformerConfig {
 }
 
 impl TransformerConfig {
+    /// Assemble a config from the five dimensions that have no defensible
+    /// default. `feed_forward_dim` defaults to `4 * embed_dim` — the standard
+    /// convention — and is overridable with
+    /// [`with_feed_forward_dim`](TransformerConfig::with_feed_forward_dim).
+    ///
+    /// That default exists to close a specific hazard, not for brevity: with
+    /// all six dimensions positional and the same type, transposing
+    /// `embed_dim` and `feed_forward_dim` at a call site compiles, and
+    /// `validate` — which only checks
+    /// non-zero and `embed_dim % num_heads == 0` — accepts the swap whenever
+    /// the new `embed_dim` still happens to divide evenly, silently training
+    /// and checkpointing the wrong architecture. Removing the field from the
+    /// positional list removes the transposition. `num_heads` and
+    /// `num_layers` stay required and adjacent (transposing *them* is usually
+    /// invisible because the two are often equal, but neither has a default a
+    /// caller would want silently applied) — an omitted dimension is a
+    /// missing-argument compile error, which is the failure mode this
+    /// signature is designed to convert transpositions into.
+    ///
+    /// Infallible: the dimensions are checked where they are used, by
+    /// [`DecoderTransformer::new`] and by `decode`.
+    /// The `4 * embed_dim` default saturates rather than overflowing, so a
+    /// nonsense `embed_dim` — from a corrupt checkpoint, say — still reaches
+    /// that validation instead of panicking here in a debug build.
+    #[must_use]
+    pub fn new(
+        vocab_size: usize,
+        max_seq_len: usize,
+        embed_dim: usize,
+        num_heads: usize,
+        num_layers: usize,
+    ) -> Self {
+        Self {
+            vocab_size,
+            max_seq_len,
+            embed_dim,
+            num_heads,
+            num_layers,
+            feed_forward_dim: embed_dim.saturating_mul(4),
+        }
+    }
+
+    /// Replace the vocabulary size.
+    #[must_use]
+    pub fn with_vocab_size(mut self, vocab_size: usize) -> Self {
+        self.vocab_size = vocab_size;
+        self
+    }
+
+    /// Replace the longest accepted sequence length.
+    #[must_use]
+    pub fn with_max_seq_len(mut self, max_seq_len: usize) -> Self {
+        self.max_seq_len = max_seq_len;
+        self
+    }
+
+    /// Replace the token representation width.
+    #[must_use]
+    pub fn with_embed_dim(mut self, embed_dim: usize) -> Self {
+        self.embed_dim = embed_dim;
+        self
+    }
+
+    /// Replace the per-block attention head count.
+    #[must_use]
+    pub fn with_num_heads(mut self, num_heads: usize) -> Self {
+        self.num_heads = num_heads;
+        self
+    }
+
+    /// Replace the decoder block count.
+    #[must_use]
+    pub fn with_num_layers(mut self, num_layers: usize) -> Self {
+        self.num_layers = num_layers;
+        self
+    }
+
+    /// Replace the feed-forward hidden width.
+    #[must_use]
+    pub fn with_feed_forward_dim(mut self, feed_forward_dim: usize) -> Self {
+        self.feed_forward_dim = feed_forward_dim;
+        self
+    }
+
     fn validate(&self) -> Result<()> {
         if self.vocab_size == 0
             || self.max_seq_len == 0
@@ -71,10 +172,10 @@ impl TransformerConfig {
         let mut fields = BTreeMap::new();
         for part in value.split(';') {
             let (name, raw) = part.split_once('=').ok_or_else(|| {
-                checkpoint_error(format!("invalid transformer config field {part:?}"))
+                Error::persistence(format!("invalid transformer config field {part:?}"))
             })?;
             if fields.insert(name, raw).is_some() {
-                return Err(checkpoint_error(format!(
+                return Err(Error::persistence(format!(
                     "duplicate transformer config field {name:?}"
                 )));
             }
@@ -82,28 +183,34 @@ impl TransformerConfig {
         let mut parse = |name: &str| -> Result<usize> {
             fields
                 .remove(name)
-                .ok_or_else(|| checkpoint_error(format!("transformer config missing {name:?}")))?
+                .ok_or_else(|| Error::persistence(format!("transformer config missing {name:?}")))?
                 .parse()
-                .map_err(|_| {
-                    checkpoint_error(format!("transformer config {name:?} is not a usize"))
+                .map_err(|source| {
+                    Error::persistence_with(
+                        format!("transformer config {name:?} is not a usize"),
+                        source,
+                    )
                 })
         };
-        let config = Self {
-            vocab_size: parse("vocab_size")?,
-            max_seq_len: parse("max_seq_len")?,
-            embed_dim: parse("embed_dim")?,
-            num_heads: parse("num_heads")?,
-            num_layers: parse("num_layers")?,
-            feed_forward_dim: parse("feed_forward_dim")?,
-        };
+        let config = Self::new(
+            parse("vocab_size")?,
+            parse("max_seq_len")?,
+            parse("embed_dim")?,
+            parse("num_heads")?,
+            parse("num_layers")?,
+        )
+        .with_feed_forward_dim(parse("feed_forward_dim")?);
         if let Some(name) = fields.keys().next() {
-            return Err(checkpoint_error(format!(
+            return Err(Error::persistence(format!(
                 "unknown transformer config field {name:?}"
             )));
         }
-        config
-            .validate()
-            .map_err(|error| checkpoint_error(error.to_string()))?;
+        config.validate().map_err(|error| {
+            Error::persistence_with(
+                "checkpoint's transformer config is internally inconsistent",
+                error,
+            )
+        })?;
         Ok(config)
     }
 }
@@ -219,14 +326,7 @@ impl KvCache {
 /// use rstorch::{Device, Rng, Tensor};
 ///
 /// # fn main() -> rstorch::Result<()> {
-/// let config = TransformerConfig {
-///     vocab_size: 16,
-///     max_seq_len: 8,
-///     embed_dim: 4,
-///     num_heads: 2,
-///     num_layers: 1,
-///     feed_forward_dim: 8,
-/// };
+/// let config = TransformerConfig::new(16, 8, 4, 2, 1).with_feed_forward_dim(8);
 /// let mut model = DecoderTransformer::new(config, &Device::Cpu, &mut Rng::seed(0))?;
 ///
 /// let prompt = Tensor::from_vec(vec![1i64, 2, 3], [1, 3], &Device::Cpu)?;
@@ -461,14 +561,7 @@ impl DecoderTransformer {
     /// use rstorch::{Device, Rng};
     ///
     /// # fn main() -> rstorch::Result<()> {
-    /// let config = TransformerConfig {
-    ///     vocab_size: 16,
-    ///     max_seq_len: 8,
-    ///     embed_dim: 4,
-    ///     num_heads: 2,
-    ///     num_layers: 1,
-    ///     feed_forward_dim: 8,
-    /// };
+    /// let config = TransformerConfig::new(16, 8, 4, 2, 1).with_feed_forward_dim(8);
     /// let model = DecoderTransformer::new(config, &Device::Cpu, &mut Rng::seed(0))?;
     ///
     /// let path = std::env::temp_dir().join(format!(
@@ -486,7 +579,7 @@ impl DecoderTransformer {
     pub fn save_checkpoint(&self, path: impl AsRef<Path>, limits: &Limits) -> Result<()> {
         let mut envelope = Envelope::new();
         envelope.set_section("config", self.config.encode())?;
-        for (name, tensor) in nn::state_dict(self) {
+        for (name, tensor) in self.state_dict() {
             envelope.insert_tensor(name, crate::checkpoint::to_host_tensor(&tensor)?);
         }
         envelope.save(path, limits)
@@ -510,7 +603,7 @@ impl DecoderTransformer {
         let envelope = Envelope::load(path, limits)?;
         let encoded = envelope
             .section("config")
-            .ok_or_else(|| checkpoint_error("checkpoint has no config section"))?;
+            .ok_or_else(|| Error::persistence("checkpoint has no config section"))?;
         let config = TransformerConfig::decode(encoded)?;
         let mut model = Self::new(config, device, &mut Rng::seed(0))?;
         let state = envelope
@@ -523,12 +616,14 @@ impl DecoderTransformer {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
-        nn::load_state_dict(&mut model, &state)?;
+        model.load_state_dict(&state)?;
         Ok(model)
     }
 }
 
 impl Forward for DecoderTransformer {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         self.logits(x, mode)
     }
@@ -552,10 +647,6 @@ fn checked_tokens(token_ids: &Tensor, max_sequence: usize) -> Result<(usize, usi
     Ok((batch, sequence))
 }
 
-fn checkpoint_error(msg: impl Into<String>) -> Error {
-    Error::Persistence { msg: msg.into() }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,20 +654,13 @@ mod tests {
     const CPU: Device = Device::Cpu;
 
     fn config() -> TransformerConfig {
-        TransformerConfig {
-            vocab_size: 11,
-            max_seq_len: 8,
-            embed_dim: 8,
-            num_heads: 2,
-            num_layers: 2,
-            feed_forward_dim: 16,
-        }
+        TransformerConfig::new(11, 8, 8, 2, 2).with_feed_forward_dim(16)
     }
 
     #[test]
     fn derived_block_paths_are_indexed() {
         let model = DecoderTransformer::new(config(), &CPU, &mut Rng::seed(3)).unwrap();
-        let state = nn::state_dict(&model);
+        let state = model.state_dict();
         assert!(state.contains_key("blocks.0.attention.q_proj.weight"));
         assert!(state.contains_key("blocks.1.feed_forward2.bias"));
         assert!(!state.keys().any(|key| key.starts_with("0.")));

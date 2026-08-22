@@ -1,6 +1,6 @@
-//! Reductions: `sum`/`mean`/`max`/`min`/`var`/`std` in three spellings
-//! each, the normalizations `softmax`/`log_softmax`, and the index reductions
-//! `argmax`/`argmin`.
+//! Reductions: `sum`/`mean`/`max`/`min`/`prod`/`var`/`std` in three spellings
+//! each, the `p`-norm `norm`, the normalizations `softmax`/`log_softmax`, and
+//! the index reductions `argmax`/`argmin`.
 //!
 //! # Three spellings, one meaning
 //!
@@ -13,17 +13,22 @@
 //! # Empty-reduction policy
 //!
 //! Reducing an axis of size 0 has an answer only where the op has an identity
-//! element. The rule here is one line:
+//! element, and only `sum` is spelled to return one. The rule here is one
+//! line:
 //!
 //! > **`sum`/`sum_all` return the identity (zeros); every other reduction
 //! > over an empty axis is a loud [`Error::InvalidArg`] naming the op.**
 //!
-//! So `sum` of an empty axis is `0`, while `mean`, `max`, `min`, `var`,
-//! `std`, `softmax`, `log_softmax`, `argmax` and `argmin` refuse rather than
-//! return the `NaN`/`-inf`/arbitrary-index answers a silent implementation
-//! would produce. `var`/`std` extend the same rule to `correction`: with
-//! `correction = 1` an axis of length 1 has no unbiased variance, so it is
-//! rejected instead of returning `NaN`.
+//! So `sum` of an empty axis is `0`, while `mean`, `max`, `min`, `prod`,
+//! `var`, `std`, `norm`, `softmax`, `log_softmax`, `argmax` and `argmin`
+//! refuse rather than return the `NaN`/`-inf`/arbitrary-index answers a
+//! silent implementation would produce. `prod` is in that list even though ∏
+//! over nothing is conventionally `1`: the identity is only returned where a
+//! caller reduces an empty axis on purpose, which `sum` covers, and an empty
+//! `prod` is far more often a shape mistake than a request for ones.
+//! `var`/`std` extend the same rule to `correction`: with `correction = 1` an
+//! axis of length 1 has no unbiased variance, so it is rejected instead of
+//! returning `NaN`.
 //!
 //! # Numerics
 //!
@@ -47,7 +52,8 @@
 //! | `sum(axis)` | broadcast the cotangent back along `axis` |
 //! | `mean(axis)` | the same, scaled by `1/n` |
 //! | `max`/`min(axis)` | route to the winners, splitting ties evenly; a line whose extremum is `NaN` has no winner and gets an all-`NaN` cotangent |
-//! | `var`/`std`, `log_softmax` | none of their own — they are *composed* from recorded ops (`mean`/`sub`/`mul`/`sum`/`exp`/`div`), so the engine differentiates the composition |
+//! | `prod(axis)` | the leave-one-out product ∏_{j≠k} xⱼ, built from the product over the *non-zero* elements so that a line containing a zero is finite and correct rather than `0/0` |
+//! | `var`/`std`, `norm`, `log_softmax` | none of their own — they are *composed* from recorded ops (`mean`/`sub`/`mul`/`sum`/`sqrt`/`exp`/`div`), so the engine differentiates the composition |
 //! | `softmax` | the fused last-axis `F32`/`F64` path records one node with `y · (g − Σ(g · y))`; other variants retain the composed path |
 //! | `argmax`/`argmin` | not differentiable ([`I64`](crate::DType::I64) output); they never reach the record seam |
 //!
@@ -287,6 +293,41 @@ fn axis_reduce(
             let xd = x.detach();
             let od = out.detach();
             Box::new(move |g| Ok(vec![Some(route_to_extrema(g, &xd, &od, axis, keepdim)?)]))
+        }
+        // ∂∏/∂xₖ = ∏_{j≠k} xⱼ. A product is multilinear, so that is finite
+        // everywhere — including at a zero, where it is generally *not* zero.
+        // Dividing the whole product by xₖ computes it only when the line
+        // holds no zero; at a zero that division is 0/0. So the leave-one-out
+        // product is built directly: multiply the non-zero elements, then
+        // pick per element on how many zeros the line has — none (every
+        // position gets ∏/xₖ), exactly one (only the zero position gets the
+        // product of the others), or two or more (every position gets zero,
+        // since every leave-one-out product still contains a zero).
+        ReduceOp::Prod => {
+            let xd = x.detach();
+            Box::new(move |g| {
+                let g_kd = with_axis(g, axis, keepdim)?;
+                let ones = xd.ones_like()?;
+                let zeros = xd.zeros_like()?;
+                let is_zero = xd.eq(&zeros)?;
+                // Zeros replaced by the multiplicative identity: the product
+                // of this is ∏ over the non-zero elements, and dividing by it
+                // is always safe.
+                let safe = is_zero.where_cond(&ones, &xd)?;
+                let nonzero_prod = reduce_values(op, ReduceOp::Prod, &safe, axis, true)?;
+                // Counted in the accumulation dtype so a long f16/bf16 line
+                // cannot round its own zero count.
+                let wide = xd.to_dtype(xd.dtype().accumulation_dtype())?;
+                let indicator = is_zero.where_cond(&wide.ones_like()?, &wide.zeros_like()?)?;
+                let count = reduce_values(op, ReduceOp::Sum, &indicator, axis, true)?;
+                let exactly_one = count.eq(&count.ones_like()?)?;
+                let none = count.eq(&count.zeros_like()?)?;
+                let keep = is_zero.where_cond(
+                    &exactly_one.where_cond(&ones, &zeros)?,
+                    &none.where_cond(&ones, &zeros)?,
+                )?;
+                Ok(vec![Some(g_kd.mul(&nonzero_prod)?.div(&safe)?.mul(&keep)?)])
+            })
         }
     };
     Ok(record(op, out, &[x], backward))
@@ -606,6 +647,53 @@ impl Tensor {
         fold_all("min_all", ReduceOp::Min, self)
     }
 
+    // ---- prod --------------------------------------------------------
+
+    /// Product over `axis`, dropping it.
+    ///
+    /// # Errors
+    /// [`Error::InvalidAxis`] out of range, [`Error::InvalidArg`] on an empty
+    /// axis (see the module docs), [`Error::Unsupported`] on a dtype without
+    /// arithmetic or on any non-CPU device: `ReduceOp::Prod` has no
+    /// accelerator kernel, so Metal, CUDA and WGPU all decline it.
+    ///
+    /// # Gradient
+    /// `∂∏/∂xᵢ = ∏_{j≠i} xⱼ`, the leave-one-out product — finite everywhere,
+    /// including on a line containing a zero, where it is the product of the
+    /// other elements at that one position and zero elsewhere. It is built
+    /// from the product over the non-zero elements rather than as `prod / xᵢ`,
+    /// which would be `0/0` exactly where the interesting answer is.
+    ///
+    /// ```
+    /// use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], [2, 2], &Device::Cpu)?;
+    /// assert_eq!(x.prod(1)?.to_vec::<f32>()?, vec![2.0, 12.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn prod(&self, axis: isize) -> Result<Tensor> {
+        const OP: &str = "prod";
+        let ax = self.shape().resolve_axis(axis, OP)?;
+        axis_reduce(OP, ReduceOp::Prod, self, ax, false)
+    }
+
+    /// Product over `axis`, keeping it at size 1.
+    ///
+    /// # Errors
+    /// As [`prod`](Tensor::prod).
+    pub fn prod_keepdim(&self, axis: isize) -> Result<Tensor> {
+        const OP: &str = "prod_keepdim";
+        let ax = self.shape().resolve_axis(axis, OP)?;
+        axis_reduce(OP, ReduceOp::Prod, self, ax, true)
+    }
+
+    /// Product of every element, as a rank-0 scalar.
+    ///
+    /// # Errors
+    /// As [`prod`](Tensor::prod) (an empty tensor is [`Error::InvalidArg`]).
+    pub fn prod_all(&self) -> Result<Tensor> {
+        fold_all("prod_all", ReduceOp::Prod, self)
+    }
+
     // ---- var / std -------------------------------------------------------
 
     /// Variance over `axis` with **`correction = 1`** (Bessel's correction —
@@ -733,6 +821,98 @@ impl Tensor {
         z.sub(&denom.ln()?)
     }
 
+    // ---- norm --------------------------------------------------------
+
+    /// The `p`-norm over `axis`, dropping it: `(Σ|x|ᵖ)^(1/p)` (`p = 2.0` is
+    /// the Euclidean/L2 norm the crate's own `RMSNorm` and a manual RoPE need
+    /// most).
+    ///
+    /// Composed from ops the engine already differentiates, so the gradient
+    /// comes from that composition rather than a hand-written formula.
+    /// `p == 1` is [`abs`](Tensor::abs) + [`sum`](Tensor::sum) and `p == 2` is
+    /// [`mul`](Tensor::mul) + `sum` + [`sqrt`](Tensor::sqrt) — both available
+    /// on every backend. Any other `p` goes through [`pow`](Tensor::pow),
+    /// which today has a CPU kernel only.
+    ///
+    /// # Errors
+    /// [`Error::InvalidAxis`] out of range, [`Error::InvalidArg`] on an empty
+    /// axis or a `p` that is not finite and positive (there is no `p = ∞`
+    /// spelling — use [`max`](Tensor::max) over [`abs`](Tensor::abs)),
+    /// [`Error::Unsupported`] on a non-float dtype, or — for a `p` other than
+    /// `1` or `2`, which route through [`pow`](Tensor::pow) — on any
+    /// non-CPU device.
+    ///
+    /// ```
+    /// use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![3.0f32, 4.0], [2], &Device::Cpu)?;
+    /// assert!((x.norm(0, 2.0)?.item()? - 5.0).abs() < 1e-6);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn norm(&self, axis: isize, p: f64) -> Result<Tensor> {
+        const OP: &str = "norm";
+        self.norm_impl(OP, axis, p, false)
+    }
+
+    /// The `p`-norm over `axis`, keeping it at size 1.
+    ///
+    /// # Errors
+    /// As [`norm`](Tensor::norm).
+    pub fn norm_keepdim(&self, axis: isize, p: f64) -> Result<Tensor> {
+        const OP: &str = "norm_keepdim";
+        self.norm_impl(OP, axis, p, true)
+    }
+
+    /// The `p`-norm over every element, as a rank-0 scalar — the third
+    /// spelling this module promises for every value reduction.
+    ///
+    /// Flattening first and reducing the one axis is what makes this the
+    /// *whole-tensor* norm rather than a fold of per-axis norms: `‖x‖ₚ` over
+    /// all elements is `(Σ|xᵢ|ᵖ)^(1/p)`, and folding `norm` axis by axis
+    /// would raise the intermediate sums to `1/p` in between.
+    ///
+    /// # Errors
+    /// As [`norm`](Tensor::norm) (an empty tensor is [`Error::InvalidArg`]).
+    pub fn norm_all(&self, p: f64) -> Result<Tensor> {
+        const OP: &str = "norm_all";
+        let flat = self.reshape([self.num_elements()])?;
+        flat.norm_impl(OP, 0, p, false)
+    }
+
+    fn norm_impl(&self, op: &'static str, axis: isize, p: f64, keepdim: bool) -> Result<Tensor> {
+        let ax = self.shape().resolve_axis(axis, op)?;
+        require_float(op, self)?;
+        // `p` must be finite as well as positive. `p = ∞` would otherwise
+        // sail through: `|x|^∞ ∈ {0, 1, ∞}` and the outer exponent is
+        // `1/∞ = 0`, and `powf(_, 0) = 1`, so the max-norm spelling people
+        // reach for would silently return all ones with a zero gradient.
+        if !p.is_finite() || p <= 0.0 {
+            return Err(Error::InvalidArg {
+                op,
+                msg: format!("norm requires a finite p > 0, got {p}"),
+            });
+        }
+        require_non_empty(op, self, ax)?;
+        // `p == 1` and `p == 2` are almost every call, and neither needs
+        // `pow` — which has no accelerator kernel, and would make `norm`
+        // unusable on a GPU for the two exponents people actually ask for.
+        // `x * x` is also a shorter and no less accurate route to `|x|²` than
+        // an `abs` plus a `powf` round trip.
+        let reduce_axis = |t: &Tensor| {
+            if keepdim {
+                t.sum_keepdim(ax as isize)
+            } else {
+                t.sum(ax as isize)
+            }
+        };
+        if p == 1.0 {
+            return reduce_axis(&self.abs()?);
+        }
+        if p == 2.0 {
+            return reduce_axis(&self.mul(self)?)?.sqrt();
+        }
+        reduce_axis(&self.abs()?.pow(p)?)?.pow(1.0 / p)
+    }
+
     // ---- argmax / argmin -------------------------------------------------
 
     /// Positions of the maxima along `axis` as an [`I64`](crate::DType::I64)
@@ -742,8 +922,9 @@ impl Tensor {
     /// autograd graph. There is no `_all` spelling: flatten first
     /// (`x.reshape([x.num_elements()])?.argmax(0)`).
     ///
-    /// `NaN` orders below every number, so it is only selected when the whole
-    /// line is `NaN`.
+    /// `NaN` orders **above** every number, so a line containing one selects
+    /// it (the first, on ties) — the only index that agrees with
+    /// [`max`](Tensor::max), which propagates `NaN`.
     ///
     /// # Errors
     /// [`Error::InvalidAxis`] out of range, [`Error::InvalidArg`] on an empty
@@ -773,7 +954,9 @@ impl Tensor {
     /// Positions of the minima along `axis` as an [`I64`](crate::DType::I64)
     /// tensor, dropping the axis. The **first** occurrence wins a tie.
     ///
-    /// `NaN` orders below every number, so a `NaN` in the line is selected.
+    /// `NaN` orders **above** every number here too, so a line containing one
+    /// selects it rather than the smallest finite element — again agreeing
+    /// with [`min`](Tensor::min), which propagates `NaN`.
     ///
     /// # Errors
     /// As [`argmax`](Tensor::argmax).

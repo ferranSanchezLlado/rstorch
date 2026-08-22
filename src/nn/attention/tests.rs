@@ -2,7 +2,7 @@
 //! splitting and merging, and gradients.
 
 use super::*;
-use crate::nn;
+use crate::nn::ModuleExt;
 use crate::testing::check_grad;
 
 const CPU: Device = Device::Cpu;
@@ -596,7 +596,7 @@ fn eval_records_nothing_and_agrees_with_train_on_the_values() {
 fn the_state_dict_paths_are_the_four_projections() {
     let attn = mha(4, 2);
     assert_eq!(
-        nn::state_dict(&attn).keys().collect::<Vec<_>>(),
+        attn.state_dict().keys().collect::<Vec<_>>(),
         [
             "k_proj.bias",
             "k_proj.weight",
@@ -608,12 +608,12 @@ fn the_state_dict_paths_are_the_four_projections() {
             "v_proj.weight",
         ]
     );
-    assert_eq!(nn::num_params(&attn), 4 * (4 * 4 + 4));
+    assert_eq!(attn.num_params(), 4 * (4 * 4 + 4));
 
     // Bias-free: the `bias` paths are simply absent.
     let bare = MultiHeadAttention::new_without_bias(4, 2, &CPU, &mut Rng::seed(1)).unwrap();
-    assert_eq!(nn::state_dict(&bare).len(), 4);
-    assert_eq!(nn::num_params(&bare), 4 * 4 * 4);
+    assert_eq!(bare.state_dict().len(), 4);
+    assert_eq!(bare.num_params(), 4 * 4 * 4);
 }
 
 #[test]
@@ -625,7 +625,7 @@ fn a_checkpoint_round_trip_reproduces_the_outputs() {
         v(&trained.attend(&x, None, Mode::EVAL).unwrap()),
         v(&fresh.attend(&x, None, Mode::EVAL).unwrap())
     );
-    nn::load_state_dict(&mut fresh, &nn::state_dict(&trained)).unwrap();
+    fresh.load_state_dict(&trained.state_dict()).unwrap();
     assert_eq!(
         v(&trained.attend(&x, None, Mode::EVAL).unwrap()),
         v(&fresh.attend(&x, None, Mode::EVAL).unwrap())
@@ -732,4 +732,49 @@ fn project_output_checks_the_head_axes() {
         attn.project_output(&t(&[2, 3, 3]), Mode::EVAL),
         Err(Error::ShapeMismatch { .. })
     ));
+}
+
+#[test]
+fn attention_is_reachable_through_the_forward_trait() {
+    let mut rng = Rng::seed(11);
+    let mut attn = MultiHeadAttention::new(4, 2, &CPU, &mut rng).unwrap();
+    let x = t(&[2, 3, 4]);
+    let mask = Tensor::causal_mask(3, &CPU).unwrap();
+
+    // The trait spelling and the inherent spelling are the same computation,
+    // mask included — not merely the same shape.
+    let direct = attn.attend(&x, Some(&mask), Mode::EVAL).unwrap();
+    let input = AttentionInput::new(x.clone(), Some(mask.clone()));
+    let through_trait = attn.forward(&input, Mode::EVAL).unwrap();
+    assert_eq!(
+        through_trait.to_vec::<f32>().unwrap(),
+        direct.to_vec::<f32>().unwrap()
+    );
+
+    // And the mask is genuinely carried: dropping it changes the result, so a
+    // `Forward` caller cannot accidentally get bidirectional attention.
+    let unmasked = attn
+        .forward(&AttentionInput::new(x, None), Mode::EVAL)
+        .unwrap();
+    assert_ne!(
+        unmasked.to_vec::<f32>().unwrap(),
+        direct.to_vec::<f32>().unwrap()
+    );
+}
+
+#[test]
+fn a_generic_forward_caller_accepts_the_attention_layer() {
+    // The point of `Forward<Input>`: code written against the trait, not
+    // against a concrete layer, can drive a multi-input layer.
+    fn run<L: Forward<AttentionInput, Output = Tensor>>(
+        layer: &mut L,
+        input: &AttentionInput,
+    ) -> Tensor {
+        layer.forward(input, Mode::EVAL).unwrap()
+    }
+
+    let mut rng = Rng::seed(12);
+    let mut attn = MultiHeadAttention::new(4, 2, &CPU, &mut rng).unwrap();
+    let input = AttentionInput::new(t(&[2, 3, 4]), Some(Tensor::causal_mask(3, &CPU).unwrap()));
+    assert_eq!(run(&mut attn, &input).dims(), &[2, 3, 4]);
 }

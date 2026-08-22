@@ -87,6 +87,31 @@
 //! crate depending only on `rstorch` reaches it as
 //! `rstorch::typed::nn::TypedModule` and never needs a second direct
 //! dependency on `rstorch_derive`.
+//!
+//! # Why these stay free functions
+//!
+//! The dynamic half of the crate spells the same operations as methods on
+//! [`crate::nn::ModuleExt`], so the asymmetry is deliberate rather than an
+//! oversight, and the reasons are specific to this module:
+//!
+//! - **The discoverability problem `ModuleExt` solves does not exist here.**
+//!   That trait exists because `use rstorch::prelude::*` is the dynamic API's
+//!   normal entry point and it did not export the free functions, which made
+//!   them unreachable without knowing they existed. `typed::prelude`
+//!   deliberately exports no `nn` items, so a typed user is already writing
+//!   `rstorch::typed::nn::` — at which point `nn::state_dict(&model)?` and
+//!   `model.state_dict()?` are equally findable.
+//! - **There are two load contracts, and the qualified spelling names which
+//!   one you took.** [`load_state_dict`] replaces the leaves;
+//!   [`crate::typed::persist::load_state_dict`] additionally rejects the
+//!   reserved `optim`/`optim.*` namespace before doing so. As free functions
+//!   the call site says which; as methods on one trait both would read
+//!   `model.load_state_dict(&state)?` and the safer one would be the harder
+//!   to reach.
+//! - **The signatures are not twins.** [`state_dict`] here is fallible — it
+//!   rejects a malformed walk rather than panicking on one — where the dynamic
+//!   `ModuleExt::state_dict` returns a plain map. A trait that made them look
+//!   alike would be hiding the difference that matters.
 
 use super::{DeviceBinding, DeviceCtx, FloatElement, Placement, TypedTensor};
 use crate::{DType, Result, Tensor};

@@ -18,6 +18,17 @@
 /// Freezing a *subtree* is per-`Param` (`Param::freeze`), never a `Mode`
 /// side effect.
 ///
+/// # Axis ownership
+///
+/// The axes belong to the crate, and **the set may grow in a minor release**.
+/// The fields are private and there is no public constructor — `TRAIN`, `EVAL`,
+/// [`recorded`](Mode::recorded), and [`frozen`](Mode::frozen) are the only ways
+/// to name a mode — so adding an axis cannot break a caller who spelled one of
+/// those. An autocast dtype for mixed precision and a determinism flag are the
+/// plausible additions; neither is promised here. Per-call information a layer
+/// of your own needs goes in the *input* type it accepts
+/// ([`Forward<Input>`](crate::nn::Forward)), not in `Mode`.
+///
 /// # Examples
 ///
 /// ```

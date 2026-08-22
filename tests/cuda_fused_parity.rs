@@ -15,7 +15,6 @@
 
 #![cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 
-use rstorch::nn;
 use rstorch::prelude::*;
 
 #[path = "common/cuda.rs"]
@@ -184,7 +183,8 @@ fn layer_norm_parameter_gradients_match_the_cpu() {
             .unwrap();
         let mut sgd = Sgd::new(0.5);
         sgd.step(&mut layer, grads).unwrap();
-        nn::state_dict(&layer)
+        layer
+            .state_dict()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect()
@@ -215,6 +215,8 @@ fn optimizer_steps_match_the_cpu() {
     }
 
     impl Forward for Model {
+        type Output = Tensor;
+
         fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
             self.second
                 .forward(&self.first.forward(x, mode)?.relu()?, mode)
@@ -247,7 +249,8 @@ fn optimizer_steps_match_the_cpu() {
                 _ => adamw.step(&mut model, grads).unwrap(),
             }
         }
-        nn::state_dict(&model)
+        model
+            .state_dict()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect()
@@ -272,7 +275,8 @@ fn attention_matches_the_cpu() {
         let mut sgd = Sgd::new(0.1);
         sgd.step(&mut attention, grads).unwrap();
         result.extend(
-            nn::state_dict(&attention)
+            attention
+                .state_dict()
                 .into_values()
                 .flat_map(|tensor| tensor.to_vec::<f32>().unwrap()),
         );
@@ -301,7 +305,8 @@ fn batch_norm_running_statistics_match_the_cpu() {
             .to_vec::<f32>()
             .unwrap();
         result.extend(
-            nn::state_dict(&layer)
+            layer
+                .state_dict()
                 .into_values()
                 .flat_map(|tensor| tensor.to_vec::<f32>().unwrap()),
         );

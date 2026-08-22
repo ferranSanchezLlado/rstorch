@@ -54,12 +54,10 @@ impl HostTensor {
     pub fn from_bytes(dtype: DType, dims: Vec<usize>, bytes: Vec<u8>) -> Result<Self> {
         let expected = byte_len(dtype, &dims)?;
         if bytes.len() != expected {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "tensor byte length mismatch: dtype {dtype} dims {dims:?} expect {expected} bytes, got {}",
-                    bytes.len()
-                ),
-            });
+            return Err(Error::persistence(format!(
+                "tensor byte length mismatch: dtype {dtype} dims {dims:?} expect {expected} bytes, got {}",
+                bytes.len()
+            )));
         }
         Ok(Self { dtype, dims, bytes })
     }
@@ -95,15 +93,15 @@ impl HostTensor {
 pub(crate) fn byte_len(dtype: DType, dims: &[usize]) -> Result<usize> {
     let mut elems = 1usize;
     for &d in dims {
-        elems = elems.checked_mul(d).ok_or_else(|| Error::Persistence {
-            msg: format!("element count overflow for dims {dims:?}"),
+        elems = elems.checked_mul(d).ok_or_else(|| {
+            Error::persistence(format!("element count overflow for dims {dims:?}"))
         })?;
     }
-    elems
-        .checked_mul(dtype.size_in_bytes())
-        .ok_or_else(|| Error::Persistence {
-            msg: format!("byte length overflow for dtype {dtype} dims {dims:?}"),
-        })
+    elems.checked_mul(dtype.size_in_bytes()).ok_or_else(|| {
+        Error::persistence(format!(
+            "byte length overflow for dtype {dtype} dims {dims:?}"
+        ))
+    })
 }
 
 /// Map a crate [`DType`] to the safetensors [`Dtype`](safetensors::Dtype).
@@ -135,11 +133,9 @@ pub(crate) fn from_st_dtype(dtype: StDtype) -> Result<DType> {
         StDtype::I64 => DType::I64,
         StDtype::BOOL => DType::Bool,
         other => {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "unsupported safetensors dtype {other:?} (not one of the crate's six)"
-                ),
-            });
+            return Err(Error::persistence(format!(
+                "unsupported safetensors dtype {other:?} (not one of the crate's six)"
+            )));
         }
     })
 }

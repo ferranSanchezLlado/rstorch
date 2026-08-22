@@ -845,6 +845,86 @@ fn grad_stack_splits_the_cotangent_per_input() {
 }
 
 #[test]
+fn grad_repeat_sums_over_the_tiled_copies() {
+    // `repeat` is built from `cat`, which records one edge per occurrence of
+    // the *same* node, and `backward` sums every edge that targets one node.
+    // So a tiled element's gradient is the sum over its tiles — not the
+    // cotangent of one tile, and not the last one to be written.
+    let x = t_f32(&[1.0, 2.0], [2]).traced().unwrap();
+    let out = x.repeat(&[3]).unwrap();
+    assert_eq!(out.dims(), &[6]);
+    assert_eq!(
+        out.to_vec::<f32>().unwrap(),
+        vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+    );
+    let g = out.sum_all().unwrap().backward().unwrap();
+    // d(Σ repeat(x, [3]))/dx = 3, once per copy.
+    assert_eq!(
+        g.wrt_input(&x).unwrap().to_vec::<f32>().unwrap(),
+        vec![3.0, 3.0]
+    );
+
+    // Powers of two as per-tile weights, so the sum names its summands: x₀
+    // collects w₀ + w₂ + w₄ = 21 and x₁ collects w₁ + w₃ + w₅ = 42. A
+    // backward that overwrote instead of accumulating could only report one
+    // of the three weights, and no partial sum aliases 21 or 42.
+    let w = t_f32(&[1.0, 2.0, 4.0, 8.0, 16.0, 32.0], [6]);
+    let x = t_f32(&[1.0, 2.0], [2]).traced().unwrap();
+    let g = x
+        .repeat(&[3])
+        .unwrap()
+        .mul(&w)
+        .unwrap()
+        .sum_all()
+        .unwrap()
+        .backward()
+        .unwrap();
+    assert_eq!(
+        g.wrt_input(&x).unwrap().to_vec::<f32>().unwrap(),
+        vec![21.0, 42.0]
+    );
+
+    // Multi-axis: every element appears r₀·r₁ = 6 times, so the two
+    // summations have to compose rather than one shadowing the other.
+    let x = t_f32(&[1.0, 2.0, 3.0, 4.0], [2, 2]).traced().unwrap();
+    let out = x.repeat(&[2, 3]).unwrap();
+    assert_eq!(out.dims(), &[4, 6]);
+    let g = out.sum_all().unwrap().backward().unwrap();
+    assert_eq!(
+        g.wrt_input(&x).unwrap().to_vec::<f32>().unwrap(),
+        vec![6.0; 4]
+    );
+
+    // A `reps` entry of 1 is the identity on its axis, so the multiplicity
+    // is the other axis's alone — 4, not 4·1 counted twice.
+    let x = t_f32(&[1.0, 2.0, 3.0, 4.0], [2, 2]).traced().unwrap();
+    let g = x
+        .repeat(&[1, 4])
+        .unwrap()
+        .sum_all()
+        .unwrap()
+        .backward()
+        .unwrap();
+    assert_eq!(
+        g.wrt_input(&x).unwrap().to_vec::<f32>().unwrap(),
+        vec![4.0; 4]
+    );
+
+    // …and finite differences through `pick`, which puts the cotangent in
+    // exactly one tile: the placement the summation has to get right.
+    let x = iota([2, 2]);
+    for flat in 0..16 {
+        check_grad(
+            move |xs| pick(&xs[0].repeat(&[2, 2])?, flat),
+            std::slice::from_ref(&x),
+            EPS,
+            TOL,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn grad_flows_through_a_chain_of_view_ops() {
     // The attention-style reshape/transpose chain, differentiated end to
     // end: a regression net for composing the inverses in the right order.

@@ -19,6 +19,20 @@ use crate::tensor::Tensor;
 /// The dtype the keep/drop mask is drawn in, whatever the input's dtype: the
 /// mask a given seed produces then depends only on the seed and the shape, so
 /// a model converted to `f16` drops exactly the same elements it did in `f32`.
+///
+/// Fixed at `f32` on purpose, with the cost understood: the draw is
+/// activation-sized and uploaded, so an `f16` activation moves twice its own
+/// bytes per dropout per step. Following the activation dtype would buy that
+/// bandwidth back by spending accuracy. `MASK_DTYPE` is the precision of the
+/// uniform draws and of the `p` they are compared against, and `f16` neither
+/// represents a typical `p` exactly (`0.1` becomes `0.0999755859375`) nor
+/// resolves `[0.5, 1)` more finely than `2^-11`, so the realized drop rate
+/// shifts and a different set of elements drops. It would also cost the
+/// property above — the same seed would stop dropping the same positions once a
+/// model is converted. The scale factor is not the issue: `1/(1 - p)` is
+/// applied by `mul_scalar` in the activation's own dtype and never touches this
+/// constant. Either way the numbers move, so this is a pre-1.0 decision or
+/// never, and it is deliberately not changed.
 const MASK_DTYPE: DType = DType::F32;
 
 /// Zero each element independently with probability `p` during training, and
@@ -93,6 +107,8 @@ impl Dropout {
 }
 
 impl Forward for Dropout {
+    type Output = Tensor;
+
     /// Apply the mask under a training [`Mode`]; return `x` unchanged
     /// otherwise (and for `p == 0`, which has nothing to drop).
     ///
@@ -142,7 +158,7 @@ impl std::fmt::Debug for Dropout {
 mod tests {
     use super::*;
     use crate::device::Device;
-    use crate::nn::{self, Module};
+    use crate::nn::{self, Module, ModuleExt};
     use crate::testing::check_grad;
 
     const CPU: Device = Device::Cpu;
@@ -306,21 +322,39 @@ mod tests {
     }
 
     #[test]
-    fn the_mask_is_independent_of_the_input_dtype() {
-        // The mask is drawn in f32 whatever the activation dtype, so the same
-        // seed drops the same positions in f64.
+    fn the_mask_dtype_is_pinned_so_the_mask_is_independent_of_the_input_dtype() {
+        // Not an accident of the implementation: `MASK_DTYPE` is deliberately
+        // f32 whatever the activation dtype, so one seed drops one set of
+        // positions and a model converted to f64 or f16 keeps dropping exactly
+        // those. Drawing the mask in the activation's dtype would buy back the
+        // upload bandwidth (an f16 activation moves twice its own bytes here)
+        // and break this: f16 cannot hold a typical `p` exactly, so the
+        // comparison `draw < p` would select differently.
         let x32 = ones(256);
         let x64 = Tensor::ones([256], DType::F64, &CPU).unwrap();
-        let y32 = v(&dropout(0.5, 9).forward(&x32, Mode::TRAIN).unwrap());
-        let y64 = dropout(0.5, 9).forward(&x64, Mode::TRAIN).unwrap();
-        let zeros32: Vec<bool> = y32.iter().map(|&value| value == 0.0).collect();
-        let zeros64: Vec<bool> = y64
+        let x16 = Tensor::ones([256], DType::F16, &CPU).unwrap();
+        let dropped32: Vec<bool> = v(&dropout(0.5, 9).forward(&x32, Mode::TRAIN).unwrap())
+            .iter()
+            .map(|&value| value == 0.0)
+            .collect();
+        let dropped64: Vec<bool> = dropout(0.5, 9)
+            .forward(&x64, Mode::TRAIN)
+            .unwrap()
             .to_vec::<f64>()
             .unwrap()
             .iter()
             .map(|&value| value == 0.0)
             .collect();
-        assert_eq!(zeros32, zeros64);
+        let dropped16: Vec<bool> = dropout(0.5, 9)
+            .forward(&x16, Mode::TRAIN)
+            .unwrap()
+            .to_vec::<half::f16>()
+            .unwrap()
+            .iter()
+            .map(|&value| value == half::f16::ZERO)
+            .collect();
+        assert_eq!(dropped32, dropped64);
+        assert_eq!(dropped32, dropped16);
     }
 
     // ---- gradients and structure -----------------------------------------
@@ -404,8 +438,8 @@ mod tests {
     #[test]
     fn the_layer_holds_no_parameters_and_no_buffers() {
         let d = dropout(0.5, 11);
-        assert!(nn::state_dict(&d).is_empty(), "rng must not be a leaf");
-        assert_eq!(nn::num_params(&d), 0);
+        assert!(d.state_dict().is_empty(), "rng must not be a leaf");
+        assert_eq!(d.num_params(), 0);
         let mut visited = 0;
         d.visit(&mut nn::Visitor::new(&mut |_, _| visited += 1));
         assert_eq!(visited, 0);

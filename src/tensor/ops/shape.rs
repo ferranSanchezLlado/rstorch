@@ -1,5 +1,6 @@
 //! Shape and view operations: `reshape`, `transpose`, `permute`,
-//! `squeeze`, `unsqueeze`, `narrow`, `broadcast_to`, `cat`, `stack`.
+//! `squeeze`, `unsqueeze`, `narrow`, `broadcast_to`, `cat`, `stack`,
+//! `repeat`, `split` and `chunk`.
 //!
 //! # Views and contiguity
 //!
@@ -29,6 +30,8 @@
 //! | `narrow(a, s, l)` | zero-pad back to the source size |
 //! | `broadcast_to(t)` | `sum_to(source dims)` |
 //! | `cat` / `stack` | `narrow` the cotangent, one region per input |
+//! | `repeat` | none of its own — it is `cat` of the same tensor, and the engine sums the one input's several parent slots, so the cotangent adds over the repeats |
+//! | `split` / `chunk` | none of their own — each piece is a `narrow`, and the engine sums the pieces' zero-padded cotangents back onto the source |
 //!
 //! No backward closure captures a tensor: they close over dimensions, axis
 //! indices, the dtype and the device only, which trivially satisfies the
@@ -202,11 +205,10 @@ impl Tensor {
     /// count (`PyTorch` `reshape` semantics).
     ///
     /// Returns a zero-copy view whenever the source layout admits one — always
-    /// for a contiguous tensor, and for strided ones when the merged/split
-    /// axes line up with contiguous runs. Otherwise the source is materialized
-    /// into a fresh contiguous buffer first. Use
-    /// [`is_contiguous`](Tensor::is_contiguous) if you need to know which
-    /// happened.
+    /// for a row-major source, and for strided ones when the merged/split axes
+    /// line up with dense runs. Otherwise the source is materialized into a
+    /// fresh buffer first. Which of the two happened is deliberately not
+    /// observable: it is an allocation choice, not part of the contract.
     ///
     /// # Errors
     ///
@@ -444,8 +446,8 @@ impl Tensor {
     /// allowed). Every input must share the dtype, the device, the rank and
     /// every dimension other than `axis`.
     ///
-    /// The result is a fresh contiguous tensor — it cannot be a view of
-    /// several disjoint buffers.
+    /// The result is a fresh allocation — it cannot be a view of several
+    /// disjoint buffers.
     ///
     /// # Errors
     ///
@@ -566,6 +568,134 @@ impl Tensor {
                     .collect()
             }),
         ))
+    }
+
+    // ---- repeat / split / chunk ------------------------------------------
+
+    /// Tile the whole tensor: axis `a` of the result has length
+    /// `dims()[a] * reps[a]` (`PyTorch`'s `repeat`, restricted to the same
+    /// rank — unlike `PyTorch`, this does not prepend axes for a shorter
+    /// `reps`, so a rank mismatch is a loud error rather than an implicit
+    /// reshape).
+    ///
+    /// Built as repeated [`cat`](Tensor::cat) of `self` with itself, one axis
+    /// at a time. That is also what makes the gradient free and correct
+    /// without a dedicated backward: `cat` records one edge per occurrence of
+    /// the *same* input node, and [`backward`](Tensor::backward) already sums
+    /// every edge that targets one node (the same mechanism weight tying
+    /// relies on) — so the cotangent naturally adds back the `reps[a]` tiled
+    /// copies onto `self`.
+    ///
+    /// # Errors
+    /// [`Error::RankMismatch`] if `reps.len()` is not this tensor's rank.
+    ///
+    /// ```
+    /// use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![1.0f32, 2.0], [2], &Device::Cpu)?;
+    /// assert_eq!(x.repeat(&[3])?.to_vec::<f32>()?, vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn repeat(&self, reps: &[usize]) -> Result<Tensor> {
+        const OP: &str = "repeat";
+        if reps.len() != self.rank() {
+            return Err(Error::RankMismatch {
+                op: OP,
+                expected: self.rank(),
+                got: reps.len(),
+            });
+        }
+        let mut cur = self.clone();
+        for (axis, &r) in reps.iter().enumerate() {
+            if r == 1 {
+                continue;
+            }
+            if r == 0 {
+                cur = cur.narrow(axis as isize, 0, 0)?;
+                continue;
+            }
+            let copies: Vec<&Tensor> = std::iter::repeat_n(&cur, r).collect();
+            cur = Tensor::cat(&copies, axis as isize)?;
+        }
+        Ok(cur)
+    }
+
+    /// Split into consecutive, exactly-sized pieces along `axis`: the `i`-th
+    /// output has length `sizes[i]`, and the lengths must sum to the axis
+    /// size exactly (`PyTorch`'s `split` with an explicit size list).
+    ///
+    /// # Errors
+    /// [`Error::InvalidAxis`] if `axis` is out of range,
+    /// [`Error::InvalidArg`] if `sizes` does not sum to the axis length.
+    ///
+    /// ```
+    /// use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0], [5], &Device::Cpu)?;
+    /// let parts = x.split(&[2, 3], 0)?;
+    /// assert_eq!(parts[0].to_vec::<f32>()?, vec![1.0, 2.0]);
+    /// assert_eq!(parts[1].to_vec::<f32>()?, vec![3.0, 4.0, 5.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn split(&self, sizes: &[usize], axis: isize) -> Result<Vec<Tensor>> {
+        const OP: &str = "split";
+        let ax = self.shape().resolve_axis(axis, OP)?;
+        let axis_len = self.dims()[ax];
+        let total: usize = sizes.iter().sum();
+        if total != axis_len {
+            return Err(Error::InvalidArg {
+                op: OP,
+                msg: format!("split sizes sum to {total}, but axis {ax} has length {axis_len}"),
+            });
+        }
+        let mut start = 0;
+        let mut out = Vec::with_capacity(sizes.len());
+        for &len in sizes {
+            out.push(self.narrow(ax as isize, start, len)?);
+            start += len;
+        }
+        Ok(out)
+    }
+
+    /// Split into at most `n` pieces along `axis`, each of size
+    /// `ceil(axis_len / n)` except the last, which holds the remainder
+    /// (`PyTorch`'s `chunk`) — the non-dividing case yields *fewer than `n`*
+    /// pieces rather than an empty trailing one. An empty axis is the one
+    /// edge case: it yields a single empty piece rather than zero pieces, so
+    /// callers never have to special-case an empty result `Vec`.
+    ///
+    /// # Errors
+    /// [`Error::InvalidAxis`] if `axis` is out of range,
+    /// [`Error::InvalidArg`] if `n` is zero.
+    ///
+    /// ```
+    /// use rstorch::{Device, Tensor};
+    /// let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0], [5], &Device::Cpu)?;
+    /// let parts = x.chunk(2, 0)?;
+    /// assert_eq!(parts[0].to_vec::<f32>()?, vec![1.0, 2.0, 3.0]);
+    /// assert_eq!(parts[1].to_vec::<f32>()?, vec![4.0, 5.0]);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    pub fn chunk(&self, n: usize, axis: isize) -> Result<Vec<Tensor>> {
+        const OP: &str = "chunk";
+        if n == 0 {
+            return Err(Error::InvalidArg {
+                op: OP,
+                msg: "chunk count must be non-zero".to_owned(),
+            });
+        }
+        let ax = self.shape().resolve_axis(axis, OP)?;
+        let axis_len = self.dims()[ax];
+        let chunk_size = axis_len.div_ceil(n).max(1);
+        let mut out = Vec::new();
+        let mut start = 0;
+        while start < axis_len {
+            let len = chunk_size.min(axis_len - start);
+            out.push(self.narrow(ax as isize, start, len)?);
+            start += len;
+        }
+        if out.is_empty() {
+            out.push(self.narrow(ax as isize, 0, 0)?);
+        }
+        Ok(out)
     }
 }
 

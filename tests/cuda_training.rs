@@ -15,6 +15,8 @@ struct Mlp {
 }
 
 impl Forward for Mlp {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         self.second
             .forward(&self.first.forward(x, mode)?.gelu()?, mode)
@@ -56,14 +58,7 @@ fn seeded_mlp_and_transformer_losses_decrease_on_cuda() -> Result<()> {
     eprintln!("cuda MLP final loss: {last}");
     assert!(last < first, "MLP loss did not decrease: {first} -> {last}");
 
-    let config = TransformerConfig {
-        vocab_size: 6,
-        max_seq_len: 3,
-        embed_dim: 4,
-        num_heads: 2,
-        num_layers: 1,
-        feed_forward_dim: 8,
-    };
+    let config = TransformerConfig::new(6, 3, 4, 2, 1).with_feed_forward_dim(8);
     let mut transformer = DecoderTransformer::new(config, &CUDA, &mut Rng::seed(7))?;
     let ids = Tensor::from_vec(vec![0i64, 1, 2, 1, 2, 3], [2, 3], &CUDA)?;
     let targets = Tensor::from_vec(vec![1i64, 2, 3, 2, 3, 4], [6], &CUDA)?;
@@ -96,6 +91,8 @@ struct Cnn {
 }
 
 impl Forward for Cnn {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let features = x
             .conv2d(&self.weight.get(mode), (1, 1), (0, 0), (1, 1))?

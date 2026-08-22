@@ -1,4 +1,5 @@
 use super::{Linear, Mode, ToDType, ToDevice};
+use crate::nn::ModuleExt as _;
 use crate::nn::{merge_heads, split_heads};
 use crate::typed::device::validate_binding;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
@@ -385,7 +386,7 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
         } else {
             crate::nn::MultiHeadAttention::new_without_bias(EMBED, HEADS, &ctx.device(), rng)?
         };
-        let state = crate::nn::state_dict(&runtime);
+        let state = runtime.state_dict();
         Ok(Self {
             q_proj: projection_from_runtime_state("q_proj", &state, ctx)?,
             k_proj: projection_from_runtime_state("k_proj", &state, ctx)?,
@@ -858,7 +859,8 @@ mod tests {
                 .unwrap()
                 .paths()
                 .collect::<Vec<_>>(),
-            crate::nn::state_dict(&runtime)
+            runtime
+                .state_dict()
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>()

@@ -3,6 +3,7 @@
 //! files against the same model driven through the dynamic API.
 
 use super::*;
+use crate::nn::ModuleExt as _;
 use crate::typed::nn::{Mode, TypedBuffer, TypedModule, TypedParam, TypedVisitor, TypedVisitorMut};
 use crate::typed::{DeviceCtx, FloatElement, NumericElement, Tensor1};
 use crate::{Error, Tensor};
@@ -92,7 +93,7 @@ fn sgd_groups_frozen_parameters_and_missing_grads_match_runtime_behavior() {
     let before = values(&model);
     let grads = loss(&model, false).backward().unwrap();
     let error = sgd_step(&mut optimizer, &mut model, grads).unwrap_err();
-    assert!(matches!(error, Error::MissingGrad { path } if path == "second"));
+    assert!(matches!(error, Error::MissingGrad { op: "step", path } if path == "second"));
     assert_eq!(values(&model), before);
 }
 
@@ -425,24 +426,23 @@ fn malformed_optimizer_rolls_back_a_valid_combined_model_load() {
 
 /// `rollback_error` is only rendered when a rollback *also* fails, which no
 /// reachable input produces today, so its wording is pinned directly rather
-/// than left as the one message in this module that nothing ever formats.
+/// than left as the one message in this module that nothing ever formats. The
+/// optimizer failure is deliberately absent from the text — it is the
+/// `source`, and splicing it in would make a chain-walking reporter say it
+/// twice.
 #[test]
-fn a_failed_rollback_reports_both_causes() {
-    let rendered = rollback_error(
-        Error::Persistence {
-            msg: "optimizer half broke".into(),
-        },
-        Error::Persistence {
-            msg: "model half broke".into(),
-        },
-    )
-    .to_string();
-    assert_eq!(
-        rendered,
-        "persistence: combined checkpoint optimizer load failed \
-         (persistence: optimizer half broke); model rollback failed \
-         (persistence: model half broke)"
+fn a_failed_rollback_names_the_rollback_and_sources_the_optimizer() {
+    let error = rollback_error(
+        Error::persistence("optimizer half broke"),
+        Error::persistence("model half broke"),
     );
+    assert_eq!(
+        error.to_string(),
+        "persistence: combined checkpoint optimizer load failed, and restoring \
+         the model snapshot then failed too: persistence: model half broke"
+    );
+    let cause = std::error::Error::source(&error).expect("the optimizer failure is the cause");
+    assert_eq!(cause.to_string(), "persistence: optimizer half broke");
 }
 
 #[test]
@@ -493,7 +493,7 @@ fn a_parameter_the_optimizer_never_updated_reports_a_zero_clock() {
 
 fn save_dynamic_model(model: &mut Pair, envelope: &mut Envelope) {
     let adapter = RuntimeModuleAdapter::new(model);
-    for (path, value) in crate::nn::state_dict(&adapter) {
+    for (path, value) in adapter.state_dict() {
         envelope.insert_tensor(path, crate::checkpoint::to_host_tensor(&value).unwrap());
     }
 }

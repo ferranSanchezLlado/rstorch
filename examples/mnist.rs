@@ -24,35 +24,33 @@ const MIN_LEARNING_RATE: f64 = 3e-4;
 
 #[derive(Module)]
 struct Cnn {
-    conv_weight: Param,
-    conv_bias: Param,
+    conv: Conv2d,
+    pool: MaxPool2d,
+    flatten: Flatten,
     classifier: Linear,
 }
 
 impl Cnn {
     fn new(device: &Device, rng: &mut Rng) -> Result<Cnn> {
-        let fan_in = 3 * 3;
-        let bound = (6.0 / fan_in as f64).sqrt();
-        let weights = (0..CHANNELS * fan_in)
-            .map(|_| rng.uniform(-bound, bound) as f32)
-            .collect();
         Ok(Cnn {
-            conv_weight: Param::new(Tensor::from_vec(weights, [CHANNELS, 1, 3, 3], device)?),
-            conv_bias: Param::new(Tensor::zeros([CHANNELS, 1, 1], DType::F32, device)?),
+            conv: Conv2d::new(1, CHANNELS, (3, 3), device, rng)?.with_padding((1, 1)),
+            pool: MaxPool2d::new((2, 2)),
+            flatten: Flatten::new(),
             classifier: Linear::new(CHANNELS * POOLED_SIDE * POOLED_SIDE, CLASSES, device, rng)?,
         })
     }
 }
 
 impl Forward for Cnn {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
-        let batch = x.dims()[0];
-        let features = x
-            .conv2d(&self.conv_weight.get(mode), (1, 1), (1, 1), (1, 1))?
-            .add(&self.conv_bias.get(mode))?
-            .relu()?
-            .max_pool2d((2, 2), (2, 2), (0, 0))?
-            .reshape([batch, CHANNELS * POOLED_SIDE * POOLED_SIDE])?;
+        let features = self.flatten.forward(
+            &self
+                .pool
+                .forward(&self.conv.forward(x, mode)?.relu()?, mode)?,
+            mode,
+        )?;
         self.classifier.forward(&features, mode)
     }
 }

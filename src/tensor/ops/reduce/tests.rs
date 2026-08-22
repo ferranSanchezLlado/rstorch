@@ -191,6 +191,101 @@ fn integer_reductions_stay_integer() {
 }
 
 // ------------------------------------------------------------------
+// Forward: prod / norm
+// ------------------------------------------------------------------
+
+#[test]
+fn prod_multiplies_each_line_and_the_whole_tensor() {
+    let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+
+    // Row products (1·2·3, 4·5·6), then column products.
+    let rows = x.prod(1).unwrap();
+    assert_eq!(rows.dims(), &[2]);
+    assert_eq!(v(&rows), vec![6.0, 120.0]);
+    let cols = x.prod(0).unwrap();
+    assert_eq!(cols.dims(), &[3]);
+    assert_eq!(v(&cols), vec![4.0, 10.0, 18.0]);
+
+    // keepdim holds the reduced axis at 1 with the same numbers, and the
+    // negative axis is the same axis.
+    let k = x.prod_keepdim(1).unwrap();
+    assert_eq!(k.dims(), &[2, 1]);
+    assert_eq!(v(&k), vec![6.0, 120.0]);
+    let k0 = x.prod_keepdim(-2).unwrap();
+    assert_eq!(k0.dims(), &[1, 3]);
+    assert_eq!(v(&k0), vec![4.0, 10.0, 18.0]);
+
+    // `prod_all` is 6! as a rank-0 scalar, and it agrees with reducing one
+    // axis after the other.
+    let all = x.prod_all().unwrap();
+    assert_eq!(all.rank(), 0);
+    assert_eq!(all.item().unwrap(), 720.0);
+    assert_eq!(x.prod(1).unwrap().prod(0).unwrap().item().unwrap(), 720.0);
+
+    // A single zero anywhere annihilates the line it is on, and only that
+    // line; negative signs multiply through.
+    let z = t(&[1.0, 0.0, 3.0, -4.0, 5.0, -6.0], [2, 3]);
+    assert_eq!(v(&z.prod(1).unwrap()), vec![0.0, 120.0]);
+    assert_eq!(z.prod_all().unwrap().item().unwrap(), 0.0);
+    assert_eq!(
+        t(&[-2.0, 3.0, -4.0], [3]).prod(0).unwrap().item().unwrap(),
+        24.0
+    );
+
+    // Integers stay integers.
+    let i = Tensor::from_vec(vec![2i64, 3, 4], [3], &CPU).unwrap();
+    let p = i.prod(0).unwrap();
+    assert_eq!(p.dtype(), DType::I64);
+    assert_eq!(p.to_scalar::<i64>().unwrap(), 24);
+    assert_eq!(i.prod_all().unwrap().to_scalar::<i64>().unwrap(), 24);
+}
+
+#[test]
+fn norm_is_the_p_norm_and_refuses_a_degenerate_p() {
+    let x = t(&[3.0, 4.0], [2]);
+    // The 3-4-5 triangle, and the L1 norm of the same vector.
+    assert!((x.norm(0, 2.0).unwrap().item().unwrap() - 5.0).abs() < 1e-6);
+    assert!((x.norm(0, 1.0).unwrap().item().unwrap() - 7.0).abs() < 1e-6);
+    // Any other `p` routes through `pow`: (3³ + 4³)^(1/3) = 91^(1/3).
+    let p3 = x.norm(0, 3.0).unwrap().item().unwrap();
+    assert!((p3 - 91.0f64.cbrt()).abs() < 1e-5, "norm(0, 3.0) = {p3}");
+
+    // `|x|` before the power, so the signs are absorbed on all three routes.
+    let s = t(&[-3.0, 4.0], [2]);
+    assert!((s.norm(0, 2.0).unwrap().item().unwrap() - 5.0).abs() < 1e-6);
+    assert!((s.norm(0, 1.0).unwrap().item().unwrap() - 7.0).abs() < 1e-6);
+    assert!((s.norm(0, 3.0).unwrap().item().unwrap() - 91.0f64.cbrt()).abs() < 1e-5);
+
+    // Per line, and the keepdim spelling.
+    let m = t(&[3.0, 4.0, 6.0, 8.0], [2, 2]);
+    close(&v(&m.norm(1, 2.0).unwrap()), &[5.0, 10.0], 1e-5);
+    let k = m.norm_keepdim(1, 2.0).unwrap();
+    assert_eq!(k.dims(), &[2, 1]);
+    close(&v(&k), &[5.0, 10.0], 1e-5);
+
+    // `p = ∞` is *not* a spelling of the max-norm. Unguarded it sails
+    // through — |x|^∞ ∈ {0, 1, ∞}, the outer exponent is 1/∞ = 0, and
+    // `powf(_, 0) = 1` — and returns all ones with a zero gradient, which
+    // is exactly the silent wrong answer this rejection exists to prevent.
+    for p in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 0.0, -1.0] {
+        assert!(
+            matches!(x.norm(0, p), Err(Error::InvalidArg { op: "norm", .. })),
+            "norm(0, {p}) should be an InvalidArg"
+        );
+        assert!(
+            matches!(
+                x.norm_keepdim(0, p),
+                Err(Error::InvalidArg {
+                    op: "norm_keepdim",
+                    ..
+                })
+            ),
+            "norm_keepdim(0, {p}) should be an InvalidArg"
+        );
+    }
+}
+
+// ------------------------------------------------------------------
 // Forward: var / std
 // ------------------------------------------------------------------
 
@@ -799,6 +894,87 @@ fn grad_softmax_and_log_softmax() {
     fd(|xs| xs[0].log_softmax(-1)?.mul(&w)?.sum_all(), &x);
     // Along the leading axis too.
     fd(|xs| xs[0].softmax(0)?.mul(&w)?.sum_all(), &x);
+}
+
+#[test]
+fn grad_prod_matches_finite_differences_away_from_zero() {
+    // No element is zero, so a central difference is meaningful and the
+    // leave-one-out product is finite and non-degenerate in every slot.
+    let x = t(&[1.5, -2.0, 0.5, 3.0, -1.25, 2.5], [2, 3]);
+    let w = weights(&[2]);
+    fd(|xs| xs[0].prod(1)?.mul(&w)?.sum_all(), &x);
+    let w0 = weights(&[3]);
+    fd(|xs| xs[0].prod(0)?.mul(&w0)?.sum_all(), &x);
+    fd(|xs| xs[0].prod_all(), &x);
+
+    let wk = weights(&[2, 1]);
+    fd(|xs| xs[0].prod_keepdim(1)?.mul(&wk)?.sum_all(), &x);
+}
+
+/// `∂∏/∂xₖ = ∏_{j≠k} xⱼ`, which is finite everywhere — a product is
+/// multilinear — including at a zero, where it is generally *not* zero.
+/// Computing it as `∏/xₖ` is `0/0` exactly there, so the leave-one-out
+/// product has to be built directly. Finite differences cannot police this:
+/// the wrong answer was `NaN`, and `NaN` is not a number a central
+/// difference disagrees with. Hence values.
+#[test]
+fn grad_prod_builds_the_leave_one_out_product_at_a_zero() {
+    /// The gradient of the (scalarized) output of `f` w.r.t. `x`, flattened.
+    fn grad(x: &Tensor, f: impl Fn(&Tensor) -> Result<Tensor>) -> Vec<f32> {
+        let traced = x.traced().unwrap();
+        let out = f(&traced).unwrap();
+        let grads = out.sum_all().unwrap().backward().unwrap();
+        v(&grads.wrt_input(&traced).unwrap())
+    }
+
+    // No zero: every slot receives the product of the others — 3·4, 2·4, 2·3.
+    assert_eq!(
+        grad(&t(&[2.0, 3.0, 4.0], [3]), |x| x.prod(0)),
+        vec![12.0, 8.0, 6.0]
+    );
+    // Exactly one zero: the zero slot alone is sensitive, and it receives
+    // the product of the others (2·4 = 8). Every other slot is flat, because
+    // its own leave-one-out product still contains the zero.
+    assert_eq!(
+        grad(&t(&[2.0, 0.0, 4.0], [3]), |x| x.prod(0)),
+        vec![0.0, 8.0, 0.0]
+    );
+    // Two zeros: no leave-one-out product escapes them, so the whole
+    // gradient is zero.
+    assert_eq!(
+        grad(&t(&[0.0, 0.0, 4.0], [3]), |x| x.prod(0)),
+        vec![0.0, 0.0, 0.0]
+    );
+    // Per line, and neither line's zero count leaks into the other: row 0
+    // has none, row 1 has one.
+    assert_eq!(
+        grad(&t(&[2.0, 3.0, 0.0, 5.0], [2, 2]), |x| x.prod(1)),
+        vec![3.0, 2.0, 5.0, 0.0]
+    );
+    // The keepdim spelling goes through the same backward.
+    assert_eq!(
+        grad(&t(&[2.0, 0.0], [1, 2]), |x| x.prod_keepdim(1)),
+        vec![0.0, 2.0]
+    );
+}
+
+#[test]
+fn grad_norm_flows_through_its_composition() {
+    // Every element away from zero: `|x|` has a kink there and the p-norm
+    // inherits it, so finite differences need to stay off it.
+    let x = t(&[1.5, -2.0, 0.5, 3.0, -1.25, 2.5], [2, 3]);
+    let w = weights(&[2]);
+    // p = 2 (mul + sum + sqrt) and p = 1 (abs + sum): the two special-cased
+    // routes that never touch `pow`.
+    fd(|xs| xs[0].norm(1, 2.0)?.mul(&w)?.sum_all(), &x);
+    fd(|xs| xs[0].norm(1, 1.0)?.mul(&w)?.sum_all(), &x);
+    // …and a `p` that does, twice: `|x|^p` and then the outer `^(1/p)`.
+    fd(|xs| xs[0].norm(1, 3.0)?.mul(&w)?.sum_all(), &x);
+
+    let w0 = weights(&[3]);
+    fd(|xs| xs[0].norm(0, 2.0)?.mul(&w0)?.sum_all(), &x);
+    let wk = weights(&[2, 1]);
+    fd(|xs| xs[0].norm_keepdim(-1, 2.0)?.mul(&wk)?.sum_all(), &x);
 }
 
 #[test]

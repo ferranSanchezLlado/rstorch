@@ -8,7 +8,7 @@
 use crate::device::Device;
 use crate::dtype::DType;
 use crate::error::{Error, Result};
-use crate::nn::{Mode, Module, Param};
+use crate::nn::{Mode, Module, ModuleExt, Param};
 use crate::persist::Envelope;
 use crate::tensor::Tensor;
 
@@ -172,7 +172,7 @@ impl Net {
 
     /// Every parameter's value, in `state_dict` (sorted-path) order.
     pub(crate) fn snapshot(&self) -> Vec<(String, f32)> {
-        crate::nn::state_dict(self)
+        self.state_dict()
             .into_iter()
             .map(|(path, tensor)| (path, values(&tensor)[0]))
             .collect()

@@ -162,13 +162,11 @@ impl Mnist {
         let parsed = parse_idx_images(images)?;
         let labels = parse_idx_labels(labels)?;
         if parsed.images.len() != labels.len() {
-            return Err(Error::Data {
-                msg: format!(
-                    "MNIST image/label count mismatch: {} images vs {} labels",
-                    parsed.images.len(),
-                    labels.len()
-                ),
-            });
+            return Err(Error::data(format!(
+                "MNIST image/label count mismatch: {} images vs {} labels",
+                parsed.images.len(),
+                labels.len()
+            )));
         }
         Ok(Self {
             images: parsed.images,
@@ -248,7 +246,7 @@ fn read_gzip(path: impl AsRef<std::path::Path>) -> Result<Vec<u8>> {
         .take(MAX_DECOMPRESSED_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_DECOMPRESSED_BYTES {
-        return Err(data_error(&format!(
+        return Err(Error::data(format!(
             "decompressed archive exceeds the {MAX_DECOMPRESSED_BYTES} byte cap"
         )));
     }
@@ -287,13 +285,13 @@ pub fn parse_idx_images(bytes: &[u8]) -> Result<RawImages> {
     }
     let image_len = rows
         .checked_mul(cols)
-        .ok_or_else(|| data_error("IDX image dimensions overflow"))?;
+        .ok_or_else(|| Error::data("IDX image dimensions overflow"))?;
     let payload = count
         .checked_mul(image_len)
-        .ok_or_else(|| data_error("IDX image byte count overflow"))?;
+        .ok_or_else(|| Error::data("IDX image byte count overflow"))?;
     let expected = 16usize
         .checked_add(payload)
-        .ok_or_else(|| data_error("IDX image byte count overflow"))?;
+        .ok_or_else(|| Error::data("IDX image byte count overflow"))?;
     if bytes.len() != expected {
         return parse_error("truncated IDX image data");
     }
@@ -327,7 +325,7 @@ pub fn parse_idx_labels(bytes: &[u8]) -> Result<Vec<u8>> {
     let count = read_u32(bytes, 4) as usize;
     let expected = 8usize
         .checked_add(count)
-        .ok_or_else(|| data_error("IDX label byte count overflow"))?;
+        .ok_or_else(|| Error::data("IDX label byte count overflow"))?;
     if bytes.len() != expected {
         return parse_error("truncated IDX label data");
     }
@@ -338,14 +336,8 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
-fn data_error(message: &str) -> Error {
-    Error::Data {
-        msg: message.to_owned(),
-    }
-}
-
 fn parse_error<T>(message: &str) -> Result<T> {
-    Err(data_error(message))
+    Err(Error::data(message))
 }
 
 #[cfg(test)]
@@ -463,7 +455,7 @@ mod tests {
 
         let err = read_gzip(&path).expect_err("over-cap archive must be rejected");
         assert!(
-            matches!(&err, Error::Data { msg } if msg.contains("exceeds")),
+            matches!(&err, Error::Data { msg, .. } if msg.contains("exceeds")),
             "expected a cap error, got {err:?}"
         );
 

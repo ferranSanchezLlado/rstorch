@@ -1,0 +1,75 @@
+# The dependency gate. It runs in the `deny` job of both
+# `.github/workflows/ci.yml` (integration branches and their PRs) and
+# `.github/workflows/release.yml` (tag pushes, which ci.yml's branch filters do
+# not match). Run it locally exactly as CI does:
+#
+#     cargo deny check advisories licenses bans sources
+
+[graph]
+# The crate's default feature set is `metal` alone, so a feature-blind graph
+# would hide cudarc, wgpu, ureq and everything under them. A release gate has to
+# see every dependency the manifest can pull, and all targets, or `block` (macOS
+# only) and `cudarc` (Linux/Windows only) never get checked.
+all-features = true
+
+[advisories]
+# A RustSec advisory or a yanked release is a release blocker at 1.0.0. There is
+# one accepted exception, named here with its reasoning — everything else is a
+# blocker, not a candidate for a quiet `ignore` entry.
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2024-0436: `paste` (unmaintained) reaches the tree only via
+    # `wgpu-hal 26.0.6 -> metal 0.32.0` on the macOS Metal feature of `wgpu`;
+    # rstorch's own Metal backend (`objc2`/`objc2-metal`) does not depend on
+    # it. It is upstream's to fix (the same `wgpu-hal -> metal 0.32` edge the
+    # `[bans]` future-incompat note below already tracks); watched, not
+    # vendored around.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+# rstorch itself is `MIT OR Apache-2.0`. Every entry below is a license the
+# resolved tree actually needs — the list was derived from the tree, not copied
+# from a permissive template, and each line names the crates that require it.
+allow = [
+    "MIT",                            # the bulk of the tree
+    "Apache-2.0",                     # the other half of nearly every dual license
+    "Apache-2.0 WITH LLVM-exception", # rustix, linux-raw-sys, wasi, wasip2, wit-bindgen
+    "ISC",                            # libloading (cudarc + wgpu dynamic loading), rustls-webpki, untrusted
+    "BSD-2-Clause",                   # zerocopy, zerocopy-derive
+    "BSD-3-Clause",                   # subtle, via ring in the `hub` TLS stack
+    "Zlib",                           # foldhash, slotmap, bytemuck: the wgpu stack
+    "Unicode-3.0",                    # the icu_* / zerovec / yoke family behind idna
+    "Unlicense",                      # memchr, aho-corasick, walkdir, same-file, termcolor
+    "CC0-1.0",                        # hexf-parse, naga's literal parser
+    "CDLA-Permissive-2.0",            # webpki-roots, the `hub` download path
+    "0BSD",                           # adler2, via flate2
+]
+# `ring 0.17` is `Apache-2.0 AND ISC`: a conjunction, and both halves are
+# allowed above, so it resolves without a per-crate clarification.
+
+[bans]
+# Duplicate versions are transitive facts of the wgpu, cudarc and ureq trees
+# (libloading 0.8 + 0.9, webpki-roots 0.26 + 1.0, foldhash 0.1 + 0.2,
+# r-efi 5 + 6). They cost compile time, not correctness, and no requirement in
+# this workspace can unify them, so they are reported and not gated.
+multiple-versions = "warn"
+# A `*` *version* requirement on a registry dependency would make the
+# lockfile the only thing pinning a build — deny that. `rstorch-derive`'s
+# dev-cycle back-reference to `rstorch` (`rstorch-derive/Cargo.toml:23`) and
+# `fixtures`'s reference are `path`-only with no version requirement at all,
+# which cargo-deny also calls a wildcard; both always resolve to this
+# workspace's own tree, never to a registry, so they are explicitly exempted
+# rather than silently tripping the same lint as an unpinned registry crate.
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = []
+# Future-incompat watch, deliberately not a gate: `block v0.1.6` reaches the
+# tree through `wgpu-hal 26.0.6 -> metal 0.32.0` and carries a rustc
+# future-incompatibility warning. It is upstream's to fix and ours to watch; the
+# note comes out when wgpu-hal stops depending on `metal 0.32`.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

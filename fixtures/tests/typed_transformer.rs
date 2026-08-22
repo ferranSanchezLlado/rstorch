@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use half::{bf16, f16};
 use rstorch::models::{DecoderTransformer, TransformerConfig};
-use rstorch::nn as dynamic_nn;
+use rstorch::nn::{self as dynamic_nn, ModuleExt};
 use rstorch::persist::{Envelope, Limits, LoadOptions};
 use rstorch::prelude::{DType, Device, Result, Rng, Tensor};
 use rstorch::typed::nn::{
@@ -59,14 +59,7 @@ type Mask = Tensor4<DYN, HEADS, DYN, DYN, bool>;
 type Logits = Tensor3<DYN, DYN, VOCAB>;
 
 fn config() -> TransformerConfig {
-    TransformerConfig {
-        vocab_size: VOCAB,
-        max_seq_len: MAX_SEQUENCE,
-        embed_dim: EMBED,
-        num_heads: HEADS,
-        num_layers: LAYERS,
-        feed_forward_dim: FF,
-    }
+    TransformerConfig::new(VOCAB, MAX_SEQUENCE, EMBED, HEADS, LAYERS).with_feed_forward_dim(FF)
 }
 
 fn checkpoint_path() -> PathBuf {
@@ -353,10 +346,7 @@ fn seeded_dynamic_and_typed_logits_gradients_paths_and_variable_shapes_agree() -
         .paths()
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let dynamic_paths = dynamic_nn::state_dict(&dynamic)
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    let dynamic_paths = dynamic.state_dict().keys().cloned().collect::<Vec<_>>();
     assert_eq!(typed_paths, dynamic_paths);
     assert!(typed_paths.contains(&"blocks.1.attention.k_proj.weight".to_string()));
 

@@ -198,18 +198,28 @@ impl Rule for AdamRule {
     }
 
     fn adopt(&mut self, base: &mut AdamGroup, incoming: &Incoming) -> Result<()> {
+        // The writer only ever emits 0 or 1 (`hypers`, above), and the fused
+        // kernel's own validator is exact, so anything else is a malformed
+        // file rather than a value to coerce — `0.5` or `nan` must not load
+        // silently as AdamW.
+        let saved_decoupled = match incoming.hyper("decoupled")? {
+            0.0 => false,
+            1.0 => true,
+            other => {
+                return Err(Error::persistence(format!(
+                    "optimizer state has decoupled={other}, which is neither 0 nor 1"
+                )));
+            }
+        };
         // A coupled-decay checkpoint and an AdamW are different algorithms, so
         // that is a rejection rather than a silent reconfiguration.
-        let saved_decoupled = incoming.hyper("decoupled")? != 0.0;
         if saved_decoupled != self.decoupled {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "optimizer state has decoupled={saved_decoupled}, loaded into an \
+            return Err(Error::persistence(format!(
+                "optimizer state has decoupled={saved_decoupled}, loaded into an \
                      optimizer with decoupled={} (Adam and AdamW apply weight decay \
                      differently; build the one the checkpoint was saved from)",
-                    self.decoupled
-                ),
-            });
+                self.decoupled
+            )));
         }
         base.beta1 = incoming.hyper("beta1")?;
         base.beta2 = incoming.hyper("beta2")?;
@@ -236,12 +246,10 @@ impl Rule for AdamRule {
             (None, _) => "m",
             (_, None) => "v",
         };
-        Err(Error::Persistence {
-            msg: format!(
-                "optimizer state for `{path}` is missing the `{missing}` moment \
+        Err(Error::persistence(format!(
+            "optimizer state for `{path}` is missing the `{missing}` moment \
                  (Adam keeps both or neither)"
-            ),
-        })
+        )))
     }
 }
 
@@ -864,7 +872,7 @@ mod tests {
         let loss = model.untraced_head_bias_loss(Mode::TRAIN).unwrap();
         let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
         assert!(
-            matches!(&err, Error::MissingGrad { path } if path == "head.bias"),
+            matches!(&err, Error::MissingGrad { op: "step", path } if path == "head.bias"),
             "{err}"
         );
         // Nothing moved, and no clock advanced — so a caught mistake can be
@@ -983,6 +991,72 @@ mod tests {
                 .load_state(&model, &envelope)
                 .is_ok()
         );
+    }
+
+    /// Rewrite one `hyper.*` line of a saved optimizer section.
+    fn with_hyper(envelope: &Envelope, key: &str, value: &str) -> Envelope {
+        let section = envelope.section("optimizer").unwrap();
+        let patched: String = section
+            .lines()
+            .map(|line| {
+                if line.starts_with(&format!("hyper.{key}=")) {
+                    format!("hyper.{key}={value}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut out = Envelope::new();
+        out.set_section("optimizer", &patched).unwrap();
+        for (k, t) in envelope.tensors() {
+            out.insert_tensor(k.clone(), t.clone());
+        }
+        out
+    }
+
+    #[test]
+    fn a_hyperparameter_out_of_range_is_rejected_at_load_not_at_the_next_step() {
+        let mut model = Net::ones();
+        let mut opt = Adam::new(0.1);
+        step(&mut opt, &mut model);
+        let mut envelope = Envelope::new();
+        opt.save_state(&model, &mut envelope).unwrap();
+
+        // Adopting these and failing later would leave an optimizer that can
+        // never step again and cannot be repaired, which is the opposite of
+        // the all-or-nothing load `optim`'s module docs promise.
+        for (key, value) in [("beta1", "nan"), ("beta2", "2"), ("eps", "-1")] {
+            let broken = with_hyper(&envelope, key, value);
+            let mut target = Adam::new(0.1);
+            assert!(
+                target.load_state(&model, &broken).is_err(),
+                "hyper.{key}={value} must be refused by the load itself"
+            );
+            // Refused before anything was adopted: the optimizer still steps.
+            step(&mut target, &mut model);
+        }
+    }
+
+    #[test]
+    fn a_decoupled_flag_that_is_neither_zero_nor_one_is_rejected() {
+        let mut model = Net::ones();
+        let mut opt = Adam::new(0.1);
+        step(&mut opt, &mut model);
+        let mut envelope = Envelope::new();
+        opt.save_state(&model, &mut envelope).unwrap();
+
+        // The writer only ever emits 0 or 1, so anything else is a malformed
+        // file — and `!= 0.0` would have quietly loaded both of these as
+        // AdamW.
+        for value in ["0.5", "nan"] {
+            let broken = with_hyper(&envelope, "decoupled", value);
+            let msg = Adam::new(0.1)
+                .load_state(&model, &broken)
+                .unwrap_err()
+                .to_string();
+            assert!(msg.contains("neither 0 nor 1"), "{value}: {msg}");
+        }
     }
 
     #[test]

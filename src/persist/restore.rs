@@ -102,16 +102,25 @@ pub fn stage(
 ) -> Result<StagedTensors> {
     // Detect unexpected paths first (cheap, and the loudest signal of a schema
     // mismatch) before touching any data.
-    if options.unexpected == UnexpectedPolicy::Reject {
-        let expected_paths: std::collections::BTreeSet<&str> =
-            schema.iter().map(|e| e.path.as_str()).collect();
-        for name in loaded.keys() {
-            if !expected_paths.contains(name.as_str()) {
-                return Err(Error::Persistence {
-                    msg: format!("unexpected tensor `{name}` in file (not in target schema)"),
-                });
+    //
+    // Matched exhaustively with no `_` arm, like `Error::with_op`: both policy
+    // enums are `#[non_exhaustive]` and expected to grow (a warn-and-continue
+    // policy is the named next one), and a wildcard here would silently route
+    // that new variant into the permissive branch instead of failing to
+    // compile where the decision has to be made.
+    match options.unexpected {
+        UnexpectedPolicy::Reject => {
+            let expected_paths: std::collections::BTreeSet<&str> =
+                schema.iter().map(|e| e.path.as_str()).collect();
+            for name in loaded.keys() {
+                if !expected_paths.contains(name.as_str()) {
+                    return Err(Error::persistence(format!(
+                        "unexpected tensor `{name}` in file (not in target schema)"
+                    )));
+                }
             }
         }
+        UnexpectedPolicy::Allow => {}
     }
 
     let mut entries = Vec::with_capacity(schema.len());
@@ -119,35 +128,33 @@ pub fn stage(
         match loaded.get(&exp.path) {
             Some(tensor) => {
                 if tensor.dtype() != exp.dtype {
-                    return Err(Error::Persistence {
-                        msg: format!(
-                            "tensor `{}` dtype mismatch: file has {}, target expects {}",
-                            exp.path,
-                            tensor.dtype(),
-                            exp.dtype
-                        ),
-                    });
+                    return Err(Error::persistence(format!(
+                        "tensor `{}` dtype mismatch: file has {}, target expects {}",
+                        exp.path,
+                        tensor.dtype(),
+                        exp.dtype
+                    )));
                 }
                 if tensor.dims() != exp.dims.as_slice() {
-                    return Err(Error::Persistence {
-                        msg: format!(
-                            "tensor `{}` shape mismatch: file has {:?}, target expects {:?}",
-                            exp.path,
-                            tensor.dims(),
-                            exp.dims
-                        ),
-                    });
+                    return Err(Error::persistence(format!(
+                        "tensor `{}` shape mismatch: file has {:?}, target expects {:?}",
+                        exp.path,
+                        tensor.dims(),
+                        exp.dims
+                    )));
                 }
                 entries.push((exp.path.clone(), tensor.clone()));
             }
-            None => {
-                if options.missing == MissingPolicy::Reject {
-                    return Err(Error::Persistence {
-                        msg: format!("missing tensor `{}` (expected by target)", exp.path),
-                    });
+            None => match options.missing {
+                MissingPolicy::Reject => {
+                    return Err(Error::persistence(format!(
+                        "missing tensor `{}` (expected by target)",
+                        exp.path
+                    )));
                 }
-                // allow-missing: leave the target's current value; do not stage.
-            }
+                // Leave the target's current value; do not stage.
+                MissingPolicy::Allow => {}
+            },
         }
     }
 

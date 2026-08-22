@@ -121,6 +121,60 @@ fn full_overflowing_shape_is_invalid_arg() {
 }
 
 #[test]
+fn like_constructors_inherit_shape_dtype_and_device() {
+    // A non-default dtype and a non-trivial shape, so inheriting them is
+    // observable rather than accidentally equal to the default.
+    let src = Tensor::full([2, 3], 9.0, DType::I64, &CPU).unwrap();
+
+    for (like, expected) in [
+        (src.zeros_like().unwrap(), 0i64),
+        (src.ones_like().unwrap(), 1),
+        (src.full_like(-4.5).unwrap(), -4),
+    ] {
+        assert_eq!(like.dims(), src.dims());
+        assert_eq!(like.dtype(), src.dtype());
+        assert_eq!(like.device(), src.device());
+        assert_eq!(like.to_vec::<i64>().unwrap(), vec![expected; 6]);
+    }
+
+    // Every dtype flavour, not just the integer one above.
+    for dtype in [DType::F32, DType::F64, DType::F16, DType::BF16, DType::Bool] {
+        let src = Tensor::zeros([4], dtype, &CPU).unwrap();
+        assert_eq!(src.ones_like().unwrap().dtype(), dtype);
+        assert_eq!(src.ones_like().unwrap().device(), CPU);
+    }
+
+    // Device inheritance is only distinguishable from "defaults to CPU" when a
+    // second device exists, so assert it against a Metal source when one is
+    // present.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    if let Ok(gpu) = Tensor::zeros([2, 2], DType::F32, &Device::Metal(0)) {
+        assert_eq!(gpu.zeros_like().unwrap().device(), Device::Metal(0));
+        assert_eq!(gpu.full_like(2.0).unwrap().device(), Device::Metal(0));
+    }
+}
+
+#[test]
+fn like_constructors_are_untraced_even_from_a_traced_source() {
+    let src = t_f32(&[1.0, 2.0], [2]).traced().unwrap();
+    assert!(src.node().is_some());
+
+    for like in [
+        src.zeros_like().unwrap(),
+        src.ones_like().unwrap(),
+        src.full_like(3.0).unwrap(),
+    ] {
+        assert!(like.node().is_none());
+        // No graph means no gradient: `backward` on the result is the
+        // `NotTraced` error, not a silent zero.
+        assert!(matches!(
+            like.sum_all().unwrap().backward(),
+            Err(Error::NotTraced { .. })
+        ));
+    }
+}
+
+#[test]
 fn rand_is_in_unit_interval_and_reproducible() {
     let mut rng = Rng::seed(1234);
     let a = Tensor::rand([64], DType::F32, &CPU, &mut rng).unwrap();

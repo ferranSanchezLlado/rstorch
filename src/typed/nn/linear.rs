@@ -1,4 +1,5 @@
 use super::{Forward, Mode, ToDType, ToDevice, TypedParam};
+use crate::nn::ModuleExt as _;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
 use crate::typed::tensor::checked_wrap;
 use crate::typed::{
@@ -85,7 +86,7 @@ impl<const IN: usize, const OUT: usize, E: FloatElement, P: Placement> Linear<IN
         validate_marker(OUT, out_features, "out_features", "typed::nn::Linear::new")?;
         let mut runtime = crate::nn::Linear::new(in_features, out_features, &ctx.device(), rng)?;
         if E::DTYPE != DType::F32 {
-            crate::nn::to_dtype(&mut runtime, E::DTYPE)?;
+            runtime.to_dtype(E::DTYPE)?;
         }
         Self::seal_fresh_runtime(runtime, ctx)
     }
@@ -432,7 +433,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            crate::nn::state_dict(&runtime).keys().collect::<Vec<_>>(),
+            runtime.state_dict().keys().collect::<Vec<_>>(),
             vec!["weight"]
         );
     }

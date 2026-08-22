@@ -88,13 +88,11 @@ impl TinyShakespeareDataset {
         let tokenizer = CharTokenizer::from_text(text);
         let ids = tokenizer.encode(text, false)?;
         if ids.len() <= window {
-            return Err(Error::Data {
-                msg: format!(
-                    "corpus of {} tokens is too short for a window of {window}: \
+            return Err(Error::data(format!(
+                "corpus of {} tokens is too short for a window of {window}: \
                      a window needs one more token as its target",
-                    ids.len()
-                ),
-            });
+                ids.len()
+            )));
         }
         let values: Vec<i64> = ids
             .iter()

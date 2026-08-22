@@ -276,12 +276,10 @@ impl DatasetResource {
         if let Some(expected) = self.sha256 {
             let found = sha256::sha256_hex(bytes);
             if found != expected {
-                return Err(Error::Data {
-                    msg: format!(
-                        "checksum mismatch for `{}`: expected {expected}, found {found}",
-                        self.name
-                    ),
-                });
+                return Err(Error::data(format!(
+                    "checksum mismatch for `{}`: expected {expected}, found {found}",
+                    self.name
+                )));
             }
         }
         Ok(())
@@ -294,12 +292,10 @@ impl DatasetResource {
         if let Some(max) = self.max_bytes
             && len > max
         {
-            return Err(Error::Data {
-                msg: format!(
-                    "resource `{}` exceeds size cap of {max} bytes (got {len})",
-                    self.name
-                ),
-            });
+            return Err(Error::data(format!(
+                "resource `{}` exceeds size cap of {max} bytes (got {len})",
+                self.name
+            )));
         }
         Ok(())
     }
@@ -334,12 +330,10 @@ fn check_cache_key(dataset: &str, file_name: &str) -> Result<()> {
         let single_normal =
             matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
         if !single_normal {
-            return Err(Error::Data {
-                msg: format!(
-                    "{label} `{value}` must be a single path component \
+            return Err(Error::data(format!(
+                "{label} `{value}` must be a single path component \
                      (no separators, `..`, or absolute paths)"
-                ),
-            });
+            )));
         }
     }
     Ok(())
@@ -372,9 +366,7 @@ fn fetch_resource(resource: &DatasetResource) -> Result<Vec<u8>> {
     use std::io::Read as _;
     let reader = ureq::get(resource.url)
         .call()
-        .map_err(|source| Error::Data {
-            msg: format!("failed to fetch `{}`: {source}", resource.name),
-        })?
+        .map_err(|source| Error::data_with(format!("failed to fetch `{}`", resource.name), source))?
         .into_reader();
     let mut bytes = Vec::new();
     reader
@@ -563,7 +555,7 @@ mod tests {
             .ensure_resource_with("fixture", &resource, |_| panic!("must not fetch"))
             .expect_err("a tampered cache file must be rejected");
         assert!(
-            matches!(&err, Error::Data { msg } if msg.contains("checksum mismatch")),
+            matches!(&err, Error::Data { msg, .. } if msg.contains("checksum mismatch")),
             "expected a checksum error, got {err:?}"
         );
         let _ = fs::remove_dir_all(root);
@@ -591,7 +583,7 @@ mod tests {
             .ensure_resource_with("fixture", &resource, |_| panic!("must not fetch"))
             .expect_err("an over-cap cache file must be rejected");
         assert!(
-            matches!(&err, Error::Data { msg } if msg.contains("size cap")),
+            matches!(&err, Error::Data { msg, .. } if msg.contains("size cap")),
             "expected a size-cap error, got {err:?}"
         );
         let _ = fs::remove_dir_all(root);

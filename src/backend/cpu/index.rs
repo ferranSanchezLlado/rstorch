@@ -5,6 +5,10 @@
 //! checked ([`Error::IndexOutOfBounds`](crate::Error)), never UB;
 //! `scatter_add` accumulates in `Acc`.
 //!
+//! Four kernels *consume* an index tensor (`index_select`, `gather`,
+//! `index_add`, `scatter_add`); [`arg_sort`] is the one that *produces* one,
+//! and it is the only kernel here with no index operand to bounds-check.
+//!
 //! # Design
 //!
 //! - **Stride-aware, nothing pre-materialized.** Each kernel addresses its
@@ -12,9 +16,9 @@
 //!   [`Layout::offset`](crate::layout::Layout::offset), so transposed,
 //!   narrowed, and broadcast inputs are read in place. Outputs are freshly
 //!   allocated, dense, row-major buffers.
-//! - **One coordinate walk.** All four kernels are the same loop: advance a
-//!   row-major position, replace the indexed axis's coordinate with a
-//!   looked-up index, and address the other side. The walk is the shared
+//! - **One coordinate walk.** All four index-consuming kernels are the same
+//!   loop: advance a row-major position, replace the indexed axis's coordinate
+//!   with a looked-up index, and address the other side. The walk is the shared
 //!   `super::host::Walk` odometer, which carries one running storage index per
 //!   side and advances it by strides — so no division runs per element.
 //!   [`place_values`] gives each axis of the (dense) output its row-major
@@ -643,6 +647,126 @@ pub(crate) fn scatter_add(
             picks: &picks,
         },
     )
+}
+
+// ---------------------------------------------------------------------------
+// arg_sort — the sorting permutation, per axis line
+// ---------------------------------------------------------------------------
+
+/// A **total** order over accumulated values, NaN included: the one place the
+/// crate needs NaN to have a *position* rather than to win.
+///
+/// [`NumAcc::order`] deliberately excludes NaN, because `argmax`/`argmin` need
+/// a NaN to win *both* directions and no single total order can express that.
+/// A sort has no such freedom — it must lay every element on one line — so NaN
+/// is defined here as greater than every number and equal to itself. An
+/// ascending sort therefore ends in NaNs and a descending one starts with them
+/// (`PyTorch`'s placement).
+///
+/// The consequence is stated in [`Tensor::sort`](crate::Tensor::sort)'s docs:
+/// on a line containing a NaN, `topk(1, .., false)` names the smallest number
+/// while `argmin` names the NaN. That is not a bug in either; it is the
+/// difference between an order and a winner.
+fn total_order<A: NumAcc>(a: A, b: A) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => a.order(b),
+    }
+}
+
+/// Decode `outer` — a row-major index into `dims` with `axis` removed — into
+/// the base storage index of that axis line on the (strided) source side and
+/// on the (dense row-major) output side.
+///
+/// One division per line rather than per element, as in the reductions. The
+/// axis coordinate is 0 in both results; the caller advances by
+/// `src_strides[axis]` and `out_place[axis]`.
+fn line_bases(
+    dims: &[usize],
+    src_strides: &[usize],
+    src_offset: usize,
+    out_place: &[usize],
+    axis: usize,
+    outer: usize,
+) -> (usize, usize) {
+    let mut src = src_offset;
+    let mut out = 0;
+    let mut rem = outer;
+    // Right-to-left, so the innermost non-sorted axis is the fastest — the
+    // row-major order the output buffer is written in.
+    for ax in (0..dims.len()).rev() {
+        if ax == axis {
+            continue;
+        }
+        let coord = rem % dims[ax];
+        rem /= dims[ax];
+        src += coord * src_strides[ax];
+        out += coord * out_place[ax];
+    }
+    (src, out)
+}
+
+/// `out[.., k, ..]` = the source position along `axis` of the `k`-th element in
+/// sorted order, for every line of the view.
+///
+/// Comparison happens in the wide [`Acc`](Element::Acc) type, so `f16`/`bf16`
+/// lines are ordered exactly rather than through a lossy round-trip. The sort
+/// is `slice::sort_by`, which is stable, so equal elements keep their source
+/// order whichever direction is asked for.
+fn arg_sort_generic<E>(slice: &[E], layout: &Layout, axis: usize, descending: bool) -> Vec<i64>
+where
+    E: Element,
+    E::Acc: NumAcc,
+{
+    let total = layout.num_elements();
+    let dims = layout.dims();
+    let axis_len = dims[axis];
+    if total == 0 {
+        // An empty axis anywhere: nothing to permute, and `total / axis_len`
+        // below would divide by zero when the empty axis *is* the sorted one.
+        return Vec::new();
+    }
+    let strides = layout.strides();
+    let out_place = place_values(dims);
+    let axis_stride = strides[axis];
+    let out_stride = out_place[axis];
+
+    let mut out = vec![0i64; total];
+    // Both scratch buffers are reused across lines: one sort's worth of
+    // allocation for the whole call.
+    let mut line: Vec<E::Acc> = Vec::with_capacity(axis_len);
+    let mut order: Vec<usize> = Vec::with_capacity(axis_len);
+    for outer in 0..total / axis_len {
+        let (src_base, out_base) =
+            line_bases(dims, strides, layout.offset(), &out_place, axis, outer);
+        line.clear();
+        line.extend((0..axis_len).map(|pos| slice[src_base + pos * axis_stride].to_acc()));
+        order.clear();
+        order.extend(0..axis_len);
+        if descending {
+            order.sort_by(|&a, &b| total_order(line[b], line[a]));
+        } else {
+            order.sort_by(|&a, &b| total_order(line[a], line[b]));
+        }
+        for (rank, &pos) in order.iter().enumerate() {
+            out[out_base + rank * out_stride] = pos as i64;
+        }
+    }
+    out
+}
+
+/// See [`BackendOps::arg_sort`](crate::backend::BackendOps::arg_sort).
+pub(crate) fn arg_sort(x: View<'_>, axis: usize, descending: bool) -> Result<Storage> {
+    const OP: &str = "arg_sort";
+    let layout = x.layout();
+    check_axis(OP, axis, layout.rank())?;
+    let cpu = cpu_storage(x);
+    dispatch_numeric!(x.dtype(), OP, x.device(), E => {
+        // Positions are `I64` whatever the sorted dtype was.
+        Ok(i64::storage(arg_sort_generic::<E>(E::slice(cpu), layout, axis, descending)))
+    })
 }
 
 #[cfg(test)]

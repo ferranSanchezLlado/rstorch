@@ -48,7 +48,6 @@ use crate::backend::{Conv2dParams, ConvOp, View};
 use crate::dtype::Element;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
-use crate::shape::Shape;
 use crate::storage::Storage;
 
 /// The storage index of logical element `(a, b, c, d)` of a rank-4 view.
@@ -274,11 +273,9 @@ fn expect_dims(op: &'static str, layout: &Layout, want: [usize; 4]) -> Result<()
         });
     }
     if layout.dims() != want.as_slice() {
-        return Err(Error::ShapeMismatch {
-            op,
-            lhs: layout.shape().clone(),
-            rhs: Shape::from(want.to_vec()),
-        });
+        // `want` is the requirement the resolved geometry imposes, so it is
+        // `lhs`; the operand's own shape is what failed to meet it.
+        return Err(Error::shape_mismatch(op, want, layout.shape()));
     }
     Ok(())
 }

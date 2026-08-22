@@ -210,14 +210,12 @@ impl Rule for SgdRule {
         };
         let effective = groups.resolve_with_base(saved_base, path);
         if velocity.is_none() && effective.momentum != 0.0 && saved.clock > 0 {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "optimizer state for `{path}` has no velocity buffer, but it was \
+            return Err(Error::persistence(format!(
+                "optimizer state for `{path}` has no velocity buffer, but it was \
                      saved by a momentum run (momentum={}) after {} update(s), \
                      which always writes one",
-                    effective.momentum, saved.clock
-                ),
-            });
+                effective.momentum, saved.clock
+            )));
         }
         Ok(velocity)
     }
@@ -403,7 +401,7 @@ impl Sgd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nn::Mode;
+    use crate::nn::{Mode, ModuleExt};
     use crate::optim::schedule;
     use crate::optim::testkit::{
         Net, REGRESSION_XS, Solo, assert_an_exhausted_clock_outranks_an_invalid_hyperparameter,
@@ -577,7 +575,7 @@ mod tests {
         let loss = model.untraced_head_bias_loss(Mode::TRAIN).unwrap();
         let err = opt.step(&mut model, loss.backward().unwrap()).unwrap_err();
         assert!(
-            matches!(&err, Error::MissingGrad { path } if path == "head.bias"),
+            matches!(&err, Error::MissingGrad { op: "step", path } if path == "head.bias"),
             "{err}"
         );
         assert!(err.to_string().contains("`head.bias`"), "{err}");
@@ -809,7 +807,7 @@ mod tests {
         let mut opt = Sgd::new(0.1).momentum(0.9).weight_decay(0.01);
         step(&mut opt, &mut model);
         step(&mut opt, &mut model);
-        for (path, value) in crate::nn::state_dict(&model) {
+        for (path, value) in model.state_dict() {
             assert!(value.backward().is_err(), "graph survived into `{path}`");
         }
         assert!(model.trunk.weight.get(Mode::EVAL).backward().is_err());

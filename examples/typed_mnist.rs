@@ -120,9 +120,9 @@ fn main() -> Result<()> {
     }
     let completed_steps = usize::try_from(optimizer.steps()).unwrap_or(usize::MAX);
     if completed_steps % loader.num_batches() != 0 {
-        return Err(Error::Persistence {
-            msg: "MNIST checkpoint was not saved at an epoch boundary".into(),
-        });
+        return Err(Error::persistence(
+            "MNIST checkpoint was not saved at an epoch boundary",
+        ));
     }
     let start_epoch = completed_steps / loader.num_batches();
 

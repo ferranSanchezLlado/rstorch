@@ -630,6 +630,7 @@ impl<Input> Default for Sequential<Input> {
 mod tests {
     use super::*;
     use crate::nn::Forward as DynamicForward;
+    use crate::nn::ModuleExt as _;
     use crate::typed::nn::{BatchNorm2d, Embedding, LayerNorm, Linear, RMSNorm};
     use crate::typed::{Cpu, DYN, Tensor1, Tensor2, Tensor4};
     use crate::{Rng, Tensor};
@@ -665,7 +666,8 @@ mod tests {
                 .unwrap()
                 .paths()
                 .collect::<Vec<_>>(),
-            crate::nn::state_dict(&dynamic)
+            dynamic
+                .state_dict()
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>()

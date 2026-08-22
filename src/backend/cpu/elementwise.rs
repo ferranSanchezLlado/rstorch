@@ -291,7 +291,7 @@ macro_rules! dispatch_op_const {
 macro_rules! dispatch_binary_op {
     ($op:expr, $konst:ident => $body:block) => {
         dispatch_op_const!(BinaryOp, $op, $konst => $body,
-            [Add, Sub, Mul, Div, Maximum, Minimum])
+            [Add, Sub, Mul, Div, Maximum, Minimum, Pow])
     };
 }
 
@@ -299,7 +299,7 @@ macro_rules! dispatch_binary_op {
 macro_rules! dispatch_unary_op {
     ($op:expr, $konst:ident => $body:block) => {
         dispatch_op_const!(UnaryOp, $op, $konst => $body,
-            [Relu, Gelu, Exp, Ln, Sqrt, Tanh, Sigmoid, Neg, Abs])
+            [Relu, Gelu, Exp, Ln, Sqrt, Tanh, Sigmoid, Neg, Abs, Sign, Recip, Floor, Ceil, Round, Erf])
     };
 }
 
@@ -362,7 +362,19 @@ pub(crate) fn binary(op: BinaryOp, lhs: View<'_>, rhs: View<'_>) -> Result<Stora
             DType::BF16 => zip_map::<half::bf16, _>(name, lhs, rhs, |a, b| {
                 half::bf16::from_f32(binary_f32(OP, a.to_f32(), b.to_f32()))
             }),
-            DType::I64 => zip_map::<i64, _>(name, lhs, rhs, |a, b| binary_i64(OP, a, b)),
+            DType::I64 => match OP {
+                // `BinaryOp::Pow` is float-only by contract, and every
+                // accelerator declines it. Computing something here — via an
+                // `f64` round trip, say — would make the same call answer
+                // differently per device, which is the one thing the CPU
+                // reference must never do.
+                BinaryOp::Pow => Err(Error::Unsupported {
+                    op: name,
+                    device,
+                    dtype: DType::I64,
+                }),
+                _ => zip_map::<i64, _>(name, lhs, rhs, |a, b| binary_i64(OP, a, b)),
+            },
             other => Err(Error::Unsupported {
                 op: name,
                 device,
@@ -395,10 +407,19 @@ pub(crate) fn binary_scalar(op: BinaryOp, x: View<'_>, scalar: f64) -> Result<St
                     half::bf16::from_f32(binary_f32(OP, a.to_f32(), s))
                 })
             }
-            DType::I64 => {
-                let s = scalar as i64;
-                unary_map::<i64, _>(name, x, move |a| binary_i64(OP, a, s))
-            }
+            DType::I64 => match OP {
+                // As in `binary`: float-only, so it declines rather than
+                // inventing an integer answer no accelerator would agree with.
+                BinaryOp::Pow => Err(Error::Unsupported {
+                    op: name,
+                    device,
+                    dtype: DType::I64,
+                }),
+                _ => {
+                    let s = scalar as i64;
+                    unary_map::<i64, _>(name, x, move |a| binary_i64(OP, a, s))
+                }
+            },
             other => Err(Error::Unsupported {
                 op: name,
                 device,
@@ -416,6 +437,7 @@ fn binary_op_name(op: BinaryOp) -> &'static str {
         BinaryOp::Div => "div",
         BinaryOp::Maximum => "maximum",
         BinaryOp::Minimum => "minimum",
+        BinaryOp::Pow => "pow",
     }
 }
 
@@ -497,6 +519,7 @@ fn binary_f32(op: BinaryOp, a: f32, b: f32) -> f32 {
         BinaryOp::Div => a / b,
         BinaryOp::Maximum => f32_maximum(a, b),
         BinaryOp::Minimum => f32_minimum(a, b),
+        BinaryOp::Pow => a.powf(b),
     }
 }
 
@@ -509,6 +532,7 @@ fn binary_f64(op: BinaryOp, a: f64, b: f64) -> f64 {
         BinaryOp::Div => a / b,
         BinaryOp::Maximum => f64_maximum(a, b),
         BinaryOp::Minimum => f64_minimum(a, b),
+        BinaryOp::Pow => a.powf(b),
     }
 }
 
@@ -534,6 +558,10 @@ fn binary_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         }
         BinaryOp::Maximum => a.max(b),
         BinaryOp::Minimum => a.min(b),
+        // `pow` is float-only. `binary`/`binary_scalar` reject it for I64
+        // before reaching this table, so the arm exists only because
+        // `BinaryOp` is one enum shared by every dtype's kernel.
+        BinaryOp::Pow => unreachable!("i64 pow is rejected before dispatch"),
     }
 }
 
@@ -614,6 +642,12 @@ fn unary_op_name(op: UnaryOp) -> &'static str {
         UnaryOp::Sigmoid => "sigmoid",
         UnaryOp::Neg => "neg",
         UnaryOp::Abs => "abs",
+        UnaryOp::Sign => "sign",
+        UnaryOp::Recip => "recip",
+        UnaryOp::Floor => "floor",
+        UnaryOp::Ceil => "ceil",
+        UnaryOp::Round => "round",
+        UnaryOp::Erf => "erf",
     }
 }
 
@@ -644,6 +678,28 @@ fn unary_f64(op: UnaryOp, x: f64) -> f64 {
         UnaryOp::Sigmoid => 1.0 / (1.0 + (-x).exp()),
         UnaryOp::Neg => -x,
         UnaryOp::Abs => x.abs(),
+        // -1/0/+1, NaN preserved — the same three-way split as `NumAcc`'s
+        // extremum rules, spelled out here because `PartialOrd` on `f64`
+        // does not give a `sign` for free.
+        UnaryOp::Sign => {
+            if x.is_nan() {
+                x
+            } else if x > 0.0 {
+                1.0
+            } else if x < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }
+        }
+        // IEEE: `1/±0` is an infinity, not a panic or an error.
+        UnaryOp::Recip => 1.0 / x,
+        UnaryOp::Floor => x.floor(),
+        UnaryOp::Ceil => x.ceil(),
+        // Ties to even (`PyTorch`'s `round`), not Rust's away-from-zero
+        // `f64::round`.
+        UnaryOp::Round => x.round_ties_even(),
+        UnaryOp::Erf => erf(x),
     }
 }
 

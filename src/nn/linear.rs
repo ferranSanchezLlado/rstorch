@@ -35,7 +35,7 @@ use crate::tensor::Tensor;
 /// nonlinearity — `U(-√(6/fan_in), √(6/fan_in))`, `fan_in = in_features` — and
 /// the bias starts at zero. Constructors always produce
 /// [`F32`](crate::DType::F32) parameters; convert afterwards with
-/// [`nn::to_dtype`](crate::nn::to_dtype).
+/// [`ModuleExt::to_dtype`](crate::nn::ModuleExt::to_dtype).
 ///
 /// This is *not* bug-compatible with `PyTorch`'s `nn.Linear`, whose default is
 /// `kaiming_uniform_(a=√5)` — a bound of `1/√fan_in`, some 2.4× smaller — with
@@ -118,6 +118,74 @@ impl Linear {
         })
     }
 
+    /// [`new`](Linear::new) with the weight drawn by `init` instead of the
+    /// hard-coded Kaiming-uniform scheme. `init` receives the weight's shape
+    /// (`[out_features, in_features]`) and `device`, and must return a
+    /// tensor of exactly that shape — the natural way to plug in
+    /// [`nn::init`](crate::nn::init)'s named initializers:
+    ///
+    /// ```
+    /// # use rstorch::nn::{self, Linear};
+    /// # use rstorch::{DType, Device, Rng};
+    /// # fn main() -> rstorch::Result<()> {
+    /// let dev = Device::Cpu;
+    /// let mut rng = Rng::seed(0);
+    /// let fc = Linear::with_init(4, 8, &dev, |shape, device| {
+    ///     nn::init::xavier_uniform(shape.to_vec(), 1.0, DType::F32, device, &mut rng)
+    /// })?;
+    /// assert_eq!((fc.in_features(), fc.out_features()), (4, 8));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The bias is zero-initialized, as in [`new`](Linear::new), but in the
+    /// weight's own dtype and on the weight's own device — an `init` closure
+    /// is free to return an `F64` or off-device weight, and a bias that
+    /// disagreed with it would make every `forward` fail on the add. Drop it
+    /// afterward with [`without_bias`](Linear::without_bias) if unwanted.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`] (`op: "Linear::with_init"`) under the same
+    /// zero-dimension/overflow conditions as [`new`](Linear::new), whatever
+    /// `init` itself returns, or [`Error::ShapeMismatch`] if `init`'s output
+    /// is not exactly `[out_features, in_features]`.
+    pub fn with_init(
+        in_features: usize,
+        out_features: usize,
+        device: &Device,
+        init: impl FnOnce(&[usize], &Device) -> Result<Tensor>,
+    ) -> Result<Linear> {
+        const OP: &str = "Linear::with_init";
+        if in_features == 0 || out_features == 0 {
+            return Err(Error::invalid_arg(
+                OP,
+                format!(
+                    "in_features and out_features must be non-zero \
+                     (got {in_features} and {out_features})"
+                ),
+            ));
+        }
+        in_features.checked_mul(out_features).ok_or_else(|| {
+            Error::invalid_arg(
+                OP,
+                format!("{in_features} * {out_features} weights overflow usize"),
+            )
+        })?;
+
+        let expected = [out_features, in_features];
+        let weight = init(&expected, device)?;
+        if weight.dims() != expected {
+            return Err(Error::shape_mismatch(OP, expected, weight.shape()));
+        }
+
+        let bias = Tensor::zeros([out_features], weight.dtype(), &weight.device())?;
+        Ok(Linear {
+            weight: Param::new(weight),
+            bias: Some(Param::new(bias)),
+        })
+    }
+
     /// Drop this layer's bias (`y = x·Wᵀ`), as pre-norm transformer blocks and
     /// tied output heads want.
     ///
@@ -155,6 +223,8 @@ impl Linear {
 }
 
 impl Forward for Linear {
+    type Output = Tensor;
+
     /// `x·Wᵀ + b`, with the weight transposed as a view (no copy).
     ///
     /// # Errors
@@ -164,8 +234,8 @@ impl Forward for Linear {
     ///   least one batch axis must precede it (see the
     ///   [type docs](Linear#shapes)).
     /// - [`Error::ShapeMismatch`] (`op: "Linear::forward"`) if `x`'s trailing
-    ///   axis is not [`in_features`](Linear::in_features) (`lhs` is the input
-    ///   shape, `rhs` the weight's).
+    ///   axis is not [`in_features`](Linear::in_features) (`lhs` is the
+    ///   weight's shape — the requirement — and `rhs` the input's).
     /// - whatever [`matmul`](crate::Tensor::matmul) reports for a device or
     ///   dtype mismatch against the parameters.
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
@@ -177,11 +247,11 @@ impl Forward for Linear {
             });
         }
         if x.dims().last() != Some(&self.in_features()) {
-            return Err(Error::ShapeMismatch {
-                op: "Linear::forward",
-                lhs: x.shape().clone(),
-                rhs: self.weight.value().shape().clone(),
-            });
+            return Err(Error::shape_mismatch(
+                "Linear::forward",
+                self.weight.value().shape(),
+                x.shape(),
+            ));
         }
         let y = x.matmul(&self.weight.get(mode).transpose(-2, -1)?)?;
         match &self.bias {
@@ -218,7 +288,7 @@ impl std::fmt::Debug for Linear {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nn::{self, Module};
+    use crate::nn::{self, Module, ModuleExt};
     use crate::testing::check_grad;
 
     const CPU: Device = Device::Cpu;
@@ -234,10 +304,10 @@ mod tests {
     /// A layer with hand-set parameters: `weight` `[O, I]`, `bias` `[O]`.
     fn fixed(weight: &[f32], out_features: usize, in_features: usize, bias: &[f32]) -> Linear {
         let mut fc = Linear::new(in_features, out_features, &CPU, &mut Rng::seed(0)).unwrap();
-        let mut state = nn::state_dict(&fc);
+        let mut state = fc.state_dict();
         state.insert("weight".to_string(), t(weight, [out_features, in_features]));
         state.insert("bias".to_string(), t(bias, [out_features]));
-        nn::load_state_dict(&mut fc, &state).unwrap();
+        fc.load_state_dict(&state).unwrap();
         fc
     }
 
@@ -246,11 +316,11 @@ mod tests {
     #[test]
     fn parameter_paths_and_shapes_are_the_persistence_contract() {
         let fc = Linear::new(3, 2, &CPU, &mut Rng::seed(1)).unwrap();
-        let state = nn::state_dict(&fc);
+        let state = fc.state_dict();
         assert_eq!(state.keys().collect::<Vec<_>>(), ["bias", "weight"]);
         assert_eq!(state["weight"].dims(), &[2, 3]);
         assert_eq!(state["bias"].dims(), &[2]);
-        assert_eq!(nn::num_params(&fc), 2 * 3 + 2);
+        assert_eq!(fc.num_params(), 2 * 3 + 2);
         assert_eq!((fc.in_features(), fc.out_features()), (3, 2));
         assert_eq!(fc.weight().value().dtype(), DType::F32);
         assert!(fc.bias().is_some());
@@ -292,11 +362,11 @@ mod tests {
         let mut fc = fixed(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3, &[10.0, 20.0]).without_bias();
         assert!(fc.bias().is_none());
         assert_eq!(
-            nn::state_dict(&fc).keys().collect::<Vec<_>>(),
+            fc.state_dict().keys().collect::<Vec<_>>(),
             ["weight"],
             "a bias-free layer must not emit a bias path"
         );
-        assert_eq!(nn::num_params(&fc), 6);
+        assert_eq!(fc.num_params(), 6);
         let y = fc
             .forward(&t(&[1.0, 0.0, -1.0], [1, 3]), Mode::EVAL)
             .unwrap();

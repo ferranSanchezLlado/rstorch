@@ -444,7 +444,7 @@ fn filled(shape: impl Into<Shape>, value: f64, device: &Device) -> Result<Tensor
 /// and `[d]` alike — the transformer's usual call.
 ///
 /// `weight` is initialized to ones and `bias` to zeros (F32; convert with
-/// [`nn::to_dtype`](crate::nn::to_dtype)), so a fresh layer is a pure
+/// [`ModuleExt::to_dtype`](crate::nn::ModuleExt::to_dtype)), so a fresh layer is a pure
 /// whitening transform. The affine is not optional: the parameter names
 /// `weight` and `bias` are part of the `state_dict` contract.
 ///
@@ -549,6 +549,8 @@ impl LayerNorm {
 }
 
 impl Forward for LayerNorm {
+    type Output = Tensor;
+
     /// # Errors
     /// [`Error::ShapeMismatch`] (`op: "LayerNorm::forward"`) if `x`'s trailing
     /// axes are not exactly [`normalized_shape`](LayerNorm::normalized_shape)
@@ -627,26 +629,37 @@ impl RMSNorm {
     /// [`DEFAULT_EPS`](RMSNorm::DEFAULT_EPS).
     ///
     /// # Errors
-    /// As [`with_eps`](RMSNorm::with_eps).
+    /// As [`with_eps`](RMSNorm::with_eps), but reported under
+    /// `op: "RMSNorm::new"`.
     pub fn new(normalized_shape: impl Into<Shape>, device: &Device) -> Result<RMSNorm> {
-        RMSNorm::with_eps(normalized_shape, Self::DEFAULT_EPS, device)
+        RMSNorm::build(
+            "RMSNorm::new",
+            normalized_shape.into(),
+            Self::DEFAULT_EPS,
+            device,
+        )
     }
 
     /// A layer normalizing over the trailing `normalized_shape` axes with an
     /// explicit `eps`.
     ///
     /// # Errors
-    /// [`Error::InvalidArg`] (`op: "RMSNorm::new"`) on a rank-0 or empty
+    /// [`Error::InvalidArg`] (`op: "RMSNorm::with_eps"`) on a rank-0 or empty
     /// `normalized_shape`, or an `eps` that is not finite and positive.
     pub fn with_eps(
         normalized_shape: impl Into<Shape>,
         eps: f64,
         device: &Device,
     ) -> Result<RMSNorm> {
-        const OP: &str = "RMSNorm::new";
-        let shape: Shape = normalized_shape.into();
-        check_normalized_shape(OP, &shape)?;
-        check_eps(OP, eps)?;
+        RMSNorm::build("RMSNorm::with_eps", normalized_shape.into(), eps, device)
+    }
+
+    /// Shared by both constructors, each passing its own name: `op` names the
+    /// public method the caller invoked, so a `new` rejection is not blamed on
+    /// `with_eps` nor the reverse.
+    fn build(op: &'static str, shape: Shape, eps: f64, device: &Device) -> Result<RMSNorm> {
+        check_normalized_shape(op, &shape)?;
+        check_eps(op, eps)?;
         Ok(RMSNorm {
             weight: Param::new(filled(&shape, 1.0, device)?),
             eps,
@@ -665,6 +678,8 @@ impl RMSNorm {
 }
 
 impl Forward for RMSNorm {
+    type Output = Tensor;
+
     /// # Errors
     /// As [`LayerNorm`]'s `forward` — [`Error::ShapeMismatch`] on a trailing
     /// shape that is not [`normalized_shape`](RMSNorm::normalized_shape)
@@ -684,8 +699,8 @@ impl Forward for RMSNorm {
 /// Four leaves, whose names are the `state_dict` contract: parameters `weight`
 /// (ones) and `bias` (zeros), and non-trainable buffers `running_mean` (zeros)
 /// and `running_var` (ones), each shaped `[C]`. Buffers land in
-/// [`state_dict`](crate::nn::state_dict) and move under
-/// [`to_device`](crate::nn::to_device)/[`to_dtype`](crate::nn::to_dtype), so a
+/// [`ModuleExt::state_dict`](crate::nn::ModuleExt::state_dict) and move under
+/// [`ModuleExt::to_device`](crate::nn::ModuleExt::to_device)/[`ModuleExt::to_dtype`](crate::nn::ModuleExt::to_dtype), so a
 /// checkpoint restores a usable eval model.
 ///
 /// # The two branches
@@ -730,14 +745,14 @@ impl Forward for RMSNorm {
 /// `m / (m − 1)`.
 ///
 /// ```
-/// use rstorch::nn::{self, BatchNorm2d, Forward, Mode};
+/// use rstorch::nn::{BatchNorm2d, Forward, Mode, ModuleExt};
 /// use rstorch::{Device, Tensor};
 ///
 /// let dev = Device::Cpu;
 /// let mut bn = BatchNorm2d::new(2, &dev)?;
 /// let x = Tensor::from_vec((0..16).map(|i| i as f32).collect(), [2, 2, 2, 2], &dev)?;
 /// let _ = bn.forward(&x, Mode::TRAIN)?;      // updates the buffers
-/// let state = nn::state_dict(&bn);
+/// let state = bn.state_dict();
 /// // channel 0 holds 0,1,2,3, 8,9,10,11 -> mean 5.5; EMA from 0 with 0.1.
 /// assert!((state["running_mean"].to_vec::<f32>()?[0] - 0.55).abs() < 1e-6);
 /// # Ok::<(), rstorch::Error>(())
@@ -843,6 +858,8 @@ impl BatchNorm2d {
 }
 
 impl Forward for BatchNorm2d {
+    type Output = Tensor;
+
     /// # Errors
     /// [`Error::RankMismatch`] (`op: "dims4"`) if `x` is not rank 4,
     /// [`Error::ShapeMismatch`] (`op: "BatchNorm2d::forward"`) if `x`'s channel

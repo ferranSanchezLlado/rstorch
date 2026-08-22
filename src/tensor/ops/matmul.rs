@@ -93,8 +93,8 @@ impl Tensor {
     /// The last two axes of each operand are the matrix
     /// (`[…, m, k] @ […, k, n] → […, m, n]`); the leading axes are batch dims
     /// that broadcast right-aligned against each other. Both operands must be
-    /// rank ≥ 2. The result is freshly allocated and contiguous, and keeps the
-    /// operands' dtype and device.
+    /// rank ≥ 2. The result is freshly allocated and keeps the operands' dtype
+    /// and device.
     ///
     /// Operands are consumed as strided views: transposing one costs nothing
     /// beyond the layout (`a.matmul(&b.transpose(-2, -1)?)` does not copy `b`).

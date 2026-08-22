@@ -81,12 +81,10 @@ fn save(
             .keys()
             .any(|key| key.starts_with(TENSOR_PREFIX))
     {
-        return Err(Error::Persistence {
-            msg: format!(
-                "envelope already carries optimizer state (a `{SECTION}` section or an \
+        return Err(Error::persistence(format!(
+            "envelope already carries optimizer state (a `{SECTION}` section or an \
                  `{TENSOR_PREFIX}*` tensor); save each optimizer into its own envelope"
-            ),
-        });
+        )));
     }
 
     let mut text = String::new();
@@ -101,9 +99,9 @@ fn save(
     for (name, value) in hypers {
         let key = format!("hyper.{name}");
         if !section_keys.insert(key.clone()) {
-            return Err(Error::Persistence {
-                msg: format!("duplicate optimizer state key `{key}`"),
-            });
+            return Err(Error::persistence(format!(
+                "duplicate optimizer state key `{key}`"
+            )));
         }
         let _ = writeln!(text, "hyper.{name}={value:?}");
     }
@@ -114,27 +112,25 @@ fn save(
         // two characters that would make the encoding ambiguous are refused
         // rather than silently mangled.
         if param.path.contains('=') || param.path.contains('\n') {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "parameter path {:?} contains `=` or a newline, which the optimizer \
+            return Err(Error::persistence(format!(
+                "parameter path {:?} contains `=` or a newline, which the optimizer \
                      state encoding cannot represent",
-                    param.path
-                ),
-            });
+                param.path
+            )));
         }
         let clock_key = format!("clock.{}", param.path);
         if !section_keys.insert(clock_key.clone()) {
-            return Err(Error::Persistence {
-                msg: format!("duplicate optimizer state key `{clock_key}`"),
-            });
+            return Err(Error::persistence(format!(
+                "duplicate optimizer state key `{clock_key}`"
+            )));
         }
         let _ = writeln!(text, "clock.{}={}", param.path, param.clock);
         for (name, tensor) in &param.buffers {
             let key = format!("{TENSOR_PREFIX}{}.{name}", param.path);
             if !buffer_keys.insert(key.clone()) {
-                return Err(Error::Persistence {
-                    msg: format!("duplicate optimizer buffer `{key}`"),
-                });
+                return Err(Error::persistence(format!(
+                    "duplicate optimizer buffer `{key}`"
+                )));
             }
             staged.push((key, to_host_tensor(tensor)?));
         }
@@ -203,12 +199,11 @@ impl Incoming {
 
     /// A saved hyperparameter, or [`Error::Persistence`] if absent.
     pub(crate) fn hyper(&self, name: &str) -> Result<f64> {
-        self.hypers
-            .get(name)
-            .copied()
-            .ok_or_else(|| Error::Persistence {
-                msg: format!("optimizer state is missing hyperparameter `{name}`"),
-            })
+        self.hypers.get(name).copied().ok_or_else(|| {
+            Error::persistence(format!(
+                "optimizer state is missing hyperparameter `{name}`"
+            ))
+        })
     }
 
     /// Require the saved hyperparameter set to be exactly `names`: an extra or
@@ -217,9 +212,9 @@ impl Incoming {
     pub(crate) fn expect_hypers(&self, names: &[&str]) -> Result<()> {
         for name in self.hypers.keys() {
             if !names.contains(&name.as_str()) {
-                return Err(Error::Persistence {
-                    msg: format!("optimizer state carries unknown hyperparameter `{name}`"),
-                });
+                return Err(Error::persistence(format!(
+                    "optimizer state carries unknown hyperparameter `{name}`"
+                )));
             }
         }
         for name in names {
@@ -233,9 +228,7 @@ impl Incoming {
 pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
     let text = envelope
         .section(SECTION)
-        .ok_or_else(|| Error::Persistence {
-            msg: format!("envelope carries no `{SECTION}` section"),
-        })?;
+        .ok_or_else(|| Error::persistence(format!("envelope carries no `{SECTION}` section")))?;
 
     let mut version = None;
     let mut found_kind = None;
@@ -245,13 +238,15 @@ pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
     let mut keys = std::collections::BTreeSet::new();
 
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let (key, value) = line.split_once('=').ok_or_else(|| Error::Persistence {
-            msg: format!("malformed optimizer state line {line:?} (expected key=value)"),
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            Error::persistence(format!(
+                "malformed optimizer state line {line:?} (expected key=value)"
+            ))
         })?;
         if !keys.insert(key) {
-            return Err(Error::Persistence {
-                msg: format!("duplicate optimizer state key `{key}`"),
-            });
+            return Err(Error::persistence(format!(
+                "duplicate optimizer state key `{key}`"
+            )));
         }
         if key == "version" {
             version = Some(number::<u32>(key, value)?);
@@ -260,11 +255,9 @@ pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
         } else if key == "steps" {
             let value = number::<u64>(key, value)?;
             if value == u64::MAX {
-                return Err(Error::Persistence {
-                    msg: format!(
-                        "optimizer state `steps` is {value}, which cannot be advanced safely"
-                    ),
-                });
+                return Err(Error::persistence(format!(
+                    "optimizer state `steps` is {value}, which cannot be advanced safely"
+                )));
             }
             steps = Some(value);
         } else if let Some(name) = key.strip_prefix("hyper.") {
@@ -272,51 +265,41 @@ pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
         } else if let Some(path) = key.strip_prefix("clock.") {
             let value = number::<u64>(key, value)?;
             if value == u64::MAX {
-                return Err(Error::Persistence {
-                    msg: format!(
-                        "optimizer state `clock.{path}` is {value}, which cannot be advanced safely"
-                    ),
-                });
+                return Err(Error::persistence(format!(
+                    "optimizer state `clock.{path}` is {value}, which cannot be advanced safely"
+                )));
             }
             clocks.insert(path.to_string(), value);
         } else {
-            return Err(Error::Persistence {
-                msg: format!("unknown optimizer state key `{key}`"),
-            });
+            return Err(Error::persistence(format!(
+                "unknown optimizer state key `{key}`"
+            )));
         }
     }
 
     match version {
         Some(ENCODING_VERSION) => {}
         Some(other) => {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "optimizer state encoding version {other} (this build reads {ENCODING_VERSION})"
-                ),
-            });
+            return Err(Error::persistence(format!(
+                "optimizer state encoding version {other} (this build reads {ENCODING_VERSION})"
+            )));
         }
         None => {
-            return Err(Error::Persistence {
-                msg: "optimizer state is missing `version`".to_string(),
-            });
+            return Err(Error::persistence("optimizer state is missing `version`"));
         }
     }
     match found_kind.as_deref() {
         Some(found) if found == kind => {}
         Some(found) => {
-            return Err(Error::Persistence {
-                msg: format!("optimizer state was saved by `{found}`, loaded into `{kind}`"),
-            });
+            return Err(Error::persistence(format!(
+                "optimizer state was saved by `{found}`, loaded into `{kind}`"
+            )));
         }
         None => {
-            return Err(Error::Persistence {
-                msg: "optimizer state is missing `kind`".to_string(),
-            });
+            return Err(Error::persistence("optimizer state is missing `kind`"));
         }
     }
-    let steps = steps.ok_or_else(|| Error::Persistence {
-        msg: "optimizer state is missing `steps`".to_string(),
-    })?;
+    let steps = steps.ok_or_else(|| Error::persistence("optimizer state is missing `steps`"))?;
 
     let mut params: BTreeMap<String, IncomingParam> = clocks
         .into_iter()
@@ -336,14 +319,16 @@ pub(crate) fn load(envelope: &Envelope, kind: &str) -> Result<Incoming> {
             // A model weight sharing the envelope: not this layer's business.
             continue;
         };
-        let (path, name) = rest.rsplit_once('.').ok_or_else(|| Error::Persistence {
-            msg: format!("optimizer tensor `{key}` has no `<path>.<buffer>` form"),
+        let (path, name) = rest.rsplit_once('.').ok_or_else(|| {
+            Error::persistence(format!(
+                "optimizer tensor `{key}` has no `<path>.<buffer>` form"
+            ))
         })?;
-        let entry = params.get_mut(path).ok_or_else(|| Error::Persistence {
-            msg: format!(
+        let entry = params.get_mut(path).ok_or_else(|| {
+            Error::persistence(format!(
                 "optimizer tensor `{key}` has no step clock: the `{SECTION}` section \
                  does not mention parameter `{path}`"
-            ),
+            ))
         })?;
         entry.buffers.insert(name.to_string(), tensor.clone());
     }
@@ -403,19 +388,17 @@ fn locate<'a>(
 ) -> Result<(GradKey, &'a Tensor)> {
     match (keys.get(path), values.get(path)) {
         (Some(key), Some(value)) => Ok((*key, value)),
-        _ => Err(Error::Persistence {
-            msg: format!(
-                "optimizer state names parameter `{path}`, which this model does not have"
-            ),
-        }),
+        _ => Err(Error::persistence(format!(
+            "optimizer state names parameter `{path}`, which this model does not have"
+        ))),
     }
 }
 
 /// The rejection for a buffer name an optimizer does not know.
 pub(crate) fn unknown_buffer(kind: &str, path: &str, name: &str) -> Error {
-    Error::Persistence {
-        msg: format!("optimizer state has unknown buffer `{name}` for `{path}` (kind {kind})"),
-    }
+    Error::persistence(format!(
+        "optimizer state has unknown buffer `{name}` for `{path}` (kind {kind})"
+    ))
 }
 
 /// Rebuild one loaded moment buffer as a tensor beside the parameter it
@@ -433,29 +416,34 @@ pub(crate) fn restore_buffer(
 ) -> Result<Tensor> {
     let expected = param.dtype().accumulation_dtype();
     if host.dtype() != expected {
-        return Err(Error::Persistence {
-            msg: format!(
-                "optimizer buffer `{path}.{name}` has dtype {}, expected {expected}",
-                host.dtype()
-            ),
-        });
+        return Err(Error::persistence(format!(
+            "optimizer buffer `{path}.{name}` has dtype {}, expected {expected}",
+            host.dtype()
+        )));
     }
     if host.dims() != param.dims() {
-        return Err(Error::Persistence {
-            msg: format!(
-                "optimizer buffer `{path}.{name}` has shape {:?}, expected {:?}",
-                host.dims(),
-                param.dims()
-            ),
-        });
+        return Err(Error::persistence(format!(
+            "optimizer buffer `{path}.{name}` has shape {:?}, expected {:?}",
+            host.dims(),
+            param.dims()
+        )));
     }
     from_host_tensor(host, &param.device())
 }
 
 /// Parse one numeric field, naming the key on failure.
-fn number<T: std::str::FromStr>(key: &str, value: &str) -> Result<T> {
-    value.parse::<T>().map_err(|_| Error::Persistence {
-        msg: format!("optimizer state `{key}` is not a number: {value:?}"),
+///
+/// The parse error itself is kept as the cause, so `steps=nan` reports both
+/// which key was malformed and what the standard-library parser objected to.
+fn number<T: std::str::FromStr>(key: &str, value: &str) -> Result<T>
+where
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    value.parse::<T>().map_err(|source| {
+        Error::persistence_with(
+            format!("optimizer state `{key}` is not a number: {value:?}"),
+            source,
+        )
     })
 }
 

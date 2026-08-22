@@ -17,9 +17,16 @@
 //!   four fractional digits, switching to scientific notation when any value
 //!   is too large or too small to read at that precision.
 //! - `Debug` (`{:?}`, `{:#?}`) is the developer view: a struct with the
-//!   metadata fields — including layout contiguity and whether the tensor
-//!   carries an autograd graph — and a *flat* value list. Floats print in
-//!   their shortest round-trip form, so a Debug print never hides a value.
+//!   metadata fields — including the recorded layout's contiguity and whether
+//!   the tensor carries an autograd graph — and a *flat* value list. Floats
+//!   print in their shortest round-trip form, so a Debug print never hides a
+//!   value.
+//!
+//! The `contiguous` field is the only place contiguity reaches outside the
+//! crate, and it is a debugging aid rather than a contract: it reports the
+//! logical layout as recorded, not a promise about physical storage. There is
+//! deliberately no public predicate to branch on — see
+//! [`Tensor::contiguous`] for the way to *ask* for a dense operand.
 //!
 //! # Truncation
 //!
@@ -603,6 +610,21 @@ mod tests {
             format!("{transposed:?}"),
             "Tensor { shape: [2, 2], dtype: f32, device: cpu, contiguous: false, \
              traced: false, values: [1.0, 3.0, 2.0, 4.0] }"
+        );
+    }
+
+    #[test]
+    fn debug_contiguity_field_is_the_only_way_contiguity_leaves_the_crate() {
+        // `Tensor::is_contiguous` is `pub(crate)`, so this field is the whole
+        // affordance a downstream consumer has. It is reached through the
+        // public view ops alone, exactly as such a consumer would reach it.
+        let dense = t_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+        assert!(format!("{dense:?}").contains("contiguous: true"));
+        let strided = dense.transpose(0, 1).unwrap();
+        assert!(format!("{strided:?}").contains("contiguous: false"));
+        assert!(
+            format!("{:?}", strided.contiguous().unwrap()).contains("contiguous: true"),
+            "asking for a dense operand must show up in the Debug field"
         );
     }
 

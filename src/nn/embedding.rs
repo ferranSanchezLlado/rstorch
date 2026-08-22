@@ -61,7 +61,7 @@ impl Embedding {
     /// standard normal (`PyTorch`'s `nn.Embedding` default) using `rng`.
     ///
     /// Tables are created in `F32` and converted afterwards
-    /// ([`nn::to_dtype`](crate::nn::to_dtype)), like every other layer.
+    /// ([`ModuleExt::to_dtype`](crate::nn::ModuleExt::to_dtype)), like every other layer.
     ///
     /// # Errors
     ///
@@ -213,6 +213,8 @@ impl Embedding {
 }
 
 impl Forward for Embedding {
+    type Output = Tensor;
+
     /// [`lookup`](Embedding::lookup) — `x` is the [`I64`](crate::DType::I64)
     /// id tensor, so an `Embedding` is the legal first layer of a
     /// [`Sequential`](crate::nn::Sequential).
@@ -225,7 +227,7 @@ impl Forward for Embedding {
 mod tests {
     use super::*;
     use crate::error::Error;
-    use crate::nn;
+    use crate::nn::ModuleExt;
     use crate::testing::check_grad;
 
     const CPU: Device = Device::Cpu;
@@ -309,8 +311,8 @@ mod tests {
     #[test]
     fn the_table_is_the_only_parameter_and_is_named_weight() {
         let emb = Embedding::from_weight(table(5, 4)).unwrap();
-        assert_eq!(nn::state_dict(&emb).keys().collect::<Vec<_>>(), ["weight"]);
-        assert_eq!(nn::num_params(&emb), 20);
+        assert_eq!(emb.state_dict().keys().collect::<Vec<_>>(), ["weight"]);
+        assert_eq!(emb.num_params(), 20);
     }
 
     #[test]

@@ -628,6 +628,7 @@ where
 mod tests {
     use super::*;
     use crate::nn::Forward as RuntimeForward;
+    use crate::nn::ModuleExt as _;
     use crate::typed::sealed::DeviceBinding;
     use crate::typed::{Cpu, Tensor1, Tensor2};
     use crate::{DType, Device};
@@ -1014,7 +1015,7 @@ mod tests {
         let output = typed.forward(&input, Mode::TRAIN).unwrap();
 
         let mut runtime = crate::nn::LayerNorm::new([3], &ctx.device()).unwrap();
-        crate::nn::to_dtype(&mut runtime, DType::F16).unwrap();
+        runtime.to_dtype(DType::F16).unwrap();
         let expected = RuntimeForward::forward(&mut runtime, input.dynamic(), Mode::TRAIN).unwrap();
         assert_eq!(
             output.to_vec().unwrap(),

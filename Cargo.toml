@@ -22,12 +22,13 @@ keywords = ["neural-network", "machine-learning", "deep-learning", "pytorch", "t
 categories = ["science", "mathematics", "algorithms"]
 edition.workspace = true
 rust-version.workspace = true
-# The design record (`docs/`) is untracked working material; `test-tools/` and
-# `api/` are the CI gate's harness and its 3.5 MB of recorded surfaces, which
-# no consumer of the crate reads. `tests/` and `benches/` stay in: they are
-# declared targets, so the manifest a consumer resolves must still find their
-# sources.
-exclude = [".github/", "api/", "test-tools/", ".gitignore"]
+# What a consumer of the published crate never reads: CI configuration
+# (`.github/`, `deny.toml`), the maintainer-only release runbook
+# (`RELEASING.md`), and the untracked local working material `api/` (generated
+# API snapshots) and `test-tools/` (throwaway scripts). `tests/` and `benches/`
+# stay in: they are declared targets, so the manifest a consumer resolves must
+# still find their sources.
+exclude = [".github/", "api/", "test-tools/", ".gitignore", "deny.toml", "RELEASING.md"]
 
 # docs.rs renders the whole surface, not just the default features, so `typed`,
 # `hub`, `rayon`, `metal`, and `wgpu` are documented. `metal` compiles only on macOS, so

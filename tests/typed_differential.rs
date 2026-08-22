@@ -252,6 +252,7 @@ fn reduction_family() -> Result<()> {
             op: "sum_dyn",
             axis: 2,
             rank: 2,
+            ..
         })
     ));
     assert!(matches!(
@@ -260,6 +261,7 @@ fn reduction_family() -> Result<()> {
             op: "sum",
             axis: 2,
             rank: 2,
+            ..
         })
     ));
     let typed_grad = typed_out.sum_all()?.backward()?.wrt_input(&leaf)?;
@@ -442,7 +444,8 @@ fn core_autograd_family() -> Result<()> {
     assert_typed_dynamic_parity::<i64>(cast.as_dynamic(), &leaf.to_dtype(DType::I64)?);
 
     let view = roundtrip.transpose::<0, 1>()?;
-    assert!(!view.as_dynamic().is_contiguous());
+    // Contiguity has no public predicate; the `Debug` field is the affordance.
+    assert!(format!("{:?}", view.as_dynamic()).contains("contiguous: false"));
     let typed_output = view.square()?.sum_all()?;
     let dynamic_view = leaf.transpose(0, 1)?;
     let dynamic_output = dynamic_view.mul(&dynamic_view)?.sum_all()?;

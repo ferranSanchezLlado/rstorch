@@ -290,18 +290,18 @@ fn copy_into_typed<T: Copy>(src: &[T], src_layout: &Layout, dst: &mut [T], dst_l
 #[allow(clippy::infallible_destructuring_match)]
 pub(crate) fn copy_into(src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -> Result<()> {
     if src.layout().shape() != dst_layout.shape() {
-        return Err(Error::ShapeMismatch {
-            op: "copy_into",
-            lhs: src.layout().shape().clone(),
-            rhs: dst_layout.shape().clone(),
-        });
+        // Destination-shaped op, so the destination is the requirement on both
+        // this check and the dtype check below.
+        return Err(Error::shape_mismatch(
+            "copy_into",
+            dst_layout.shape(),
+            src.layout().shape(),
+        ));
     }
     if src.dtype() != dst.dtype() {
-        return Err(Error::DTypeMismatch {
-            op: "copy_into",
-            expected: src.dtype(),
-            got: dst.dtype(),
-        });
+        // The destination's dtype is likewise the requirement. Every backend
+        // reports this orientation, so the message does not flip with device.
+        return Err(Error::dtype_mismatch("copy_into", dst.dtype(), src.dtype()));
     }
     let src_layout = src.layout();
     let src = cpu_storage(src);

@@ -33,6 +33,21 @@ fn assert_close(got: &[f32], want: &[f32]) {
     }
 }
 
+/// Assert a tensor's contiguity the only way a downstream consumer can: the
+/// `contiguous` field of the `Debug` render. There is deliberately no public
+/// predicate — an infallible one would let user code branch on how a tensor is
+/// stored, and the crate keeps that free for a future fusion pass to decide.
+#[track_caller]
+fn assert_contiguous(t: &Tensor, want: bool) {
+    let rendered = format!("{t:?}");
+    let field = if want {
+        "contiguous: true"
+    } else {
+        "contiguous: false"
+    };
+    assert!(rendered.contains(field), "expected `{field}` in {rendered}");
+}
+
 // ---------------------------------------------------------------------------
 // Construction and host round-trips
 // ---------------------------------------------------------------------------
@@ -48,7 +63,7 @@ fn construct_and_inspect() -> Result<()> {
     assert_eq!(x.num_elements(), 6);
     assert_eq!(x.dtype(), DType::F32);
     assert_eq!(x.device(), dev);
-    assert!(x.is_contiguous());
+    assert_contiguous(&x, true);
     // Rank assumptions are explicit and loud, never inferred.
     assert_eq!(x.dims2()?, (2, 3));
 
@@ -164,9 +179,9 @@ fn reshape_transpose_and_views() -> Result<()> {
     // Zero-copy views; `contiguous()` is public and explicit.
     let t = x.transpose(0, 1)?;
     assert_eq!(t.dims(), &[4, 3]);
-    assert!(!t.is_contiguous());
+    assert_contiguous(&t, false);
     assert_close(&t.to_vec::<f32>()?[..3], &[0.0, 4.0, 8.0]);
-    assert!(t.contiguous()?.is_contiguous());
+    assert_contiguous(&t.contiguous()?, true);
     // A reshape that the strides cannot express copies instead of failing.
     assert_eq!(t.reshape([12])?.to_vec::<f32>()?[1], 4.0);
 

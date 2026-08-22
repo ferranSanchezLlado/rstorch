@@ -288,10 +288,6 @@ impl WgpuStorage {
     }
 }
 
-fn unsupported(op: &'static str, device: Device, dtype: DType) -> Error {
-    Error::Unsupported { op, device, dtype }
-}
-
 fn words(dtype: DType) -> Option<usize> {
     match dtype {
         DType::F32 | DType::Bool => Some(1),
@@ -364,14 +360,18 @@ fn virtual_descriptor(
     Ok(())
 }
 
-fn storage<'a>(view: View<'a>, op: &'static str) -> Result<&'a WgpuStorage> {
+/// `ordinal` is the WGPU device the caller is running on, and is what a
+/// non-WGPU view is reported against: `view.device()` describes the storage
+/// that is *present*, so using it on both sides of the mismatch would print
+/// "expected cpu, got cpu" and never name the backend actually asked for.
+fn storage<'a>(view: View<'a>, op: &'static str, ordinal: usize) -> Result<&'a WgpuStorage> {
     match view.storage() {
         Storage::Wgpu(value) => Ok(value),
-        other => Err(Error::DeviceMismatch {
+        other => Err(Error::device_mismatch(
             op,
-            expected: view.device(),
-            got: other.device(),
-        }),
+            Device::Wgpu(ordinal),
+            other.device(),
+        )),
     }
 }
 
@@ -651,6 +651,7 @@ fn op_code_binary(op: BinaryOp) -> u32 {
         BinaryOp::Div => 3,
         BinaryOp::Maximum => 4,
         BinaryOp::Minimum => 5,
+        BinaryOp::Pow => unreachable!("guarded by the caller"),
     }
 }
 fn op_code_unary(op: UnaryOp) -> u32 {
@@ -664,6 +665,14 @@ fn op_code_unary(op: UnaryOp) -> u32 {
         UnaryOp::Sigmoid => 6,
         UnaryOp::Neg => 7,
         UnaryOp::Abs => 8,
+        UnaryOp::Sign
+        | UnaryOp::Recip
+        | UnaryOp::Floor
+        | UnaryOp::Ceil
+        | UnaryOp::Round
+        | UnaryOp::Erf => {
+            unreachable!("guarded by the caller")
+        }
     }
 }
 fn op_code_cmp(op: CmpOp) -> u32 {
@@ -689,11 +698,11 @@ impl WgpuBackend {
     ) -> Result<Storage> {
         let context = context(self.ordinal)?;
         if dtype == DType::F16 && context.f16_shaders.is_none() {
-            return Err(unsupported(entry, Device::Wgpu(self.ordinal), dtype));
+            return Err(Error::unsupported(entry, Device::Wgpu(self.ordinal), dtype));
         }
         let values = inputs
             .iter()
-            .map(|view| storage(*view, entry))
+            .map(|view| storage(*view, entry, self.ordinal))
             .collect::<Result<Vec<_>>>()?;
         if values
             .iter()
@@ -711,7 +720,7 @@ impl WgpuBackend {
         }
         let output = context.allocate(
             len * element_bytes(dtype)
-                .ok_or_else(|| unsupported(entry, Device::Wgpu(self.ordinal), dtype))?,
+                .ok_or_else(|| Error::unsupported(entry, Device::Wgpu(self.ordinal), dtype))?,
             entry,
         );
         context
@@ -727,7 +736,7 @@ impl WgpuBackend {
             || views.iter().any(|view| view.dtype() != dtype)
             || (dtype == DType::F16 && !supports_f16(Device::Wgpu(self.ordinal)))
         {
-            return Err(unsupported(op, Device::Wgpu(self.ordinal), dtype));
+            return Err(Error::unsupported(op, Device::Wgpu(self.ordinal), dtype));
         }
         Ok(dtype)
     }
@@ -738,9 +747,9 @@ impl BackendOps for WgpuBackend {
         let dtype = host.dtype();
         let context = context(self.ordinal)?;
         element_bytes(dtype)
-            .ok_or_else(|| unsupported("transfer_in", Device::Wgpu(self.ordinal), dtype))?;
+            .ok_or_else(|| Error::unsupported("transfer_in", Device::Wgpu(self.ordinal), dtype))?;
         if dtype == DType::F16 && context.f16_shaders.is_none() {
-            return Err(unsupported(
+            return Err(Error::unsupported(
                 "transfer_in",
                 Device::Wgpu(self.ordinal),
                 dtype,
@@ -790,7 +799,7 @@ impl BackendOps for WgpuBackend {
     }
 
     fn transfer_out(&self, x: View<'_>) -> Result<CpuStorage> {
-        let source = storage(x, "transfer_out")?;
+        let source = storage(x, "transfer_out", self.ordinal)?;
         let dense = if x.layout().is_contiguous()
             && x.layout().offset() == 0
             && x.layout().num_elements() == source.len
@@ -846,10 +855,32 @@ impl BackendOps for WgpuBackend {
         })
     }
 
+    /// Wait for every submission on this adapter's device to finish.
+    ///
+    /// A dispatch is submitted as it is encoded here, so nothing is held back
+    /// the way Metal holds a command buffer — but a submission is still only
+    /// *queued* when the op returns, and `PollType::Wait` is what blocks until
+    /// the queue is empty.
+    ///
+    /// Deferred bounds verdicts are **not** collected: they travel with the
+    /// storage that carries them (`WgpuStorage::validations`), not with the
+    /// device, so there is no device-wide set to read. They still surface from
+    /// [`transfer_out`](BackendOps::transfer_out) on the tensor that owns them.
+    fn synchronize(&self) -> Result<()> {
+        context(self.ordinal)?
+            .device
+            .poll(::wgpu::PollType::Wait)
+            .map_err(|error| Error::Backend {
+                op: "synchronize",
+                msg: format!("{error:?}"),
+            })?;
+        Ok(())
+    }
+
     fn copy_strided(&self, x: View<'_>) -> Result<Storage> {
         if x.dtype() == DType::F16 {
             if !supports_f16(x.device()) {
-                return Err(unsupported("copy", x.device(), x.dtype()));
+                return Err(Error::unsupported("copy", x.device(), x.dtype()));
             }
             let mut params = [0; 64];
             let output = Layout::contiguous(x.layout().dims().to_vec())?;
@@ -865,7 +896,7 @@ impl BackendOps for WgpuBackend {
                 false,
             );
         }
-        words(x.dtype()).ok_or_else(|| unsupported("copy", x.device(), x.dtype()))?;
+        words(x.dtype()).ok_or_else(|| Error::unsupported("copy", x.device(), x.dtype()))?;
         let mut params = [0; 64];
         params[2] = words(x.dtype()).unwrap() as u32;
         let output = Layout::contiguous(x.layout().dims().to_vec())?;
@@ -897,7 +928,7 @@ impl BackendOps for WgpuBackend {
                 got: src.dtype(),
             });
         }
-        let source = storage(src, "copy_into")?;
+        let source = storage(src, "copy_into", self.ordinal)?;
         let context = context(self.ordinal)?;
         if !Arc::ptr_eq(&source.context, &context) || !Arc::ptr_eq(&target.context, &context) {
             return Err(Error::DeviceMismatch {
@@ -914,11 +945,12 @@ impl BackendOps for WgpuBackend {
         params[0] = u32_checked(src.layout().num_elements(), "copy_into")?;
         params[2] = if src.dtype() == DType::F16 {
             if !supports_f16(src.device()) {
-                return Err(unsupported("copy_into", src.device(), src.dtype()));
+                return Err(Error::unsupported("copy_into", src.device(), src.dtype()));
             }
             1
         } else {
-            words(src.dtype()).ok_or_else(|| unsupported("copy_into", src.device(), src.dtype()))?
+            words(src.dtype())
+                .ok_or_else(|| Error::unsupported("copy_into", src.device(), src.dtype()))?
                 as u32
         };
         params[3] = u32::from(src.layout().is_contiguous());
@@ -947,14 +979,18 @@ impl BackendOps for WgpuBackend {
     fn full(&self, len: usize, dtype: DType, value: f64) -> Result<Storage> {
         if dtype == DType::F16 {
             if !supports_f16(Device::Wgpu(self.ordinal)) {
-                return Err(unsupported("full", Device::Wgpu(self.ordinal), dtype));
+                return Err(Error::unsupported(
+                    "full",
+                    Device::Wgpu(self.ordinal),
+                    dtype,
+                ));
             }
             let mut params = [0; 64];
             params[3] = (value as f32).to_bits();
             return self.compute("f16_full", &[], dtype, len, params, false);
         }
-        let count =
-            words(dtype).ok_or_else(|| unsupported("full", Device::Wgpu(self.ordinal), dtype))?;
+        let count = words(dtype)
+            .ok_or_else(|| Error::unsupported("full", Device::Wgpu(self.ordinal), dtype))?;
         let bits = match dtype {
             DType::F32 => (value as f32).to_bits() as u64,
             DType::Bool => u64::from(value != 0.0),
@@ -974,7 +1010,7 @@ impl BackendOps for WgpuBackend {
         }
         if x.dtype() == DType::F16 {
             if !supports_f16(x.device()) || !matches!(to, DType::F32 | DType::I64 | DType::Bool) {
-                return Err(unsupported("cast", x.device(), x.dtype()));
+                return Err(Error::unsupported("cast", x.device(), x.dtype()));
             }
             let mut params = [0; 64];
             params[2] = match to {
@@ -997,7 +1033,7 @@ impl BackendOps for WgpuBackend {
             if !supports_f16(x.device())
                 || !matches!(x.dtype(), DType::F32 | DType::I64 | DType::Bool)
             {
-                return Err(unsupported("cast", x.device(), x.dtype()));
+                return Err(Error::unsupported("cast", x.device(), x.dtype()));
             }
             let mut params = [0; 64];
             params[2] = match x.dtype() {
@@ -1020,7 +1056,7 @@ impl BackendOps for WgpuBackend {
             (x.dtype(), to),
             (DType::F32, DType::Bool) | (DType::Bool, DType::F32)
         ) {
-            return Err(unsupported("cast", x.device(), x.dtype()));
+            return Err(Error::unsupported("cast", x.device(), x.dtype()));
         }
         let mut params = [0; 64];
         params[2] = u32::from(to == DType::Bool);
@@ -1037,6 +1073,11 @@ impl BackendOps for WgpuBackend {
 
     fn binary(&self, op: BinaryOp, lhs: View<'_>, rhs: View<'_>) -> Result<Storage> {
         let dtype = self.float_dtype("binary", &[lhs, rhs])?;
+        // No WGSL kernel yet for `Pow` — a loud decline, not a silent CPU
+        // fallback.
+        if matches!(op, BinaryOp::Pow) {
+            return Err(Error::unsupported("binary", lhs.device(), dtype));
+        }
         let mut p = [0; 64];
         p[2] = op_code_binary(op);
         p[5] = u32::from(lhs.layout().is_contiguous() && rhs.layout().is_contiguous());
@@ -1055,6 +1096,9 @@ impl BackendOps for WgpuBackend {
     }
     fn binary_scalar(&self, op: BinaryOp, x: View<'_>, scalar: f64) -> Result<Storage> {
         let dtype = self.float_dtype("binary_scalar", &[x])?;
+        if matches!(op, BinaryOp::Pow) {
+            return Err(Error::unsupported("binary_scalar", x.device(), dtype));
+        }
         let mut p = [0; 64];
         p[2] = op_code_binary(op);
         p[3] = (scalar as f32).to_bits();
@@ -1074,6 +1118,19 @@ impl BackendOps for WgpuBackend {
     }
     fn unary(&self, op: UnaryOp, x: View<'_>) -> Result<Storage> {
         let dtype = self.float_dtype("unary", &[x])?;
+        // No WGSL kernel yet for these — a loud decline, not a silent CPU
+        // fallback.
+        if matches!(
+            op,
+            UnaryOp::Sign
+                | UnaryOp::Recip
+                | UnaryOp::Floor
+                | UnaryOp::Ceil
+                | UnaryOp::Round
+                | UnaryOp::Erf
+        ) {
+            return Err(Error::unsupported("unary", x.device(), dtype));
+        }
         let mut p = [0; 64];
         p[2] = op_code_unary(op);
         p[5] = u32::from(x.layout().is_contiguous());
@@ -1111,7 +1168,7 @@ impl BackendOps for WgpuBackend {
     fn where_cond(&self, cond: View<'_>, on_true: View<'_>, on_false: View<'_>) -> Result<Storage> {
         let dtype = self.float_dtype("where", &[on_true, on_false])?;
         if cond.dtype() != DType::Bool {
-            return Err(unsupported("where", cond.device(), cond.dtype()));
+            return Err(Error::unsupported("where", cond.device(), cond.dtype()));
         }
         let mut p = [0; 64];
         p[5] = u32::from(
@@ -1136,7 +1193,11 @@ impl BackendOps for WgpuBackend {
     fn masked_fill(&self, x: View<'_>, mask: View<'_>, value: f64) -> Result<Storage> {
         let dtype = self.float_dtype("masked_fill", &[x])?;
         if mask.dtype() != DType::Bool {
-            return Err(unsupported("masked_fill", mask.device(), mask.dtype()));
+            return Err(Error::unsupported(
+                "masked_fill",
+                mask.device(),
+                mask.dtype(),
+            ));
         }
         let mut p = [0; 64];
         p[2] = (value as f32).to_bits();
@@ -1166,6 +1227,14 @@ impl BackendOps for WgpuBackend {
             .filter(|(i, _)| *i != axis)
             .map(|(_, v)| v)
             .product();
+        // Ahead of the empty-axis short-circuit on purpose: a zero-length
+        // axis must still get the loud decline, not a zero-filled buffer —
+        // which is not even the product identity.
+        if matches!(op, ReduceOp::Prod) {
+            // No WGSL kernel yet for `Prod` — a loud decline, not a silent CPU
+            // fallback.
+            return Err(Error::unsupported("reduce", x.device(), dtype));
+        }
         if count == 0 {
             return self.full(len, dtype, 0.0);
         }
@@ -1175,6 +1244,7 @@ impl BackendOps for WgpuBackend {
             ReduceOp::Mean => 1,
             ReduceOp::Max => 2,
             ReduceOp::Min => 3,
+            ReduceOp::Prod => unreachable!("guarded above"),
         };
         p[3] = axis as u32;
         p[4] = u32_checked(count, "reduce")?;
@@ -1182,7 +1252,7 @@ impl BackendOps for WgpuBackend {
         p[0] = u32_checked(len, "reduce")?;
         descriptor(&mut p, 8, x.layout(), "reduce")?;
         let context = context(self.ordinal)?;
-        let input = storage(x, "reduce")?;
+        let input = storage(x, "reduce", self.ordinal)?;
         if !Arc::ptr_eq(&input.context, &context) {
             return Err(Error::DeviceMismatch {
                 op: "reduce",
@@ -1241,7 +1311,7 @@ impl BackendOps for WgpuBackend {
         let batch = batch_dims.num_elements();
         let rank = batch_dims.rank() + 2;
         if rank > MAX_RANK {
-            return Err(unsupported("matmul", lhs.device(), lhs.dtype()));
+            return Err(Error::unsupported("matmul", lhs.device(), lhs.dtype()));
         }
         let expand = |layout: &Layout, dims: &[usize], batch: &[usize]| {
             let prefix = &dims[..dims.len() - 2];
@@ -1269,8 +1339,8 @@ impl BackendOps for WgpuBackend {
         virtual_descriptor(&mut p, 8, lhs.layout(), &av, &as_, "matmul")?;
         virtual_descriptor(&mut p, 26, rhs.layout(), &bv, &bs, "matmul")?;
         let context = context(self.ordinal)?;
-        let a = storage(lhs, "matmul")?;
-        let b = storage(rhs, "matmul")?;
+        let a = storage(lhs, "matmul", self.ordinal)?;
+        let b = storage(rhs, "matmul", self.ordinal)?;
         let output = context.allocate(batch * m * n * element_bytes(dtype).unwrap(), "matmul");
         context
             .dispatch(
@@ -1296,10 +1366,10 @@ impl BackendOps for WgpuBackend {
         if !matches!(dtype, DType::F16 | DType::F32 | DType::I64 | DType::Bool)
             || (dtype == DType::F16 && !supports_f16(Device::Wgpu(self.ordinal)))
         {
-            return Err(unsupported("index_select", x.device(), dtype));
+            return Err(Error::unsupported("index_select", x.device(), dtype));
         }
         if indices.dtype() != DType::I64 {
-            return Err(unsupported(
+            return Err(Error::unsupported(
                 "index_select",
                 indices.device(),
                 indices.dtype(),
@@ -1336,7 +1406,11 @@ impl BackendOps for WgpuBackend {
     ) -> Result<Storage> {
         let dtype = self.float_dtype("index_add", &[x, src])?;
         if indices.dtype() != DType::I64 {
-            return Err(unsupported("index_add", indices.device(), indices.dtype()));
+            return Err(Error::unsupported(
+                "index_add",
+                indices.device(),
+                indices.dtype(),
+            ));
         }
         let mut p = [0; 64];
         p[2] = axis as u32;
@@ -1359,7 +1433,11 @@ impl BackendOps for WgpuBackend {
     fn gather(&self, x: View<'_>, axis: usize, indices: View<'_>) -> Result<Storage> {
         let dtype = self.float_dtype("gather", &[x])?;
         if indices.dtype() != DType::I64 {
-            return Err(unsupported("gather", indices.device(), indices.dtype()));
+            return Err(Error::unsupported(
+                "gather",
+                indices.device(),
+                indices.dtype(),
+            ));
         }
         let mut p = [0; 64];
         p[2] = axis as u32;
@@ -1387,7 +1465,7 @@ impl BackendOps for WgpuBackend {
     ) -> Result<Storage> {
         let dtype = self.float_dtype("scatter_add", &[x, src])?;
         if indices.dtype() != DType::I64 {
-            return Err(unsupported(
+            return Err(Error::unsupported(
                 "scatter_add",
                 indices.device(),
                 indices.dtype(),
@@ -1411,9 +1489,9 @@ impl BackendOps for WgpuBackend {
         )?;
         let context = context(self.ordinal)?;
         let values = [
-            storage(x, "scatter_add")?,
-            storage(indices, "scatter_add")?,
-            storage(src, "scatter_add")?,
+            storage(x, "scatter_add", self.ordinal)?,
+            storage(indices, "scatter_add", self.ordinal)?,
+            storage(src, "scatter_add", self.ordinal)?,
         ];
         let output = context.allocate(
             x.layout().num_elements() * element_bytes(dtype).unwrap(),
@@ -1436,6 +1514,13 @@ impl BackendOps for WgpuBackend {
                 None,
             )
             .map(Storage::Wgpu)
+    }
+
+    /// No device sort kernel yet: loud
+    /// [`Error::Unsupported`](crate::Error::Unsupported), never a host
+    /// round-trip behind the caller's back.
+    fn arg_sort(&self, x: View<'_>, _axis: usize, _descending: bool) -> Result<Storage> {
+        Err(Error::unsupported("arg_sort", x.device(), x.dtype()))
     }
 
     fn conv(&self, op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Result<Storage> {
@@ -1548,7 +1633,7 @@ impl BackendOps for WgpuBackend {
                 "f16_layer_norm"
             }
             _ => {
-                return Err(unsupported(
+                return Err(Error::unsupported(
                     match op {
                         FusedOp::Softmax => "softmax",
                         FusedOp::LayerNorm => "layer_norm",
@@ -1569,7 +1654,7 @@ impl BackendOps for WgpuBackend {
         let context = context(self.ordinal)?;
         let values = inputs
             .iter()
-            .map(|view| storage(*view, entry))
+            .map(|view| storage(*view, entry, self.ordinal))
             .collect::<Result<Vec<_>>>()?;
         if values
             .iter()

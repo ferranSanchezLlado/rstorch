@@ -2,9 +2,10 @@
 //! the `resnet_mnist` convergence test.
 //!
 //! Included with `#[path]` by both targets rather than living in the library:
-//! it is benchmark scaffolding (an `nn::Conv2d` layer does not exist yet), not
-//! public API. Every item is `pub` and the module allows dead code, because
-//! each including target uses a different subset.
+//! it assembles `nn::Conv2d`/`nn::BatchNorm2d` into a residual network, which
+//! is model structure, not a library primitive. Every item is `pub` and the
+//! module allows dead code, because each including target uses a different
+//! subset.
 //!
 //! # Why this model
 //!
@@ -38,60 +39,32 @@ use rstorch::prelude::*;
 // Layers
 // ---------------------------------------------------------------------------
 
-/// A bias-free convolution: every convolution here is followed by a
-/// [`BatchNorm2d`], whose own shift subsumes the bias.
-///
-/// `nn` has no `Conv2d` layer yet, so this is the same `Tensor::conv2d` +
-/// `Param` pairing `benches/training.rs` uses, wrapped so it can sit in a
-/// `#[derive(Module)]` tree. `stride`/`padding` are `usize` (not `(usize,
-/// usize)`) because the derive's primitive whitelist skips scalars but would
-/// treat a tuple as a child module.
-#[derive(Module)]
-pub struct Conv2d {
-    weight: Param,
+/// Kaiming-normal (`fan_in`, `ReLU` gain), bias-free — what `PyTorch`'s
+/// `kaiming_normal_(mode="fan_in", nonlinearity="relu")` does, and what a
+/// `ResNet` needs to train at this depth without a warm-up schedule. Every
+/// convolution here is followed by a [`BatchNorm2d`], whose own shift
+/// subsumes the bias `nn::Conv2d::new`'s default would otherwise add.
+fn conv2d(
+    in_channels: usize,
+    out_channels: usize,
+    kernel: usize,
     stride: usize,
     padding: usize,
-}
-
-impl Conv2d {
-    /// Kaiming-normal (`fan_in`, `ReLU` gain) initialization — what `PyTorch`'s
-    /// `kaiming_normal_(mode="fan_in", nonlinearity="relu")` does, and what a
-    /// `ResNet` needs to train at this depth without a warm-up schedule.
-    pub fn new(
-        in_channels: usize,
-        out_channels: usize,
-        kernel: usize,
-        stride: usize,
-        padding: usize,
-        device: &Device,
-        rng: &mut Rng,
-    ) -> Result<Conv2d> {
-        let fan_in = in_channels * kernel * kernel;
-        let std = (2.0 / fan_in as f64).sqrt();
-        let values: Vec<f32> = (0..out_channels * fan_in)
-            .map(|_| rng.normal(0.0, std) as f32)
-            .collect();
-        Ok(Conv2d {
-            weight: Param::new(Tensor::from_vec(
-                values,
-                [out_channels, in_channels, kernel, kernel],
-                device,
-            )?),
-            stride,
-            padding,
-        })
-    }
-}
-
-impl Forward for Conv2d {
-    fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
-        x.conv2d(
-            &self.weight.get(mode),
-            (self.stride, self.stride),
-            (self.padding, self.padding),
-            (1, 1),
-        )
-    }
+    device: &Device,
+    rng: &mut Rng,
+) -> Result<Conv2d> {
+    Ok(Conv2d::with_init(
+        in_channels,
+        out_channels,
+        (kernel, kernel),
+        device,
+        |shape, device| {
+            rstorch::nn::init::kaiming_normal(shape.to_vec(), 2f64.sqrt(), DType::F32, device, rng)
+        },
+    )?
+    .with_stride((stride, stride))
+    .with_padding((padding, padding))
+    .without_bias())
 }
 
 /// The `1x1`-convolution shortcut used when a block changes shape.
@@ -102,6 +75,8 @@ pub struct Downsample {
 }
 
 impl Forward for Downsample {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         self.norm.forward(&self.conv.forward(x, mode)?, mode)
     }
@@ -128,16 +103,16 @@ impl BasicBlock {
     ) -> Result<BasicBlock> {
         let shortcut = if stride != 1 || in_channels != out_channels {
             Some(Downsample {
-                conv: Conv2d::new(in_channels, out_channels, 1, stride, 0, device, rng)?,
+                conv: conv2d(in_channels, out_channels, 1, stride, 0, device, rng)?,
                 norm: BatchNorm2d::new(out_channels, device)?,
             })
         } else {
             None
         };
         Ok(BasicBlock {
-            conv1: Conv2d::new(in_channels, out_channels, 3, stride, 1, device, rng)?,
+            conv1: conv2d(in_channels, out_channels, 3, stride, 1, device, rng)?,
             norm1: BatchNorm2d::new(out_channels, device)?,
-            conv2: Conv2d::new(out_channels, out_channels, 3, 1, 1, device, rng)?,
+            conv2: conv2d(out_channels, out_channels, 3, 1, 1, device, rng)?,
             norm2: BatchNorm2d::new(out_channels, device)?,
             shortcut,
         })
@@ -145,6 +120,8 @@ impl BasicBlock {
 }
 
 impl Forward for BasicBlock {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let identity = match &mut self.shortcut {
             Some(shortcut) => shortcut.forward(x, mode)?,
@@ -235,7 +212,7 @@ impl ResNet {
         device: &Device,
         rng: &mut Rng,
     ) -> Result<ResNet> {
-        let stem = Conv2d::new(in_channels, spec.width, 3, 1, 1, device, rng)?;
+        let stem = conv2d(in_channels, spec.width, 3, 1, 1, device, rng)?;
         let stem_norm = BatchNorm2d::new(spec.width, device)?;
 
         let mut blocks = Vec::new();
@@ -266,25 +243,25 @@ impl ResNet {
 
     /// Trainable parameters.
     pub fn params(&self) -> usize {
-        rstorch::nn::num_params(self)
+        self.num_params()
     }
 
-    /// Reads one head parameter back to the host, which forces a deferred
-    /// backend (Metal) to finish everything queued behind it.
+    /// Forces a deferred backend (Metal) to finish everything queued behind
+    /// it, via [`Tensor::realize`](rstorch::Tensor::realize) on one head
+    /// parameter.
     ///
     /// Both including targets call this at the end of a training step. It is
     /// not free and it is not meant to be: without it a Metal "step" would
-    /// time command encoding, and a real loop pays the same read every time it
-    /// logs a loss.
+    /// time command encoding, and a real loop pays the same flush every time
+    /// it logs a loss.
     pub fn sync(&self) -> Result<()> {
-        let state = rstorch::nn::state_dict(&self.head);
-        let value = state.values().next().expect("the head has parameters");
-        value.to_vec::<f32>()?;
-        Ok(())
+        self.head.weight().value().realize()
     }
 }
 
 impl Forward for ResNet {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let mut hidden = self
             .stem_norm
@@ -515,15 +492,23 @@ impl HostData {
 // ---------------------------------------------------------------------------
 
 /// Every device this build can reach, CPU first.
+///
+/// Metal is probed rather than assumed: `metal` is a default feature, so a
+/// macOS build always compiles the branch, and a trial allocation is what
+/// distinguishes a machine with a usable device from one without. Both
+/// including targets honour `RSTORCH_SKIP_METAL_TESTS` for the same reason the
+/// test suites do (README documents it as the opt-out on CPU-only machines and
+/// doc builds).
 pub fn devices() -> Vec<Device> {
+    #[allow(unused_mut)]
+    let mut devices = vec![Device::Cpu];
     #[cfg(all(feature = "metal", target_os = "macos"))]
+    if env::var_os("RSTORCH_SKIP_METAL_TESTS").is_none()
+        && Tensor::zeros([1], DType::F32, &Device::Metal(0)).is_ok()
     {
-        vec![Device::Cpu, Device::Metal(0)]
+        devices.push(Device::Metal(0));
     }
-    #[cfg(not(all(feature = "metal", target_os = "macos")))]
-    {
-        vec![Device::Cpu]
-    }
+    devices
 }
 
 /// How the build was configured, for the report header: `rayon` is a

@@ -40,7 +40,7 @@
 use crate::device::Device;
 use crate::dtype::DType;
 use crate::error::{Error, Result};
-use crate::nn::{Mode, Param};
+use crate::nn::{Forward, Mode, Param};
 use crate::rng::Rng;
 use crate::shape::Shape;
 use crate::tensor::Tensor;
@@ -307,11 +307,12 @@ impl Proj {
 /// key/value source have independent lengths), and the `project_*` methods
 /// are those two taken apart for a KV cache.
 ///
-/// `forward` is *not* implemented: [`Forward`](crate::nn::Forward) has no
-/// place for the mask, and an attention layer that silently picks its own
-/// masking policy — bidirectional when the model needed causal — is a bug
-/// that trains to a plausible-looking loss. The mask stays a required
-/// argument, `None` spelled out.
+/// [`Forward`] is implemented for [`AttentionInput`], not for a bare
+/// [`Tensor`]: the mask has no place in a one-tensor signature, and an
+/// attention layer that silently picks its own masking policy —
+/// bidirectional when the model needed causal — is a bug that trains to a
+/// plausible-looking loss. The mask stays required, `None` spelled out,
+/// whichever spelling you call.
 ///
 /// ```
 /// # use rstorch::nn::{MultiHeadAttention, Mode};
@@ -350,7 +351,7 @@ impl MultiHeadAttention {
     /// [`F32`](crate::DType::F32) on `device`.
     ///
     /// Weights are created in `F32` and converted afterwards
-    /// ([`nn::to_dtype`](crate::nn::to_dtype)), like every other layer.
+    /// ([`ModuleExt::to_dtype`](crate::nn::ModuleExt::to_dtype)), like every other layer.
     ///
     /// # Errors
     ///
@@ -611,6 +612,79 @@ impl MultiHeadAttention {
     /// `[.., seq, embed_dim]` → `[.., num_heads, seq, head_dim]`.
     fn split_heads(&self, x: &Tensor) -> Result<Tensor> {
         split_heads(x, self.num_heads, self.head_dim())
+    }
+}
+
+/// The [`Forward`] input of [`MultiHeadAttention`]: the sequence and its mask,
+/// in one value.
+///
+/// This is what makes a multi-input layer fit the crate's central trait
+/// without smuggling the mask through `&mut self`. The mask stays **required**
+/// — `None` has to be spelled out — so a layer can never silently pick its own
+/// masking policy, which is the bug that trains to a plausible-looking loss.
+///
+/// The fields are owned rather than borrowed because [`Forward::forward`]
+/// takes `&Input`: a caller builds one of these per call from tensors it
+/// already holds, and a `Tensor` clone is an `Arc` bump.
+///
+/// `#[non_exhaustive]` with a constructor, for the same reason
+/// [`TransformerConfig`](crate::models::TransformerConfig) is: a struct
+/// literal is the only downstream construction path a bare `pub`-field struct
+/// offers, so adding a field in a 1.x release would break every caller. Sealed
+/// and constructed through [`AttentionInput::new`], the shape can still grow —
+/// a cross-attention memory tensor is the obvious addition, and today it is
+/// reachable only through [`attend_to`](MultiHeadAttention::attend_to).
+///
+/// ```
+/// # use rstorch::nn::{AttentionInput, Forward, Mode, MultiHeadAttention};
+/// # use rstorch::{DType, Device, Rng, Tensor};
+/// # fn main() -> rstorch::Result<()> {
+/// let dev = Device::Cpu;
+/// let mut rng = Rng::seed(3);
+/// let mut attn = MultiHeadAttention::new(8, 2, &dev, &mut rng)?;
+/// let x = Tensor::rand([2, 5, 8], DType::F32, &dev, &mut rng)?;
+/// let input = AttentionInput::new(x, Some(Tensor::causal_mask(5, &dev)?));
+/// assert_eq!(attn.forward(&input, Mode::TRAIN)?.dims(), &[2, 5, 8]);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AttentionInput {
+    /// The sequence, `[.., seq, embed_dim]`. Supplies the queries, the keys
+    /// **and** the values (self-attention); for cross-attention call
+    /// [`attend_to`](MultiHeadAttention::attend_to) directly.
+    pub x: Tensor,
+    /// The mask, broadcasting into `[.., num_heads, seq, seq]`. `true` means
+    /// **blocked** ([`Tensor::causal_mask`]'s polarity).
+    pub mask: Option<Tensor>,
+}
+
+impl AttentionInput {
+    /// One self-attention call's input. `mask` is positional rather than
+    /// defaulted so it cannot be forgotten — see the type's own docs.
+    #[must_use]
+    pub fn new(x: Tensor, mask: Option<Tensor>) -> AttentionInput {
+        AttentionInput { x, mask }
+    }
+}
+
+impl Forward<AttentionInput> for MultiHeadAttention {
+    type Output = Tensor;
+
+    /// [`attend`](MultiHeadAttention::attend) over
+    /// [`AttentionInput::x`] with [`AttentionInput::mask`].
+    ///
+    /// `attend`/`attend_to` remain the ergonomic spelling and share this
+    /// implementation; this impl exists so the layer is reachable through the
+    /// trait system (and therefore through generic code written against
+    /// [`Forward`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`attend`](MultiHeadAttention::attend).
+    fn forward(&mut self, input: &AttentionInput, mode: Mode) -> Result<Tensor> {
+        self.attend(&input.x, input.mask.as_ref(), mode)
     }
 }
 

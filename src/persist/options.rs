@@ -10,7 +10,12 @@
 //! call site reads `MissingPolicy::Allow` far more clearly than `true`.
 
 /// What to do when the file is **missing** a tensor the target expects.
+///
+/// `#[non_exhaustive]`: the policy set is crate-owned and may grow in a minor
+/// release (a warn-and-continue policy is the obvious next one), so downstream
+/// `match` arms must carry a `_` catch-all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MissingPolicy {
     /// Every expected path must be present, else [`Error::Persistence`](crate::Error::Persistence).
     Reject,
@@ -19,7 +24,11 @@ pub enum MissingPolicy {
 }
 
 /// What to do when the file carries a tensor the target does **not** expect.
+///
+/// `#[non_exhaustive]`: the policy set is crate-owned and may grow in a minor
+/// release, so downstream `match` arms must carry a `_` catch-all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnexpectedPolicy {
     /// Any extra path is an error ([`Error::Persistence`](crate::Error::Persistence)).
     Reject,
@@ -77,9 +86,9 @@ impl Limits {
     /// [`Error::Persistence`](crate::Error::Persistence) naming the field.
     pub(crate) fn check(field: &str, value: u64, max: u64) -> crate::error::Result<()> {
         if value > max {
-            return Err(crate::error::Error::Persistence {
-                msg: format!("{field} {value} exceeds limit {max}"),
-            });
+            return Err(crate::error::Error::persistence(format!(
+                "{field} {value} exceeds limit {max}"
+            )));
         }
         Ok(())
     }

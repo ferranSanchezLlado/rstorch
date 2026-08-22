@@ -16,9 +16,8 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 
 #[path = "common/metal.rs"]
-mod metal;
+mod gpu;
 
-use rstorch::nn;
 use rstorch::prelude::*;
 
 const METAL: Device = Device::Metal(0);
@@ -75,7 +74,7 @@ fn value_and_grad(
 
 #[test]
 fn softmax_and_log_softmax_match_the_cpu() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     for dims in [[4usize, 8], [3, 33], [1, 129], [17, 5]] {
@@ -93,7 +92,7 @@ fn softmax_and_log_softmax_match_the_cpu() {
 /// it assumes a packed row.
 #[test]
 fn softmax_over_a_strided_view_matches_the_cpu() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     compare("softmax.transposed", |device| {
@@ -109,7 +108,7 @@ fn softmax_over_a_strided_view_matches_the_cpu() {
 
 #[test]
 fn layer_norm_and_rms_norm_match_the_cpu() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     for width in [4usize, 31, 128] {
@@ -134,7 +133,7 @@ fn layer_norm_and_rms_norm_match_the_cpu() {
 
 #[test]
 fn wide_parallel_reductions_match_the_cpu_forward_and_backward() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     compare("softmax.parallel.1024", |device| {
@@ -152,7 +151,7 @@ fn wide_parallel_reductions_match_the_cpu_forward_and_backward() {
 
 #[test]
 fn contiguous_index_backward_fast_paths_match_the_cpu_with_duplicates() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     compare("index_select.axis0.backward", |device| {
@@ -182,7 +181,7 @@ fn contiguous_index_backward_fast_paths_match_the_cpu_with_duplicates() {
 /// that gets the input gradient right can still get `weight`/`bias` wrong.
 #[test]
 fn layer_norm_parameter_gradients_match_the_cpu() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     compare("layer_norm.params", |device| {
@@ -199,7 +198,8 @@ fn layer_norm_parameter_gradients_match_the_cpu() {
             .unwrap();
         let mut sgd = Sgd::new(0.5);
         sgd.step(&mut layer, grads).unwrap();
-        nn::state_dict(&layer)
+        layer
+            .state_dict()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect()
@@ -208,7 +208,7 @@ fn layer_norm_parameter_gradients_match_the_cpu() {
 
 #[test]
 fn cross_entropy_matches_the_cpu() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     compare("cross_entropy", |device| {
@@ -226,7 +226,7 @@ fn cross_entropy_matches_the_cpu() {
 /// when a momentum or a bias-correction term is mishandled; ten cannot.
 #[test]
 fn optimizer_steps_match_the_cpu() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     #[derive(rstorch::Module)]
@@ -236,6 +236,8 @@ fn optimizer_steps_match_the_cpu() {
     }
 
     impl Forward for Model {
+        type Output = Tensor;
+
         fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
             self.second
                 .forward(&self.first.forward(x, mode)?.relu()?, mode)
@@ -268,7 +270,8 @@ fn optimizer_steps_match_the_cpu() {
                 _ => adamw.step(&mut model, grads).unwrap(),
             }
         }
-        nn::state_dict(&model)
+        model
+            .state_dict()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect()
@@ -283,7 +286,7 @@ fn optimizer_steps_match_the_cpu() {
 /// where a fused softmax meets non-contiguous operands.
 #[test]
 fn attention_matches_the_cpu() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     compare("attention", |device| {
@@ -296,7 +299,8 @@ fn attention_matches_the_cpu() {
         let mut sgd = Sgd::new(0.1);
         sgd.step(&mut attention, grads).unwrap();
         result.extend(
-            nn::state_dict(&attention)
+            attention
+                .state_dict()
                 .into_values()
                 .flat_map(|tensor| tensor.to_vec::<f32>().unwrap()),
         );
@@ -308,7 +312,7 @@ fn attention_matches_the_cpu() {
 /// forwards instead of showing up in one.
 #[test]
 fn batch_norm_running_statistics_match_the_cpu() {
-    if !metal::available() {
+    if !gpu::available() {
         return;
     }
     compare("batch_norm", |device| {
@@ -328,7 +332,8 @@ fn batch_norm_running_statistics_match_the_cpu() {
             .to_vec::<f32>()
             .unwrap();
         result.extend(
-            nn::state_dict(&layer)
+            layer
+                .state_dict()
                 .into_values()
                 .flat_map(|tensor| tensor.to_vec::<f32>().unwrap()),
         );

@@ -550,10 +550,44 @@ impl Grads {
         Ok(Grads { grads })
     }
 
+    /// The **global** L2 norm over every gradient at once (`√Σ‖gₖ‖²`): the
+    /// number to log for a step, and exactly the value
+    /// [`clip_norm`](Self::clip_norm) compares its budget against. Read it
+    /// *before* clipping — that is the pre-clipping norm a training log wants,
+    /// and `clip_norm` consumes the `Grads`:
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rstorch::prelude::*;
+    ///
+    /// let param = Param::new(Tensor::from_vec(vec![1.0f32], [1], &Device::Cpu)?);
+    /// let grads = param.get(Mode::TRAIN).mul_scalar(3.0)?.backward()?;
+    /// let grad_norm = grads.norm()?; // log this, before clipping
+    /// assert!((grad_norm - 3.0).abs() < 1e-6);
+    /// let grads = grads.clip_norm(1.0)?;
+    /// // Scaling by `1/3` in f32 lands near 1.0, not exactly on it — which
+    /// // is why the sibling unit test compares with a tolerance too.
+    /// assert!((grads.norm()? - 1.0).abs() < 1e-6);
+    /// # Ok::<(), rstorch::Error>(())
+    /// ```
+    ///
+    /// An empty `Grads` has norm `0.0`. Unlike `clip_norm`, a non-finite norm
+    /// is returned rather than rejected: a diverged step is precisely what a
+    /// log is for.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the widen/square/sum ops report.
+    pub fn norm(&self) -> Result<f64> {
+        self.global_norm()
+    }
+
     /// Clip by **global** L2 norm to `max_norm`, consuming `self`: the norm is
     /// taken over every gradient at once (`√Σ‖gₖ‖²`), and if it exceeds
     /// `max_norm` all of them are scaled by `max_norm / norm`. A norm already
-    /// within budget leaves the gradients untouched.
+    /// within budget leaves the gradients untouched. The norm itself is
+    /// [`norm`](Self::norm).
     ///
     /// # Errors
     ///
@@ -568,6 +602,23 @@ impl Grads {
                 msg: format!("max_norm must be finite and positive, got {max_norm}"),
             });
         }
+        let norm = self.global_norm()?;
+        if !norm.is_finite() {
+            return Err(Error::InvalidArg {
+                op: "clip_norm",
+                msg: format!("global gradient norm is not finite ({norm})"),
+            });
+        }
+        if norm <= max_norm {
+            return Ok(self);
+        }
+        self.scale(max_norm / norm)
+    }
+
+    /// The global L2 norm, shared by [`norm`](Self::norm) and
+    /// [`clip_norm`](Self::clip_norm) so the value that is logged and the value
+    /// that is clipped against cannot drift apart.
+    fn global_norm(&self) -> Result<f64> {
         // Accumulate the per-gradient sums of squares **on the device**, then
         // read once. Calling `item()` per gradient made the global norm cost
         // one full accelerator round trip per parameter — the single largest
@@ -596,17 +647,7 @@ impl Grads {
         for (_, partial) in &partials {
             total += partial.item()?;
         }
-        let norm = total.sqrt();
-        if !norm.is_finite() {
-            return Err(Error::InvalidArg {
-                op: "clip_norm",
-                msg: format!("global gradient norm is not finite ({norm})"),
-            });
-        }
-        if norm <= max_norm {
-            return Ok(self);
-        }
-        self.scale(max_norm / norm)
+        Ok(total.sqrt())
     }
 
     /// The gradient with respect to `param` (a clone of the stored handle;

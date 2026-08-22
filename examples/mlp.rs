@@ -50,6 +50,8 @@ impl Mlp {
 }
 
 impl Forward for Mlp {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let hidden = self.fc1.forward(x, mode)?.relu()?;
         self.fc2.forward(&hidden, mode)

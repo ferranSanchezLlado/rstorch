@@ -9,13 +9,16 @@
 //!   safetensors tensors, keyed by their dotted path (a `String`);
 //! - the non-tensor sections live as string entries in the safetensors
 //!   free-form `__metadata__` map, under a reserved `rstorch.*` namespace;
-//! - a format-family magic and a major/minor version let readers dispatch by
-//!   version and reject unknown families/majors loudly.
+//! - a format-family magic and a major/minor version let a reader recognize
+//!   what it is holding and reject an unknown family or major loudly.
 //!
-//! The magic is independent of any internal epoch number, and the reader is
-//! permanent for every shipped major version. Section *values* are
-//! opaque strings here — the `optim`/`nn` layers decide their own encoding;
-//! the envelope only guarantees they round-trip verbatim.
+//! The magic is independent of any internal epoch number. Exactly one major
+//! version is readable today: this build accepts [`FORMAT_MAJOR`] and nothing
+//! else, in either direction. A higher major is an incompatible future format,
+//! and an older major would get its own permanent reader alongside this one if
+//! one had ever shipped — none has. Section *values* are opaque strings here —
+//! the `optim`/`nn` layers decide their own encoding; the envelope only
+//! guarantees they round-trip verbatim.
 
 use crate::error::{Error, Result};
 use crate::persist::host_tensor::HostTensor;
@@ -42,7 +45,8 @@ const SECTION_PREFIX: &str = "rstorch.section.";
 ///
 /// Build one with [`Envelope::new`], attach tensors and sections, then
 /// [`Envelope::save`] atomically. [`Envelope::load`] validates the magic and
-/// dispatches on the major version before returning the parsed envelope.
+/// requires the one readable major version before returning the parsed
+/// envelope.
 ///
 /// # Examples
 ///
@@ -164,10 +168,13 @@ impl Envelope {
         )
     }
 
-    /// Load and version-dispatch an envelope from `path`, enforcing `limits`.
+    /// Load and version-check an envelope from `path`, enforcing `limits`.
     ///
     /// Rejects a file whose magic is not this format family, or whose major
-    /// version this reader does not understand ([`Error::Persistence`]).
+    /// version is not the one this build reads ([`Error::Persistence`]).
+    /// [`FORMAT_MAJOR`] is the only readable major; an older one is refused
+    /// here as loudly as a newer one, because no older major ever shipped to
+    /// have a reader for.
     ///
     /// # Errors
     ///
@@ -180,25 +187,22 @@ impl Envelope {
 
         let magic = meta.get(KEY_MAGIC).map(String::as_str);
         if magic != Some(MAGIC) {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "not an rstorch checkpoint: magic {magic:?} (expected {MAGIC:?}); \
+            return Err(Error::persistence(format!(
+                "not an rstorch checkpoint: magic {magic:?} (expected {MAGIC:?}); \
                      use load_safetensors for a plain safetensors file"
-                ),
-            });
+            )));
         }
 
         let major = parse_version(&meta, KEY_MAJOR)?;
         let minor = parse_version(&meta, KEY_MINOR)?;
-        // Version dispatch: this reader understands exactly FORMAT_MAJOR. A
-        // higher major means an incompatible future format; refuse it loudly
-        // rather than misread it.
+        // This reader understands exactly FORMAT_MAJOR, and no other major has
+        // ever shipped: a different one is either an incompatible future
+        // format or not a real version at all. Refuse it rather than misread
+        // it.
         if major != FORMAT_MAJOR {
-            return Err(Error::Persistence {
-                msg: format!(
-                    "unsupported checkpoint format major {major} (this build reads major {FORMAT_MAJOR})"
-                ),
-            });
+            return Err(Error::persistence(format!(
+                "unsupported checkpoint format major {major} (this build reads major {FORMAT_MAJOR})"
+            )));
         }
 
         let mut sections = BTreeMap::new();
@@ -220,20 +224,23 @@ impl Envelope {
 
 fn validate_section_name(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('.') {
-        return Err(Error::Persistence {
-            msg: format!("invalid section name `{name}` (must be non-empty and contain no `.`)"),
-        });
+        return Err(Error::persistence(format!(
+            "invalid section name `{name}` (must be non-empty and contain no `.`)"
+        )));
     }
     Ok(())
 }
 
 /// Parse a reserved `u32` version key, erroring on absence or non-numeric.
 fn parse_version(meta: &HashMap<String, String>, key: &str) -> Result<u32> {
-    let raw = meta.get(key).ok_or_else(|| Error::Persistence {
-        msg: format!("checkpoint missing required `{key}`"),
-    })?;
-    raw.parse().map_err(|_| Error::Persistence {
-        msg: format!("checkpoint `{key}` is not a number: {raw:?}"),
+    let raw = meta
+        .get(key)
+        .ok_or_else(|| Error::persistence(format!("checkpoint missing required `{key}`")))?;
+    raw.parse().map_err(|source| {
+        Error::persistence_with(
+            format!("checkpoint `{key}` is not a number: {raw:?}"),
+            source,
+        )
     })
 }
 

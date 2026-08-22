@@ -113,13 +113,6 @@ struct WalkLeaf {
     contract: LeafContract,
 }
 
-fn malformed(op: &'static str, msg: impl Into<String>) -> Error {
-    Error::InvalidArg {
-        op,
-        msg: msg.into(),
-    }
-}
-
 /// Whether two erased contracts describe the same typed leaf.
 ///
 /// `dtype` is the sole guard against a load between two models that are
@@ -167,11 +160,14 @@ fn collect_read<M: Module + ?Sized>(
                 ),
             };
             if !paths.insert(path.to_string()) {
-                error = Some(malformed(op, format!("duplicate state path {path:?}")));
+                error = Some(Error::invalid_arg(
+                    op,
+                    format!("duplicate state path {path:?}"),
+                ));
                 return;
             }
             if !identities.insert(identity) {
-                error = Some(malformed(
+                error = Some(Error::invalid_arg(
                     op,
                     format!("duplicate leaf identity at {path:?}"),
                 ));
@@ -228,14 +224,14 @@ fn collect_mut<M: Module + ?Sized>(
                 ),
             };
             if !paths.insert(path.to_string()) {
-                error = Some(malformed(
+                error = Some(Error::invalid_arg(
                     OP,
                     format!("duplicate mutable state path {path:?}"),
                 ));
                 return;
             }
             if !identities.insert(identity) {
-                error = Some(malformed(
+                error = Some(Error::invalid_arg(
                     OP,
                     format!("duplicate mutable leaf identity at {path:?}"),
                 ));
@@ -325,7 +321,10 @@ fn apply_checked<M: Module + ?Sized>(
                 return;
             }
             let Some(schema) = expected.get(index) else {
-                error = Some(malformed(OP, "mutable commit walk emitted an extra leaf"));
+                error = Some(Error::invalid_arg(
+                    OP,
+                    "mutable commit walk emitted an extra leaf",
+                ));
                 return;
             };
             let (kind, identity, dims, contract) = match &leaf {
@@ -343,11 +342,14 @@ fn apply_checked<M: Module + ?Sized>(
                 ),
             };
             if !paths.insert(path.to_string()) {
-                error = Some(malformed(OP, format!("duplicate commit path {path:?}")));
+                error = Some(Error::invalid_arg(
+                    OP,
+                    format!("duplicate commit path {path:?}"),
+                ));
                 return;
             }
             if !identities.insert(identity) {
-                error = Some(malformed(
+                error = Some(Error::invalid_arg(
                     OP,
                     format!("duplicate commit leaf identity at {path:?}"),
                 ));
@@ -359,7 +361,7 @@ fn apply_checked<M: Module + ?Sized>(
                 || dims != schema.dims
                 || !same_contract(contract, &schema.contract)
             {
-                error = Some(malformed(
+                error = Some(Error::invalid_arg(
                     OP,
                     format!("mutable commit leaf differs from validated schema at {path:?}"),
                 ));
@@ -367,7 +369,7 @@ fn apply_checked<M: Module + ?Sized>(
             }
             if selected.is_none_or(|indices| indices.contains(&index)) {
                 let Some(value) = values.get(index).cloned() else {
-                    error = Some(malformed(OP, "replacement value is missing"));
+                    error = Some(Error::invalid_arg(OP, "replacement value is missing"));
                     return;
                 };
                 match leaf {
@@ -392,7 +394,7 @@ fn apply_checked<M: Module + ?Sized>(
     }
     if index != expected.len() {
         return Err(ApplyFailure {
-            error: malformed(OP, "mutable commit walk omitted a leaf"),
+            error: Error::invalid_arg(OP, "mutable commit walk omitted a leaf"),
             changed,
         });
     }
@@ -410,7 +412,7 @@ fn rollback<M: Module + ?Sized>(
     }
     let (rollback_walk, _) = collect_mut(module, false)?;
     if !walks_agree(expected, &rollback_walk) {
-        return Err(malformed(
+        return Err(Error::invalid_arg(
             "typed::nn::load_state_dict",
             "mutable rollback walk differs from validated schema",
         ));
@@ -467,7 +469,10 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
     let (read, _) = collect_read(module, false, OP)?;
     let (mutable, _) = collect_mut(module, false)?;
     if !walks_agree(&read, &mutable) {
-        return Err(malformed(OP, "read-only and mutable module walks disagree"));
+        return Err(Error::invalid_arg(
+            OP,
+            "read-only and mutable module walks disagree",
+        ));
     }
     let target_paths = read
         .iter()
@@ -478,7 +483,10 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
         .keys()
         .find(|path| !target_paths.contains(path.as_str()))
     {
-        return Err(malformed(OP, format!("unexpected state path {path:?}")));
+        return Err(Error::invalid_arg(
+            OP,
+            format!("unexpected state path {path:?}"),
+        ));
     }
 
     let mut staged = BTreeMap::new();
@@ -486,9 +494,9 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
         let entry = state
             .entries
             .get(&leaf.path)
-            .ok_or_else(|| malformed(OP, format!("missing state path {:?}", leaf.path)))?;
+            .ok_or_else(|| Error::invalid_arg(OP, format!("missing state path {:?}", leaf.path)))?;
         if !same_contract(&leaf.contract, &entry.contract) {
-            return Err(malformed(
+            return Err(Error::invalid_arg(
                 OP,
                 format!("typed contract mismatch at {:?}", leaf.path),
             ));
@@ -516,7 +524,7 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
             || entry.value.dtype() != entry.contract.dtype
             || entry.value.device() != entry.contract.binding.device
         {
-            return Err(malformed(
+            return Err(Error::invalid_arg(
                 OP,
                 format!("invalid staged value at {:?}", leaf.path),
             ));
@@ -527,7 +535,7 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
         // typed wrapper that would claim the wrong markers for it.
         for (&marker, &actual) in entry.contract.markers.iter().zip(entry.value.dims()) {
             if marker != crate::typed::DYN && marker != actual {
-                return Err(malformed(
+                return Err(Error::invalid_arg(
                     OP,
                     format!("shape marker mismatch at {:?}", leaf.path),
                 ));
@@ -538,21 +546,21 @@ pub fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &TypedStateDic
 
     let (precommit, originals) = collect_mut(module, true)?;
     if !walks_agree(&mutable, &precommit) {
-        return Err(malformed(OP, "pre-commit mutable walk changed"));
+        return Err(Error::invalid_arg(OP, "pre-commit mutable walk changed"));
     }
     let replacements = mutable
         .iter()
         .map(|leaf| {
-            staged
-                .remove(&leaf.path)
-                .ok_or_else(|| malformed(OP, format!("staged path {:?} disappeared", leaf.path)))
+            staged.remove(&leaf.path).ok_or_else(|| {
+                Error::invalid_arg(OP, format!("staged path {:?} disappeared", leaf.path))
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     match apply_checked(module, &mutable, &replacements, None) {
         Ok(()) => Ok(()),
         Err(failure) => match rollback(module, &mutable, &originals, &failure.changed) {
             Ok(()) => Err(failure.error),
-            Err(rollback_error) => Err(malformed(
+            Err(rollback_error) => Err(Error::invalid_arg(
                 OP,
                 format!(
                     "commit rejected ({}); rollback could not restore every changed leaf ({rollback_error})",
@@ -615,6 +623,7 @@ impl<'a, M: Module + ?Sized> RuntimeModuleAdapter<'a, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::ModuleExt as _;
     use crate::typed::sealed::DeviceBinding;
     use crate::typed::{Cpu, DYN, DeviceCtx, Placement, Tensor1};
     use crate::{DType, Device};
@@ -665,7 +674,8 @@ mod tests {
         );
         let adapter = RuntimeModuleAdapter::new(&mut model);
         assert_eq!(
-            crate::nn::state_dict(&adapter)
+            adapter
+                .state_dict()
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),

@@ -1,5 +1,12 @@
-//! Model-level utilities: visitor-based helpers that
-//! operate on any `&dyn Module`.
+//! Model-level utilities: visitor-based helpers that operate on any
+//! [`Module`], erased or not.
+//!
+//! The public spelling is one extension trait, [`ModuleExt`], blanket-
+//! implemented for every `Module + ?Sized`. Its methods delegate to the
+//! `pub(crate)` free functions below, which are the actual implementations
+//! and the only form the rest of the crate calls. There is deliberately no
+//! public free-function spelling: two ways to write `state_dict` would be two
+//! ways forever.
 //!
 //! Two halves: the read-only walks ([`num_params`], [`state_dict`]) and the
 //! mutating conversions ([`load_state_dict`], [`to_device`], [`to_dtype`]),
@@ -15,10 +22,10 @@
 //! operate on both parameters and non-trainable `Tensor` buffers (`BatchNorm`
 //! running stats), so a moved or checkpointed model stays complete.
 //!
-//! The user-facing prose for these functions — the replication recipe and the
-//! all-or-nothing guarantee — lives in the [`nn`](crate::nn) module docs,
-//! which is where rustdoc renders it (this module is private; its items are
-//! re-exported flat).
+//! The user-facing prose — the replication recipe and the all-or-nothing
+//! guarantee — lives in the [`nn`](crate::nn) module docs, which is where
+//! rustdoc renders it (this module is private; only `ModuleExt` is
+//! re-exported).
 //!
 //! Every mutating helper validates the whole walk before it swaps anything
 //! (the in-memory sibling of [`persist::stage`](crate::persist::stage)), so a
@@ -34,7 +41,7 @@ use std::collections::BTreeMap;
 
 /// Total number of scalar elements across all **trainable parameters** of
 /// `module` (buffers are excluded).
-pub fn num_params(module: &dyn Module) -> usize {
+pub(crate) fn num_params<M: Module + ?Sized>(module: &M) -> usize {
     let mut total = 0usize;
     visit_all(module, &mut |_path, leaf| {
         if let Leaf::Param(p) = leaf {
@@ -55,7 +62,7 @@ pub fn num_params(module: &dyn Module) -> usize {
 /// emits one leaf under multiple paths. Such a walk cannot represent a
 /// lossless state dictionary; derive-generated modules cannot produce either
 /// condition.
-pub fn state_dict(module: &dyn Module) -> BTreeMap<String, Tensor> {
+pub(crate) fn state_dict<M: Module + ?Sized>(module: &M) -> BTreeMap<String, Tensor> {
     let mut out = BTreeMap::new();
     let mut seen = BTreeMap::new();
     visit_all(module, &mut |path, leaf| {
@@ -105,7 +112,10 @@ pub fn state_dict(module: &dyn Module) -> BTreeMap<String, Tensor> {
 ///   implementation bugs that would make a state dict lossy.
 ///
 /// Nothing is swapped unless every check passes.
-pub fn load_state_dict(module: &mut dyn Module, state: &BTreeMap<String, Tensor>) -> Result<()> {
+pub(crate) fn load_state_dict<M: Module + ?Sized>(
+    module: &mut M,
+    state: &BTreeMap<String, Tensor>,
+) -> Result<()> {
     const OP: &str = "load_state_dict";
     // The current values double as the schema every incoming value must match.
     let current = mapped(OP, module, |t| Ok(t.clone()))?;
@@ -114,7 +124,7 @@ pub fn load_state_dict(module: &mut dyn Module, state: &BTreeMap<String, Tensor>
     // from a different model (mirrors `persist::stage`).
     for path in state.keys() {
         if !current.contains_key(path) {
-            return Err(invalid(
+            return Err(Error::invalid_arg(
                 OP,
                 format!(
                     "unexpected key `{path}` in state dict: the target module has \
@@ -126,13 +136,13 @@ pub fn load_state_dict(module: &mut dyn Module, state: &BTreeMap<String, Tensor>
 
     for (path, target) in &current {
         let Some(value) = state.get(path) else {
-            return Err(invalid(
+            return Err(Error::invalid_arg(
                 OP,
                 format!("missing key `{path}` in state dict (expected by the target module)"),
             ));
         };
         if value.dims() != target.value.dims() {
-            return Err(invalid(
+            return Err(Error::invalid_arg(
                 OP,
                 format!(
                     "`{path}` shape mismatch: state dict has {}, target expects {}",
@@ -142,7 +152,7 @@ pub fn load_state_dict(module: &mut dyn Module, state: &BTreeMap<String, Tensor>
             ));
         }
         if value.dtype() != target.value.dtype() {
-            return Err(invalid(
+            return Err(Error::invalid_arg(
                 OP,
                 format!(
                     "`{path}` dtype mismatch: state dict has {}, target expects {} \
@@ -153,7 +163,7 @@ pub fn load_state_dict(module: &mut dyn Module, state: &BTreeMap<String, Tensor>
             ));
         }
         if value.device() != target.value.device() {
-            return Err(invalid(
+            return Err(Error::invalid_arg(
                 OP,
                 format!(
                     "`{path}` device mismatch: state dict has {}, target expects {} \
@@ -200,7 +210,7 @@ pub fn load_state_dict(module: &mut dyn Module, state: &BTreeMap<String, Tensor>
 /// Whatever [`Tensor::to_device`] reports for a leaf (for a device with no
 /// backend, [`Error::Unsupported`]), or [`Error::InvalidArg`]
 /// (`op: "to_device"`) if the module's two walks disagree.
-pub fn to_device(module: &mut dyn Module, device: &Device) -> Result<()> {
+pub(crate) fn to_device<M: Module + ?Sized>(module: &mut M, device: &Device) -> Result<()> {
     const OP: &str = "to_device";
     let values = mapped(OP, module, |t| t.to_device(device))?;
     commit(OP, module, &values)
@@ -227,10 +237,10 @@ pub fn to_device(module: &mut dyn Module, device: &Device) -> Result<()> {
 ///   module's two walks disagree.
 /// - Whatever [`Tensor::to_dtype`] reports for a leaf — notably
 ///   [`Error::Unsupported`] for a cast lane the backend does not implement.
-pub fn to_dtype(module: &mut dyn Module, dtype: DType) -> Result<()> {
+pub(crate) fn to_dtype<M: Module + ?Sized>(module: &mut M, dtype: DType) -> Result<()> {
     const OP: &str = "to_dtype";
     if !dtype.is_float() {
-        return Err(invalid(
+        return Err(Error::invalid_arg(
             OP,
             format!(
                 "cannot cast a module to {dtype}: nn::to_dtype converts precision, \
@@ -248,12 +258,89 @@ pub fn to_dtype(module: &mut dyn Module, dtype: DType) -> Result<()> {
     commit(OP, module, &values)
 }
 
-// ---- internals -----------------------------------------------------------
+/// The discoverable, method-call spelling of this module's five model-level
+/// utilities. Blanket-implemented for every [`Module`], so
+/// `use rstorch::prelude::*; model.num_params()` resolves without naming
+/// this trait — the whole reason it exists: the underlying functions used to
+/// be free functions in an internal module that `prelude` never exported,
+/// which made them undiscoverable from a bare `use rstorch::prelude::*`.
+///
+/// The blanket impl is over `M: Module + ?Sized`, so the methods are equally
+/// available on an erased model — `&mut dyn Module` is the type the optimizer
+/// `step` takes, and a `Box<dyn Module>` is how a heterogeneous zoo is stored.
+/// A `Sized` bound here would have left those holders with no spelling at all.
+///
+/// The `typed` half of the crate keeps free functions
+/// (`typed::nn::state_dict`) rather than a parallel trait. That is deliberate,
+/// and the reasons are recorded where a typed user reads them, in the
+/// `typed::nn` module docs: `typed::prelude` exports no `nn` items, so the
+/// discoverability hole this trait fills does not exist there; the typed side
+/// has two load contracts whose qualified spellings name which one you took;
+/// and its `state_dict` is fallible, so the two would not be signature twins.
+///
+/// See the [`nn`](crate::nn) module docs for the replication recipe and the
+/// all-or-nothing loading/conversion guarantee every mutating method here
+/// follows.
+pub trait ModuleExt: Module {
+    /// Total number of scalar elements across all **trainable parameters**
+    /// (buffers are excluded).
+    fn num_params(&self) -> usize {
+        num_params(self)
+    }
 
-/// A uniform, path-naming rejection.
-fn invalid(op: &'static str, msg: String) -> Error {
-    Error::InvalidArg { op, msg }
+    /// Collect this module's parameters **and buffers** into a dotted-path →
+    /// value map (ordered for stable, diffable output). Buffers are included
+    /// so a checkpoint reconstructs a model (running stats survive).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a hand-written [`Module`] emits the same path more than once
+    /// or emits one leaf under multiple paths. Such a walk cannot represent a
+    /// lossless state dictionary; derive-generated modules cannot produce
+    /// either condition.
+    fn state_dict(&self) -> BTreeMap<String, Tensor> {
+        state_dict(self)
+    }
+
+    /// Load values from `state` by matching dotted paths — both parameters
+    /// and buffers. The match is exact and loud: nothing is swapped unless
+    /// `state` carries exactly the paths this module's walk emits, each with
+    /// the same dims, dtype, and device as the value it replaces.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg), naming the offending
+    /// path, on a missing path, an unexpected path, a shape/dtype/device
+    /// mismatch, or a malformed walk.
+    fn load_state_dict(&mut self, state: &BTreeMap<String, Tensor>) -> Result<()> {
+        load_state_dict(self, state)
+    }
+
+    /// Move every parameter and buffer to `device`, all-or-nothing: a
+    /// failure never leaves parameters split across two devices.
+    ///
+    /// # Errors
+    /// Whatever the per-leaf device conversion reports, or
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if the module's two
+    /// walks disagree.
+    fn to_device(&mut self, device: &Device) -> Result<()> {
+        to_device(self, device)
+    }
+
+    /// Cast every **floating-point** parameter and buffer to `dtype`
+    /// (integer/boolean leaves are left untouched), all-or-nothing.
+    ///
+    /// # Errors
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `dtype` is not a
+    /// float dtype or the module's two walks disagree, or whatever the
+    /// per-leaf dtype conversion reports.
+    fn to_dtype(&mut self, dtype: DType) -> Result<()> {
+        to_dtype(self, dtype)
+    }
 }
+
+impl<M: Module + ?Sized> ModuleExt for M {}
+
+// ---- internals -----------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LeafKind {
@@ -310,9 +397,9 @@ fn identity_mut(leaf: &LeafMut<'_>) -> LeafIdentity {
 ///   A tied parameter is owned once and visited once, so a
 ///   collision is a `Module` implementation bug; rejecting it keeps one leaf
 ///   from silently overwriting the other's value on the way back in.
-fn mapped(
+fn mapped<M: Module + ?Sized>(
     op: &'static str,
-    module: &dyn Module,
+    module: &M,
     mut f: impl FnMut(&Tensor) -> Result<Tensor>,
 ) -> Result<BTreeMap<String, Mapped>> {
     let mut out: BTreeMap<String, Mapped> = BTreeMap::new();
@@ -331,7 +418,7 @@ fn mapped(
             Ok(value) => {
                 let path = path.to_string();
                 if seen.insert(leaf_identity, path.clone()).is_some() {
-                    failure = Some(invalid(
+                    failure = Some(Error::invalid_arg(
                         op,
                         format!(
                             "module visits one leaf under multiple paths, including `{path}`; \
@@ -348,7 +435,7 @@ fn mapped(
                     )
                     .is_some()
                 {
-                    failure = Some(invalid(
+                    failure = Some(Error::invalid_arg(
                         op,
                         format!(
                             "module emits the path `{path}` twice: two distinct leaves \
@@ -376,9 +463,9 @@ fn mapped(
 /// with disagreeing walks is rejected with nothing modified.
 ///
 /// Values are detached, so no autograd history enters a parameter or buffer.
-fn commit(
+fn commit<M: Module + ?Sized>(
     op: &'static str,
-    module: &mut dyn Module,
+    module: &mut M,
     values: &BTreeMap<String, Mapped>,
 ) -> Result<()> {
     let mut failure: Option<Error> = None;
@@ -388,7 +475,7 @@ fn commit(
             return;
         }
         let Some(expected) = values.get(path) else {
-            failure = Some(invalid(
+            failure = Some(Error::invalid_arg(
                 op,
                 format!(
                     "`{path}` is emitted by visit_mut but not by visit: the module's \
@@ -399,7 +486,7 @@ fn commit(
         };
         let actual = identity_mut(&leaf);
         if actual != expected.identity {
-            failure = Some(invalid(
+            failure = Some(Error::invalid_arg(
                 op,
                 format!(
                     "`{path}` is emitted by visit_mut for a different {} leaf than visit; \
@@ -411,7 +498,7 @@ fn commit(
                 ),
             ));
         } else if !seen.insert(path.to_string()) {
-            failure = Some(invalid(
+            failure = Some(Error::invalid_arg(
                 op,
                 format!(
                     "visit_mut emits the path `{path}` twice: two distinct leaves would \
@@ -425,7 +512,7 @@ fn commit(
     }
     if seen.len() != values.len() {
         let missed = values.keys().find(|p| !seen.contains(*p));
-        return Err(invalid(
+        return Err(Error::invalid_arg(
             op,
             match missed {
                 Some(path) => format!(
@@ -533,6 +620,30 @@ mod tests {
         // 4 cells × 4 weight elements + 1 bias = 17; the 4 × 2 buffer
         // elements do not count.
         assert_eq!(num_params(&Net::new(1.0)), 17);
+    }
+
+    /// The blanket impl is over `Module + ?Sized`, so an erased model keeps
+    /// every method. A `Sized` bound would leave `&mut dyn Module` — the type
+    /// the optimizer `step` takes — with no spelling at all, because the free
+    /// functions behind these methods are `pub(crate)`.
+    #[test]
+    fn module_ext_reaches_an_erased_module() {
+        let src = Net::new(2.0);
+        let mut dst = Net::new(0.0);
+
+        let erased_src: &dyn Module = &src;
+        let erased_dst: &mut dyn Module = &mut dst;
+
+        assert_eq!(erased_src.num_params(), 17);
+        let state = erased_src.state_dict();
+        erased_dst.load_state_dict(&state).unwrap();
+        erased_dst.to_device(&dev()).unwrap();
+        erased_dst.to_dtype(DType::F32).unwrap();
+
+        assert_eq!(
+            values(dst.cell.weight.value()),
+            values(src.cell.weight.value())
+        );
     }
 
     #[test]

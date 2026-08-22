@@ -25,7 +25,11 @@
 //! flight on the device queue; subsequent kernel calls that consume it are
 //! ordered after it by the backend. **Synchronization happens only at host
 //! boundaries** — [`transfer_out`](BackendOps::transfer_out) (and the
-//! `to_vec`/`to_scalar`/`item` tensor methods built on it). This is what
+//! `to_vec`/`to_scalar`/`item` tensor methods built on it) — and at the
+//! explicit flush, [`synchronize`](BackendOps::synchronize) (behind
+//! [`Device::synchronize`](crate::Device::synchronize) and
+//! [`Tensor::realize`](crate::Tensor::realize)), which performs the same wait
+//! without the host copy. This is what
 //! lets a GPU backend batch command-buffer encoding and defer the sync that
 //! would otherwise make a GPU path train slower than CPU. The CPU backend is trivially
 //! synchronous and satisfies the contract vacuously.
@@ -111,6 +115,10 @@ pub(crate) enum BinaryOp {
     Maximum,
     /// Element-wise minimum.
     Minimum,
+    /// `lhs` raised to `rhs` (`powf`). Float-only: an integer lane would have
+    /// to invent a meaning for a fractional or negative exponent, so it
+    /// declines instead.
+    Pow,
 }
 
 /// Element-wise unary ops. Float-only variants error with
@@ -137,6 +145,24 @@ pub(crate) enum UnaryOp {
     Neg,
     /// Absolute value (valid for float and I64).
     Abs,
+    /// Sign: `-1` below zero, `+1` above, `+0` at either zero, and NaN for
+    /// NaN. Signed zero is therefore not preserved — `sign(-0.0)` is `+0.0`,
+    /// where `PyTorch` returns `-0.0`. Float only — I64 admits
+    /// [`Neg`](UnaryOp::Neg)/[`Abs`](UnaryOp::Abs) and nothing else.
+    Sign,
+    /// Reciprocal `1/x`. IEEE: `1/±0` is an infinity, not an error.
+    Recip,
+    /// Round toward `-∞`.
+    Floor,
+    /// Round toward `+∞`.
+    Ceil,
+    /// Round to the nearest integer, **ties to even** — `PyTorch`'s `round`
+    /// (the familiar-semantics contract), not Rust's away-from-zero
+    /// [`f64::round`].
+    Round,
+    /// Error function `erf(x)`: the primitive [`Gelu`](UnaryOp::Gelu) is
+    /// built from, exposed on its own.
+    Erf,
 }
 
 /// Element-wise comparisons; every variant produces a [`Bool`](DType::Bool)
@@ -171,6 +197,8 @@ pub(crate) enum ReduceOp {
     Max,
     /// Minimum along the axis.
     Min,
+    /// Product along the axis.
+    Prod,
 }
 
 /// Index-producing reductions (`argmax`/`argmin`), returning an
@@ -286,6 +314,18 @@ pub(crate) trait BackendOps: Send + Sync {
     /// synchronizes here.
     fn transfer_out(&self, x: View<'_>) -> Result<CpuStorage>;
 
+    /// Block until every operation previously submitted on this device has
+    /// completed, then report anything the drained work turned up — a command
+    /// buffer that failed, or a deferred bounds check that fired.
+    ///
+    /// This is the wait half of [`transfer_out`](BackendOps::transfer_out)
+    /// without its host copy, and it is the seam behind
+    /// [`Device::synchronize`](crate::Device::synchronize) and
+    /// [`Tensor::realize`](crate::Tensor::realize). A backend that executes
+    /// synchronously has nothing in flight, so `Ok(())` is the honest
+    /// implementation there — but a backend that batches must actually drain.
+    fn synchronize(&self) -> Result<()>;
+
     /// Materialize `x` into a fresh contiguous device buffer of the same
     /// dtype and shape (the public `contiguous()` and the copy branch of
     /// `reshape`).
@@ -395,6 +435,26 @@ pub(crate) trait BackendOps: Send + Sync {
         src: View<'_>,
     ) -> Result<Storage>;
 
+    /// Sort `x` along `axis` (pre-resolved) and return the **permutation**
+    /// that does it as an [`I64`](DType::I64) tensor of `x`'s shape:
+    /// `out[.., k, ..]` is the source position of the `k`-th smallest
+    /// element of that line (largest first when `descending`).
+    ///
+    /// Only the permutation is a kernel: the op layer reads the sorted values
+    /// back with [`gather`](BackendOps::gather), which is what gives
+    /// [`sort`](crate::Tensor::sort) and [`topk`](crate::Tensor::topk) their
+    /// backward for free. The sort is **stable** — equal elements keep their
+    /// source order in both directions — and NaN orders above every number.
+    ///
+    /// Only the CPU backend implements this. Every accelerator returns
+    /// [`Error::Unsupported`](crate::Error::Unsupported) rather than round-trip
+    /// through the host, which makes [`sort`](crate::Tensor::sort) and
+    /// [`topk`](crate::Tensor::topk) CPU-only today. `Bool` is declined too:
+    /// the CPU kernel goes through the numeric dispatch, which has no
+    /// accumulator type for `Bool`. That is an accumulation gap, not an
+    /// ordering one — booleans do order.
+    fn arg_sort(&self, x: View<'_>, axis: usize, descending: bool) -> Result<Storage>;
+
     /// Convolution/pooling (see [`ConvOp`]/[`Conv2dParams`]). `inputs` holds
     /// the per-variant operand views; accumulation is in `Acc`.
     fn conv(&self, op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Result<Storage>;
@@ -416,6 +476,11 @@ impl BackendOps for CpuBackend {
     }
     fn transfer_out(&self, x: View<'_>) -> Result<CpuStorage> {
         Ok(cpu::host::transfer_out(x))
+    }
+    /// Nothing to wait for: a CPU kernel has finished by the time it returns,
+    /// so the queue this would drain is always empty.
+    fn synchronize(&self) -> Result<()> {
+        Ok(())
     }
     fn copy_strided(&self, x: View<'_>) -> Result<Storage> {
         Ok(cpu::host::copy_strided(x))
@@ -484,6 +549,9 @@ impl BackendOps for CpuBackend {
         src: View<'_>,
     ) -> Result<Storage> {
         cpu::index::scatter_add(x, axis, indices, src)
+    }
+    fn arg_sort(&self, x: View<'_>, axis: usize, descending: bool) -> Result<Storage> {
+        cpu::index::arg_sort(x, axis, descending)
     }
     fn conv(&self, op: ConvOp, inputs: &[View<'_>], params: &Conv2dParams) -> Result<Storage> {
         cpu::conv::conv(op, inputs, params)

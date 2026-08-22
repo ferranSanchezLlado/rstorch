@@ -25,7 +25,12 @@ fn f16_available_or_loud() -> bool {
             device: Device::Wgpu(0),
             dtype: DType::F16,
             ..
-        }) => false,
+        }) => {
+            eprintln!(
+                "skipping WGPU F16 test: this adapter does not support the SHADER_F16 capability"
+            );
+            false
+        }
         Err(error) => panic!("unexpected F16 capability probe error: {error}"),
     }
 }
@@ -173,7 +178,7 @@ fn conv_backward_softmax_and_eval_layer_norm_match_cpu() {
 
     let norm = |device: &Device| {
         let mut layer = LayerNorm::new([129], device).unwrap();
-        rstorch::nn::to_dtype(&mut layer, DType::F16).unwrap();
+        layer.to_dtype(DType::F16).unwrap();
         layer
             .forward(&on(device, &rows, [5, 129]), Mode::EVAL)
             .unwrap()
@@ -185,7 +190,7 @@ fn conv_backward_softmax_and_eval_layer_norm_match_cpu() {
     let norm_backward = |device: &Device| {
         let input = Param::new(on(device, &rows, [5, 129]));
         let mut layer = LayerNorm::new([129], device).unwrap();
-        rstorch::nn::to_dtype(&mut layer, DType::F16).unwrap();
+        layer.to_dtype(DType::F16).unwrap();
         layer
             .forward(&input.get(Mode::TRAIN), Mode::TRAIN)
             .unwrap()

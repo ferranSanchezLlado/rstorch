@@ -190,6 +190,8 @@ impl Mlp {
 }
 
 impl Forward for Mlp {
+    type Output = Tensor;
+
     fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
         let h = self.fc1.forward(x, mode)?.relu()?;
         let h = self.drop.forward(&h, mode)?;
@@ -228,7 +230,7 @@ fn train_epoch<M, D>(
     step: &mut dyn FnMut(&mut M, Grads) -> Result<()>,
 ) -> Result<f64>
 where
-    M: Forward + Module,
+    M: Forward<Output = Tensor> + Module,
     D: Dataset<Batch = Batch>,
 {
     let mut total = 0.0;
@@ -248,7 +250,7 @@ where
 /// identity there and nothing is recorded, so no activations are retained.
 fn accuracy<M, D>(model: &mut M, loader: &DataLoader<D>) -> Result<f64>
 where
-    M: Forward,
+    M: Forward<Output = Tensor>,
     D: Dataset<Batch = Batch>,
 {
     let mut correct = 0usize;
@@ -271,7 +273,7 @@ where
 /// Mean cross-entropy of a model over a loader, without training it.
 fn mean_loss<M, D>(model: &mut M, loader: &DataLoader<D>) -> Result<f64>
 where
-    M: Forward,
+    M: Forward<Output = Tensor>,
     D: Dataset<Batch = Batch>,
 {
     let mut total = 0.0;
@@ -455,12 +457,9 @@ fn every_parameter_of_the_flagship_is_traced() -> Result<()> {
     let mut model = Mlp::new(&device, &mut rng)?;
 
     // The four leaves, by the dotted paths the derive emits.
-    let paths: Vec<String> = rstorch::nn::state_dict(&model).into_keys().collect();
+    let paths: Vec<String> = model.state_dict().into_keys().collect();
     assert_eq!(paths, ["fc1.bias", "fc1.weight", "fc2.bias", "fc2.weight"]);
-    assert_eq!(
-        rstorch::nn::num_params(&model),
-        PIXELS * 64 + 64 + 64 * 10 + 10
-    );
+    assert_eq!(model.num_params(), PIXELS * 64 + 64 + 64 * 10 + 10);
 
     let (x, y) = train.batch(&[0, 1, 2, 3])?;
     let grads = model
@@ -490,6 +489,8 @@ fn an_untraced_parameter_is_loud_at_the_next_step() -> Result<()> {
     }
 
     impl Forward for HalfTraced {
+        type Output = Tensor;
+
         fn forward(&mut self, x: &Tensor, mode: Mode) -> Result<Tensor> {
             let h = self.fc.forward(x, mode)?.relu()?;
             // The bug: `value()` is the raw tensor, outside the graph.
@@ -515,7 +516,7 @@ fn an_untraced_parameter_is_loud_at_the_next_step() -> Result<()> {
 
     let rejected = Sgd::new(0.1).step(&mut model, grads);
     match rejected {
-        Err(Error::MissingGrad { path }) => assert_eq!(path, "head"),
+        Err(Error::MissingGrad { path, .. }) => assert_eq!(path, "head"),
         other => panic!("expected MissingGrad naming `head`, got {other:?}"),
     }
     Ok(())
