@@ -37,6 +37,7 @@ impl Prng {
 fn out_slice<E: CpuElement>(storage: &Storage) -> Vec<E> {
     match storage {
         Storage::Cpu(cpu) => E::slice(cpu).to_vec(),
+        Storage::Pending(_) => panic!("pending storage in cpu test"),
         #[cfg(any(
             all(feature = "metal", target_os = "macos"),
             all(feature = "cuda", any(target_os = "linux", target_os = "windows")),

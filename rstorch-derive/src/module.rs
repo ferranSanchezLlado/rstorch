@@ -1,8 +1,9 @@
 //! Expansion for `#[derive(Module)]`.
 //!
-//! Field classification is a **syntactic token match** on the type as written
-//! (see [`classify`]); this is what makes type aliases fail loudly and what
-//! makes every unrecognized field default to child-module recursion.
+//! Field classification first honors explicit `#[module(param)]`,
+//! `#[module(buffer)]`, `#[module(child)]`, and `#[module(skip)]` overrides,
+//! then falls back to syntactic type matching. This keeps aliases loud by
+//! default while providing an intentional escape hatch.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -37,11 +38,16 @@ pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
     shared::expand(input, &spec, classify)
 }
 
-/// Classify a field by a syntactic token match on its type, honoring
-/// `#[module(skip)]`.
+/// Classify a field by an explicit override first, then by a syntactic token
+/// match on its type.
 fn classify(field: &syn::Field) -> Result<FieldKind> {
-    if shared::has_skip_attr(field, ATTR)? {
-        return Ok(FieldKind::Skip);
+    if let Some(override_kind) = shared::explicit_field_override(field, ATTR)? {
+        return Ok(match override_kind {
+            shared::FieldOverride::Param => FieldKind::Param,
+            shared::FieldOverride::Buffer => FieldKind::Buffer,
+            shared::FieldOverride::Child => FieldKind::Module,
+            shared::FieldOverride::Skip => FieldKind::Skip,
+        });
     }
 
     let Type::Path(type_path) = &field.ty else {
@@ -215,6 +221,13 @@ mod tests {
     }
 
     #[test]
+    fn explicit_param_override_recognizes_an_alias() {
+        let out = expand_str("struct M { #[module(param)] w: Weights }");
+        assert!(out.contains("visitor . param (\"w\" , & self . w)"));
+        assert!(out.contains("visitor . param (\"w\" , & mut self . w)"));
+    }
+
+    #[test]
     fn generic_struct_gets_bounds_from_where_clause() {
         // Generics flow through untouched; the caller supplies the bound.
         let out = expand_str("struct M<T> where T: ::rstorch::nn::Module { inner: T }");
@@ -237,7 +250,10 @@ mod tests {
     #[test]
     fn unknown_module_option_is_rejected() {
         let err = expand_err("struct M { #[module(rename = \"x\")] w: Param }");
-        assert!(err.contains("only supported option is `skip`"), "{err}");
+        assert!(
+            err.contains("supported options are `param`, `buffer`, `child`, and `skip`"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -5,6 +5,30 @@ All notable changes to this project are documented here. The format follows
 project follows [semantic versioning](https://semver.org) under the scope
 recorded in [STABILITY.md](STABILITY.md).
 
+## [Unreleased]
+
+### Release-boundary hardening
+
+- Dynamic `ModuleExt::state_dict` is now fallible and returns an opaque,
+  validated `StateDict`; generic dynamic model checkpoint helpers are available
+  in `rstorch::persist`.
+- Parameters detach incoming tensors before retaining values or cached leaves,
+  and non-floating parameters never create autograd leaves.
+- Typed and lazy namespaces are explicitly experimental and outside the
+  dynamic 1.x stability guarantee.
+- Optimizer scalar validation is backend-neutral, optimizer gradient
+  validation avoids reduced-precision observation conversions, and the global
+  step clock advances only after the final lazy realization boundary succeeds.
+
+### Lazy element-wise execution
+
+- Added an opt-in thread-local deferred executor for dense CPU element-wise
+  chains. The default remains eager (`RSTORCH_FUSION=off`); use
+  `rstorch::lazy::set_fusion(true)` or `RSTORCH_FUSION=on` for measurement.
+- `Tensor::realize()` now realizes the receiver's own value before flushing
+  its device. Deferred execution errors retain the operation name and are not
+  cached.
+
 ## [1.0.0] - unreleased
 
 The first stable API, and a complete rewrite. Nothing from the 0.x line

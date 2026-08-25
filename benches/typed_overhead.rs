@@ -85,6 +85,58 @@ fn elementwise_and_reduce(c: &mut Criterion) {
         bench.iter(|| black_box(ta_large.softmax::<1>().unwrap()));
     });
 
+    group.bench_function("chain_8x8_dynamic", |bench| {
+        bench.iter(|| {
+            black_box(
+                a_small
+                    .add(black_box(&b_small))
+                    .unwrap()
+                    .mul(black_box(&b_small))
+                    .unwrap()
+                    .neg()
+                    .unwrap(),
+            )
+        });
+    });
+    group.bench_function("chain_8x8_typed", |bench| {
+        bench.iter(|| {
+            black_box(
+                ta_small
+                    .add(black_box(&tb_small))
+                    .unwrap()
+                    .mul(black_box(&tb_small))
+                    .unwrap()
+                    .neg()
+                    .unwrap(),
+            )
+        });
+    });
+    group.bench_function("chain_256x256_dynamic", |bench| {
+        bench.iter(|| {
+            black_box(
+                a_large
+                    .add(black_box(&b_large))
+                    .unwrap()
+                    .mul(black_box(&b_large))
+                    .unwrap()
+                    .neg()
+                    .unwrap(),
+            )
+        });
+    });
+    group.bench_function("chain_256x256_typed", |bench| {
+        bench.iter(|| {
+            black_box(
+                ta_large
+                    .add(black_box(&tb_large))
+                    .unwrap()
+                    .mul(black_box(&tb_large))
+                    .unwrap()
+                    .neg()
+                    .unwrap(),
+            )
+        });
+    });
     group.finish();
 }
 

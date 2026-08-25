@@ -1,12 +1,12 @@
 use super::{Linear, Mode, ToDType, ToDevice};
 use crate::nn::ModuleExt as _;
+use crate::nn::StateDict;
 use crate::nn::{merge_heads, split_heads};
 use crate::typed::device::validate_binding;
 use crate::typed::sealed::TypedTensor as SealedTypedTensor;
 use crate::typed::tensor::checked_wrap;
 use crate::typed::{DYN, DeviceCtx, FloatElement, Placement, TypedTensor};
 use crate::{Error, Result, Rng, Shape, Tensor};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const fn assert_configuration(embed: usize, heads: usize) {
@@ -264,7 +264,7 @@ pub fn scaled_dot_product_attention<
 /// identical to the runtime sibling's.
 fn projection_from_runtime_state<const EMBED: usize, E: FloatElement, P: Placement>(
     prefix: &str,
-    state: &BTreeMap<String, Tensor>,
+    state: &StateDict,
     ctx: &DeviceCtx<P>,
 ) -> Result<Linear<EMBED, EMBED, E, P>> {
     let missing = |path: &str| Error::InvalidArg {
@@ -386,7 +386,7 @@ impl<const EMBED: usize, const HEADS: usize, E: FloatElement, P: Placement>
         } else {
             crate::nn::MultiHeadAttention::new_without_bias(EMBED, HEADS, &ctx.device(), rng)?
         };
-        let state = runtime.state_dict();
+        let state = runtime.state_dict()?;
         Ok(Self {
             q_proj: projection_from_runtime_state("q_proj", &state, ctx)?,
             k_proj: projection_from_runtime_state("k_proj", &state, ctx)?,
@@ -861,6 +861,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             runtime
                 .state_dict()
+                .unwrap()
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>()

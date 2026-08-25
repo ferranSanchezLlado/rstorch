@@ -21,13 +21,13 @@
 //!
 //! | Feature | What it adds |
 //! |---|---|
-//! | `typed` | The `typed` namespace: rank, dimensions, dtype and placement checked at compile time, as a wrapper over this same [`Tensor`]. |
+//! | `typed` | Experimental `typed` namespace: rank, dimensions, dtype and placement checked at compile time, as a wrapper over this same [`Tensor`]. It is excluded from the dynamic 1.x stability guarantee. |
 //! | `rayon` | Multi-threaded CPU kernels. Results are bit-identical to the single-threaded ones: kernels partition by output element, so no float is accumulated across threads in a racing order. |
 //! | `hub` | Downloads for the bundled datasets in [`data::hub`]. |
 //! | `metal` | The default macOS GPU backend. [`Device::best_available`] selects the first Metal device when present, then considers CUDA, WGPU and CPU. |
 //! | `cuda` | Opt-in native NVIDIA GPU backend on Linux and Windows, including Linux under WSL. [`Device::best_available`] selects it when present before considering WGPU and CPU. Supports compute capability 6.0+, F16/F32 compute, and I64/Bool storage. Bundled PTX requires a compatible NVIDIA driver, but not the CUDA toolkit. |
 //! | `wgpu` | Opt-in portable native GPU backend. Supports F32 compute plus lossless I64/Bool storage and native F16 when the adapter exposes `SHADER_F16`; unsupported dtypes fail loudly. |
-//! | `testing` | The `testing` finite-difference gradient harness. The one public module outside the stability guarantee. |
+//! | `testing` | The `testing` finite-difference gradient harness. The public module outside the stability guarantee. |
 //!
 //! # Stability
 //!
@@ -61,6 +61,8 @@ pub(crate) mod storage;
 
 // ---- subsystems ----------------------------------------------------------
 pub mod data;
+/// Experimental runtime control for deferred and fused element-wise execution.
+pub mod lazy;
 pub mod models;
 pub mod nn;
 pub mod optim;
@@ -69,6 +71,7 @@ pub mod prelude;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod text;
+
 /// Compile-time checked tensor and neural-network APIs.
 #[cfg(feature = "typed")]
 pub mod typed;

@@ -90,7 +90,7 @@ pub fn save_model_state<M: Module + ?Sized>(model: &mut M, envelope: &mut Envelo
     reject_reserved_paths(state.paths(), "typed::persist::save_model_state")?;
     let adapter = RuntimeModuleAdapter::new(model);
     let staged = adapter
-        .state_dict()
+        .state_dict()?
         .into_iter()
         .map(|(path, tensor)| Ok((path, crate::checkpoint::to_host_tensor(&tensor)?)))
         .collect::<Result<Vec<_>>>()?;
@@ -163,7 +163,7 @@ fn load_model_state_impl<M: Module + ?Sized>(
     reject_reserved_paths(state.paths(), "typed::persist::load_model_state")?;
     let current = {
         let adapter = RuntimeModuleAdapter::new(model);
-        adapter.state_dict()
+        adapter.state_dict()?
     };
     let schema = current
         .iter()
@@ -179,8 +179,11 @@ fn load_model_state_impl<M: Module + ?Sized>(
 
     let mut replacements = current;
     for (path, host) in staged.into_entries() {
-        let device = replacements[&path].device();
-        replacements.insert(path, crate::checkpoint::from_host_tensor(&host, &device)?);
+        let device = replacements
+            .get(&path)
+            .expect("staged path came from the target schema")
+            .device();
+        replacements.insert(path, crate::checkpoint::from_host_tensor(&host, &device)?)?;
     }
     RuntimeModuleAdapter::new(model).load_state_dict(&replacements)
 }

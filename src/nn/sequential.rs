@@ -58,7 +58,7 @@ impl<Input, T: Forward<Input, Output = Input> + Module + Send> SeqLayer<Input> f
 /// let mut net = Sequential::new().push(two()?).push(two()?);
 /// let x = Tensor::full([2], 3.0, DType::F32, &dev)?;
 /// assert_eq!(net.forward(&x, Mode::EVAL)?.to_vec::<f32>()?, vec![12.0, 12.0]);
-/// assert_eq!(net.state_dict().keys().collect::<Vec<_>>(), ["0.factor", "1.factor"]);
+/// assert_eq!(net.state_dict()?.keys().collect::<Vec<_>>(), ["0.factor", "1.factor"]);
 /// # Ok(())
 /// # }
 /// ```
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn children_get_indexed_paths() {
         let net = Sequential::new().push(scale(2.0)).push(scale(5.0));
-        let keys: Vec<_> = net.state_dict().into_keys().collect();
+        let keys: Vec<_> = net.state_dict().unwrap().into_keys().collect();
         assert_eq!(keys, ["0.calls", "0.factor", "1.calls", "1.factor"]);
         // Only the params count.
         assert_eq!(net.num_params(), 2);
@@ -249,7 +249,7 @@ mod tests {
             layers: Sequential::new().push(scale(2.0)),
             tail: scale(3.0),
         };
-        let keys: Vec<_> = net.state_dict().into_keys().collect();
+        let keys: Vec<_> = net.state_dict().unwrap().into_keys().collect();
         assert_eq!(
             keys,
             [
@@ -265,7 +265,7 @@ mod tests {
     fn state_dict_round_trips_through_a_chain() {
         let src = Sequential::new().push(scale(2.0)).push(scale(5.0));
         let mut dst = Sequential::new().push(scale(0.0)).push(scale(0.0));
-        dst.load_state_dict(&src.state_dict()).unwrap();
+        dst.load_state_dict(&src.state_dict().unwrap()).unwrap();
         let y = dst.forward(&x(1.0), Mode::EVAL).unwrap();
         assert_eq!(y.to_vec::<f32>().unwrap(), vec![10.0, 10.0]);
     }
@@ -274,7 +274,7 @@ mod tests {
     fn a_shorter_chain_is_a_loud_mismatch() {
         let src = Sequential::new().push(scale(2.0)).push(scale(5.0));
         let mut dst = Sequential::new().push(scale(0.0));
-        let err = dst.load_state_dict(&src.state_dict()).unwrap_err();
+        let err = dst.load_state_dict(&src.state_dict().unwrap()).unwrap_err();
         assert!(err.to_string().contains("unexpected key `1."), "{err}");
     }
 
@@ -368,7 +368,7 @@ mod tests {
         let out = net.forward(&input, Mode::EVAL).unwrap();
         assert_eq!(out.values.to_vec::<f32>().unwrap(), vec![6.0, 0.0]);
         // The container is still a `Module`, with the same indexed paths.
-        let keys: Vec<_> = net.state_dict().into_keys().collect();
+        let keys: Vec<_> = net.state_dict().unwrap().into_keys().collect();
         assert_eq!(keys, ["0.factor", "1.factor"]);
     }
 

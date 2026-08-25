@@ -140,8 +140,8 @@ mod tests {
 
     #[test]
     fn they_hold_no_parameters() {
-        assert!(Relu.state_dict().is_empty());
-        assert!(Gelu.state_dict().is_empty());
+        assert!(Relu.state_dict().unwrap().is_empty());
+        assert!(Gelu.state_dict().unwrap().is_empty());
         assert_eq!(Relu.num_params() + Gelu.num_params(), 0);
     }
 
@@ -183,7 +183,7 @@ mod tests {
         // Only the two `Linear`s contribute leaves, and they are indexed by
         // position in the chain.
         assert_eq!(
-            net.state_dict().into_keys().collect::<Vec<_>>(),
+            net.state_dict().unwrap().into_keys().collect::<Vec<_>>(),
             ["0.bias", "0.weight", "3.bias", "3.weight"]
         );
         assert_eq!(net.num_params(), (4 * 3 + 3) + (3 * 2 + 2));

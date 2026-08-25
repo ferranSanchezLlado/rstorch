@@ -252,6 +252,10 @@ where
                 cpu.dtype()
             ),
         }),
+        Storage::Pending(_) => Err(Error::Backend {
+            op,
+            msg: "cpu elementwise kernel received pending storage".into(),
+        }),
         #[cfg(any(
             all(feature = "cuda", any(target_os = "linux", target_os = "windows")),
             all(feature = "metal", target_os = "macos"),
@@ -523,6 +527,32 @@ fn binary_f32(op: BinaryOp, a: f32, b: f32) -> f32 {
     }
 }
 
+/// Arithmetic primitives used by the CPU lazy tile executor. Keeping these
+/// calls beside the eager tables guarantees the fused path inherits the
+/// dtype-specific arithmetic and NaN/signed-zero rules.
+#[inline(always)]
+pub(crate) fn fused_binary_f32(op: BinaryOp, a: f32, b: f32) -> f32 {
+    binary_f32(op, a, b)
+}
+
+/// Scalar spelling of the CPU f32 arithmetic contract.
+#[inline(always)]
+pub(crate) fn fused_binary_scalar_f32(op: BinaryOp, a: f32, scalar: f64) -> f32 {
+    binary_f32(op, a, scalar as f32)
+}
+
+/// F64 arithmetic primitive shared by the lazy executor.
+#[inline(always)]
+pub(crate) fn fused_binary_f64(op: BinaryOp, a: f64, b: f64) -> f64 {
+    binary_f64(op, a, b)
+}
+
+/// Scalar F64 arithmetic primitive shared by the lazy executor.
+#[inline(always)]
+pub(crate) fn fused_binary_scalar_f64(op: BinaryOp, a: f64, scalar: f64) -> f64 {
+    binary_f64(op, a, scalar)
+}
+
 #[inline(always)]
 fn binary_f64(op: BinaryOp, a: f64, b: f64) -> f64 {
     match op {
@@ -563,6 +593,18 @@ fn binary_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         // `BinaryOp` is one enum shared by every dtype's kernel.
         BinaryOp::Pow => unreachable!("i64 pow is rejected before dispatch"),
     }
+}
+
+/// I64 arithmetic primitive shared by the lazy executor.
+#[inline(always)]
+pub(crate) fn fused_binary_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
+    binary_i64(op, a, b)
+}
+
+/// Scalar I64 arithmetic primitive shared by the lazy executor.
+#[inline(always)]
+pub(crate) fn fused_binary_scalar_i64(op: BinaryOp, a: i64, scalar: f64) -> i64 {
+    binary_i64(op, a, scalar as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +742,29 @@ fn unary_f64(op: UnaryOp, x: f64) -> f64 {
         // `f64::round`.
         UnaryOp::Round => x.round_ties_even(),
         UnaryOp::Erf => erf(x),
+    }
+}
+
+/// Unary primitive used by the CPU lazy tile executor. CPU unary arithmetic
+/// intentionally widens through f64 before narrowing to f32.
+#[inline(always)]
+pub(crate) fn fused_unary_f32(op: UnaryOp, value: f32) -> f32 {
+    unary_f64(op, value as f64) as f32
+}
+
+/// F64 unary primitive shared by the lazy executor.
+#[inline(always)]
+pub(crate) fn fused_unary_f64(op: UnaryOp, value: f64) -> f64 {
+    unary_f64(op, value)
+}
+
+/// I64 unary primitive shared by the lazy executor.
+#[inline(always)]
+pub(crate) fn fused_unary_i64(op: UnaryOp, value: i64) -> i64 {
+    match op {
+        UnaryOp::Neg => value.wrapping_neg(),
+        UnaryOp::Abs => value.wrapping_abs(),
+        _ => unreachable!("unsupported i64 unary reached lazy primitive"),
     }
 }
 

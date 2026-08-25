@@ -311,7 +311,10 @@ mod tests {
     #[test]
     fn the_table_is_the_only_parameter_and_is_named_weight() {
         let emb = Embedding::from_weight(table(5, 4)).unwrap();
-        assert_eq!(emb.state_dict().keys().collect::<Vec<_>>(), ["weight"]);
+        assert_eq!(
+            emb.state_dict().unwrap().keys().collect::<Vec<_>>(),
+            ["weight"]
+        );
         assert_eq!(emb.num_params(), 20);
     }
 

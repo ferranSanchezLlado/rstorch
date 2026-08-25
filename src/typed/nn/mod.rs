@@ -104,14 +104,10 @@
 //! - **There are two load contracts, and the qualified spelling names which
 //!   one you took.** [`load_state_dict`] replaces the leaves;
 //!   [`crate::typed::persist::load_state_dict`] additionally rejects the
-//!   reserved `optim`/`optim.*` namespace before doing so. As free functions
-//!   the call site says which; as methods on one trait both would read
-//!   `model.load_state_dict(&state)?` and the safer one would be the harder
-//!   to reach.
-//! - **The signatures are not twins.** [`state_dict`] here is fallible — it
-//!   rejects a malformed walk rather than panicking on one — where the dynamic
-//!   `ModuleExt::state_dict` returns a plain map. A trait that made them look
-//!   alike would be hiding the difference that matters.
+//!   reserved `optim`/`optim.*` namespace before doing so.
+//! - **The signatures are not twins.** Both sides now report malformed walks
+//!   as errors, but the typed state retains compile-time contracts and binding
+//!   identities that the dynamic [`crate::nn::StateDict`] does not.
 
 use super::{DeviceBinding, DeviceCtx, FloatElement, Placement, TypedTensor};
 use crate::{DType, Result, Tensor};

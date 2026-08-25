@@ -7,10 +7,9 @@ use std::sync::Arc;
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::nn::{
-    Embedding, Forward, LayerNorm, Linear, Mode, ModuleExt, MultiHeadAttention,
-    scaled_dot_product_attention,
+    Embedding, Forward, LayerNorm, Linear, Mode, MultiHeadAttention, scaled_dot_product_attention,
 };
-use crate::persist::{Envelope, Limits};
+use crate::persist::{Envelope, Limits, LoadOptions};
 use crate::rng::Rng;
 use crate::tensor::Tensor;
 
@@ -32,24 +31,24 @@ use crate::tensor::Tensor;
 /// use rstorch::models::TransformerConfig;
 ///
 /// let config = TransformerConfig::new(16, 8, 4, 2, 1).with_num_layers(2);
-/// assert_eq!(config.num_layers, 2);
-/// assert_eq!(config.feed_forward_dim, 16); // 4 * embed_dim, the default
+/// assert_eq!(config.num_layers(), 2);
+/// assert_eq!(config.feed_forward_dim(), 16); // 4 * embed_dim, the default
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TransformerConfig {
     /// Number of tokens in the vocabulary.
-    pub vocab_size: usize,
+    vocab_size: usize,
     /// Longest sequence accepted by the learned positional embedding.
-    pub max_seq_len: usize,
+    max_seq_len: usize,
     /// Width of each token representation.
-    pub embed_dim: usize,
+    embed_dim: usize,
     /// Number of attention heads in each block.
-    pub num_heads: usize,
+    num_heads: usize,
     /// Number of decoder blocks.
-    pub num_layers: usize,
+    num_layers: usize,
     /// Width of each block's feed-forward hidden layer.
-    pub feed_forward_dim: usize,
+    feed_forward_dim: usize,
 }
 
 impl TransformerConfig {
@@ -93,6 +92,36 @@ impl TransformerConfig {
             num_layers,
             feed_forward_dim: embed_dim.saturating_mul(4),
         }
+    }
+
+    /// Number of tokens in the vocabulary.
+    pub fn vocab_size(&self) -> usize {
+        self.vocab_size
+    }
+
+    /// Longest sequence accepted by the learned positional embedding.
+    pub fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+
+    /// Width of each token representation.
+    pub fn embed_dim(&self) -> usize {
+        self.embed_dim
+    }
+
+    /// Number of attention heads in each block.
+    pub fn num_heads(&self) -> usize {
+        self.num_heads
+    }
+
+    /// Number of decoder blocks.
+    pub fn num_layers(&self) -> usize {
+        self.num_layers
+    }
+
+    /// Width of each block's feed-forward hidden layer.
+    pub fn feed_forward_dim(&self) -> usize {
+        self.feed_forward_dim
     }
 
     /// Replace the vocabulary size.
@@ -546,8 +575,9 @@ impl DecoderTransformer {
         Ok((tokens, cache))
     }
 
-    /// Atomically save model config and all `state_dict` weights in the
-    /// existing versioned [`Envelope`] format.
+    /// Atomically save model configuration and model tensor state in the
+    /// versioned [`Envelope`] format. Optimizer, RNG, and application sections
+    /// are not included by this model-only convenience method.
     ///
     /// # Errors
     ///
@@ -570,7 +600,11 @@ impl DecoderTransformer {
     /// ));
     /// model.save_checkpoint(&path, &Limits::default())?;
     ///
-    /// let restored = DecoderTransformer::load_checkpoint(&path, &Device::Cpu, &Limits::default())?;
+    /// let restored = DecoderTransformer::load_checkpoint(
+    ///     &path,
+    ///     &Device::Cpu,
+    ///     &Limits::default(),
+    /// )?;
     /// assert_eq!(restored.config(), model.config());
     /// # let _ = std::fs::remove_file(&path);
     /// # Ok(())
@@ -579,22 +613,17 @@ impl DecoderTransformer {
     pub fn save_checkpoint(&self, path: impl AsRef<Path>, limits: &Limits) -> Result<()> {
         let mut envelope = Envelope::new();
         envelope.set_section("config", self.config.encode())?;
-        for (name, tensor) in self.state_dict() {
-            envelope.insert_tensor(name, crate::checkpoint::to_host_tensor(&tensor)?);
-        }
+        crate::persist::save_model_state(self, &mut envelope)?;
         envelope.save(path, limits)
     }
 
     /// Load an [`Envelope`] from disk, reconstruct the architecture from its
-    /// config section, and load its exact `state_dict` on `device`.
-    ///
-    /// No model config or initialization seed is supplied by the caller; the
-    /// checkpoint is the sole architecture and weight source.
+    /// config section, and load its exact model tensor state on `device`.
     ///
     /// # Errors
     ///
-    /// Invalid/missing config, tensor conversion, exact state-dict matching,
-    /// reader-limit, and filesystem errors propagate.
+    /// Invalid/missing config, model state conversion, exact state-dict
+    /// matching, reader-limit, and filesystem errors propagate.
     pub fn load_checkpoint(
         path: impl AsRef<Path>,
         device: &Device,
@@ -606,17 +635,8 @@ impl DecoderTransformer {
             .ok_or_else(|| Error::persistence("checkpoint has no config section"))?;
         let config = TransformerConfig::decode(encoded)?;
         let mut model = Self::new(config, device, &mut Rng::seed(0))?;
-        let state = envelope
-            .tensors()
-            .iter()
-            .map(|(name, host)| {
-                Ok((
-                    name.clone(),
-                    crate::checkpoint::from_host_tensor(host, device)?,
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        model.load_state_dict(&state)?;
+        let options = LoadOptions::strict().with_limits(*limits);
+        crate::persist::load_model_state(&mut model, &envelope, &options)?;
         Ok(model)
     }
 }
@@ -650,6 +670,7 @@ fn checked_tokens(token_ids: &Tensor, max_sequence: usize) -> Result<(usize, usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::ModuleExt;
 
     const CPU: Device = Device::Cpu;
 
@@ -660,7 +681,7 @@ mod tests {
     #[test]
     fn derived_block_paths_are_indexed() {
         let model = DecoderTransformer::new(config(), &CPU, &mut Rng::seed(3)).unwrap();
-        let state = model.state_dict();
+        let state = model.state_dict().unwrap();
         assert!(state.contains_key("blocks.0.attention.q_proj.weight"));
         assert!(state.contains_key("blocks.1.feed_forward2.bias"));
         assert!(!state.keys().any(|key| key.starts_with("0.")));

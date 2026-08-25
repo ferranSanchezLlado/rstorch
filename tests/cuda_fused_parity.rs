@@ -185,6 +185,7 @@ fn layer_norm_parameter_gradients_match_the_cpu() {
         sgd.step(&mut layer, grads).unwrap();
         layer
             .state_dict()
+            .unwrap()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect()
@@ -251,6 +252,7 @@ fn optimizer_steps_match_the_cpu() {
         }
         model
             .state_dict()
+            .unwrap()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect()
@@ -277,6 +279,7 @@ fn attention_matches_the_cpu() {
         result.extend(
             attention
                 .state_dict()
+                .unwrap()
                 .into_values()
                 .flat_map(|tensor| tensor.to_vec::<f32>().unwrap()),
         );
@@ -307,6 +310,7 @@ fn batch_norm_running_statistics_match_the_cpu() {
         result.extend(
             layer
                 .state_dict()
+                .unwrap()
                 .into_values()
                 .flat_map(|tensor| tensor.to_vec::<f32>().unwrap()),
         );

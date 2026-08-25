@@ -457,7 +457,7 @@ fn every_parameter_of_the_flagship_is_traced() -> Result<()> {
     let mut model = Mlp::new(&device, &mut rng)?;
 
     // The four leaves, by the dotted paths the derive emits.
-    let paths: Vec<String> = model.state_dict().into_keys().collect();
+    let paths: Vec<String> = model.state_dict().unwrap().into_keys().collect();
     assert_eq!(paths, ["fc1.bias", "fc1.weight", "fc2.bias", "fc2.weight"]);
     assert_eq!(model.num_params(), PIXELS * 64 + 64 + 64 * 10 + 10);
 

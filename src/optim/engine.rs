@@ -392,6 +392,20 @@ impl<R: Rule> Engine<R> {
             state.insert(param.grad_key(), ParamState { clock, buffers });
             Ok(())
         })?;
+        if crate::lazy::enabled() {
+            let mut roots = Vec::new();
+            visit_all(model, &mut |_, leaf| {
+                roots.push(match leaf {
+                    Leaf::Param(param) => param.value().clone(),
+                    Leaf::Buffer(tensor) => tensor.clone(),
+                });
+            });
+            let values: Vec<&Tensor> = roots.iter().collect();
+            crate::lazy::flush_tensors(&values)?;
+        }
+        // The public clock counts only steps whose final realization boundary
+        // succeeded. A deferred backend failure is still fatal and may have
+        // partially applied the update, but it must not advance this counter.
         *steps = next_steps;
         Ok(())
     }
@@ -542,46 +556,19 @@ fn apply(
             });
             return;
         }
-        // The loudness gate: no gradient for a non-frozen parameter is an
-        // error naming the path, so an untraced weight access (wrong `Mode`,
-        // a forward that read `Param::value` instead of `Param::get`) is
-        // caught at the very next step instead of silently freezing it.
-        // Only a genuinely *absent* gradient is `MissingGrad`. `wrt` also
-        // narrows to the parameter's dtype, so a backend failure in that
-        // conversion arrives here too — reporting it as "no gradient" would send
-        // the reader hunting an untraced-weight bug that does not exist.
-        let grad = match grads.wrt(param) {
-            Ok(grad) => grad,
+        // Validate only the stored gradient metadata. The public `wrt`
+        // accessor intentionally narrows reduced-precision gradients for
+        // callers; the optimizer must not perform that conversion only to
+        // widen the value again during its apply pass.
+        match grads.validate_wrt(param.grad_key(), value, op) {
+            Ok(()) => {}
             Err(Error::NotTraced { .. }) => {
                 failure = Some(Error::MissingGrad {
                     op,
                     path: path.to_string(),
                 });
-                return;
             }
-            Err(error) => {
-                failure = Some(error);
-                return;
-            }
-        };
-        if grad.dims() != value.dims() {
-            failure = Some(Error::ShapeMismatch {
-                op,
-                lhs: value.shape().clone(),
-                rhs: grad.shape().clone(),
-            });
-        } else if grad.dtype() != value.dtype() {
-            failure = Some(Error::DTypeMismatch {
-                op,
-                expected: value.dtype(),
-                got: grad.dtype(),
-            });
-        } else if grad.device() != value.device() {
-            failure = Some(Error::DeviceMismatch {
-                op,
-                expected: value.device(),
-                got: grad.device(),
-            });
+            Err(error) => failure = Some(error),
         }
     });
     if let Some(e) = failure {

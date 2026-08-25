@@ -173,6 +173,7 @@ impl Net {
     /// Every parameter's value, in `state_dict` (sorted-path) order.
     pub(crate) fn snapshot(&self) -> Vec<(String, f32)> {
         self.state_dict()
+            .unwrap()
             .into_iter()
             .map(|(path, tensor)| (path, values(&tensor)[0]))
             .collect()

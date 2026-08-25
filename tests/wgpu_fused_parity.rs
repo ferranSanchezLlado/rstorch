@@ -113,6 +113,7 @@ fn layer_norm_forward_backward_and_parameters_match_cpu() {
         Sgd::new(0.5).step(&mut layer, grads).unwrap();
         layer
             .state_dict()
+            .unwrap()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect()
@@ -134,6 +135,7 @@ fn attention_and_indexing_backward_match_cpu() {
         result.extend(
             attention
                 .state_dict()
+                .unwrap()
                 .into_values()
                 .flat_map(|tensor| tensor.to_vec::<f32>().unwrap()),
         );
@@ -213,6 +215,7 @@ fn cross_entropy_and_optimizers_match_cpu() {
         }
         model
             .state_dict()
+            .unwrap()
             .into_values()
             .flat_map(|tensor| tensor.to_vec::<f32>().unwrap())
             .collect::<Vec<_>>()

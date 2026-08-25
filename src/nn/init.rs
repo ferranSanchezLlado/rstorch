@@ -449,7 +449,9 @@ mod tests {
         let attn = crate::nn::MultiHeadAttention::new(8, 2, &CPU, &mut a).unwrap();
         let via_init = xavier_uniform([8, 8], 1.0, DType::F32, &CPU, &mut b).unwrap();
         // `Proj::new` draws q/k/v/out in order; q_proj's weight is the first draw.
-        let q_weight = attn.state_dict()["q_proj.weight"].to_vec::<f32>().unwrap();
+        let q_weight = attn.state_dict().unwrap()["q_proj.weight"]
+            .to_vec::<f32>()
+            .unwrap();
         assert_eq!(q_weight, via_init.to_vec::<f32>().unwrap());
     }
 
@@ -486,7 +488,7 @@ mod tests {
             inner: crate::nn::Linear::new(4, 4, &CPU, &mut rng).unwrap(),
             norm: BatchNorm2d::new(4, &CPU).unwrap(),
         };
-        let running_mean_before = net.norm.state_dict()["running_mean"]
+        let running_mean_before = net.norm.state_dict().unwrap()["running_mean"]
             .to_vec::<f32>()
             .unwrap();
         let weight_before = net.inner.weight().value().to_vec::<f32>().unwrap();
@@ -514,7 +516,7 @@ mod tests {
         // `apply` only visits `Param`s.
         assert_eq!(
             running_mean_before,
-            net.norm.state_dict()["running_mean"]
+            net.norm.state_dict().unwrap()["running_mean"]
                 .to_vec::<f32>()
                 .unwrap()
         );

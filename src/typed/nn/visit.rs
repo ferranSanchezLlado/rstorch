@@ -676,6 +676,7 @@ mod tests {
         assert_eq!(
             adapter
                 .state_dict()
+                .unwrap()
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),

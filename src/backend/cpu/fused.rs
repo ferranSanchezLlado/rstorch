@@ -41,8 +41,10 @@ fn sgd_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         unreachable!("arity validated")
     };
     validate_optimizer_views(OP, inputs, 2)?;
-    validate_sgd_scalars(OP, *lr, *momentum, *weight_decay, inputs[0].dtype())?;
-    if inputs.len() == 3 && effective_scalar(*momentum, inputs[0].dtype()) == 0.0 {
+    crate::optim::validate::sgd_scalars(OP, *lr, *momentum, *weight_decay, inputs[0].dtype())?;
+    if inputs.len() == 3
+        && crate::optim::validate::effective_scalar(*momentum, inputs[0].dtype()) == 0.0
+    {
         return Err(Error::InvalidArg {
             op: OP,
             msg: "a velocity input requires non-zero momentum".to_owned(),
@@ -90,19 +92,37 @@ where
 {
     let use_momentum = momentum != E::Acc::ZERO;
     let len = param_layout.num_elements();
-    // One element's update, given its logical position. Written once and shared
-    // by the momentum and no-momentum drivers below so the two spellings cannot
-    // drift apart.
+    let dense = param_layout.is_contiguous()
+        && grad_layout.is_contiguous()
+        && velocity.is_none_or(|(_, layout)| layout.is_contiguous());
+    // Contiguous parameter/gradient/state buffers are the normal optimizer
+    // case. Avoiding offset_for_linear here removes one div+rem walk per
+    // operand while leaving the strided fallback and its cost model intact.
     let step = |logical: usize| -> (E, E::Acc) {
-        let p = param[offset_for_linear(param_layout, logical)].to_acc();
-        let grad = grad[offset_for_linear(grad_layout, logical)].to_acc();
+        let param_index = if dense {
+            logical
+        } else {
+            offset_for_linear(param_layout, logical)
+        };
+        let grad_index = if dense {
+            logical
+        } else {
+            offset_for_linear(grad_layout, logical)
+        };
+        let p = param[param_index].to_acc();
+        let grad = grad[grad_index].to_acc();
         let g = if weight_decay != E::Acc::ZERO {
             grad + p * weight_decay
         } else {
             grad
         };
         let direction = if let Some((values, layout)) = velocity {
-            values[offset_for_linear(layout, logical)] * momentum + g
+            let index = if dense {
+                logical
+            } else {
+                offset_for_linear(layout, logical)
+            };
+            values[index] * momentum + g
         } else {
             g
         };
@@ -160,7 +180,7 @@ fn adam_step(inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
     else {
         unreachable!("arity validated")
     };
-    validate_adam_scalars(OP, scalars, inputs[0].dtype())?;
+    crate::optim::validate::adam_scalars(OP, scalars, inputs[0].dtype())?;
     let param = cpu_storage(inputs[0]);
     let grad = cpu_storage(inputs[1]);
     let first = cpu_storage(inputs[2]);
@@ -225,6 +245,12 @@ where
     let mut next_param = vec![E::from_acc(E::Acc::ZERO); len];
     let mut next_m = vec![E::Acc::ZERO; len];
     let mut next_v = vec![E::Acc::ZERO; len];
+    let dense = param_layout.is_contiguous()
+        && grad_layout.is_contiguous()
+        && m_layout.is_contiguous()
+        && v_layout.is_contiguous();
+    // Keep one loop body for dense and strided layouts. Dense rows use direct
+    // indexing; the fallback preserves the existing offset walk.
     crate::backend::parallel::for_each_row_mut3(
         len,
         (&mut next_param, 1),
@@ -238,22 +264,43 @@ where
                 .zip(vs.iter_mut())
                 .zip(base..)
             {
-                let p = param[offset_for_linear(param_layout, logical)].to_acc();
-                let mut g = grad[offset_for_linear(grad_layout, logical)].to_acc();
+                let param_index = if dense {
+                    logical
+                } else {
+                    offset_for_linear(param_layout, logical)
+                };
+                let grad_index = if dense {
+                    logical
+                } else {
+                    offset_for_linear(grad_layout, logical)
+                };
+                let m_index = if dense {
+                    logical
+                } else {
+                    offset_for_linear(m_layout, logical)
+                };
+                let v_index = if dense {
+                    logical
+                } else {
+                    offset_for_linear(v_layout, logical)
+                };
+                let p = param[param_index].to_acc();
+                let mut g = grad[grad_index].to_acc();
                 if weight_decay != E::Acc::ZERO && !decoupled {
                     g = g + p * weight_decay;
                 }
-                let m = m[offset_for_linear(m_layout, logical)] * beta1 + g * one_minus_beta1;
-                let v = v[offset_for_linear(v_layout, logical)] * beta2 + (g * g) * one_minus_beta2;
-                let direction = (m / correction1) / ((v / correction2).sqrt() + eps);
+                let next_m_value = m[m_index] * beta1 + g * one_minus_beta1;
+                let next_v_value = v[v_index] * beta2 + (g * g) * one_minus_beta2;
+                let direction =
+                    (next_m_value / correction1) / ((next_v_value / correction2).sqrt() + eps);
                 let mut next = p;
                 if weight_decay != E::Acc::ZERO && decoupled {
                     next = next * decoupled_scale;
                 }
                 next = next - direction * lr;
                 *slot = E::from_acc(next);
-                *m_slot = m;
-                *v_slot = v;
+                *m_slot = next_m_value;
+                *v_slot = next_v_value;
             }
         },
     );
@@ -791,131 +838,6 @@ fn validate_optimizer_views(
         validate_view(op, input)?;
     }
     Ok(())
-}
-
-/// Range-check the SGD hyperparameters.
-///
-/// Also called by [`Sgd::step`](crate::optim::Sgd::step) *before* it mutates
-/// anything: reaching this only from inside the kernel would mean an invalid
-/// group hyperparameter is diagnosed part-way through the parameter walk,
-/// leaving the step half-applied. Sharing one function keeps the up-front check
-/// and the kernel's guard from drifting apart.
-pub(crate) fn validate_sgd_scalars(
-    op: &'static str,
-    lr: f64,
-    momentum: f64,
-    weight_decay: f64,
-    dtype: DType,
-) -> Result<()> {
-    validate_nonnegative(op, "lr", lr, dtype)?;
-    validate_unit_interval(op, "momentum", momentum, false, dtype)?;
-    validate_nonnegative(op, "weight_decay", weight_decay, dtype)
-}
-
-/// Range-check the Adam hyperparameters. Shared with
-/// [`Adam::step`](crate::optim::Adam::step)'s up-front check for the reason
-/// given on [`validate_sgd_scalars`].
-pub(crate) fn validate_adam_scalars(op: &'static str, scalars: &[f64], dtype: DType) -> Result<()> {
-    let [
-        lr,
-        beta1,
-        beta2,
-        eps,
-        weight_decay,
-        correction1,
-        correction2,
-        decoupled,
-    ] = scalars
-    else {
-        unreachable!("arity validated")
-    };
-    validate_nonnegative(op, "lr", *lr, dtype)?;
-    validate_unit_interval(op, "beta1", *beta1, false, dtype)?;
-    validate_unit_interval(op, "beta2", *beta2, false, dtype)?;
-    validate_positive(op, "eps", *eps, dtype)?;
-    validate_nonnegative(op, "weight_decay", *weight_decay, dtype)?;
-    validate_unit_interval(op, "bias_correction1", *correction1, true, dtype)?;
-    validate_unit_interval(op, "bias_correction2", *correction2, true, dtype)?;
-    if !(*decoupled == 0.0 || *decoupled == 1.0) {
-        return Err(Error::InvalidArg {
-            op,
-            msg: format!("decoupled must be encoded as 0 or 1, got {decoupled}"),
-        });
-    }
-    if *decoupled == 1.0 {
-        validate_effective(
-            op,
-            "1 - lr * weight_decay",
-            1.0 - *lr * *weight_decay,
-            dtype,
-            |_| true,
-            "finite",
-        )?;
-    }
-    Ok(())
-}
-
-fn validate_nonnegative(op: &'static str, name: &str, value: f64, dtype: DType) -> Result<()> {
-    validate_effective(
-        op,
-        name,
-        value,
-        dtype,
-        |x| x >= 0.0,
-        "finite and non-negative",
-    )
-}
-
-fn validate_positive(op: &'static str, name: &str, value: f64, dtype: DType) -> Result<()> {
-    validate_effective(op, name, value, dtype, |x| x > 0.0, "finite and positive")
-}
-
-fn validate_unit_interval(
-    op: &'static str,
-    name: &str,
-    value: f64,
-    include_zero: bool,
-    dtype: DType,
-) -> Result<()> {
-    let valid = |x: f64| {
-        if include_zero {
-            x > 0.0 && x <= 1.0
-        } else {
-            (0.0..1.0).contains(&x)
-        }
-    };
-    let expected = if include_zero {
-        "in (0, 1]"
-    } else {
-        "in [0, 1)"
-    };
-    validate_effective(op, name, value, dtype, valid, expected)
-}
-
-fn validate_effective(
-    op: &'static str,
-    name: &str,
-    value: f64,
-    dtype: DType,
-    valid: impl Fn(f64) -> bool,
-    expected: &str,
-) -> Result<()> {
-    let effective = effective_scalar(value, dtype);
-    if !value.is_finite() || !effective.is_finite() || !valid(effective) {
-        return Err(Error::InvalidArg {
-            op,
-            msg: format!("{name} must be {expected} in the accumulation dtype, got {value}"),
-        });
-    }
-    Ok(())
-}
-
-fn effective_scalar(value: f64, dtype: DType) -> f64 {
-    if dtype == DType::F64 {
-        value
-    } else {
-        f64::from(value as f32)
-    }
 }
 
 fn invalid_encoding<T>(

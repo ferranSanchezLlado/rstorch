@@ -91,7 +91,7 @@ impl Tensor {
         let geo = Conv2dGeometry::conv2d("conv2d", self.dims(), weight_dims, &params)?;
         let storage = dispatch::backend(self.device()).conv(
             ConvOp::Conv2d,
-            &[self.view(), weight.view()],
+            &[self.ready_view()?, weight.ready_view()?],
             &params,
         )?;
         let out = Tensor::from_parts(storage, Layout::contiguous(geo.output_dims())?);
@@ -109,7 +109,11 @@ impl Tensor {
                 let input_grad = from_kernel(
                     backend.conv(
                         ConvOp::Conv2dInputGrad,
-                        &[g.view(), saved_weight.view(), saved_input.view()],
+                        &[
+                            g.ready_view()?,
+                            saved_weight.ready_view()?,
+                            saved_input.ready_view()?,
+                        ],
                         &params,
                     ),
                     geo.input_dims(),
@@ -117,7 +121,11 @@ impl Tensor {
                 let weight_grad = from_kernel(
                     backend.conv(
                         ConvOp::Conv2dWeightGrad,
-                        &[g.view(), saved_input.view(), saved_weight.view()],
+                        &[
+                            g.ready_view()?,
+                            saved_input.ready_view()?,
+                            saved_weight.ready_view()?,
+                        ],
                         &params,
                     ),
                     geo.weight_dims(),
@@ -177,7 +185,7 @@ impl Tensor {
                 Ok(vec![Some(from_kernel(
                     dispatch::backend(g.device()).conv(
                         ConvOp::MaxPool2dBackward,
-                        &[g.view(), saved_input.view()],
+                        &[g.ready_view()?, saved_input.ready_view()?],
                         &params,
                     ),
                     geo.input_dims(),
@@ -230,7 +238,7 @@ impl Tensor {
                 Ok(vec![Some(from_kernel(
                     dispatch::backend(g.device()).conv(
                         ConvOp::AvgPool2dBackward,
-                        &[g.view(), saved_input.view()],
+                        &[g.ready_view()?, saved_input.ready_view()?],
                         &params,
                     ),
                     geo.input_dims(),
@@ -256,7 +264,8 @@ impl Tensor {
             dilation: (1, 1),
         };
         let geo = Conv2dGeometry::pool(op, self.dims(), &params)?;
-        let storage = dispatch::backend(self.device()).conv(conv_op, &[self.view()], &params)?;
+        let storage =
+            dispatch::backend(self.device()).conv(conv_op, &[self.ready_view()?], &params)?;
         let out = Tensor::from_parts(storage, Layout::contiguous(geo.output_dims())?);
         Ok((geo, out))
     }

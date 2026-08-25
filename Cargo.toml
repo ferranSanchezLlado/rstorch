@@ -72,6 +72,10 @@ name = "tensor_ops"
 harness = false
 
 [[bench]]
+name = "lazy"
+harness = false
+
+[[bench]]
 name = "training"
 harness = false
 

@@ -18,7 +18,7 @@ use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::persist::host_tensor::HostTensor;
 use crate::persist::options::{LoadOptions, MissingPolicy, UnexpectedPolicy};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One entry of the target's expected schema: its path and the dtype/dims a
 /// loaded tensor must match to be accepted.
@@ -100,6 +100,22 @@ pub fn stage(
     loaded: &BTreeMap<String, HostTensor>,
     options: &LoadOptions,
 ) -> Result<StagedTensors> {
+    let mut expected_paths = BTreeSet::new();
+    for expected in schema {
+        if expected.path.is_empty() || expected.path.split('.').any(str::is_empty) {
+            return Err(Error::persistence(format!(
+                "invalid empty-segment schema path `{}`",
+                expected.path
+            )));
+        }
+        if !expected_paths.insert(expected.path.as_str()) {
+            return Err(Error::persistence(format!(
+                "duplicate schema path `{}`",
+                expected.path
+            )));
+        }
+    }
+
     // Detect unexpected paths first (cheap, and the loudest signal of a schema
     // mismatch) before touching any data.
     //
@@ -110,8 +126,6 @@ pub fn stage(
     // compile where the decision has to be made.
     match options.unexpected {
         UnexpectedPolicy::Reject => {
-            let expected_paths: std::collections::BTreeSet<&str> =
-                schema.iter().map(|e| e.path.as_str()).collect();
             for name in loaded.keys() {
                 if !expected_paths.contains(name.as_str()) {
                     return Err(Error::persistence(format!(
@@ -122,7 +136,6 @@ pub fn stage(
         }
         UnexpectedPolicy::Allow => {}
     }
-
     let mut entries = Vec::with_capacity(schema.len());
     for exp in schema {
         match loaded.get(&exp.path) {
@@ -241,5 +254,14 @@ mod tests {
         l.insert("fc.weight".to_string(), ht(DType::F32, vec![4, 5]));
         let err = stage(&schema(), &l, &LoadOptions::strict());
         assert!(matches!(err, Err(Error::Persistence { .. })));
+    }
+
+    #[test]
+    fn duplicate_schema_paths_are_rejected() {
+        let duplicate = vec![
+            Expected::new("fc.weight", DType::F32, vec![4, 3]),
+            Expected::new("fc.weight", DType::F32, vec![4, 3]),
+        ];
+        assert!(stage(&duplicate, &loaded(), &LoadOptions::strict()).is_err());
     }
 }

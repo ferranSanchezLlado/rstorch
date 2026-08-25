@@ -21,8 +21,8 @@
 use crate::nn::{Module, Param};
 use crate::tensor::Tensor;
 
-/// A leaf's dotted path: `name` at the top level, `prefix.name` below it.
-/// Shared with the typed visitors, whose path semantics are the same.
+#[cfg(feature = "typed")]
+/// Join a leaf segment for consumers that bridge into the typed visitor.
 pub(crate) fn join(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
@@ -83,15 +83,16 @@ impl<'a> Visitor<'a> {
 
     /// Emit a trainable parameter leaf named `name` at the current prefix.
     pub fn param(&mut self, name: &str, p: &Param) {
-        let full = join(&self.path, name);
-        (self.sink)(&full, Leaf::Param(p));
+        let saved = push_segment(&mut self.path, name);
+        (self.sink)(&self.path, Leaf::Param(p));
+        self.path.truncate(saved);
     }
 
-    /// Emit a non-trainable `Tensor` buffer leaf named `name` at the current
-    /// prefix (persistent state such as `BatchNorm` running statistics).
+    /// Emit a non-trainable `Tensor` buffer named `name` at the current prefix.
     pub fn buffer(&mut self, name: &str, t: &Tensor) {
-        let full = join(&self.path, name);
-        (self.sink)(&full, Leaf::Buffer(t));
+        let saved = push_segment(&mut self.path, name);
+        (self.sink)(&self.path, Leaf::Buffer(t));
+        self.path.truncate(saved);
     }
 
     /// Descend into child module `child` under segment `name`, prefixing all
@@ -122,14 +123,16 @@ impl<'a> VisitorMut<'a> {
 
     /// Emit a mutable parameter leaf named `name` at the current prefix.
     pub fn param(&mut self, name: &str, p: &mut Param) {
-        let full = join(&self.path, name);
-        (self.sink)(&full, LeafMut::Param(p));
+        let saved = push_segment(&mut self.path, name);
+        (self.sink)(&self.path, LeafMut::Param(p));
+        self.path.truncate(saved);
     }
 
-    /// Emit a mutable `Tensor` buffer leaf named `name` at the current prefix.
+    /// Emit a mutable `Tensor` buffer named `name` at the current prefix.
     pub fn buffer(&mut self, name: &str, t: &mut Tensor) {
-        let full = join(&self.path, name);
-        (self.sink)(&full, LeafMut::Buffer(t));
+        let saved = push_segment(&mut self.path, name);
+        (self.sink)(&self.path, LeafMut::Buffer(t));
+        self.path.truncate(saved);
     }
 
     /// Descend into mutable child module `child` under segment `name`.
@@ -402,7 +405,7 @@ mod tests {
         let paths: Vec<_> = walk(&m).into_iter().map(|(p, _)| p).collect();
         assert_eq!(paths, vec!["embed"], "a tied param must appear once");
         assert_eq!(m.num_params(), 3);
-        assert_eq!(m.state_dict().len(), 1);
+        assert_eq!(m.state_dict().unwrap().len(), 1);
 
         // Both uses still contribute: d/de of sum(e ⊙ e) is 2e.
         let grads = m.forward(Mode::TRAIN).backward().unwrap();

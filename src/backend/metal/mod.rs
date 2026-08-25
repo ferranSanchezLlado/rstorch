@@ -1432,13 +1432,7 @@ impl MetalBackend {
         // out-of-range `momentum` is an error on those two and silent garbage
         // here, and `conformance` cannot see the difference: it compares
         // successful values and declared declines, never rejections.
-        crate::backend::cpu::fused::validate_sgd_scalars(
-            "fused_sgd_step",
-            *lr,
-            *momentum,
-            *decay,
-            dtype,
-        )?;
+        crate::optim::validate::sgd_scalars("fused_sgd_step", *lr, *momentum, *decay, dtype)?;
         if inputs.len() == 3 && *momentum as f32 == 0.0 {
             return Err(Error::InvalidArg {
                 op: "fused_sgd_step",
@@ -1462,7 +1456,7 @@ impl MetalBackend {
             .zip(inputs)
             .map(|(storage, &input)| match storage {
                 Some(Storage::Metal(value)) => Ok(value),
-                Some(Storage::Cpu(_)) => unreachable!(),
+                Some(Storage::Cpu(_)) | Some(Storage::Pending(_)) => unreachable!(),
                 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
                 Some(Storage::Wgpu(_)) => unreachable!(),
                 None => metal_storage("fused_sgd_step", self.ordinal, input),
@@ -1518,7 +1512,7 @@ impl MetalBackend {
         }
         validate_fused_optimizer_views("fused_adam_step", inputs, 2)?;
         // As in `fused_sgd`: the scalar range check CPU and CUDA both apply.
-        crate::backend::cpu::fused::validate_adam_scalars("fused_adam_step", scalars, dtype)?;
+        crate::optim::validate::adam_scalars("fused_adam_step", scalars, dtype)?;
         let context = context(self.ordinal)?;
         check_context("fused_adam_step", &context, inputs)?;
         let dense = inputs
@@ -1536,7 +1530,7 @@ impl MetalBackend {
             .zip(inputs)
             .map(|(storage, &input)| match storage {
                 Some(Storage::Metal(value)) => Ok(value),
-                Some(Storage::Cpu(_)) => unreachable!(),
+                Some(Storage::Cpu(_)) | Some(Storage::Pending(_)) => unreachable!(),
                 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
                 Some(Storage::Wgpu(_)) => unreachable!(),
                 None => metal_storage("fused_adam_step", self.ordinal, input),
@@ -1640,7 +1634,7 @@ impl BackendOps for MetalBackend {
         synchronize(&context, "transfer_out")?;
         let storage = match &dense {
             Some(Storage::Metal(storage)) => storage,
-            Some(Storage::Cpu(_)) => unreachable!(),
+            Some(Storage::Cpu(_)) | Some(Storage::Pending(_)) => unreachable!(),
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
             Some(Storage::Wgpu(_)) => unreachable!(),
             None => metal_storage("transfer_out", self.ordinal, x)?,
@@ -3187,92 +3181,6 @@ mod tests {
             };
             assert!((values[0].to_f32() - 0.950_2).abs() < 2e-3);
             assert!((values[1].to_f32() - 2.025).abs() < 2e-3);
-        }
-    }
-
-    /// A rejected hyperparameter must be rejected on *every* backend.
-    ///
-    /// `conformance` structurally cannot cover this: a `Case` either compares
-    /// successful values or records a declared `Unsupported` decline, so it
-    /// has no rejection-parity dimension. Metal skipped both scalar
-    /// validators for exactly that reason — CPU and CUDA errored, Metal
-    /// computed garbage, and no lane noticed.
-    #[test]
-    fn fused_optimizer_scalar_rejections_match_cpu() {
-        let Some(_lane) = hardware_lane() else { return };
-        let cpu = dispatch::backend(Device::Cpu);
-        let metal = dispatch::backend(METAL);
-        let host = crate::storage::CpuStorage::F32(std::sync::Arc::new(vec![1.0f32, 2.0]));
-        let layout = Layout::contiguous([2]).unwrap();
-
-        // (scalars, what makes them invalid)
-        let sgd_cases = [
-            ([f64::NAN, 0.0, 0.0], "lr is NaN"),
-            ([-1.0, 0.0, 0.0], "lr is negative"),
-            ([0.1, 1.5, 0.0], "momentum is outside [0, 1]"),
-            ([0.1, 0.0, -1.0], "weight_decay is negative"),
-        ];
-        for (scalars, why) in sgd_cases {
-            for backend in [cpu, metal] {
-                let p = backend.transfer_in(host.clone()).unwrap();
-                let g = backend.transfer_in(host.clone()).unwrap();
-                let result = backend.fused(
-                    FusedOp::SgdStep,
-                    &[View::new(&p, &layout), View::new(&g, &layout)],
-                    &scalars,
-                );
-                assert!(result.is_err(), "SgdStep accepted scalars where {why}");
-            }
-        }
-
-        // A velocity input with no momentum is the other shared rule.
-        for backend in [cpu, metal] {
-            let p = backend.transfer_in(host.clone()).unwrap();
-            let g = backend.transfer_in(host.clone()).unwrap();
-            let v = backend.transfer_in(host.clone()).unwrap();
-            let result = backend.fused(
-                FusedOp::SgdStep,
-                &[
-                    View::new(&p, &layout),
-                    View::new(&g, &layout),
-                    View::new(&v, &layout),
-                ],
-                &[0.1, 0.0, 0.0],
-            );
-            assert!(
-                result.is_err(),
-                "SgdStep accepted a velocity buffer with zero momentum"
-            );
-        }
-
-        // Adam: eight scalars (lr, beta1, beta2, eps, weight_decay,
-        // decoupled, correction1, correction2).
-        let adam_cases = [
-            (
-                [f64::NAN, 0.9, 0.999, 1e-8, 0.0, 0.0, 1.0, 1.0],
-                "lr is NaN",
-            ),
-            ([0.1, 1.5, 0.999, 1e-8, 0.0, 0.0, 1.0, 1.0], "beta1 > 1"),
-            ([0.1, 0.9, 0.999, -1e-8, 0.0, 0.0, 1.0, 1.0], "eps <= 0"),
-        ];
-        for (scalars, why) in adam_cases {
-            for backend in [cpu, metal] {
-                let p = backend.transfer_in(host.clone()).unwrap();
-                let g = backend.transfer_in(host.clone()).unwrap();
-                let m = backend.transfer_in(host.clone()).unwrap();
-                let v = backend.transfer_in(host.clone()).unwrap();
-                let result = backend.fused(
-                    FusedOp::AdamStep,
-                    &[
-                        View::new(&p, &layout),
-                        View::new(&g, &layout),
-                        View::new(&m, &layout),
-                        View::new(&v, &layout),
-                    ],
-                    &scalars,
-                );
-                assert!(result.is_err(), "AdamStep accepted scalars where {why}");
-            }
         }
     }
 

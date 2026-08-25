@@ -15,6 +15,130 @@ use crate::error::{Error, Result};
 use crate::storage::CpuStorage;
 use crate::tensor::Tensor;
 
+#[cfg(feature = "testing")]
+use std::alloc::{GlobalAlloc, Layout as AllocLayout, System};
+#[cfg(feature = "testing")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(feature = "testing")]
+struct CountingAllocator;
+
+#[cfg(feature = "testing")]
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "testing")]
+static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "testing")]
+static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "testing")]
+static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "testing")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[cfg(feature = "testing")]
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: AllocLayout) -> *mut u8 {
+        // SAFETY: delegated unchanged to the process allocator.
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            record_alloc(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: AllocLayout) -> *mut u8 {
+        // SAFETY: delegated unchanged to the process allocator.
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            record_alloc(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: AllocLayout) {
+        // SAFETY: delegated unchanged to the process allocator.
+        unsafe { System.dealloc(ptr, layout) };
+        DEALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let _ = LIVE_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+            Some(live.saturating_sub(layout.size()))
+        });
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: AllocLayout, new_size: usize) -> *mut u8 {
+        // SAFETY: delegated unchanged to the process allocator.
+        let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        if !new_ptr.is_null() {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            let live = LIVE_BYTES.load(Ordering::Relaxed);
+            let adjusted = if new_size >= layout.size() {
+                live.saturating_add(new_size - layout.size())
+            } else {
+                live.saturating_sub(layout.size() - new_size)
+            };
+            LIVE_BYTES.store(adjusted, Ordering::Relaxed);
+            update_peak(adjusted);
+        }
+        new_ptr
+    }
+}
+
+#[cfg(feature = "testing")]
+fn record_alloc(size: usize) {
+    ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
+    update_peak(live);
+}
+
+#[cfg(feature = "testing")]
+fn update_peak(live: usize) {
+    let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
+    while live > peak {
+        match PEAK_BYTES.compare_exchange_weak(peak, live, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => peak = next,
+        }
+    }
+}
+
+/// Allocation counters collected by the optional testing allocator.
+#[cfg(feature = "testing")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AllocationStats {
+    /// Successful allocation and reallocation calls.
+    pub allocations: usize,
+    /// Successful deallocation calls.
+    pub deallocations: usize,
+    /// Bytes currently live.
+    pub live_bytes: usize,
+    /// Maximum live bytes observed since the last reset.
+    pub peak_bytes: usize,
+}
+
+/// Reset allocation counters and preserve the bytes that were already live.
+#[cfg(feature = "testing")]
+pub fn reset_allocation_stats() -> AllocationStats {
+    let live = LIVE_BYTES.load(Ordering::Relaxed);
+    let previous_peak = PEAK_BYTES.swap(live, Ordering::Relaxed);
+    AllocationStats {
+        allocations: ALLOCATIONS.swap(0, Ordering::Relaxed),
+        deallocations: DEALLOCATIONS.swap(0, Ordering::Relaxed),
+        live_bytes: live,
+        peak_bytes: previous_peak,
+    }
+}
+
+/// Read allocation counters without resetting them.
+#[cfg(feature = "testing")]
+pub fn allocation_stats() -> AllocationStats {
+    AllocationStats {
+        allocations: ALLOCATIONS.load(Ordering::Relaxed),
+        deallocations: DEALLOCATIONS.load(Ordering::Relaxed),
+        live_bytes: LIVE_BYTES.load(Ordering::Relaxed),
+        peak_bytes: PEAK_BYTES.load(Ordering::Relaxed),
+    }
+}
+
 /// Slack over the single-evaluation roundoff bound `ε·|f| / h` allowed by the
 /// noise floor (see [`check_grad`]). One evaluation of `f` rounds once, but the
 /// arithmetic *inside* it rounds too, and a differencing chain amplifies that;
@@ -39,7 +163,7 @@ fn dtype_epsilon(dtype: DType) -> f64 {
 /// Read a tensor's elements in row-major logical order as `f64`, whatever its
 /// dtype (the dtype-agnostic bulk sibling of [`Tensor::item`]).
 fn to_f64_vec(t: &Tensor) -> Result<Vec<f64>> {
-    let host = dispatch::backend(t.device()).transfer_out(t.view())?;
+    let host = dispatch::backend(t.device()).transfer_out(t.ready_view()?)?;
     Ok(match &host {
         CpuStorage::F16(a) => a.iter().map(|v| v.to_f64()).collect(),
         CpuStorage::BF16(a) => a.iter().map(|v| v.to_f64()).collect(),

@@ -98,6 +98,27 @@ GPU backends validate on device and report at the next transfer — never later
 than the moment a wrong value would have become visible. `STABILITY.md` states
 the split precisely.
 
+## Deferred element-wise execution (experimental)
+
+Dense element-wise chains have an opt-in deferred executor. It is an
+experimental execution policy and is **off by default**. Enable it per thread
+for an experiment or benchmark:
+
+```rust
+let _restore = rstorch::lazy::set_fusion(true);
+let y = x.add_scalar(1.0)?.mul_scalar(2.0)?;
+y.realize()?; // force y's value, then flush its device
+```
+
+The `rstorch::lazy` namespace is outside the dynamic 1.x stability guarantee.
+Its thread-local controls, supported operation set, and realization schedule
+may change independently. The `RSTORCH_FUSION=on` environment variable selects
+the process default for threads that have not overridden it. `set_fusion`
+returns a restore guard, so tests and concurrent callers do not race a
+process-global switch. Deferred errors are reported at the next materialization
+and retain the failing operation name; shape, dtype, device and axis validation
+remains at the call site.
+
 ## What is in the box
 
 | | |
@@ -107,9 +128,8 @@ the split precisely.
 | **`nn`** | `Linear`, `Conv2d`, `MaxPool2d`, `AvgPool2d`, `Flatten`, `Identity`, `Dropout`, `Relu`, `Gelu`, `Embedding`, `MultiHeadAttention`, `LayerNorm`, `RMSNorm`, `BatchNorm2d`, `Sequential`, `nn::init`, `ModuleExt`, `#[derive(Module)]` |
 | **`optim`** | `Sgd`, `Adam`, `AdamW`, parameter groups, learning-rate schedules |
 | **`data`** | `Dataset`, `DataLoader` with seeded shuffling, `TensorDataset`, `VecDataset`, MNIST and Tiny Shakespeare loaders |
-| **`text`** | `CharTokenizer`, `BpeTokenizer` |
 | **`models`** | `DecoderTransformer` with a config and a `KvCache` for generation |
-| **`persist`** | safetensors state dicts and training checkpoints that reload optimizer state; files are transactional but not checksummed or authenticated |
+| **`persist`** | safetensors model state and composable envelope sections; model-only helpers are transactional, but files are not checksummed or authenticated |
 
 ## Examples
 
@@ -130,13 +150,13 @@ cargo run --release --example typed_mnist --features typed,hub
 
 | Feature | Default | What it does |
 |---|---|---|
-| `typed` | off | Compile-time checked rank, dimensions, dtype and device placement, as a wrapper over the same `Tensor`. Mismatched shapes become type errors. |
+| `typed` | off | Experimental compile-time checked rank, dimensions, dtype and device placement, as a wrapper over the same `Tensor`; outside the dynamic 1.x stability guarantee. |
 | `rayon` | off | Multi-threaded CPU kernels. Results stay bit-identical to the single-threaded kernels of the same build: kernels partition by output element, so no float is accumulated across threads in a racing order. |
 | `hub` | off | Downloads for the bundled MNIST and Tiny Shakespeare datasets. |
 | `metal` | on | GPU backend on macOS. `Device::best_available` selects the first Metal device when present, then considers CUDA, WGPU and CPU. |
 | `cuda` | off | Native NVIDIA CUDA backend on Linux and Windows, including Linux under WSL. Supports F16/F32 compute and lossless I64/Bool storage on compute capability 6.0 or newer. Bundled PTX requires a compatible NVIDIA driver but not the CUDA toolkit. **Validated locally, not CI-gated** — see [STABILITY.md](STABILITY.md). |
 | `wgpu` | off | Portable native WebGPU backend. F32 is always supported; native F16 is enabled only when the adapter advertises `SHADER_F16`. I64 index storage remains lossless. |
-| `testing` | off | The finite-difference gradient harness the crate tests itself with. The one public module outside the stability guarantee. |
+| `testing` | off | The finite-difference gradient harness; outside the stability guarantee. |
 
 ## Backends and dtypes
 

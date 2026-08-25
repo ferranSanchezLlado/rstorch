@@ -96,11 +96,11 @@ impl Rule for AdamRule {
     }
 
     fn check(&self, param: &Param, hyper: AdamGroup, lr: f64, clock: u64) -> Result<()> {
-        // Exactly the scalars the step will hand the kernel for this parameter,
-        // including its own bias-correction clock.
+        // Exactly the scalars the step will hand the kernel, including its
+        // own bias-correction clock.
         let scalars = kernel_scalars(lr, hyper, self.decoupled, clock);
         let acc = param.value().dtype().accumulation_dtype();
-        crate::backend::cpu::fused::validate_adam_scalars("step", &scalars, acc)
+        crate::optim::validate::adam_scalars("step", &scalars, acc)
     }
 
     /// The formula in [`Adam`]'s docs.
@@ -128,58 +128,62 @@ impl Rule for AdamRule {
             }
         };
         let scalars = kernel_scalars(lr, hyper, decoupled, clock);
-        let inputs = [
-            weights.view(),
-            grad.view(),
-            previous_m.view(),
-            previous_v.view(),
-        ];
+        // Materialize the four backend inputs in a short scope. The fallback
+        // consumes `grad` and the weight/moment handles after this call.
+        let fused = {
+            let inputs = [
+                weights.ready_view()?,
+                grad.ready_view()?,
+                previous_m.ready_view()?,
+                previous_v.ready_view()?,
+            ];
+            dispatch::backend(inputs[0].device()).fused(FusedOp::AdamStep, &inputs, &scalars)
+        };
 
-        let [next, m, v] =
-            match dispatch::backend(weights.device()).fused(FusedOp::AdamStep, &inputs, &scalars) {
-                Ok(outputs) => {
-                    let outputs = engine::fused_outputs(Self::NAME, outputs, 3, &weights)?;
-                    // `fused_outputs` validated the length as 3 and pushes
-                    // exactly one tensor per output, so this cannot fail.
-                    outputs
-                        .try_into()
-                        .unwrap_or_else(|_| unreachable!("fused Adam output count validated as 3"))
+        let [next, m, v] = match fused {
+            Ok(outputs) => {
+                let outputs = engine::fused_outputs(Self::NAME, outputs, 3, &weights)?;
+                // `fused_outputs` validated the length as 3 and pushes
+                // exactly one tensor per output, so this cannot fail.
+                outputs
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("fused Adam output count validated as 3"))
+            }
+            Err(Error::Unsupported { .. }) => {
+                let [
+                    _lr,
+                    _beta1,
+                    _beta2,
+                    _eps,
+                    _decay,
+                    correction1,
+                    correction2,
+                    _flag,
+                ] = scalars;
+                let mut g = grad;
+                if hyper.weight_decay != 0.0 && !decoupled {
+                    g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
                 }
-                Err(Error::Unsupported { .. }) => {
-                    let [
-                        _lr,
-                        _beta1,
-                        _beta2,
-                        _eps,
-                        _decay,
-                        correction1,
-                        correction2,
-                        _flag,
-                    ] = scalars;
-                    let mut g = grad;
-                    if hyper.weight_decay != 0.0 && !decoupled {
-                        g = g.add(&weights.mul_scalar(hyper.weight_decay)?)?;
-                    }
-                    let next_m = previous_m
-                        .mul_scalar(hyper.beta1)?
-                        .add(&g.mul_scalar(1.0 - hyper.beta1)?)?;
-                    let next_v = previous_v
-                        .mul_scalar(hyper.beta2)?
-                        .add(&g.mul(&g)?.mul_scalar(1.0 - hyper.beta2)?)?;
+                let next_m = previous_m
+                    .mul_scalar(hyper.beta1)?
+                    .add(&g.mul_scalar(1.0 - hyper.beta1)?)?;
+                let next_v = previous_v
+                    .mul_scalar(hyper.beta2)?
+                    .add(&g.mul(&g)?.mul_scalar(1.0 - hyper.beta2)?)?;
 
-                    let m_hat = next_m.div_scalar(correction1)?;
-                    let v_hat = next_v.div_scalar(correction2)?;
-                    let direction = m_hat.div(&v_hat.sqrt()?.add_scalar(hyper.eps)?)?;
+                let m_hat = next_m.div_scalar(correction1)?;
+                let v_hat = next_v.div_scalar(correction2)?;
+                let direction = m_hat.div(&v_hat.sqrt()?.add_scalar(hyper.eps)?)?;
 
-                    let mut next = weights;
-                    if hyper.weight_decay != 0.0 && decoupled {
-                        next = next.mul_scalar(1.0 - lr * hyper.weight_decay)?;
-                    }
-                    next = next.sub(&direction.mul_scalar(lr)?)?;
-                    [next, next_m, next_v]
+                let mut next = weights;
+                if hyper.weight_decay != 0.0 && decoupled {
+                    next = next.mul_scalar(1.0 - lr * hyper.weight_decay)?;
                 }
-                Err(error) => return Err(error),
-            };
+                next = next.sub(&direction.mul_scalar(lr)?)?;
+                [next, next_m, next_v]
+            }
+            Err(error) => return Err(error),
+        };
         Ok((next, Moments { m, v }))
     }
 

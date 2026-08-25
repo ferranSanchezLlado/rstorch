@@ -37,21 +37,22 @@ impl Shape {
     /// Total number of elements (the product of all dimensions; 1 for a
     /// scalar shape).
     ///
-    /// Note: tensor constructors validate this product against overflow at
-    /// construction time (via the layout), so for any shape taken from an
-    /// existing tensor this cannot overflow. For hand-built pathological
-    /// shapes the product may wrap in release builds; do not use raw
-    /// `Shape` values as a validation boundary.
+    /// # Panics
+    ///
+    /// Panics if the product overflows `usize`. Tensor constructors validate
+    /// this before exposing a shape; use [`checked_num_elements`](Self::checked_num_elements)
+    /// for caller-supplied shapes when a structured overflow result is needed.
     pub fn num_elements(&self) -> usize {
-        self.0.iter().product()
+        self.checked_num_elements()
+            .expect("shape element count overflows usize")
     }
 
-    /// [`num_elements`](Self::num_elements) without the wrap: `None` if the
+    /// [`num_elements`](Self::num_elements) without panicking: `None` if the
     /// product overflows `usize`.
     ///
     /// Use this wherever the shape is **caller-supplied** — a `reshape` or
     /// `broadcast_to` target — so a pathological request becomes a structured
-    /// error instead of a debug panic or a release-mode wrap.
+    /// error instead of a panic.
     pub fn checked_num_elements(&self) -> Option<usize> {
         self.0
             .iter()
@@ -193,6 +194,13 @@ mod tests {
         let scalar = Shape::from(());
         assert_eq!(scalar.rank(), 0);
         assert_eq!(scalar.num_elements(), 1);
+    }
+
+    #[test]
+    fn overflowing_num_elements_panics_instead_of_wrapping() {
+        let shape = Shape::from(vec![usize::MAX, 2]);
+        assert_eq!(shape.checked_num_elements(), None);
+        assert!(std::panic::catch_unwind(|| shape.num_elements()).is_err());
     }
 
     #[test]

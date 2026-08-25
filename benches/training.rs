@@ -22,7 +22,7 @@
 
 use std::hint::black_box;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use rstorch::prelude::*;
 
 fn benchmark_devices() -> Vec<Device> {
@@ -53,6 +53,7 @@ fn labels(rows: usize, classes: usize, offset: usize, device: &Device) -> Tensor
 fn observe_model(module: &impl Module) {
     let value = module
         .state_dict()
+        .unwrap()
         .into_values()
         .next()
         .expect("bench model has parameters");
@@ -305,6 +306,33 @@ fn bench_mlp_epoch(c: &mut Criterion) {
             opt.step(&mut model, grads).unwrap();
         }
         observe_model(&model);
+
+        // Isolated optimizer cost: model construction and the forward/backward
+        // graph are setup work, outside the timed update closure.
+        group.bench_function("optimizer_step_sgd", |b| {
+            b.iter_batched(
+                || {
+                    let mut rng = Rng::seed(91);
+                    let mut isolated_model = mnist_mlp(&mut rng, &dev);
+                    let isolated_input = uniform(&mut rng, &[64, 784], &dev);
+                    let isolated_targets = labels(64, 10, 0, &dev);
+                    let grads = isolated_model
+                        .forward(&isolated_input, Mode::TRAIN)
+                        .unwrap()
+                        .cross_entropy(&isolated_targets)
+                        .unwrap()
+                        .backward()
+                        .unwrap();
+                    (isolated_model, grads)
+                },
+                |(mut isolated_model, grads)| {
+                    let mut isolated_opt = Sgd::new(0.01);
+                    isolated_opt.step(&mut isolated_model, grads).unwrap();
+                    black_box(isolated_model.num_params());
+                },
+                BatchSize::SmallInput,
+            );
+        });
 
         group.bench_function("train_epoch_sgd/8x64x784", |b| {
             b.iter(|| {

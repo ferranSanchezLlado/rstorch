@@ -14,7 +14,7 @@ fn t(data: &[f32], shape: impl Into<crate::shape::Shape>) -> Tensor {
 #[test]
 fn parameter_paths_and_shapes_are_the_persistence_contract() {
     let conv = Conv2d::new(2, 4, (3, 3), &CPU, &mut Rng::seed(0)).unwrap();
-    let state = conv.state_dict();
+    let state = conv.state_dict().unwrap();
     assert_eq!(state.keys().collect::<Vec<_>>(), ["bias", "weight"]);
     assert_eq!(state["weight"].dims(), &[4, 2, 3, 3]);
     assert_eq!(state["bias"].dims(), &[4]);
@@ -35,15 +35,20 @@ fn without_bias_drops_the_bias_leaf() {
         .with_padding((1, 1))
         .without_bias();
     assert!(conv.bias().is_none());
-    assert_eq!(conv.state_dict().keys().collect::<Vec<_>>(), ["weight"]);
+    assert_eq!(
+        conv.state_dict().unwrap().keys().collect::<Vec<_>>(),
+        ["weight"]
+    );
 }
 
 #[test]
 fn forward_computes_the_convolution_by_hand() {
     let mut conv = Conv2d::new(1, 1, (2, 2), &CPU, &mut Rng::seed(0)).unwrap();
-    let mut state = conv.state_dict();
-    state.insert("weight".to_string(), t(&[1.0, 1.0, 1.0, 1.0], [1, 1, 2, 2]));
-    state.insert("bias".to_string(), t(&[10.0], [1]));
+    let mut state = conv.state_dict().unwrap();
+    state
+        .insert("weight".to_string(), t(&[1.0, 1.0, 1.0, 1.0], [1, 1, 2, 2]))
+        .unwrap();
+    state.insert("bias".to_string(), t(&[10.0], [1])).unwrap();
     conv.load_state_dict(&state).unwrap();
 
     // 1..9 in a 3×3 image under a 2×2 all-ones kernel, stride 1, no padding:

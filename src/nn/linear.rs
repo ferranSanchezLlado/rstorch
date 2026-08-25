@@ -304,9 +304,13 @@ mod tests {
     /// A layer with hand-set parameters: `weight` `[O, I]`, `bias` `[O]`.
     fn fixed(weight: &[f32], out_features: usize, in_features: usize, bias: &[f32]) -> Linear {
         let mut fc = Linear::new(in_features, out_features, &CPU, &mut Rng::seed(0)).unwrap();
-        let mut state = fc.state_dict();
-        state.insert("weight".to_string(), t(weight, [out_features, in_features]));
-        state.insert("bias".to_string(), t(bias, [out_features]));
+        let mut state = fc.state_dict().unwrap();
+        state
+            .insert("weight".to_string(), t(weight, [out_features, in_features]))
+            .unwrap();
+        state
+            .insert("bias".to_string(), t(bias, [out_features]))
+            .unwrap();
         fc.load_state_dict(&state).unwrap();
         fc
     }
@@ -316,7 +320,7 @@ mod tests {
     #[test]
     fn parameter_paths_and_shapes_are_the_persistence_contract() {
         let fc = Linear::new(3, 2, &CPU, &mut Rng::seed(1)).unwrap();
-        let state = fc.state_dict();
+        let state = fc.state_dict().unwrap();
         assert_eq!(state.keys().collect::<Vec<_>>(), ["bias", "weight"]);
         assert_eq!(state["weight"].dims(), &[2, 3]);
         assert_eq!(state["bias"].dims(), &[2]);
@@ -362,7 +366,7 @@ mod tests {
         let mut fc = fixed(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3, &[10.0, 20.0]).without_bias();
         assert!(fc.bias().is_none());
         assert_eq!(
-            fc.state_dict().keys().collect::<Vec<_>>(),
+            fc.state_dict().unwrap().keys().collect::<Vec<_>>(),
             ["weight"],
             "a bias-free layer must not emit a bias path"
         );
@@ -606,7 +610,7 @@ mod tests {
 
     #[test]
     fn the_walk_emits_weight_then_bias() {
-        // `state_dict` is a sorted map, so the *walk* order is asserted here.
+        // `StateDict` is sorted by path, so the *walk* order is asserted here.
         let fc = Linear::new(3, 2, &CPU, &mut Rng::seed(13)).unwrap();
         let mut visited = Vec::new();
         fc.visit(&mut nn::Visitor::new(&mut |path, _| {

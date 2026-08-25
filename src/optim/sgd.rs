@@ -81,15 +81,16 @@ impl Rule for SgdRule {
         hyper.lr_scale
     }
 
-    fn check(&self, param: &Param, hyper: SgdGroup, lr: f64, _clock: u64) -> Result<()> {
-        // Exactly the scalars the step will hand the kernel for this parameter.
-        // SGD does not read its step clock: it has no bias correction.
-        crate::backend::cpu::fused::validate_sgd_scalars(
+    fn check(&self, _param: &Param, hyper: SgdGroup, lr: f64, _clock: u64) -> Result<()> {
+        // Exactly the scalars the step will hand the kernel for this
+        // parameter. SGD does not read its step clock: it has no bias
+        // correction.
+        crate::optim::validate::sgd_scalars(
             "step",
             lr,
             hyper.momentum,
             hyper.weight_decay,
-            param.value().dtype().accumulation_dtype(),
+            _param.value().dtype().accumulation_dtype(),
         )
     }
 
@@ -111,14 +112,19 @@ impl Rule for SgdRule {
         } = update;
         let previous_velocity = previous.cloned().flatten();
         let scalars = [lr, hyper.momentum, hyper.weight_decay];
-        let mut inputs = vec![weights.view(), grad.view()];
-        if hyper.momentum != 0.0
-            && let Some(velocity) = &previous_velocity
-        {
-            inputs.push(velocity.view());
-        }
+        // Keep backend views in a short scope. The fallback below moves
+        // `grad`; no view may keep that borrow alive across the match.
+        let fused = {
+            let mut inputs = vec![weights.ready_view()?, grad.ready_view()?];
+            if hyper.momentum != 0.0
+                && let Some(velocity) = &previous_velocity
+            {
+                inputs.push(velocity.ready_view()?);
+            }
+            dispatch::backend(inputs[0].device()).fused(FusedOp::SgdStep, &inputs, &scalars)
+        };
 
-        match dispatch::backend(weights.device()).fused(FusedOp::SgdStep, &inputs, &scalars) {
+        match fused {
             Ok(outputs) => {
                 let mut outputs = engine::fused_outputs(
                     Self::NAME,
@@ -807,7 +813,7 @@ mod tests {
         let mut opt = Sgd::new(0.1).momentum(0.9).weight_decay(0.01);
         step(&mut opt, &mut model);
         step(&mut opt, &mut model);
-        for (path, value) in model.state_dict() {
+        for (path, value) in model.state_dict().unwrap() {
             assert!(value.backward().is_err(), "graph survived into `{path}`");
         }
         assert!(model.trunk.weight.get(Mode::EVAL).backward().is_err());

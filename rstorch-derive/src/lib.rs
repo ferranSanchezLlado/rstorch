@@ -3,8 +3,8 @@
 //! Derive macros for `rstorch`.
 //!
 //! Provides `#[derive(Module)]`: loud-by-default field classification, with
-//! `#[module(skip)]` as the explicit opt-out.
-//!
+//! `#[module(param)]`, `#[module(buffer)]`, `#[module(child)]`, and
+//! `#[module(skip)]` as explicit field controls.
 //! # `#[derive(Module)]`
 //!
 //! Generates both walks of the `rstorch::nn::Module` trait (`visit` /
@@ -36,16 +36,27 @@
 //! stricter validation to typed leaves and containers; see its differences
 //! below.
 //!
-//! ## Type aliases fail loudly
+//! ## Type aliases and explicit overrides
 //!
-//! Classification is a **syntactic** token match on the type as written, so a
-//! type alias defeats it. `type Weights = rstorch::Param;` used as a field
-//! type is **not** recognized as `Param`; it falls through to the default and
-//! is treated as a child module, producing a `Module`-not-satisfied compile
-//! error. Spell the whitelisted types out (`Param`, `Option<Param>`,
-//! `Tensor`) — do not alias them. This is intentional: a silent
-//! misclassification of a parameter as a non-visited field is precisely what
-//! the loud rule exists to prevent.
+//! Classification is normally a syntactic token match on the type as written,
+//! so a type alias defeats inference. Use an explicit field override when an
+//! alias is intentional. A plain newtype does not coerce automatically; add a
+//! suitable `Deref` conversion or hand-write its `Module` implementation.
+//!
+//! ```ignore
+//! #[derive(rstorch::Module)]
+//! struct Layer {
+//!     #[module(param)]
+//!     weight: Weights,
+//!     #[module(buffer)]
+//!     running_mean: Tensor,
+//!     #[module(child)]
+//!     encoder: Encoder,
+//! }
+//! ```
+//!
+//! An override is checked before inference and emits the selected visitor
+//! call. `#[module(skip)]` remains the explicit opt-out for dynamic modules.
 //!
 //! # `#[derive(TypedModule)]`
 //!

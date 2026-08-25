@@ -59,8 +59,12 @@ fn index_add_into_zeros(
     src: &Tensor,
 ) -> Result<Tensor> {
     let zeros = Tensor::zeros(shape.clone(), dtype, &device)?;
-    let storage =
-        dispatch::backend(device).index_add(zeros.view(), axis, indices.view(), src.view())?;
+    let storage = dispatch::backend(device).index_add(
+        zeros.ready_view()?,
+        axis,
+        indices.ready_view()?,
+        src.ready_view()?,
+    )?;
     Ok(Tensor::from_parts(
         storage,
         Layout::contiguous(shape.clone())?,
@@ -81,8 +85,12 @@ fn scatter_add_into_zeros(
     src: &Tensor,
 ) -> Result<Tensor> {
     let zeros = Tensor::zeros(shape.clone(), dtype, &device)?;
-    let storage =
-        dispatch::backend(device).scatter_add(zeros.view(), axis, indices.view(), src.view())?;
+    let storage = dispatch::backend(device).scatter_add(
+        zeros.ready_view()?,
+        axis,
+        indices.ready_view()?,
+        src.ready_view()?,
+    )?;
     Ok(Tensor::from_parts(
         storage,
         Layout::contiguous(shape.clone())?,
@@ -145,8 +153,11 @@ impl Tensor {
 
         let mut out_dims = self.dims().to_vec();
         out_dims[axis] = indices.num_elements();
-        let storage =
-            dispatch::backend(self.device()).index_select(self.view(), axis, indices.view())?;
+        let storage = dispatch::backend(self.device()).index_select(
+            self.ready_view()?,
+            axis,
+            indices.ready_view()?,
+        )?;
         let out = Tensor::from_parts(storage, Layout::contiguous(out_dims)?);
 
         let shape = self.shape().clone();
@@ -225,7 +236,11 @@ impl Tensor {
             }
         }
 
-        let storage = dispatch::backend(self.device()).gather(self.view(), axis, indices.view())?;
+        let storage = dispatch::backend(self.device()).gather(
+            self.ready_view()?,
+            axis,
+            indices.ready_view()?,
+        )?;
         let out = Tensor::from_parts(storage, Layout::contiguous(indices.shape().clone())?);
 
         let shape = self.shape().clone();
@@ -343,8 +358,8 @@ impl Tensor {
         let keys = positions.layout().unsqueeze(0)?.broadcast_to(&square)?;
         let storage = dispatch::backend(*device).compare(
             CmpOp::Gt,
-            View::new(positions.storage(), &keys),
-            View::new(positions.storage(), &queries),
+            View::ready(positions.storage(), &keys)?,
+            View::ready(positions.storage(), &queries)?,
         )?;
         Ok(Tensor::from_parts(storage, Layout::contiguous(square)?))
     }
@@ -532,7 +547,7 @@ impl Tensor {
         const OP: &str = "sort";
         let ax = self.shape().resolve_axis(axis, OP)?;
         let storage = dispatch::backend(self.device())
-            .arg_sort(self.view(), ax, descending)
+            .arg_sort(self.ready_view()?, ax, descending)
             .map_err(|e| e.with_op(OP))?;
         let indices = Tensor::from_parts(storage, Layout::contiguous(self.dims())?);
         let values = self.gather(ax as isize, &indices)?;
@@ -571,7 +586,7 @@ impl Tensor {
             });
         }
         let storage = dispatch::backend(self.device())
-            .arg_sort(self.view(), ax, largest)
+            .arg_sort(self.ready_view()?, ax, largest)
             .map_err(|e| e.with_op(OP))?;
         let indices = Tensor::from_parts(storage, Layout::contiguous(self.dims())?).narrow(
             ax as isize,

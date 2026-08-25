@@ -346,7 +346,12 @@ fn seeded_dynamic_and_typed_logits_gradients_paths_and_variable_shapes_agree() -
         .paths()
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let dynamic_paths = dynamic.state_dict().keys().cloned().collect::<Vec<_>>();
+    let dynamic_paths = dynamic
+        .state_dict()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(typed_paths, dynamic_paths);
     assert!(typed_paths.contains(&"blocks.1.attention.k_proj.weight".to_string()));
 

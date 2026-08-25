@@ -27,8 +27,10 @@ use std::sync::Arc;
 /// The reference-counted body of a [`Tensor`]: a storage buffer, a strided
 /// [`Layout`] over it, and an optional autograd [`Node`](crate::autograd).
 ///
-/// Immutable after construction — this is what makes [`Tensor::clone`] an
-/// `Arc` bump and lets views and detached captures share storage safely.
+/// Immutable after construction at the tensor API: a pending storage may
+/// fill its private write-once computation cache, but no logical value or
+/// backing buffer is mutated. This is what makes [`Tensor::clone`] an `Arc`
+/// bump and lets views and detached captures share storage safely.
 pub(crate) struct Inner {
     storage: Storage,
     layout: Layout,
@@ -36,8 +38,8 @@ pub(crate) struct Inner {
 }
 
 /// The one and only tensor type: an immutable value with **zero generic
-/// parameters**. `Clone` is an `Arc` bump; `Send + Sync`
-/// because its `Inner` body is immutable and its parts are `Send + Sync`.
+/// parameters**. `Clone` is an `Arc` bump; `Send + Sync` because its `Inner`
+/// body has no observable mutation and its parts are `Send + Sync`.
 ///
 /// Shapes, dtype, and device are runtime data. Rank assumptions are made
 /// explicit and loud through [`dims2`](Tensor::dims2)/[`dims3`](Tensor::dims3)/
@@ -73,9 +75,16 @@ impl Tensor {
         }))
     }
 
-    /// A borrowed, stride-aware [`View`] for backend dispatch.
+    /// A borrowed view over storage that is known to be ready for a backend.
+    #[allow(dead_code)]
     pub(crate) fn view(&self) -> View<'_> {
         View::new(&self.0.storage, &self.0.layout)
+    }
+
+    /// Resolve a pending value before constructing a backend view.
+    pub(crate) fn ready_view(&self) -> Result<View<'_>> {
+        let storage = self.0.storage.ready()?;
+        Ok(View::new(storage, &self.0.layout))
     }
 
     /// The storage buffer (crate-internal).
@@ -286,7 +295,11 @@ impl Tensor {
         device: &Device,
     ) -> Result<Tensor> {
         let layout = Layout::contiguous(shape)?;
-        let storage = dispatch::backend(*device).full(layout.num_elements(), dtype, value)?;
+        let storage = if crate::lazy::enabled() {
+            crate::lazy::constant("full", value, dtype, *device, layout.dims().to_vec())?
+        } else {
+            dispatch::backend(*device).full(layout.num_elements(), dtype, value)?
+        };
         Ok(Tensor::from_parts(storage, layout))
     }
 
@@ -545,7 +558,7 @@ impl Tensor {
     /// Returns [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) if
     /// `self`'s dtype is not `T`.
     pub fn to_vec<T: Element>(&self) -> Result<Vec<T>> {
-        let host = dispatch::backend(self.device()).transfer_out(self.view())?;
+        let host = dispatch::backend(self.device()).transfer_out(self.ready_view()?)?;
         <T as HostConv>::try_from_cpu_storage(&host, "to_vec")
     }
 
@@ -590,7 +603,7 @@ impl Tensor {
                 ),
             });
         }
-        let host = dispatch::backend(self.device()).transfer_out(self.view())?;
+        let host = dispatch::backend(self.device()).transfer_out(self.ready_view()?)?;
         let v = match &host {
             CpuStorage::F16(a) => a[0].to_f64(),
             CpuStorage::BF16(a) => a[0].to_f64(),
@@ -608,32 +621,16 @@ impl Tensor {
         Ok(v)
     }
 
-    /// Force this tensor's value to be materialized: block until the work
-    /// behind it has actually run.
+    /// Force this tensor's value to be materialized, then flush its device.
     ///
-    /// # What this does today
+    /// Deferred element-wise expressions are realized up to this tensor before
+    /// the backend-wide synchronization. With eager execution the first step
+    /// is already complete, so this retains the existing device flush.
     ///
-    /// Execution is eager, so the kernels producing this tensor have already
-    /// been *submitted* by the time you hold it — but on a batching backend
-    /// they may not have *run*. `realize` therefore delegates to
-    /// [`Device::synchronize`](crate::Device::synchronize) on this tensor's
-    /// device, and inherits its reach: it is **device-wide, not
-    /// tensor-scoped**. It waits for every operation submitted on that device,
-    /// not only the ones this tensor depends on, and on
-    /// [`Cpu`](crate::Device::Cpu) it waits for nothing at all, because CPU
-    /// kernels are complete when they return. Do not write code that depends on
-    /// it being finer-grained than that.
-    ///
-    /// # Why it exists under this name
-    ///
-    /// It is the spelling that survives if execution ever stops being eager. A
-    /// backend that defers and fuses within a step would make `realize` a flush
-    /// of the graph *up to this tensor*, narrowing the wait from the whole
-    /// device to this tensor's dependencies. That narrowing is the only change
-    /// reserved here: `realize` will never wait for less than this tensor's own
-    /// work. Code written against `realize` keeps working across that change,
-    /// whereas code that calls [`to_vec`](Tensor::to_vec) purely to force the
-    /// queue pays a whole host copy it does not want.
+    /// The backend synchronization remains **device-wide**: it waits for every
+    /// operation already submitted on this device, not only work this tensor
+    /// depends on. CPU kernels are synchronous and therefore have no queued
+    /// work to wait for.
     ///
     /// Nothing is returned — reading values is [`to_vec`](Tensor::to_vec),
     /// [`to_scalar`](Tensor::to_scalar) or [`item`](Tensor::item), each of
@@ -665,6 +662,7 @@ impl Tensor {
     /// # Ok::<(), rstorch::Error>(())
     /// ```
     pub fn realize(&self) -> Result<()> {
+        self.storage().ready()?;
         self.device().synchronize()
     }
 
@@ -674,13 +672,11 @@ impl Tensor {
     ///
     /// # Errors
     ///
-    /// Propagates any backend transfer error from `self`'s device or
-    /// `device`.
     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
         if self.device() == *device {
             return Ok(self.clone());
         }
-        let host = dispatch::backend(self.device()).transfer_out(self.view())?;
+        let host = dispatch::backend(self.device()).transfer_out(self.ready_view()?)?;
         let storage = dispatch::backend(*device).transfer_in(host)?;
         let layout = Layout::contiguous(self.shape().clone())?;
         let out = Tensor::from_parts(storage, layout);
@@ -699,13 +695,22 @@ impl Tensor {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`](crate::Error::Unsupported) if `self`'s
     /// dtype cannot be cast to `dtype` on the current backend.
     pub fn to_dtype(&self, dtype: DType) -> Result<Tensor> {
         if self.dtype() == dtype {
             return Ok(self.clone());
         }
-        let storage = dispatch::backend(self.device()).cast(self.view(), dtype)?;
+        let storage = if crate::lazy::enabled() {
+            crate::lazy::cast(
+                "to_dtype",
+                self.storage(),
+                self.layout(),
+                dtype,
+                self.device(),
+            )?
+        } else {
+            dispatch::backend(self.device()).cast(self.ready_view()?, dtype)?
+        };
         let layout = Layout::contiguous(self.shape().clone())?;
         let out = Tensor::from_parts(storage, layout);
         let src = self.dtype();
@@ -727,13 +732,22 @@ impl Tensor {
     /// Call this when an op wants a dense operand, not to reason about bytes.
     ///
     /// # Errors
-    ///
     /// Propagates any backend copy error from `self`'s device.
     pub fn contiguous(&self) -> Result<Tensor> {
         if self.is_contiguous() {
             return Ok(self.clone());
         }
-        let storage = dispatch::backend(self.device()).copy_strided(self.view())?;
+        let storage = if crate::lazy::enabled() {
+            crate::lazy::copy(
+                "contiguous",
+                self.storage(),
+                self.layout(),
+                self.dtype(),
+                self.device(),
+            )?
+        } else {
+            dispatch::backend(self.device()).copy_strided(self.ready_view()?)?
+        };
         let layout = Layout::contiguous(self.shape().clone())?;
         let out = Tensor::from_parts(storage, layout);
         Ok(autograd::record(
@@ -834,15 +848,15 @@ impl Tensor {
 
         let dtype = self.dtype();
         let accumulation_dtype = dtype.accumulation_dtype();
-        // Highest axis first: dropping axis `k` leaves every axis below `k`
-        // at its original index.
-        let mut cur = self.detach_shallow();
+        let mut cur = self.clone();
         if accumulation_dtype != dtype {
             cur = cur.to_dtype(accumulation_dtype)?;
         }
+        // Highest axis first: dropping axis `k` leaves every axis below `k`
+        // at its original index.
         let backend = dispatch::backend(self.device());
         for &axis in reduce_axes.iter().rev() {
-            let storage = backend.reduce(ReduceOp::Sum, cur.view(), axis)?;
+            let storage = backend.reduce(ReduceOp::Sum, cur.ready_view()?, axis)?;
             let dims: Vec<usize> = cur
                 .dims()
                 .iter()

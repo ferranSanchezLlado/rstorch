@@ -596,7 +596,7 @@ fn eval_records_nothing_and_agrees_with_train_on_the_values() {
 fn the_state_dict_paths_are_the_four_projections() {
     let attn = mha(4, 2);
     assert_eq!(
-        attn.state_dict().keys().collect::<Vec<_>>(),
+        attn.state_dict().unwrap().keys().collect::<Vec<_>>(),
         [
             "k_proj.bias",
             "k_proj.weight",
@@ -612,7 +612,7 @@ fn the_state_dict_paths_are_the_four_projections() {
 
     // Bias-free: the `bias` paths are simply absent.
     let bare = MultiHeadAttention::new_without_bias(4, 2, &CPU, &mut Rng::seed(1)).unwrap();
-    assert_eq!(bare.state_dict().len(), 4);
+    assert_eq!(bare.state_dict().unwrap().len(), 4);
     assert_eq!(bare.num_params(), 4 * 4 * 4);
 }
 
@@ -625,7 +625,9 @@ fn a_checkpoint_round_trip_reproduces_the_outputs() {
         v(&trained.attend(&x, None, Mode::EVAL).unwrap()),
         v(&fresh.attend(&x, None, Mode::EVAL).unwrap())
     );
-    fresh.load_state_dict(&trained.state_dict()).unwrap();
+    fresh
+        .load_state_dict(&trained.state_dict().unwrap())
+        .unwrap();
     assert_eq!(
         v(&trained.attend(&x, None, Mode::EVAL).unwrap()),
         v(&fresh.attend(&x, None, Mode::EVAL).unwrap())

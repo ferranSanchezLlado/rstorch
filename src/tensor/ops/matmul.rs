@@ -135,7 +135,7 @@ impl Tensor {
         let storage = if layout.num_elements() == 0 {
             backend.full(0, self.dtype(), 0.0)?
         } else {
-            backend.matmul(self.view(), rhs.view())?
+            backend.matmul(self.ready_view()?, rhs.ready_view()?)?
         };
         let out = Tensor::from_parts(storage, layout);
 

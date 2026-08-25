@@ -493,7 +493,7 @@ fn a_parameter_the_optimizer_never_updated_reports_a_zero_clock() {
 
 fn save_dynamic_model(model: &mut Pair, envelope: &mut Envelope) {
     let adapter = RuntimeModuleAdapter::new(model);
-    for (path, value) in adapter.state_dict() {
+    for (path, value) in adapter.state_dict().unwrap() {
         envelope.insert_tensor(path, crate::checkpoint::to_host_tensor(&value).unwrap());
     }
 }

@@ -7,7 +7,7 @@
 
 pub use crate::{DType, Device, Error, Grads, Result, Rng, Shape, Tensor};
 
-pub use crate::nn::{Forward, Mode, Module, ModuleExt, Param, Sequential};
+pub use crate::nn::{Forward, Mode, Module, ModuleExt, Param, Sequential, StateDict};
 
 // The core layer zoo.
 pub use crate::nn::{Dropout, Gelu, Linear, Relu};

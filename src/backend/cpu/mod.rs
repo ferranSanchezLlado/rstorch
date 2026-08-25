@@ -29,6 +29,9 @@ pub(crate) mod reduce;
 pub(super) fn cpu_storage(x: View<'_>) -> &CpuStorage {
     match x.storage() {
         Storage::Cpu(s) => s,
+        Storage::Pending(_) => {
+            unreachable!("CPU backend received pending storage; view must be ready")
+        }
         #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
         Storage::Cuda(_) => {
             unreachable!("CPU backend received non-CPU storage; dispatcher invariant violated")

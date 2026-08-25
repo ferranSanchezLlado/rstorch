@@ -35,8 +35,8 @@ fn checkpoint_path(dtype: DType) -> PathBuf {
 }
 
 fn assert_same_model(lhs: &impl nn::Module, rhs: &impl nn::Module) {
-    let lhs = lhs.state_dict();
-    let rhs = rhs.state_dict();
+    let lhs = lhs.state_dict().unwrap();
+    let rhs = rhs.state_dict().unwrap();
     assert_eq!(
         lhs.keys().collect::<Vec<_>>(),
         rhs.keys().collect::<Vec<_>>()
@@ -268,6 +268,7 @@ fn reduced_training_conversion_optimizer_state_and_resume_are_end_to_end() {
         assert!(
             model
                 .state_dict()
+                .unwrap()
                 .values()
                 .all(|value| value.dtype() == dtype)
         );
@@ -321,7 +322,9 @@ fn reduced_training_conversion_optimizer_state_and_resume_are_end_to_end() {
 
         let mut resumed_model = Linear::new(1, 1, &Device::Cpu, &mut rng).unwrap();
         resumed_model.to_dtype(dtype).unwrap();
-        resumed_model.load_state_dict(&model.state_dict()).unwrap();
+        resumed_model
+            .load_state_dict(&model.state_dict().unwrap())
+            .unwrap();
         let mut resumed = AdamW::new(0.1, 0.01);
         resumed.load_state(&resumed_model, &loaded).unwrap();
         assert_eq!(resumed.steps(), optimizer.steps());
@@ -374,7 +377,7 @@ fn reduced_optimizer_disk_resume_matches_uninterrupted_trajectory() {
         let mut rng = Rng::seed(600);
         let mut initial = Linear::new(1, 1, &Device::Cpu, &mut rng).unwrap();
         initial.to_dtype(dtype).unwrap();
-        let initial_state = initial.state_dict();
+        let initial_state = initial.state_dict().unwrap();
         let x = reduced(&[-1.0, -0.5, 0.5, 1.0], [4, 1], dtype).unwrap();
         let target = reduced(&[-2.0, -1.0, 1.0, 2.0], [4, 1], dtype).unwrap();
 
@@ -410,7 +413,7 @@ fn reduced_optimizer_disk_resume_matches_uninterrupted_trajectory() {
                 .step(&mut staged, loss.backward().unwrap())
                 .unwrap();
         }
-        let staged_model_state = staged.state_dict();
+        let staged_model_state = staged.state_dict().unwrap();
         let mut envelope = Envelope::new();
         staged_opt.save_state(&staged, &mut envelope).unwrap();
         assert_wide_state_and_clocks(&envelope, 4);
@@ -476,7 +479,7 @@ fn reduced_optimizer_disk_resume_matches_uninterrupted_trajectory() {
                 .step(&mut staged, loss.backward().unwrap())
                 .unwrap();
         }
-        let staged_model_state = staged.state_dict();
+        let staged_model_state = staged.state_dict().unwrap();
         let mut envelope = Envelope::new();
         staged_opt.save_state(&staged, &mut envelope).unwrap();
         assert_wide_state_and_clocks(&envelope, 4);

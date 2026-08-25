@@ -78,6 +78,17 @@ impl<'a> View<'a> {
         View { storage, layout }
     }
 
+    /// Build a view after realizing a deferred storage value.
+    pub(crate) fn ready(
+        storage: &'a Storage,
+        layout: &'a crate::layout::Layout,
+    ) -> Result<View<'a>> {
+        Ok(View {
+            storage: storage.ready()?,
+            layout,
+        })
+    }
+
     /// The underlying (possibly-shared, possibly-oversized) storage buffer.
     pub(crate) fn storage(&self) -> &'a Storage {
         self.storage

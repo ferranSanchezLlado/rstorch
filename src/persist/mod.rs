@@ -43,7 +43,8 @@ mod safetensors_io;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::nn::{Module, ModuleExt};
 
 pub use envelope::{Envelope, FORMAT_MAJOR, FORMAT_MINOR};
 pub use host_tensor::HostTensor;
@@ -59,8 +60,8 @@ pub use restore::{Expected, StagedTensors, stage};
 ///
 /// # Errors
 ///
-/// [`Error::Persistence`](crate::Error::Persistence) if the tensor map exceeds
-/// `limits`, or [`Error::Io`](crate::Error::Io) on a filesystem failure.
+/// [`Error::Persistence`] if the tensor map exceeds `limits`, or [`Error::Io`]
+/// on a filesystem failure.
 ///
 /// # Examples
 ///
@@ -105,14 +106,133 @@ pub fn save_safetensors(
 ///
 /// # Errors
 ///
-/// [`Error::Persistence`](crate::Error::Persistence) if the file is not valid
-/// safetensors, exceeds `limits`, or carries a dtype the crate does not model;
-/// [`Error::Io`](crate::Error::Io) on a filesystem failure.
+/// [`Error::Persistence`] if the file is not valid safetensors, exceeds
+/// `limits`, or carries a dtype the crate does not model; [`Error::Io`] on a
+/// filesystem failure.
 pub fn load_safetensors(
     path: impl AsRef<Path>,
     limits: &Limits,
 ) -> Result<(BTreeMap<String, HostTensor>, HashMap<String, String>)> {
     safetensors_io::load_tensors(path.as_ref(), limits)
+}
+
+fn reserved_optimizer_path(path: &str) -> bool {
+    path == "optim" || path.starts_with("optim.")
+}
+
+fn reject_reserved_model_paths<'a>(
+    paths: impl Iterator<Item = &'a str>,
+    op: &'static str,
+) -> Result<()> {
+    if let Some(path) = paths.into_iter().find(|path| reserved_optimizer_path(path)) {
+        return Err(Error::invalid_arg(
+            op,
+            format!(
+                "model path {path:?} conflicts with the reserved optimizer \
+                 checkpoint namespace `optim.*`"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Add a dynamic model's tensor state to an [`Envelope`].
+///
+/// This function writes model tensors only. Configuration, optimizer state,
+/// RNG state, and application sections remain caller-owned and can be added to
+/// the same envelope before [`Envelope::save`].
+///
+/// # Errors
+///
+/// Returns an error for a malformed module walk, a model path that collides
+/// with the reserved `optim.*` namespace, or a host transfer failure. All
+/// conversions complete before the envelope is mutated; existing tensor keys
+/// are replaced as documented by [`Envelope::insert_tensor`].
+pub fn save_model_state<M: Module + ?Sized>(model: &M, envelope: &mut Envelope) -> Result<()> {
+    let state = model.state_dict()?;
+    reject_reserved_model_paths(state.paths(), "persist::save_model_state")?;
+    let staged = state
+        .into_iter()
+        .map(|(path, tensor)| Ok((path, crate::checkpoint::to_host_tensor(&tensor)?)))
+        .collect::<Result<Vec<_>>>()?;
+    for (path, tensor) in staged {
+        envelope.insert_tensor(path, tensor);
+    }
+    Ok(())
+}
+
+/// Stage and load dynamic model tensor state from an [`Envelope`].
+///
+/// The target model supplies each tensor's expected shape, dtype, and device.
+/// Missing and unexpected model paths follow `options`; shape and dtype
+/// mismatches are always errors. Existing optimizer sections and `optim.*`
+/// tensors are rejected because this helper is model-only.
+///
+/// # Errors
+///
+/// Returns the envelope/schema, host-transfer, or model-load error. No model
+/// leaf is replaced unless the complete staged load is valid.
+pub fn load_model_state<M: Module + ?Sized>(
+    model: &mut M,
+    envelope: &Envelope,
+    options: &LoadOptions,
+) -> Result<()> {
+    if envelope.section("optimizer").is_some() {
+        return Err(Error::persistence(
+            "model-only load rejects an `optimizer` section",
+        ));
+    }
+    if let Some(path) = envelope
+        .tensors()
+        .keys()
+        .find(|path| reserved_optimizer_path(path))
+    {
+        return Err(Error::persistence(format!(
+            "model-only load rejects reserved optimizer tensor {path:?}"
+        )));
+    }
+
+    let current = model.state_dict()?;
+    reject_reserved_model_paths(current.paths(), "persist::load_model_state")?;
+    let schema = current
+        .iter()
+        .map(|(path, tensor)| Expected::new(path, tensor.dtype(), tensor.dims().to_vec()))
+        .collect::<Vec<_>>();
+    let staged = stage(&schema, envelope.tensors(), options)?;
+
+    let mut replacements = current;
+    for (path, host) in staged.into_entries() {
+        let device = replacements
+            .get(&path)
+            .expect("staged path came from the target schema")
+            .device();
+        replacements.insert(path, crate::checkpoint::from_host_tensor(&host, &device)?)?;
+    }
+    model.load_state_dict(&replacements)
+}
+
+/// Save a model-only dynamic checkpoint to `path`.
+///
+/// The file contains only model tensors. Use [`Envelope`] directly when a
+/// checkpoint also needs configuration, optimizer, RNG, or application state.
+pub fn save_checkpoint<M: Module + ?Sized>(
+    model: &M,
+    path: impl AsRef<Path>,
+    limits: &Limits,
+) -> Result<()> {
+    let mut envelope = Envelope::new();
+    save_model_state(model, &mut envelope)?;
+    envelope.save(path, limits)
+}
+
+/// Load a model-only dynamic checkpoint from `path` into `model`.
+pub fn load_checkpoint<M: Module + ?Sized>(
+    model: &mut M,
+    path: impl AsRef<Path>,
+    options: &LoadOptions,
+) -> Result<()> {
+    let envelope = Envelope::load(path, &options.limits)?;
+    load_model_state(model, &envelope, options)
 }
 
 #[cfg(test)]
@@ -149,6 +269,36 @@ mod tests {
         let (back, meta) = load_safetensors(&path, &Limits::defaults()).unwrap();
         assert_eq!(back, tensors);
         assert!(meta.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[derive(crate::Module)]
+    struct Model {
+        weight: crate::nn::Param,
+        running: crate::Tensor,
+    }
+
+    fn model(weight: f32, running: f32) -> Model {
+        Model {
+            weight: crate::nn::Param::new(
+                crate::Tensor::from_vec(vec![weight; 2], [2], &crate::Device::Cpu).unwrap(),
+            ),
+            running: crate::Tensor::from_vec(vec![running; 2], [2], &crate::Device::Cpu).unwrap(),
+        }
+    }
+
+    #[test]
+    fn dynamic_model_checkpoint_round_trips_parameters_and_buffers() {
+        let dir = tmpdir("model");
+        let path = dir.join("model.safetensors");
+        let source = model(3.0, 7.0);
+        save_checkpoint(&source, &path, &Limits::defaults()).unwrap();
+
+        let mut target = model(0.0, 0.0);
+        load_checkpoint(&mut target, &path, &LoadOptions::strict()).unwrap();
+        let state = target.state_dict().unwrap();
+        assert_eq!(state["weight"].to_vec::<f32>().unwrap(), vec![3.0; 2]);
+        assert_eq!(state["running"].to_vec::<f32>().unwrap(), vec![7.0; 2]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

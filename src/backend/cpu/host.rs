@@ -307,6 +307,12 @@ pub(crate) fn copy_into(src: View<'_>, dst: &mut Storage, dst_layout: &Layout) -
     let src = cpu_storage(src);
     let dst = match dst {
         Storage::Cpu(dst) => dst,
+        Storage::Pending(_) => {
+            return Err(Error::Backend {
+                op: "copy_into",
+                msg: "pending destination reached backend copy".to_string(),
+            });
+        }
         #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
         Storage::Cuda(storage) => {
             return Err(Error::DeviceMismatch {
@@ -476,6 +482,7 @@ mod tests {
     fn cpu(storage: &Storage) -> &CpuStorage {
         match storage {
             Storage::Cpu(s) => s,
+            Storage::Pending(_) => panic!("pending storage in cpu test"),
             #[cfg(any(
                 all(feature = "metal", target_os = "macos"),
                 all(feature = "cuda", any(target_os = "linux", target_os = "windows")),

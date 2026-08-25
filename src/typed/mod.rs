@@ -1,10 +1,12 @@
 //! Compile-time checked tensor APIs.
 //!
-//! This opt-in namespace wraps [`crate::Tensor`]. It never owns another
-//! storage, execution, dispatch, layout, or autograd implementation. Rank,
-//! element type, and logical placement are Rust types; each
-//! [`crate::typed::DYN`] occurrence
-//! independently retains its value only in the wrapped runtime tensor.
+//! This opt-in namespace is experimental and outside the dynamic 1.x stability
+//! guarantee. It wraps [`crate::Tensor`] and may evolve independently of the
+//! dynamic module, optimizer, persistence, and placement contracts. It never
+//! owns another storage, execution, dispatch, layout, or autograd
+//! implementation. Rank, element type, and logical placement are Rust types;
+//! each [`crate::typed::DYN`] occurrence independently retains its value only
+//! in the wrapped runtime tensor.
 //!
 //! # Failure boundary
 //!

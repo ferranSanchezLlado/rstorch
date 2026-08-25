@@ -12,10 +12,11 @@
 //! mutating conversions ([`load_state_dict`], [`to_device`], [`to_dtype`]),
 //! which validate the whole walk before swapping anything.
 //!
-//! `state_dict` uses an in-memory [`BTreeMap<String, Tensor>`] — the
-//! representation behind the sanctioned replication path (construct +
-//! `load_state_dict(&other.state_dict())`, no disk). Persistence to
-//! safetensors is a separate concern owned by [`persist`](crate::persist).
+//! `state_dict` uses an opaque [`StateDict`] with validated paths and
+//! controlled mutation. Values are `Arc`-cheap clones. The representation is
+//! the sanctioned replication path (construct + `load_state_dict`, no disk).
+//! Persistence to safetensors is a separate concern owned by
+//! [`persist`](crate::persist).
 //!
 //! **Params vs buffers**: `num_params` counts trainable [`Param`](crate::nn::Param)
 //! elements only; `state_dict`/`load_state_dict`/`to_device`/`to_dtype`
@@ -51,36 +52,63 @@ pub(crate) fn num_params<M: Module + ?Sized>(module: &M) -> usize {
     total
 }
 
-/// Collect the module's parameters **and buffers** into a dotted-path → value
-/// map (ordered for stable, diffable output). Values are `Arc`-cheap clones.
-/// Buffers are included so a checkpoint reconstructs a model (running stats
-/// survive), matching `PyTorch` `state_dict` semantics.
+/// Collect the module's parameters **and buffers** into a validated,
+/// deterministic [`StateDict`]. Values are `Arc`-cheap clones. Buffers are
+/// included so a checkpoint reconstructs a model (running stats survive),
+/// matching `PyTorch` `state_dict` semantics.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if a hand-written [`Module`] emits the same path more than once or
-/// emits one leaf under multiple paths. Such a walk cannot represent a
-/// lossless state dictionary; derive-generated modules cannot produce either
-/// condition.
-pub(crate) fn state_dict<M: Module + ?Sized>(module: &M) -> BTreeMap<String, Tensor> {
+/// [`Error::InvalidArg`] (`op: "state_dict"`) if a hand-written
+/// [`Module`] emits the same path more than once, emits one leaf under
+/// multiple paths, or emits a path with an empty dotted segment. Such a walk
+/// cannot represent a lossless state dictionary; derive-generated modules
+/// cannot produce either condition.
+pub(crate) fn state_dict<M: Module + ?Sized>(module: &M) -> Result<StateDict> {
     let mut out = BTreeMap::new();
     let mut seen = BTreeMap::new();
+    let mut failure = None;
     visit_all(module, &mut |path, leaf| {
+        if failure.is_some() {
+            return;
+        }
+        if let Err(error) = validate_path(path, "state_dict") {
+            failure = Some(error);
+            return;
+        }
         let leaf_identity = identity(&leaf);
-        assert!(
-            seen.insert(leaf_identity, path.to_string()).is_none(),
-            "module visits one leaf under multiple state-dict paths; state_dict would duplicate state"
-        );
+        if seen.insert(leaf_identity, path.to_string()).is_some() {
+            failure = Some(Error::invalid_arg(
+                "state_dict",
+                "module visits one leaf under multiple state-dict paths",
+            ));
+            return;
+        }
+        let kind = leaf_identity.kind;
         let value = match leaf {
-            Leaf::Param(p) => p.value().clone(),
-            Leaf::Buffer(t) => t.clone(),
+            Leaf::Param(p) => p.value().detach(),
+            Leaf::Buffer(t) => t.detach(),
         };
-        assert!(
-            out.insert(path.to_string(), value).is_none(),
-            "module emits the state-dict path `{path}` twice; state_dict would lose a leaf"
-        );
+        if out
+            .insert(
+                path.to_string(),
+                StateEntry {
+                    value,
+                    kind: Some(kind),
+                },
+            )
+            .is_some()
+        {
+            failure = Some(Error::invalid_arg(
+                "state_dict",
+                format!("module emits the state-dict path `{path}` twice"),
+            ));
+        }
     });
-    out
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(StateDict { entries: out }),
+    }
 }
 
 /// Load values from `state` into `module` by matching dotted paths — both
@@ -112,17 +140,14 @@ pub(crate) fn state_dict<M: Module + ?Sized>(module: &M) -> BTreeMap<String, Ten
 ///   implementation bugs that would make a state dict lossy.
 ///
 /// Nothing is swapped unless every check passes.
-pub(crate) fn load_state_dict<M: Module + ?Sized>(
-    module: &mut M,
-    state: &BTreeMap<String, Tensor>,
-) -> Result<()> {
+pub(crate) fn load_state_dict<M: Module + ?Sized>(module: &mut M, state: &StateDict) -> Result<()> {
     const OP: &str = "load_state_dict";
     // The current values double as the schema every incoming value must match.
     let current = mapped(OP, module, |t| Ok(t.clone()))?;
 
     // Unexpected paths first — the loudest signal that the state dict came
     // from a different model (mirrors `persist::stage`).
-    for path in state.keys() {
+    for path in state.entries.keys() {
         if !current.contains_key(path) {
             return Err(Error::invalid_arg(
                 OP,
@@ -135,12 +160,21 @@ pub(crate) fn load_state_dict<M: Module + ?Sized>(
     }
 
     for (path, target) in &current {
-        let Some(value) = state.get(path) else {
+        let Some(entry) = state.entries.get(path) else {
             return Err(Error::invalid_arg(
                 OP,
                 format!("missing key `{path}` in state dict (expected by the target module)"),
             ));
         };
+        if let Some(kind) = entry.kind
+            && kind != target.identity.kind
+        {
+            return Err(Error::invalid_arg(
+                OP,
+                format!("`{path}` leaf kind does not match the target module"),
+            ));
+        }
+        let value = &entry.value;
         if value.dims() != target.value.dims() {
             return Err(Error::invalid_arg(
                 OP,
@@ -179,8 +213,10 @@ pub(crate) fn load_state_dict<M: Module + ?Sized>(
         .into_iter()
         .map(|(path, target)| {
             let value = state
+                .entries
                 .get(&path)
                 .expect("load_state_dict validated every current path")
+                .value
                 .clone();
             (
                 path,
@@ -273,10 +309,7 @@ pub(crate) fn to_dtype<M: Module + ?Sized>(module: &mut M, dtype: DType) -> Resu
 /// The `typed` half of the crate keeps free functions
 /// (`typed::nn::state_dict`) rather than a parallel trait. That is deliberate,
 /// and the reasons are recorded where a typed user reads them, in the
-/// `typed::nn` module docs: `typed::prelude` exports no `nn` items, so the
-/// discoverability hole this trait fills does not exist there; the typed side
-/// has two load contracts whose qualified spellings name which one you took;
-/// and its `state_dict` is fallible, so the two would not be signature twins.
+/// `typed::nn` module docs.
 ///
 /// See the [`nn`](crate::nn) module docs for the replication recipe and the
 /// all-or-nothing loading/conversion guarantee every mutating method here
@@ -288,30 +321,30 @@ pub trait ModuleExt: Module {
         num_params(self)
     }
 
-    /// Collect this module's parameters **and buffers** into a dotted-path →
-    /// value map (ordered for stable, diffable output). Buffers are included
-    /// so a checkpoint reconstructs a model (running stats survive).
+    /// Collect this module's parameters and buffers into a validated,
+    /// deterministic [`StateDict`].
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if a hand-written [`Module`] emits the same path more than once
-    /// or emits one leaf under multiple paths. Such a walk cannot represent a
-    /// lossless state dictionary; derive-generated modules cannot produce
-    /// either condition.
-    fn state_dict(&self) -> BTreeMap<String, Tensor> {
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if a hand-written
+    /// [`Module`] emits duplicate paths, duplicate leaf identities, or an
+    /// invalid dotted path.
+    fn state_dict(&self) -> Result<StateDict> {
         state_dict(self)
     }
 
     /// Load values from `state` by matching dotted paths — both parameters
     /// and buffers. The match is exact and loud: nothing is swapped unless
     /// `state` carries exactly the paths this module's walk emits, each with
-    /// the same dims, dtype, and device as the value it replaces.
+    /// the same leaf kind, dimensions, dtype, and device as the value it
+    /// replaces.
     ///
     /// # Errors
+    ///
     /// [`Error::InvalidArg`](crate::Error::InvalidArg), naming the offending
-    /// path, on a missing path, an unexpected path, a shape/dtype/device
-    /// mismatch, or a malformed walk.
-    fn load_state_dict(&mut self, state: &BTreeMap<String, Tensor>) -> Result<()> {
+    /// path, on a missing path, an unexpected path, a leaf-kind/shape/dtype/
+    /// device mismatch, or a malformed walk.
+    fn load_state_dict(&mut self, state: &StateDict) -> Result<()> {
         load_state_dict(self, state)
     }
 
@@ -340,12 +373,179 @@ pub trait ModuleExt: Module {
 
 impl<M: Module + ?Sized> ModuleExt for M {}
 
+/// Validated model parameters and persistent buffers keyed by dotted path.
+///
+/// Values are detached tensor handles. The map is intentionally opaque:
+/// model-produced entries retain their leaf kind, while caller-inserted
+/// entries are accepted only after path validation and are treated as
+/// kind-agnostic during loading.
+#[derive(Clone)]
+pub struct StateDict {
+    entries: BTreeMap<String, StateEntry>,
+}
+
+impl StateDict {
+    /// Create an empty state dictionary.
+    pub fn new() -> StateDict {
+        StateDict {
+            entries: BTreeMap::new(),
+        }
+    }
+    /// Number of entries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether this state dictionary has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether `path` is present.
+    pub fn contains_key(&self, path: &str) -> bool {
+        self.entries.contains_key(path)
+    }
+
+    /// Borrow the tensor at `path`.
+    pub fn get(&self, path: &str) -> Option<&Tensor> {
+        self.entries.get(path).map(|entry| &entry.value)
+    }
+
+    /// Borrow the state paths in deterministic order.
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.entries.keys()
+    }
+
+    /// Borrow the state paths as string slices in deterministic order.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
+
+    /// Borrow `(path, tensor)` entries in deterministic order.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Tensor)> {
+        self.entries
+            .iter()
+            .map(|(path, entry)| (path, &entry.value))
+    }
+
+    /// Borrow tensor values in deterministic path order.
+    pub fn values(&self) -> impl Iterator<Item = &Tensor> {
+        self.entries.values().map(|entry| &entry.value)
+    }
+
+    /// Consume the dictionary into tensor values in deterministic path order.
+    pub fn into_values(self) -> impl Iterator<Item = Tensor> {
+        self.entries.into_values().map(|entry| entry.value)
+    }
+
+    /// Consume the dictionary into its paths.
+    pub fn into_keys(self) -> impl Iterator<Item = String> {
+        self.entries.into_keys()
+    }
+
+    /// Insert a detached tensor under a validated path.
+    ///
+    /// Replacing an existing model-produced entry preserves its leaf-kind
+    /// metadata. A new path is kind-agnostic and can therefore be loaded only
+    /// after the target module validates its ordinary tensor contract.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArg`](crate::Error::InvalidArg) if `path` is empty or
+    /// contains an empty dotted segment.
+    pub fn insert(&mut self, path: impl Into<String>, value: Tensor) -> Result<Option<Tensor>> {
+        let path = path.into();
+        validate_path(&path, "StateDict::insert")?;
+        let kind = self.entries.get(&path).and_then(|entry| entry.kind);
+        Ok(self
+            .entries
+            .insert(
+                path,
+                StateEntry {
+                    value: value.detach(),
+                    kind,
+                },
+            )
+            .map(|entry| entry.value))
+    }
+
+    /// Remove the tensor at `path`, if present.
+    pub fn remove(&mut self, path: &str) -> Option<Tensor> {
+        self.entries.remove(path).map(|entry| entry.value)
+    }
+
+    /// Build a state dictionary from tensors whose leaf kind is not known.
+    #[cfg(test)]
+    pub(crate) fn from_tensors(tensors: BTreeMap<String, Tensor>) -> Result<StateDict> {
+        let mut state = StateDict::new();
+        for (path, tensor) in tensors {
+            state.insert(path, tensor)?;
+        }
+        Ok(state)
+    }
+}
+
+impl Default for StateDict {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Index<&str> for StateDict {
+    type Output = Tensor;
+
+    fn index(&self, path: &str) -> &Self::Output {
+        self.get(path)
+            .unwrap_or_else(|| panic!("state dict has no entry `{path}`"))
+    }
+}
+
+/// Owning iterator over a [`StateDict`]'s `(path, tensor)` pairs.
+pub struct StateDictIntoIter {
+    inner: std::collections::btree_map::IntoIter<String, StateEntry>,
+}
+
+impl Iterator for StateDictIntoIter {
+    type Item = (String, Tensor);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|(path, entry)| (path, entry.value))
+    }
+}
+
+impl IntoIterator for StateDict {
+    type Item = (String, Tensor);
+    type IntoIter = StateDictIntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        StateDictIntoIter {
+            inner: self.entries.into_iter(),
+        }
+    }
+}
+
 // ---- internals -----------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LeafKind {
     Param,
     Buffer,
+}
+
+#[derive(Clone)]
+struct StateEntry {
+    value: Tensor,
+    kind: Option<LeafKind>,
+}
+
+fn validate_path(path: &str, op: &'static str) -> Result<()> {
+    if path.is_empty() || path.split('.').any(str::is_empty) {
+        return Err(Error::invalid_arg(
+            op,
+            format!("state path `{path}` must contain non-empty dotted segments"),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -453,23 +653,24 @@ fn mapped<M: Module + ?Sized>(
     }
 }
 
-/// The swap half: write `values[path]` into every leaf.
+/// The commit half: validate and write `values` through one final mutable
+/// walk. Every leaf is checked again immediately before its replacement is
+/// applied, because a safe hand-written `Module` may make successive walks
+/// disagree.
 ///
-/// Callers must have validated (or produced) `values` against the module's
-/// read-only walk first, so the swaps themselves cannot mismatch. What is left
-/// to check is that the mutable walk visits exactly the same leaves as the
-/// read-only one — a divergence would skip a leaf or write one value into two.
-/// That check runs as a dry pass **before** the first swap, so even a `Module`
-/// with disagreeing walks is rejected with nothing modified.
-///
-/// Values are detached, so no autograd history enters a parameter or buffer.
+/// If a later leaf rejects the walk or its replacement, earlier swaps are
+/// restored through a second checked walk. A stateful implementation that also
+/// changes its topology during rollback returns an explicit rollback error
+/// rather than silently reporting success.
 fn commit<M: Module + ?Sized>(
     op: &'static str,
     module: &mut M,
     values: &BTreeMap<String, Mapped>,
 ) -> Result<()> {
     let mut failure: Option<Error> = None;
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut originals = BTreeMap::new();
+
     visit_all_mut(module, &mut |path, leaf| {
         if failure.is_some() {
             return;
@@ -497,7 +698,10 @@ fn commit<M: Module + ?Sized>(
                     }
                 ),
             ));
-        } else if !seen.insert(path.to_string()) {
+            return;
+        }
+        let path = path.to_string();
+        if !seen.insert(path.clone()) {
             failure = Some(Error::invalid_arg(
                 op,
                 format!(
@@ -505,52 +709,131 @@ fn commit<M: Module + ?Sized>(
                      receive the same value"
                 ),
             ));
+            return;
+        }
+
+        let current = mutable_value(&leaf);
+        if current.dims() != expected.value.dims() {
+            failure = Some(Error::invalid_arg(
+                op,
+                format!(
+                    "`{path}` changed shape between validation and commit: current {}, \
+                     replacement {}",
+                    current.shape(),
+                    expected.value.shape()
+                ),
+            ));
+            return;
+        }
+        originals.insert(
+            path,
+            Mapped {
+                value: current.detach(),
+                identity: actual,
+            },
+        );
+        if let Err(error) = set_mutable_value(leaf, expected.value.detach()) {
+            failure = Some(error);
         }
     });
-    if let Some(e) = failure {
-        return Err(e);
-    }
-    if seen.len() != values.len() {
-        let missed = values.keys().find(|p| !seen.contains(*p));
-        return Err(Error::invalid_arg(
+
+    if failure.is_none() && seen.len() != values.len() {
+        let missed = values.keys().find(|path| !seen.contains(*path));
+        failure = Some(Error::invalid_arg(
             op,
             match missed {
                 Some(path) => format!(
                     "`{path}` is emitted by visit but not by visit_mut: the module's \
                      two walks disagree"
                 ),
-                // Unreachable: the sets have equal membership yet unequal size.
                 None => "the module's two walks disagree".to_string(),
             },
         ));
     }
 
+    let Some(error) = failure else {
+        return Ok(());
+    };
+    if originals.is_empty() {
+        return Err(error);
+    }
+    match restore(op, module, &originals) {
+        Ok(()) => Err(error),
+        Err(rollback) => Err(Error::invalid_arg(
+            op,
+            format!("{error}; rollback failed: {rollback}"),
+        )),
+    }
+}
+
+fn mutable_value<'a>(leaf: &'a LeafMut<'_>) -> &'a Tensor {
+    match leaf {
+        LeafMut::Param(param) => param.value(),
+        LeafMut::Buffer(tensor) => tensor,
+    }
+}
+
+fn set_mutable_value(leaf: LeafMut<'_>, value: Tensor) -> Result<()> {
+    match leaf {
+        LeafMut::Param(param) => param.set(value),
+        LeafMut::Buffer(tensor) => {
+            *tensor = value;
+            Ok(())
+        }
+    }
+}
+
+fn restore<M: Module + ?Sized>(
+    op: &'static str,
+    module: &mut M,
+    originals: &BTreeMap<String, Mapped>,
+) -> Result<()> {
     let mut failure: Option<Error> = None;
+    let mut seen = std::collections::BTreeSet::new();
     visit_all_mut(module, &mut |path, leaf| {
-        // The dry pass above proved every visited path is present, and the
-        // caller checked every shape against these very leaves — so neither
-        // arm below can fail. Report rather than ignore if one ever does.
-        let Some(value) = values.get(path) else {
+        if failure.is_some() {
+            return;
+        }
+        let Some(original) = originals.get(path) else {
             return;
         };
-        let value = value.value.detach();
-        let result = match leaf {
-            LeafMut::Param(p) => p.set(value),
-            LeafMut::Buffer(t) => {
-                *t = value;
-                Ok(())
-            }
-        };
-        if let Err(e) = result
-            && failure.is_none()
-        {
-            failure = Some(e);
+        let actual = identity_mut(&leaf);
+        if actual != original.identity {
+            failure = Some(Error::invalid_arg(
+                op,
+                format!("rollback found a different leaf at `{path}`"),
+            ));
+            return;
+        }
+        let path = path.to_string();
+        if !seen.insert(path.clone()) {
+            failure = Some(Error::invalid_arg(
+                op,
+                format!("rollback visited `{path}` more than once"),
+            ));
+            return;
+        }
+        if mutable_value(&leaf).dims() != original.value.dims() {
+            failure = Some(Error::invalid_arg(
+                op,
+                format!("rollback shape changed at `{path}`"),
+            ));
+            return;
+        }
+        if let Err(error) = set_mutable_value(leaf, original.value.detach()) {
+            failure = Some(error);
         }
     });
-    match failure {
-        Some(e) => Err(e),
-        None => Ok(()),
+    if let Some(error) = failure {
+        return Err(error);
     }
+    if seen.len() != originals.len() {
+        return Err(Error::invalid_arg(
+            op,
+            "rollback could not find every previously updated leaf",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -635,7 +918,7 @@ mod tests {
         let erased_dst: &mut dyn Module = &mut dst;
 
         assert_eq!(erased_src.num_params(), 17);
-        let state = erased_src.state_dict();
+        let state = erased_src.state_dict().unwrap();
         erased_dst.load_state_dict(&state).unwrap();
         erased_dst.to_device(&dev()).unwrap();
         erased_dst.to_dtype(DType::F32).unwrap();
@@ -652,12 +935,12 @@ mod tests {
         let mut dst = Net::new(0.0);
         assert_eq!(values(dst.cell.weight.value()), vec![0.0; 4]);
 
-        load_state_dict(&mut dst, &state_dict(&src)).unwrap();
+        load_state_dict(&mut dst, &state_dict(&src).unwrap()).unwrap();
 
-        let a = state_dict(&src);
-        let b = state_dict(&dst);
+        let a = state_dict(&src).unwrap();
+        let b = state_dict(&dst).unwrap();
         assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
-        for (path, want) in &a {
+        for (path, want) in a.iter() {
             assert_eq!(values(want), values(&b[path]), "at {path}");
         }
     }
@@ -665,7 +948,7 @@ mod tests {
     #[test]
     fn load_rejects_missing_key() {
         let mut m = Net::new(0.0);
-        let mut state = state_dict(&Net::new(1.0));
+        let mut state = state_dict(&Net::new(1.0)).unwrap();
         assert!(state.remove("cell.running").is_some());
         let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
         assert!(msg.contains("missing key `cell.running`"), "{msg}");
@@ -676,8 +959,10 @@ mod tests {
     #[test]
     fn load_rejects_unexpected_key() {
         let mut m = Net::new(0.0);
-        let mut state = state_dict(&Net::new(1.0));
-        state.insert("cell.extra".to_string(), t(&[9.0], &[1]));
+        let mut state = state_dict(&Net::new(1.0)).unwrap();
+        state
+            .insert("cell.extra".to_string(), t(&[9.0], &[1]))
+            .unwrap();
         let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
         assert!(msg.contains("unexpected key `cell.extra`"), "{msg}");
         assert_eq!(values(m.cell.weight.value()), vec![0.0; 4]);
@@ -686,8 +971,10 @@ mod tests {
     #[test]
     fn load_rejects_shape_mismatch() {
         let mut m = Net::new(0.0);
-        let mut state = state_dict(&Net::new(1.0));
-        state.insert("cell.weight".to_string(), t(&[1.0, 2.0], &[2]));
+        let mut state = state_dict(&Net::new(1.0)).unwrap();
+        state
+            .insert("cell.weight".to_string(), t(&[1.0, 2.0], &[2]))
+            .unwrap();
         let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
         assert!(msg.contains("`cell.weight` shape mismatch"), "{msg}");
         assert!(msg.contains("[2]") && msg.contains("[2, 2]"), "{msg}");
@@ -697,9 +984,9 @@ mod tests {
     #[test]
     fn load_rejects_dtype_mismatch() {
         let mut m = Net::new(0.0);
-        let mut state = state_dict(&Net::new(1.0));
+        let mut state = state_dict(&Net::new(1.0)).unwrap();
         let i64s = Tensor::from_vec(vec![1i64, 2, 3, 4], [2, 2], &dev()).unwrap();
-        state.insert("cell.weight".to_string(), i64s);
+        state.insert("cell.weight".to_string(), i64s).unwrap();
         let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
         assert!(msg.contains("`cell.weight` dtype mismatch"), "{msg}");
         assert_eq!(values(m.cell.weight.value()), vec![0.0; 4]);
@@ -708,10 +995,10 @@ mod tests {
     #[test]
     fn load_detaches_incoming_values() {
         let mut m = Net::new(0.0);
-        let mut state = state_dict(&Net::new(1.0));
+        let mut state = state_dict(&Net::new(1.0)).unwrap();
         // A value that carries a live graph must not smuggle it into a Param.
         let traced = state["cell.weight"].traced().unwrap();
-        state.insert("cell.weight".to_string(), traced);
+        state.insert("cell.weight".to_string(), traced).unwrap();
         load_state_dict(&mut m, &state).unwrap();
         assert!(m.cell.weight.value().backward().is_err());
     }
@@ -721,8 +1008,10 @@ mod tests {
         // `bias` sorts before `cell.weight`, so a valid `bias` would be
         // swapped first by a naive one-pass implementation.
         let mut m = Net::new(0.0);
-        let mut state = state_dict(&Net::new(1.0));
-        state.insert("cell.weight".to_string(), t(&[1.0], &[1]));
+        let mut state = state_dict(&Net::new(1.0)).unwrap();
+        state
+            .insert("cell.weight".to_string(), t(&[1.0], &[1]))
+            .unwrap();
         assert!(load_state_dict(&mut m, &state).is_err());
         assert_eq!(values(m.bias.as_ref().unwrap().value()), vec![0.0]);
     }
@@ -747,13 +1036,14 @@ mod tests {
             a: Param::new(t(&[1.0], &[1])),
             b: Param::new(t(&[2.0], &[1])),
         };
-        let state = BTreeMap::from([(String::from("w"), t(&[9.0], &[1]))]);
+        let state = StateDict::from_tensors(BTreeMap::from([(String::from("w"), t(&[9.0], &[1]))]))
+            .unwrap();
         let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
         assert!(msg.contains("emits the path `w` twice"), "{msg}");
     }
 
     #[test]
-    fn state_dict_panics_instead_of_dropping_duplicate_paths() {
+    fn state_dict_rejects_duplicate_paths_without_panicking() {
         struct Collide {
             a: Param,
             b: Param,
@@ -772,8 +1062,78 @@ mod tests {
             a: Param::new(t(&[1.0], &[1])),
             b: Param::new(t(&[2.0], &[1])),
         };
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| state_dict(&m)));
-        assert!(panic.is_err());
+        assert!(state_dict(&m).is_err());
+    }
+
+    #[test]
+    fn state_dict_validates_paths_and_leaf_kinds() {
+        let mut state = state_dict(&Net::new(1.0)).unwrap();
+        assert!(state.insert("", t(&[1.0], &[1])).is_err());
+        assert!(state.insert("cell..extra", t(&[1.0], &[1])).is_err());
+
+        #[derive(rstorch::Module)]
+        struct ParamLeaf {
+            leaf: Param,
+        }
+        #[derive(rstorch::Module)]
+        struct BufferLeaf {
+            leaf: Tensor,
+        }
+        let source = ParamLeaf {
+            leaf: Param::new(t(&[1.0], &[1])),
+        };
+        let mut target = BufferLeaf {
+            leaf: t(&[0.0], &[1]),
+        };
+        let error = target
+            .load_state_dict(&state_dict(&source).unwrap())
+            .unwrap_err();
+        assert!(err_msg(error).contains("leaf kind"));
+    }
+
+    #[test]
+    fn state_dict_detaches_buffer_values() {
+        #[derive(rstorch::Module)]
+        struct BufferOnly {
+            buffer: Tensor,
+        }
+        let buffer = t(&[1.0], &[1]).traced().unwrap();
+        let model = BufferOnly { buffer };
+        let state = state_dict(&model).unwrap();
+        assert!(state["buffer"].backward().is_err());
+    }
+
+    #[test]
+    fn load_rolls_back_when_final_mutable_walk_drifts() {
+        struct Drifting {
+            a: Param,
+            b: Param,
+        }
+        impl Module for Drifting {
+            fn visit(&self, v: &mut Visitor) {
+                v.param("a", &self.a);
+                v.param("b", &self.b);
+            }
+
+            fn visit_mut(&mut self, v: &mut VisitorMut) {
+                v.param("a", &mut self.a);
+                v.param("unexpected", &mut self.b);
+            }
+        }
+
+        let source = Drifting {
+            a: Param::new(t(&[1.0], &[1])),
+            b: Param::new(t(&[2.0], &[1])),
+        };
+        let mut target = Drifting {
+            a: Param::new(t(&[0.0], &[1])),
+            b: Param::new(t(&[0.0], &[1])),
+        };
+        let state = state_dict(&source).unwrap();
+        let error = target.load_state_dict(&state).unwrap_err();
+        assert!(err_msg(error).contains("not by visit"));
+        assert_eq!(values(target.a.value()), vec![0.0]);
+        assert_eq!(values(target.b.value()), vec![0.0]);
     }
 
     #[test]
@@ -794,7 +1154,8 @@ mod tests {
             a: Param::new(t(&[0.0], &[1])),
             b: Param::new(t(&[0.0], &[1])),
         };
-        let state = BTreeMap::from([(String::from("w"), t(&[1.0], &[1]))]);
+        let state = StateDict::from_tensors(BTreeMap::from([(String::from("w"), t(&[1.0], &[1]))]))
+            .unwrap();
         let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
         assert!(msg.contains("different parameter leaf"), "{msg}");
         assert_eq!(values(m.a.value()), vec![0.0]);
@@ -823,9 +1184,9 @@ mod tests {
             a: Param::new(t(&[0.0], &[1])),
             b: Param::new(t(&[0.0], &[1])),
         };
-        let mut state = state_dict(&m);
-        state.insert("a".to_string(), t(&[1.0], &[1]));
-        state.insert("b".to_string(), t(&[2.0], &[1]));
+        let mut state = state_dict(&m).unwrap();
+        state.insert("a".to_string(), t(&[1.0], &[1])).unwrap();
+        state.insert("b".to_string(), t(&[2.0], &[1])).unwrap();
 
         let msg = err_msg(load_state_dict(&mut m, &state).unwrap_err());
         assert!(
@@ -840,7 +1201,7 @@ mod tests {
     fn to_device_cpu_is_a_faithful_walk() {
         let mut m = Net::new(3.0);
         to_device(&mut m, &Device::Cpu).unwrap();
-        for (path, v) in state_dict(&m) {
+        for (path, v) in state_dict(&m).unwrap() {
             assert_eq!(v.device(), Device::Cpu, "at {path}");
             assert!(values(&v).iter().all(|&x| x == 3.0), "at {path}");
         }
@@ -888,7 +1249,7 @@ mod tests {
     fn replication_recipe_shares_no_future_updates() {
         let src = Net::new(5.0);
         let mut replica = Net::new(0.0);
-        load_state_dict(&mut replica, &state_dict(&src)).unwrap();
+        load_state_dict(&mut replica, &state_dict(&src).unwrap()).unwrap();
         // A later "optimizer step" on the replica writes a new value and does
         // not disturb the original.
         replica.cell.weight.set(t(&[7.0; 4], &[2, 2])).unwrap();

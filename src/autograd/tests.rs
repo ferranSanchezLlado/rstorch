@@ -598,6 +598,7 @@ fn a_long_chain_of_real_ops_walks_and_drops_iteratively() {
     // launches stay cheap: `x` scaled by 1.0 twenty thousand times still
     // has gradient 1.
     on_a_small_stack(|| {
+        let _fusion = crate::lazy::set_fusion(crate::lazy::Fusion::On);
         let xt = Tensor::full((), 2.0, DType::F32, &CPU)
             .unwrap()
             .traced()

@@ -33,9 +33,11 @@ pub struct Param {
     /// The current value. Replaced wholesale by [`set`](Param::set); old
     /// values stay alive inside any graph that captured them (`Arc`).
     value: Tensor,
-    /// The cached traced leaf, rebuilt on every [`set`](Param::set) and
-    /// returned by [`get`](Param::get) under a recording, non-frozen mode.
-    leaf: Tensor,
+    /// The cached traced leaf for floating-point values, rebuilt on every
+    /// [`set`](Param::set) and returned by [`get`](Param::get) under a
+    /// recording, non-frozen mode. Non-floating values are structural state
+    /// and never receive an autograd leaf.
+    leaf: Option<Tensor>,
     /// Stable gradient identity (see the type docs).
     key: GradKey,
     /// Per-parameter freeze flag: explicit, not a `Mode`
@@ -45,11 +47,19 @@ pub struct Param {
 }
 
 impl Param {
-    /// Wrap `value` as a fresh trainable parameter with a new identity and
-    /// its cached traced leaf.
+    /// Wrap `value` as a fresh trainable parameter with a new identity and,
+    /// for floating-point values, its cached traced leaf.
+    ///
+    /// The stored value is detached first. A parameter owns its own gradient
+    /// identity; accepting a caller-owned graph here would make eval/frozen
+    /// access unexpectedly retain that graph.
     pub fn new(value: Tensor) -> Param {
+        let value = value.detach();
         let key = GradKey::fresh();
-        let leaf = autograd::make_leaf(value.clone(), key);
+        let leaf = value
+            .dtype()
+            .is_float()
+            .then(|| autograd::make_leaf(value.clone(), key));
         Param {
             value,
             leaf,
@@ -59,20 +69,24 @@ impl Param {
     }
 
     /// The **only** way a parameter enters a computation. Returns the cached
-    /// traced leaf when `mode.records() && !self.is_frozen()`, otherwise the
-    /// plain value (an eval/frozen access records nothing).
+    /// traced leaf when `mode.records() && !self.is_frozen()` and the value is
+    /// floating-point; otherwise returns the detached plain value.
     pub fn get(&self, mode: Mode) -> Tensor {
         if mode.records() && !self.frozen {
-            self.leaf.clone()
-        } else {
-            self.value.clone()
+            if let Some(leaf) = &self.leaf {
+                return leaf.clone();
+            }
         }
+        self.value.clone()
     }
 
     /// Swap the value (optimizer step / checkpoint load) and rebuild the
     /// cached leaf. Any graph that already captured the previous value keeps
     /// it alive and consistent (`Param::set` swaps the `Arc`; exploration
     /// §5 "Param updated under a live graph").
+    ///
+    /// The replacement is detached before storage, so a caller cannot smuggle
+    /// an unrelated graph into a parameter through `set`.
     ///
     /// # Errors
     ///
@@ -92,7 +106,11 @@ impl Param {
                 rhs: value.shape().clone(),
             });
         }
-        self.leaf = autograd::make_leaf(value.clone(), self.key);
+        let value = value.detach();
+        self.leaf = value
+            .dtype()
+            .is_float()
+            .then(|| autograd::make_leaf(value.clone(), self.key));
         self.value = value;
         Ok(())
     }
@@ -262,5 +280,27 @@ mod tests {
         // `get()` hands out the traced leaf.
         let p = Param::new(Tensor::zeros([2], DType::F32, &Device::Cpu).unwrap());
         assert!(p.value().backward().is_err());
+    }
+
+    #[test]
+    fn new_and_set_detach_incoming_graphs() {
+        let source = t(&[1.0, 2.0]);
+        let traced = source.traced().unwrap();
+        let mut p = Param::new(traced.clone());
+        assert!(p.get(Mode::EVAL).backward().is_err());
+        assert!(p.get(Mode::TRAIN).backward().is_ok());
+
+        let replacement = t(&[3.0, 4.0]).traced().unwrap();
+        p.set(replacement).unwrap();
+        assert!(p.get(Mode::EVAL).backward().is_err());
+        assert!(p.get(Mode::TRAIN).backward().is_ok());
+    }
+
+    #[test]
+    fn non_float_params_never_create_gradient_leaves() {
+        let value = Tensor::from_vec(vec![1i64, 2], [2], &Device::Cpu).unwrap();
+        let p = Param::new(value);
+        assert!(p.get(Mode::TRAIN).backward().is_err());
+        assert!(p.get(Mode::EVAL).backward().is_err());
     }
 }

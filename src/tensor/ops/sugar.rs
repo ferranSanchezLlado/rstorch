@@ -148,8 +148,20 @@ fn scalar_add(scalar: f64, tensor: &Tensor) -> Result<Tensor> {
 ///
 /// The named methods are spelled as paths because the operator traits are in
 /// scope in this module and would otherwise win method resolution.
+/// Relabel a composed scalar-left result when realization is deferred.
+fn relabel_scalar_result(op: &'static str, value: Tensor) -> Result<Tensor> {
+    if !crate::lazy::enabled() {
+        return Ok(value);
+    }
+    let storage = crate::lazy::relabel(op, value.storage(), value.layout())?;
+    Ok(match value.node() {
+        Some(node) => Tensor::from_parts_traced(storage, value.layout().clone(), node.clone()),
+        None => Tensor::from_parts(storage, value.layout().clone()),
+    })
+}
+
 fn scalar_sub(scalar: f64, tensor: &Tensor) -> Result<Tensor> {
-    Tensor::neg(tensor)?.add_scalar(scalar)
+    relabel_scalar_result("sub_scalar", Tensor::neg(tensor)?.add_scalar(scalar)?)
 }
 
 /// `scalar * tensor`. Multiplication commutes, so this *is* `mul_scalar`.
@@ -164,7 +176,7 @@ fn scalar_mul(scalar: f64, tensor: &Tensor) -> Result<Tensor> {
 /// `-scalar / tensor²` with no new rule.
 fn scalar_div(scalar: f64, tensor: &Tensor) -> Result<Tensor> {
     let numerator = tensor.full_like(scalar)?;
-    Tensor::div(&numerator, tensor)
+    relabel_scalar_result("div_scalar", Tensor::div(&numerator, tensor)?)
 }
 
 scalar_lhs_sugar!(Add, add, scalar_add, add_scalar, "+");

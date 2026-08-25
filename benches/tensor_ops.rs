@@ -63,6 +63,18 @@ fn bench_elementwise(c: &mut Criterion) {
         b.iter(|| black_box(black_box(&rows).add(black_box(&bias)).unwrap()));
     });
 
+    let transposed = randn(5, &[512, 512], DType::F32)
+        .transpose(0, 1)
+        .expect("transpose");
+    group.bench_function("add_transposed_f32/512x512", |b| {
+        b.iter(|| black_box(black_box(&transposed).add(black_box(&rows)).unwrap()));
+    });
+    let narrowed = randn(6, &[513, 512], DType::F32)
+        .narrow(0, 1, 512)
+        .expect("narrow");
+    group.bench_function("add_narrowed_f32/512x512", |b| {
+        b.iter(|| black_box(black_box(&narrowed).add(black_box(&rows)).unwrap()));
+    });
     group.finish();
 }
 

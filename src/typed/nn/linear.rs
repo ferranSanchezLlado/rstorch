@@ -433,7 +433,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            runtime.state_dict().keys().collect::<Vec<_>>(),
+            runtime.state_dict().unwrap().keys().collect::<Vec<_>>(),
             vec!["weight"]
         );
     }

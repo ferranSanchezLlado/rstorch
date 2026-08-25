@@ -249,6 +249,21 @@ impl Call {
     }
 }
 
+/// Expected result category for one conformance row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum Outcome {
+    /// The operation must return values.
+    Value,
+    /// Both backends must reject before producing a value.
+    Rejected {
+        /// The structured error variant expected from both backends.
+        variant: &'static str,
+    },
+    /// Both backends are deliberately expected to decline the row.
+    Declined,
+}
+
 /// One row of the conformance table.
 pub(crate) struct Case {
     /// Human-readable identity, e.g. `"binary.Add.f32"`; appears verbatim in
@@ -257,11 +272,21 @@ pub(crate) struct Case {
     call: Call,
     operands: Vec<Operand>,
     tol: f64,
+    outcome: Outcome,
 }
 
 impl Case {
-    /// A case with the default float tolerance.
+    /// A case with the default float tolerance and a successful result.
     fn new(name: String, call: Call, operands: Vec<Operand>) -> Case {
+        Self::with_outcome(name, call, operands, Outcome::Value)
+    }
+
+    /// A case whose operation must reject with one named error variant.
+    fn rejected(name: String, call: Call, operands: Vec<Operand>, variant: &'static str) -> Case {
+        Self::with_outcome(name, call, operands, Outcome::Rejected { variant })
+    }
+
+    fn with_outcome(name: String, call: Call, operands: Vec<Operand>, outcome: Outcome) -> Case {
         let output_dtype = match &call {
             Call::Full { dtype, .. } | Call::Cast(dtype) => *dtype,
             Call::Compare(_) => DType::Bool,
@@ -274,23 +299,14 @@ impl Case {
             | Call::Unary(_)
             | Call::Reduce(..)
             | Call::IndexSelect(_)
-            | Call::IndexAdd(_)
-            | Call::Gather(_)
-            | Call::ScatterAdd(_)
+            | Call::IndexAdd(..)
+            | Call::Gather(..)
+            | Call::ScatterAdd(..)
             | Call::Conv(..)
             | Call::Binary(_)
             | Call::Matmul
-            // A fused row's outputs are the parameter dtype plus, for the
-            // recorded/optimizer encodings, wide state in the accumulation
-            // dtype. Taking the *parameter* dtype's tolerance is the loose
-            // bound of the two, which is the safe direction: it never demands
-            // more of an F32 state buffer than the reduced parameter can
-            // deliver, and `compare` still rejects a dtype divergence outright.
             | Call::Fused(..) => operands[0].host.dtype(),
         };
-        // Casts are deterministic representation conversions. In particular,
-        // widening a reduced value to F32 must reproduce it exactly; input
-        // dtype never grants slack to an exact output.
         let exact_output = matches!(
             call,
             Call::Full { .. }
@@ -302,10 +318,7 @@ impl Case {
                 | Call::MaskedFill(_)
                 | Call::ArgReduce(..)
                 | Call::IndexSelect(_)
-                | Call::Gather(_)
-                // A permutation of source positions is exact by construction:
-                // there is no arithmetic to round, so a backend that names a
-                // different position is wrong, never merely imprecise.
+                | Call::Gather(..)
                 | Call::ArgSort { .. }
         );
         let tol = if exact_output {
@@ -318,6 +331,7 @@ impl Case {
             call,
             operands,
             tol,
+            outcome,
         }
     }
 }
@@ -345,6 +359,8 @@ pub(crate) struct Report {
     /// Rows outside the candidate's declared capability, such as BF16 on
     /// Metal, or operation/dtype pairs the common backend contract excludes.
     pub(crate) expected_unsupported: Vec<String>,
+    /// Cases where one backend rejected differently from the other.
+    pub(crate) rejection_mismatches: Vec<String>,
     /// Cases that diverged or errored, one rendered message each.
     pub(crate) failures: Vec<String>,
 }
@@ -353,21 +369,53 @@ impl Report {
     /// Turn the report into a single [`Result`], failing loudly with every
     /// divergence listed. `device` names the backend under test.
     pub(crate) fn into_result(self, device: Device) -> Result<()> {
-        if self.failures.is_empty() {
+        if self.failures.is_empty() && self.rejection_mismatches.is_empty() {
             return Ok(());
         }
+        let mut failures = self.failures;
+        failures.extend(self.rejection_mismatches);
         Err(Error::Backend {
             op: "conformance",
             msg: format!(
                 "{} of {} case(s) diverged from the cpu reference on {device}:\n  {}",
-                self.failures.len(),
+                failures.len(),
                 self.matched.len()
                     + self.skipped.len()
                     + self.expected_unsupported.len()
-                    + self.failures.len(),
-                self.failures.join("\n  ")
+                    + failures.len(),
+                failures.join("\n  ")
             ),
         })
+    }
+}
+
+/// Return the stable variant label used by rejection-parity rows.
+fn outcome_variant(result: &Result<Vec<CpuStorage>>) -> &'static str {
+    let Err(error) = result else {
+        return "Value";
+    };
+    if matches!(error, Error::ShapeMismatch { .. }) {
+        "ShapeMismatch"
+    } else if matches!(error, Error::RankMismatch { .. }) {
+        "RankMismatch"
+    } else if matches!(error, Error::InvalidAxis { .. }) {
+        "InvalidAxis"
+    } else if matches!(error, Error::DTypeMismatch { .. }) {
+        "DTypeMismatch"
+    } else if matches!(error, Error::DeviceMismatch { .. }) {
+        "DeviceMismatch"
+    } else if matches!(error, Error::ReshapeMismatch { .. }) {
+        "ReshapeMismatch"
+    } else if matches!(error, Error::IndexOutOfBounds { .. }) {
+        "IndexOutOfBounds"
+    } else if matches!(error, Error::Unsupported { .. }) {
+        "Unsupported"
+    } else if matches!(error, Error::InvalidArg { .. }) {
+        "InvalidArg"
+    } else if matches!(error, Error::Backend { .. }) {
+        "Backend"
+    } else {
+        "Other"
     }
 }
 
@@ -379,26 +427,60 @@ pub(crate) fn run(candidate: &dyn BackendOps, device: Device) -> Report {
         matched: Vec::new(),
         skipped: Vec::new(),
         expected_unsupported: Vec::new(),
+        rejection_mismatches: Vec::new(),
         failures: Vec::new(),
     };
     for case in suite() {
-        match (evaluate(reference, &case), evaluate(candidate, &case)) {
-            (Err(Error::Unsupported { .. }), _) | (_, Err(Error::Unsupported { .. })) => {
-                if expected_unsupported(device, &case) {
+        let reference_result = evaluate(reference, &case);
+        let candidate_result = evaluate(candidate, &case);
+        match case.outcome {
+            Outcome::Rejected { variant } => {
+                let reference_variant = outcome_variant(&reference_result);
+                let candidate_variant = outcome_variant(&candidate_result);
+                if reference_variant == variant && candidate_variant == variant {
+                    report.matched.push(case.name);
+                } else if candidate_variant == "Unsupported" && expected_unsupported(device, &case)
+                {
                     report.expected_unsupported.push(case.name);
                 } else {
-                    report.skipped.push(case.name);
+                    report.rejection_mismatches.push(format!(
+                        "{}: expected rejection {variant}, cpu={reference_variant}, \
+                         {device}={candidate_variant}",
+                        case.name
+                    ));
                 }
             }
-            (Err(e), _) => report
-                .failures
-                .push(format!("{}: cpu reference failed: {e}", case.name)),
-            (_, Err(e)) => report
-                .failures
-                .push(format!("{}: {device} backend failed: {e}", case.name)),
-            (Ok(want), Ok(got)) => match compare_all(&want, &got, case.tol) {
-                Ok(()) => report.matched.push(case.name),
-                Err(diff) => report.failures.push(format!("{}: {diff}", case.name)),
+            Outcome::Declined => {
+                let reference_variant = outcome_variant(&reference_result);
+                let candidate_variant = outcome_variant(&candidate_result);
+                if reference_variant == "Unsupported" && candidate_variant == "Unsupported" {
+                    report.matched.push(case.name);
+                } else {
+                    report.rejection_mismatches.push(format!(
+                        "{}: expected Declined, cpu={reference_variant}, \
+                         {device}={candidate_variant}",
+                        case.name
+                    ));
+                }
+            }
+            Outcome::Value => match (reference_result, candidate_result) {
+                (Err(Error::Unsupported { .. }), _) | (_, Err(Error::Unsupported { .. })) => {
+                    if expected_unsupported(device, &case) {
+                        report.expected_unsupported.push(case.name);
+                    } else {
+                        report.skipped.push(case.name);
+                    }
+                }
+                (Err(e), _) => report
+                    .failures
+                    .push(format!("{}: cpu reference failed: {e}", case.name)),
+                (_, Err(e)) => report
+                    .failures
+                    .push(format!("{}: {device} backend failed: {e}", case.name)),
+                (Ok(want), Ok(got)) => match compare_all(&want, &got, case.tol) {
+                    Ok(()) => report.matched.push(case.name),
+                    Err(diff) => report.failures.push(format!("{}: {diff}", case.name)),
+                },
             },
         }
     }
@@ -877,6 +959,7 @@ pub(crate) fn suite() -> Vec<Case> {
     push_conv(&mut cases);
     push_fused(&mut cases);
     push_edges(&mut cases);
+    push_rejection_cases(&mut cases);
     cases
 }
 
@@ -1929,6 +2012,7 @@ fn push_conv_backward(
 
     // Multi-batch, multi-channel backward. The single-batch single-channel
     // shape above cannot distinguish a kernel that decodes `(b, c)` in the
+
     // wrong order from a correct one, because both indices are always 0.
     const BATCH_DIMS: [usize; 4] = [2, 2, 4, 4];
     const WIDE_WEIGHT_DIMS: [usize; 4] = [3, 2, 2, 2];
@@ -2001,6 +2085,37 @@ fn push_conv_backward(
             ],
         ));
     }
+}
+
+/// Invalid-argument rows that exercise validators in the fused entry points.
+///
+/// These are intentionally table rows rather than backend-specific patches:
+/// a backend that drops the scalar guard must disagree with the CPU reference
+/// and is reported through `rejection_mismatches`.
+fn push_rejection_cases(cases: &mut Vec<Case>) {
+    cases.push(Case::rejected(
+        "fused.SgdStep.invalid_lr".to_string(),
+        Call::Fused(FusedOp::SgdStep, vec![-1.0, 0.0, 0.0]),
+        vec![
+            f32s(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            f32s(&[2, 3], &[0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+        ],
+        "InvalidArg",
+    ));
+    cases.push(Case::rejected(
+        "fused.AdamStep.invalid_eps".to_string(),
+        Call::Fused(
+            FusedOp::AdamStep,
+            vec![0.1, 0.9, 0.999, 0.0, 0.0, 1.0, 1.0, 0.0],
+        ),
+        vec![
+            f32s(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            f32s(&[2, 3], &[0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+            f32s(&[2, 3], &[0.1, 0.1, 0.1, 0.1, 0.1, 0.1]),
+            f32s(&[2, 3], &[0.2, 0.2, 0.2, 0.2, 0.2, 0.2]),
+        ],
+        "InvalidArg",
+    ));
 }
 
 /// The dimensions kernels actually break in: values (NaN, infinities, signed

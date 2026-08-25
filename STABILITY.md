@@ -8,10 +8,11 @@ when its feature is enabled on a supported target.
 ## Covered Surface
 
 Everything reachable from `rstorch::` is covered, except the
-`rstorch::testing` module described below. This includes the dynamic API, the
-optional `typed`, `hub`, `rayon`, `metal`, `cuda`, and `wgpu` features, and the
-public derive macros. Removing an item, narrowing a signature, or moving a
-covered item to another module is a breaking change.
+`rstorch::testing` module and the explicitly experimental `rstorch::typed` and
+`rstorch::lazy` namespaces described below. This includes the dynamic API, the
+optional `hub`, `rayon`, `metal`, `cuda`, and `wgpu` features, and the public
+derive macros. Removing an item, narrowing a signature, or moving a covered
+item to another module is a breaking change.
 
 That is a statement about *signatures*. CUDA's **behaviour** carries a weaker
 claim than the other backends' because no CI runner executes its kernels; see
@@ -51,9 +52,10 @@ The following are also covered contracts:
 
 ## Execution Model
 
-Operations are eager today, and the contract is stated in values rather than
-schedules: a covered operation produces its documented result, but *when* the
-work runs is not part of the promise. Backends already batch — Metal encodes
+Operations are eager by default. The opt-in lazy executor for dense CPU
+element-wise chains is also an implementation detail: it must produce the
+same documented values and errors, while its schedule and intermediate
+allocation are not part of the promise. Backends already batch — Metal encodes
 dispatches into a command buffer and flushes on a threshold — so one call to a
 named method is not guaranteed to be one kernel launch. Deferring or fusing
 work *within* a step is deliberately reserved as a purely internal change.
@@ -168,19 +170,34 @@ and so is the order in which a tensor's elements consume the stream.
 - `rstorch::testing`, behind the `testing` feature, is the finite-difference
   harness used by the crate's own tests. Its signature follows test needs and
   may change without a semver event.
+- `rstorch::typed`, behind the `typed` feature, is an experimental second
+  frontend over the dynamic tensor runtime. Its modules, traits, wrappers,
+  placement bindings, and persistence helpers may change independently of the
+  dynamic 1.x API.
+- `rstorch::lazy`, including `Fusion`, `FusionGuard`, and its control
+  functions, is experimental execution policy. Its thread-local controls,
+  supported operation set, and realization schedule may change independently
+  of the dynamic 1.x API.
 - Floating-point results are not guaranteed to match bit-for-bit across
   backends, and no particular instruction order is promised. What is guaranteed
   is determinism **within a build**: the same input, the same crate version, the
   same backend, and the same feature set produce the same values, run after run.
   Kernel selection and fusion may change results within the documented
   numerical tolerances between minor versions.
+- Fusion is an implementation detail, not a semver commitment: it may be
+  enabled, disabled or changed in a minor release. The current executor is
+  opt-in and defaults off while backend gates remain open.
+- A backend that enables it must preserve eager bit patterns for the fused
+  chain; the implementation detail remains free to change without a semver
+  promise.
 - Backend performance, benchmark numbers, device availability, and the order
   in which hardware vendors report devices are not release guarantees.
 - Private backends, layouts, storage, and dispatch internals may change freely.
 
-Features are additive: enabling a feature does not remove or change an item
-that exists without it. The `typed` API is a wrapper over the dynamic `Tensor`
-and owns no separate kernels.
+Features are additive for covered surfaces: enabling one does not remove or
+change an item that exists without it. Experimental namespaces are exempt from
+that guarantee as stated above. The `typed` API is a wrapper over the dynamic
+`Tensor` and owns no separate kernels.
 
 ## Derive Macros
 

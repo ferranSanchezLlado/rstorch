@@ -159,7 +159,7 @@ fn reduce_values(
     keepdim: bool,
 ) -> Result<Tensor> {
     let storage = dispatch::backend(x.device())
-        .reduce(kind, x.view(), axis)
+        .reduce(kind, x.ready_view()?, axis)
         .map_err(|e| e.with_op(op))?;
     let layout = Layout::contiguous(out_dims(x.dims(), axis, keepdim))?;
     Ok(Tensor::from_parts(storage, layout))
@@ -437,12 +437,12 @@ fn try_fused_softmax(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
         return Ok(None);
     }
 
-    let mut outputs = match dispatch::backend(x.device()).fused(FusedOp::Softmax, &[x.view()], &[])
-    {
-        Ok(outputs) => outputs,
-        Err(Error::Unsupported { .. }) => return Ok(None),
-        Err(e) => return Err(e.with_op("softmax")),
-    };
+    let mut outputs =
+        match dispatch::backend(x.device()).fused(FusedOp::Softmax, &[x.ready_view()?], &[]) {
+            Ok(outputs) => outputs,
+            Err(Error::Unsupported { .. }) => return Ok(None),
+            Err(e) => return Err(e.with_op("softmax")),
+        };
     if outputs.len() != 1 {
         return Err(Error::Backend {
             op: "softmax",
@@ -476,7 +476,7 @@ fn arg_reduce(
     let ax = x.shape().resolve_axis(axis, op)?;
     require_non_empty(op, x, ax)?;
     let storage = dispatch::backend(x.device())
-        .arg_reduce(kind, x.view(), ax)
+        .arg_reduce(kind, x.ready_view()?, ax)
         .map_err(|e| e.with_op(op))?;
     let layout = Layout::contiguous(out_dims(x.dims(), ax, keepdim))?;
     Ok(Tensor::from_parts(storage, layout))

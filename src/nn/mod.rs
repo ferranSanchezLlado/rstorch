@@ -42,7 +42,7 @@
 //! let dev = Device::Cpu;
 //! let model = Mlp::new(&dev)?;
 //! let mut target = Mlp::new(&dev)?;
-//! target.load_state_dict(&model.state_dict())?;
+//! target.load_state_dict(&model.state_dict()?)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -103,7 +103,7 @@ pub(crate) use norm::{
 pub use param::Param;
 pub use sequential::Sequential;
 // Model-level utilities, discoverable as methods via `ModuleExt`.
-pub use util::ModuleExt;
+pub use util::{ModuleExt, StateDict};
 pub use visit::{Visitor, VisitorMut};
 
 use crate::error::Result;

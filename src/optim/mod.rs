@@ -164,6 +164,7 @@ mod engine;
 pub mod schedule;
 mod sgd;
 mod state;
+pub(crate) mod validate;
 
 pub use adam::{Adam, AdamGroup, AdamW};
 pub use sgd::{Sgd, SgdGroup};

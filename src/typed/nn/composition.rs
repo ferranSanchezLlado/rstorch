@@ -668,6 +668,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             dynamic
                 .state_dict()
+                .unwrap()
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>()

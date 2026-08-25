@@ -53,11 +53,24 @@ fn binary_forward(op: &'static str, kind: BinaryOp, lhs: &Tensor, rhs: &Tensor) 
     let out_shape = lhs.shape().broadcast_with(rhs.shape(), op)?;
     let ll = lhs.layout().broadcast_to(&out_shape)?;
     let rl = rhs.layout().broadcast_to(&out_shape)?;
-    let storage = dispatch::backend(lhs.device()).binary(
-        kind,
-        View::new(lhs.storage(), &ll),
-        View::new(rhs.storage(), &rl),
-    )?;
+    let storage = if crate::lazy::enabled() {
+        crate::lazy::binary(
+            op,
+            kind,
+            lhs.storage(),
+            &ll,
+            rhs.storage(),
+            &rl,
+            lhs.dtype(),
+            lhs.device(),
+        )?
+    } else {
+        dispatch::backend(lhs.device()).binary(
+            kind,
+            View::ready(lhs.storage(), &ll)?,
+            View::ready(rhs.storage(), &rl)?,
+        )?
+    };
     Ok(Tensor::from_parts(storage, Layout::contiguous(out_shape)?))
 }
 
@@ -74,18 +87,61 @@ fn binary_scalar_forward(
     x: &Tensor,
     scalar: f64,
 ) -> Result<Tensor> {
-    let storage = dispatch::backend(x.device())
-        .binary_scalar(kind, x.view(), scalar)
-        .map_err(|e| e.with_op(op))?;
+    let storage = if crate::lazy::enabled() {
+        crate::lazy::scalar(
+            op,
+            kind,
+            x.storage(),
+            x.layout(),
+            scalar,
+            x.dtype(),
+            x.device(),
+        )?
+    } else {
+        dispatch::backend(x.device())
+            .binary_scalar(kind, x.ready_view()?, scalar)
+            .map_err(|e| e.with_op(op))?
+    };
     Ok(Tensor::from_parts(
         storage,
         Layout::contiguous(x.shape().clone())?,
     ))
 }
 
+fn unary_name(kind: UnaryOp) -> &'static str {
+    match kind {
+        UnaryOp::Relu => "relu",
+        UnaryOp::Gelu => "gelu",
+        UnaryOp::Exp => "exp",
+        UnaryOp::Ln => "ln",
+        UnaryOp::Sqrt => "sqrt",
+        UnaryOp::Tanh => "tanh",
+        UnaryOp::Sigmoid => "sigmoid",
+        UnaryOp::Neg => "neg",
+        UnaryOp::Abs => "abs",
+        UnaryOp::Sign => "sign",
+        UnaryOp::Recip => "recip",
+        UnaryOp::Floor => "floor",
+        UnaryOp::Ceil => "ceil",
+        UnaryOp::Round => "round",
+        UnaryOp::Erf => "erf",
+    }
+}
+
 /// The untraced forward of a unary op.
 fn unary_forward(kind: UnaryOp, x: &Tensor) -> Result<Tensor> {
-    let storage = dispatch::backend(x.device()).unary(kind, x.view())?;
+    let storage = if crate::lazy::enabled() {
+        crate::lazy::unary(
+            unary_name(kind),
+            kind,
+            x.storage(),
+            x.layout(),
+            x.dtype(),
+            x.device(),
+        )?
+    } else {
+        dispatch::backend(x.device()).unary(kind, x.ready_view()?)?
+    };
     Ok(Tensor::from_parts(
         storage,
         Layout::contiguous(x.shape().clone())?,
@@ -100,11 +156,23 @@ fn compare_forward(op: &'static str, kind: CmpOp, lhs: &Tensor, rhs: &Tensor) ->
     let out_shape = lhs.shape().broadcast_with(rhs.shape(), op)?;
     let ll = lhs.layout().broadcast_to(&out_shape)?;
     let rl = rhs.layout().broadcast_to(&out_shape)?;
-    let storage = dispatch::backend(lhs.device()).compare(
-        kind,
-        View::new(lhs.storage(), &ll),
-        View::new(rhs.storage(), &rl),
-    )?;
+    let storage = if crate::lazy::enabled() {
+        crate::lazy::compare(
+            op,
+            kind,
+            lhs.storage(),
+            &ll,
+            rhs.storage(),
+            &rl,
+            lhs.device(),
+        )?
+    } else {
+        dispatch::backend(lhs.device()).compare(
+            kind,
+            View::ready(lhs.storage(), &ll)?,
+            View::ready(rhs.storage(), &rl)?,
+        )?
+    };
     Ok(Tensor::from_parts(storage, Layout::contiguous(out_shape)?))
 }
 
@@ -908,11 +976,24 @@ impl Tensor {
         let out_shape = self.shape().broadcast_with(mask.shape(), OP)?;
         let xl = self.layout().broadcast_to(&out_shape)?;
         let ml = mask.layout().broadcast_to(&out_shape)?;
-        let storage = dispatch::backend(self.device()).masked_fill(
-            View::new(self.storage(), &xl),
-            View::new(mask.storage(), &ml),
-            value,
-        )?;
+        let storage = if crate::lazy::enabled() {
+            crate::lazy::masked(
+                OP,
+                self.storage(),
+                &xl,
+                mask.storage(),
+                &ml,
+                value,
+                self.dtype(),
+                self.device(),
+            )?
+        } else {
+            dispatch::backend(self.device()).masked_fill(
+                View::ready(self.storage(), &xl)?,
+                View::ready(mask.storage(), &ml)?,
+                value,
+            )?
+        };
         let out = Tensor::from_parts(storage, Layout::contiguous(out_shape)?);
         let dims = self.dims().to_vec();
         let m = mask.detach();
@@ -951,11 +1032,25 @@ impl Tensor {
         let cl = self.layout().broadcast_to(&out_shape)?;
         let tl = on_true.layout().broadcast_to(&out_shape)?;
         let fl = on_false.layout().broadcast_to(&out_shape)?;
-        let storage = dispatch::backend(self.device()).where_cond(
-            View::new(self.storage(), &cl),
-            View::new(on_true.storage(), &tl),
-            View::new(on_false.storage(), &fl),
-        )?;
+        let storage = if crate::lazy::enabled() {
+            crate::lazy::where_cond(
+                OP,
+                self.storage(),
+                &cl,
+                on_true.storage(),
+                &tl,
+                on_false.storage(),
+                &fl,
+                on_true.dtype(),
+                self.device(),
+            )?
+        } else {
+            dispatch::backend(self.device()).where_cond(
+                View::ready(self.storage(), &cl)?,
+                View::ready(on_true.storage(), &tl)?,
+                View::ready(on_false.storage(), &fl)?,
+            )?
+        };
         let out = Tensor::from_parts(storage, Layout::contiguous(out_shape)?);
         let cond = self.detach();
         let (td, fd) = (on_true.dims().to_vec(), on_false.dims().to_vec());

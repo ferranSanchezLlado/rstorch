@@ -142,16 +142,16 @@ impl LayerNormBackward {
         } else {
             self.weight.to_dtype(state_dtype)?
         };
-        let dx = match dispatch::backend(g.device()).fused(
-            FusedOp::LayerNorm,
-            &[
-                g.view(),
-                self.xhat.view(),
-                self.inv_std.view(),
-                self.weight.view(),
-            ],
-            &[],
-        ) {
+        let fused = {
+            let inputs = [
+                g.ready_view()?,
+                self.xhat.ready_view()?,
+                self.inv_std.ready_view()?,
+                self.weight.ready_view()?,
+            ];
+            dispatch::backend(inputs[0].device()).fused(FusedOp::LayerNorm, &inputs, &[])
+        };
+        let dx = match fused {
             Ok(mut outputs) if outputs.len() == 1 => {
                 Tensor::from_parts(outputs.remove(0), Layout::contiguous(g.shape().clone())?)
             }
@@ -198,7 +198,7 @@ fn fused_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f64) -> Res
     let scalars = [eps, 1.0];
     let mut outputs = dispatch::backend(x.device()).fused(
         FusedOp::LayerNorm,
-        &[x.view(), weight.view(), bias.view()],
+        &[x.ready_view()?, weight.ready_view()?, bias.ready_view()?],
         &scalars[..if save_stats { 2 } else { 1 }],
     )?;
     let expected = if save_stats { 3 } else { 1 };
@@ -752,7 +752,7 @@ impl Forward for RMSNorm {
 /// let mut bn = BatchNorm2d::new(2, &dev)?;
 /// let x = Tensor::from_vec((0..16).map(|i| i as f32).collect(), [2, 2, 2, 2], &dev)?;
 /// let _ = bn.forward(&x, Mode::TRAIN)?;      // updates the buffers
-/// let state = bn.state_dict();
+/// let state = bn.state_dict()?;
 /// // channel 0 holds 0,1,2,3, 8,9,10,11 -> mean 5.5; EMA from 0 with 0.1.
 /// assert!((state["running_mean"].to_vec::<f32>()?[0] - 0.55).abs() < 1e-6);
 /// # Ok::<(), rstorch::Error>(())

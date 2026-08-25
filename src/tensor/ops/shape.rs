@@ -96,7 +96,7 @@ fn concat_values(
         };
         let blocks = parts
             .iter()
-            .map(|t| backend.transfer_out(t.view()))
+            .map(|t| t.ready_view().and_then(|view| backend.transfer_out(view)))
             .collect::<Result<Vec<CpuStorage>>>()?;
 
         macro_rules! assemble {
@@ -141,7 +141,7 @@ fn concat_values(
         } else {
             region
         };
-        backend.copy_into(part.view(), &mut storage, &region)?;
+        backend.copy_into(part.ready_view()?, &mut storage, &region)?;
         start += size;
     }
     Ok(Tensor::from_parts(storage, layout))
@@ -247,7 +247,7 @@ impl Tensor {
             None => {
                 // Not expressible as a view: materialize row-major, then the
                 // target shape is trivially a contiguous view of the copy.
-                let storage = dispatch::backend(self.device()).copy_strided(self.view())?;
+                let storage = dispatch::backend(self.device()).copy_strided(self.ready_view()?)?;
                 Tensor::from_parts(storage, Layout::contiguous(target)?)
             }
         };

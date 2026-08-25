@@ -88,8 +88,10 @@ impl Device {
     /// - CUDA: synchronizes the stream, then collects deferred bounds verdicts.
     /// - WGPU: polls the device until the queue has drained.
     ///
-    /// What it does **not** do is order anything with respect to *other*
-    /// devices, or wait for work submitted after the call.
+    /// A device-wide synchronize does not discover pending lazy tensors because
+    /// those expressions are owned by their tensor handles; call
+    /// [`Tensor::realize`](crate::Tensor::realize) on each root when lazy
+    /// execution is enabled.
     ///
     /// # Errors
     ///

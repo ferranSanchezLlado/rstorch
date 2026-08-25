@@ -39,6 +39,14 @@ pub(crate) enum FieldKind {
     Module,
 }
 
+/// Explicit dynamic field-classification override.
+pub(crate) enum FieldOverride {
+    Param,
+    Buffer,
+    Child,
+    Skip,
+}
+
 /// Everything that distinguishes one derive from the other inside [`expand`].
 pub(crate) struct Spec {
     /// Derive name as written (`Module` / `TypedModule`), used in the
@@ -210,8 +218,52 @@ pub(crate) fn inner_of_angle(segment: &syn::PathSegment) -> Option<&Type> {
     }
     match arguments.args.first()? {
         GenericArgument::Type(ty) => Some(ty),
+
         _ => None,
     }
+}
+/// Read an explicit `#[module(param|buffer|child|skip)]` override.
+///
+/// The dynamic derive uses this before syntactic type inference. The typed
+/// derive intentionally keeps its stricter `#[typed_module(skip)]` grammar.
+pub(crate) fn explicit_field_override(
+    field: &syn::Field,
+    attr_name: &str,
+) -> Result<Option<FieldOverride>> {
+    let mut found = None;
+    for attr in &field.attrs {
+        if !attr.path().is_ident(attr_name) {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            let value = if meta.path.is_ident("param") {
+                FieldOverride::Param
+            } else if meta.path.is_ident("buffer") {
+                FieldOverride::Buffer
+            } else if meta.path.is_ident("child") {
+                FieldOverride::Child
+            } else if meta.path.is_ident("skip") {
+                FieldOverride::Skip
+            } else {
+                return Err(Error::new(
+                    meta.path.span(),
+                    format!(
+                        "unknown #[{attr_name}(...)] option; supported options are \
+                         `param`, `buffer`, `child`, and `skip`"
+                    ),
+                ));
+            };
+            if found.is_some() {
+                return Err(Error::new(
+                    meta.path.span(),
+                    format!("only one #[{attr_name}(...)] classification is allowed"),
+                ));
+            }
+            found = Some(value);
+            Ok(())
+        })?;
+    }
+    Ok(found)
 }
 
 /// Read `#[<attr>(skip)]`. Any other `#[<attr>(...)]` content is a hard error

@@ -33,8 +33,9 @@
 //!   chain must not touch the stack), keeps one cotangent per node in a map,
 //!   sums the contributions that arrive from several consumers in F32 for
 //!   F16/BF16 nodes (narrowing once when the fan-in is complete), and drops each
-//!   cotangent as soon as its node has been processed. Nothing in the graph is
-//!   mutated, so the same graph can be differentiated twice and from several
+//!   cotangent as soon as its node has been processed. Graph nodes are never
+//!   mutated; deferred storage may fill its write-once computation cache, so
+//!   the same graph can still be differentiated twice and from several
 //!   threads.
 //! - **[`Drop`] is iterative too.** Dropping the head of a long chain would
 //!   otherwise recurse once per node; [`Node`]'s `Drop` moves the parents onto
@@ -261,6 +262,10 @@ pub(crate) fn backward(t: &Tensor) -> Result<Grads> {
         .node()
         .cloned()
         .ok_or(Error::NotTraced { op: "backward" })?;
+    // A deferred root can outlive the guard that created it. Realize and
+    // synchronize only when this root is still pending; ordinary eager or
+    // already-materialized paths remain asynchronous.
+    crate::lazy::flush_tensors(&[t])?;
     let seed = Tensor::ones(t.dims(), t.dtype(), &t.device())?;
 
     let mut cotangents: HashMap<usize, Accumulated> = HashMap::new();
@@ -295,7 +300,20 @@ pub(crate) fn backward(t: &Tensor) -> Result<Grads> {
             accumulate_wide(&mut cotangents, node_id(parent), contribution.detach())?;
         }
     }
-    Ok(Grads { grads })
+    let result = Grads { grads };
+    let has_pending = result
+        .grads
+        .values()
+        .any(|accumulated| accumulated.value.storage().is_pending());
+    if has_pending {
+        let values: Vec<&Tensor> = result
+            .grads
+            .values()
+            .map(|accumulated| &accumulated.value)
+            .collect();
+        crate::lazy::flush_tensors(&values)?;
+    }
+    Ok(result)
 }
 
 /// The nodes reachable from `root`, in reverse topological order (`root`
@@ -500,6 +518,44 @@ impl Grads {
             .remove(&key)
             .map(|accumulated| accumulated.wide())
             .transpose()
+    }
+
+    /// Validate a gradient's metadata without materializing the public,
+    /// parameter-dtype observation returned by [`wrt`](Self::wrt).
+    ///
+    /// Optimizers use this before draining the already-wide accumulation so
+    /// reduced-precision gradients are not narrowed merely for validation.
+    pub(crate) fn validate_wrt(
+        &self,
+        key: GradKey,
+        expected: &Tensor,
+        op: &'static str,
+    ) -> Result<()> {
+        let Some(accumulated) = self.grads.get(&key) else {
+            return Err(Error::NotTraced { op });
+        };
+        if accumulated.value.dims() != expected.dims() {
+            return Err(Error::ShapeMismatch {
+                op,
+                lhs: expected.shape().clone(),
+                rhs: accumulated.value.shape().clone(),
+            });
+        }
+        if accumulated.dtype != expected.dtype() {
+            return Err(Error::DTypeMismatch {
+                op,
+                expected: expected.dtype(),
+                got: accumulated.dtype,
+            });
+        }
+        if accumulated.value.device() != expected.device() {
+            return Err(Error::DeviceMismatch {
+                op,
+                expected: expected.device(),
+                got: accumulated.value.device(),
+            });
+        }
+        Ok(())
     }
 
     /// Number of gradient entries.

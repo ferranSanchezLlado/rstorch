@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn the_layer_holds_no_parameters_and_no_buffers() {
         let d = dropout(0.5, 11);
-        assert!(d.state_dict().is_empty(), "rng must not be a leaf");
+        assert!(d.state_dict().unwrap().is_empty(), "rng must not be a leaf");
         assert_eq!(d.num_params(), 0);
         let mut visited = 0;
         d.visit(&mut nn::Visitor::new(&mut |_, _| visited += 1));
