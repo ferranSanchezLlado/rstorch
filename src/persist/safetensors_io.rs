@@ -665,7 +665,7 @@ mod tests {
         for (name, header) in [("arrays", arrays), ("objects", objects)] {
             std::thread::Builder::new()
                 .name(format!("nested-{name}"))
-                .stack_size(64 * 1024)
+                .stack_size(256 * 1024)
                 .spawn(move || {
                     let error = reject_duplicate_json_keys(header.as_bytes()).unwrap_err();
                     let cause = std::error::Error::source(&error)

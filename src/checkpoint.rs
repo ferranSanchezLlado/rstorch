@@ -32,12 +32,11 @@ fn pack<T, const N: usize>(values: Vec<T>, to_le: impl Fn(T) -> [u8; N]) -> Vec<
 /// `HostTensor` validated it against its dtype at construction.
 fn unpack<T, const N: usize>(bytes: &[u8], from_le: impl Fn([u8; N]) -> T) -> Vec<T> {
     bytes
-        .chunks_exact(N)
-        .map(|chunk| {
-            let mut buf = [0u8; N];
-            buf.copy_from_slice(chunk);
-            from_le(buf)
-        })
+        .as_chunks::<N>()
+        .0
+        .iter()
+        .copied()
+        .map(from_le)
         .collect()
 }
 

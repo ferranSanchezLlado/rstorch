@@ -282,14 +282,14 @@ kernel void unary_##NAME(device const TYPE* x [[buffer(0)]],device TYPE* out [[b
     giving 0 for x in [43.75, 44.25] and NaN from 44.5 up, where the CPU
     reference (and PyTorch) saturate to 1. A silently wrong finite 0 from a
     saturating activation is the worse half of that.
-    tanh is within one f32 ulp of +/-1 from |x| >= 10 (tanh(10) = 1 - 4.1e-9,
-    against a spacing of 6.0e-8 below 1), so saturating there is exact in f32
-    and avoids the broken region entirely; native tanh is used below it, where
-    it agrees with the CPU. Evaluating on |x| and restoring the sign uses that
-    tanh is odd, which also repairs tanh(-0): MSL returns +0 there, where the
-    CPU keeps the sign. fabs(NaN) is NaN and NaN >= 10 is false, so a NaN still
-    reaches tanh and propagates (copysign only moves the sign bit). */ \
- case 4:z=sqrt(v);break;case 5:{float a=fabs(v);z=copysign(a>=10.0f?1.0f:tanh(a),v);}break;case 6:z=1.0f/(1.0f+exp(-v));break;case 7:z=-v;break;default:z=fabs(v);}out[gid]=FROM(z);}
+    Native tanh also rounds tanh(9) up to 1 on current Apple GPUs, while the
+    f32 CPU result is the preceding representable value. In [9, 10), evaluate
+    the stable positive identity 1-2/(exp(2x)+1) explicitly; below 9 the native
+    function agrees with the CPU, and at 10 saturation is exact in f32.
+    Evaluating on |x| and restoring the sign uses that tanh is odd, which also
+    repairs tanh(-0). fabs(NaN) is NaN and both comparisons are false, so NaN
+    still reaches native tanh and propagates. */ \
+ case 4:z=sqrt(v);break;case 5:{float a=fabs(v);float t=a>=10.0f?1.0f:(a>=9.0f?1.0f-2.0f/(exp(2.0f*a)+1.0f):tanh(a));z=copysign(t,v);}break;case 6:z=1.0f/(1.0f+exp(-v));break;case 7:z=-v;break;default:z=fabs(v);}out[gid]=FROM(z);}
 FLOAT_UNARY(half,f16,FROM_F16)
 FLOAT_UNARY(float,f32,FROM_F32)
 

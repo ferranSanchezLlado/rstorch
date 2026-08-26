@@ -334,7 +334,7 @@ fn arg_reduce(@builtin(global_invocation_id) gid: vec3<u32>) {
     out[oi * 2u + 1u] = 0u;
 }
 
-var<workgroup> softmax_shared: array<f32, 256>;
+var<workgroup> row_shared: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn softmax(
@@ -352,21 +352,18 @@ fn softmax(
         maximum = nan_max(maximum, bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]));
         k += 256u;
     }
-    softmax_shared[local.x] = maximum;
+    row_shared[local.x] = maximum;
     workgroupBarrier();
     var stride = 128u;
     loop {
         if (stride == 0u) { break; }
         if (local.x < stride) {
-            softmax_shared[local.x] = nan_max(
-                softmax_shared[local.x],
-                softmax_shared[local.x + stride],
-            );
+            row_shared[local.x] = nan_max(row_shared[local.x], row_shared[local.x + stride]);
         }
         workgroupBarrier();
         stride /= 2u;
     }
-    maximum = softmax_shared[0];
+    maximum = row_shared[0];
     let all_negative_infinity = is_inf(maximum) && maximum < 0.0;
     var total = 0.0;
     k = local.x;
@@ -377,27 +374,26 @@ fn softmax(
             0.0,
             all_negative_infinity,
         );
-        out[start + k] = bitcast<u32>(value);
         total += value;
         k += 256u;
     }
-    softmax_shared[local.x] = total;
+    row_shared[local.x] = total;
     workgroupBarrier();
     stride = 128u;
     loop {
         if (stride == 0u) { break; }
         if (local.x < stride) {
-            softmax_shared[local.x] += softmax_shared[local.x + stride];
+            row_shared[local.x] += row_shared[local.x + stride];
         }
         workgroupBarrier();
         stride /= 2u;
     }
-    storageBarrier();
     k = local.x;
     loop {
         if (k >= width) { break; }
         let value = select(
-            bitcast<f32>(out[start + k]) / softmax_shared[0],
+            exp(bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]) - maximum)
+                / row_shared[0],
             0.0,
             all_negative_infinity,
         );
@@ -405,8 +401,6 @@ fn softmax(
         k += 256u;
     }
 }
-
-var<workgroup> layer_norm_shared: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn layer_norm(
@@ -424,18 +418,18 @@ fn layer_norm(
         mean += bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]);
         k += 256u;
     }
-    layer_norm_shared[local.x] = mean;
+    row_shared[local.x] = mean;
     workgroupBarrier();
     var stride = 128u;
     loop {
         if (stride == 0u) { break; }
         if (local.x < stride) {
-            layer_norm_shared[local.x] += layer_norm_shared[local.x + stride];
+            row_shared[local.x] += row_shared[local.x + stride];
         }
         workgroupBarrier();
         stride /= 2u;
     }
-    mean = layer_norm_shared[0] / f32(width);
+    mean = row_shared[0] / f32(width);
     var variance = 0.0;
     k = local.x;
     loop {
@@ -444,18 +438,18 @@ fn layer_norm(
         variance += centered * centered;
         k += 256u;
     }
-    layer_norm_shared[local.x] = variance;
+    row_shared[local.x] = variance;
     workgroupBarrier();
     stride = 128u;
     loop {
         if (stride == 0u) { break; }
         if (local.x < stride) {
-            layer_norm_shared[local.x] += layer_norm_shared[local.x + stride];
+            row_shared[local.x] += row_shared[local.x + stride];
         }
         workgroupBarrier();
         stride /= 2u;
     }
-    let inv_std = inverseSqrt(layer_norm_shared[0] / f32(width) + bitcast<f32>(p[4]));
+    let inv_std = inverseSqrt(row_shared[0] / f32(width) + bitcast<f32>(p[4]));
     k = local.x;
     loop {
         if (k >= width) { break; }
@@ -464,6 +458,81 @@ fn layer_norm(
         let bias = bitcast<f32>(c[address_fast(k, 44u, p[5] != 0u)]);
         out[start + k] = bitcast<u32>(normalized * weight + bias);
         k += 256u;
+    }
+}
+
+// Software Vulkan adapters have produced corrupted workgroup reductions for
+// F32 row kernels. These fallbacks keep rows parallel while one invocation
+// handles each row; hardware adapters use the workgroup implementations above.
+@compute @workgroup_size(256)
+fn softmax_serial(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let row = gid.x;
+    if (row >= p[2]) { return; }
+    let width = p[3];
+    let start = row * width;
+    var maximum = bitcast<f32>(0xff800000u);
+    var k = 0u;
+    loop {
+        if (k >= width) { break; }
+        maximum = nan_max(maximum, bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]));
+        k += 1u;
+    }
+    let all_negative_infinity = is_inf(maximum) && maximum < 0.0;
+    var total = 0.0;
+    k = 0u;
+    loop {
+        if (k >= width) { break; }
+        total += select(
+            exp(bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]) - maximum),
+            0.0,
+            all_negative_infinity,
+        );
+        k += 1u;
+    }
+    k = 0u;
+    loop {
+        if (k >= width) { break; }
+        let value = select(
+            exp(bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]) - maximum) / total,
+            0.0,
+            all_negative_infinity,
+        );
+        out[start + k] = bitcast<u32>(value);
+        k += 1u;
+    }
+}
+
+@compute @workgroup_size(256)
+fn layer_norm_serial(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let row = gid.x;
+    if (row >= p[2]) { return; }
+    let width = p[3];
+    let start = row * width;
+    var mean = 0.0;
+    var k = 0u;
+    loop {
+        if (k >= width) { break; }
+        mean += bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]);
+        k += 1u;
+    }
+    mean /= f32(width);
+    var variance = 0.0;
+    k = 0u;
+    loop {
+        if (k >= width) { break; }
+        let centered = bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]) - mean;
+        variance += centered * centered;
+        k += 1u;
+    }
+    let inv_std = inverseSqrt(variance / f32(width) + bitcast<f32>(p[4]));
+    k = 0u;
+    loop {
+        if (k >= width) { break; }
+        let normalized = (bitcast<f32>(a[address_fast(start + k, 8u, p[5] != 0u)]) - mean) * inv_std;
+        let weight = bitcast<f32>(b[address_fast(k, 26u, p[5] != 0u)]);
+        let bias = bitcast<f32>(c[address_fast(k, 44u, p[5] != 0u)]);
+        out[start + k] = bitcast<u32>(normalized * weight + bias);
+        k += 1u;
     }
 }
 

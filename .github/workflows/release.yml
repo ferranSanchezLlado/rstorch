@@ -129,6 +129,8 @@ jobs:
       # backend with no vendor to load, so ordinal 0 is the lavapipe Vulkan
       # adapter installed below.
       __EGL_VENDOR_LIBRARY_FILENAMES: /dev/null
+      # Match ci.yml's software-adapter row kernels.
+      RSTORCH_WGPU_SERIAL_ROWS: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Install stable

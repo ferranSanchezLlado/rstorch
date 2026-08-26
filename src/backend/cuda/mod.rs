@@ -926,7 +926,7 @@ impl CudaBackend {
             return Err(unsupported("fused_sgd_step", inputs[0]));
         }
         validate_optimizer("fused_sgd_step", inputs, 2)?;
-        crate::backend::cpu::fused::validate_sgd_scalars(
+        crate::optim::validate::sgd_scalars(
             "fused_sgd_step",
             scalars[0],
             scalars[1],
@@ -996,7 +996,7 @@ impl CudaBackend {
             return Err(unsupported("fused_adam_step", inputs[0]));
         }
         validate_optimizer("fused_adam_step", inputs, 2)?;
-        crate::backend::cpu::fused::validate_adam_scalars("fused_adam_step", scalars, dtype)?;
+        crate::optim::validate::adam_scalars("fused_adam_step", scalars, dtype)?;
         let context = self.context()?;
         check_context("fused_adam_step", &context, inputs)?;
         let dense = self.dense_inputs(inputs)?;

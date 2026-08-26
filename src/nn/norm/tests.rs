@@ -515,7 +515,7 @@ fn reduced_precision_layer_norm_uses_the_fused_wide_path() {
         let weights = [1.5f32, -0.5, 2.0];
         let biases = [0.25f32, -0.5, 0.75];
         let mut expected = Vec::with_capacity(inputs.len());
-        for row in inputs.chunks_exact(3) {
+        for row in inputs.as_chunks::<3>().0 {
             let row: Vec<f32> = row
                 .iter()
                 .map(|&value| match dtype {

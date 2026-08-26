@@ -125,6 +125,9 @@ jobs:
       # adapter installed below. That also makes LIBGL_ALWAYS_SOFTWARE
       # pointless here: there is no GL path left to force onto llvmpipe.
       __EGL_VENDOR_LIBRARY_FILENAMES: /dev/null
+      # Lavapipe's F32 workgroup reductions are unreliable; select the
+      # one-invocation-per-row kernels while retaining parallel rows.
+      RSTORCH_WGPU_SERIAL_ROWS: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Install stable

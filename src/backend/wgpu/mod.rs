@@ -47,6 +47,7 @@ struct Validation {
 struct Context {
     ordinal: usize,
     device: ::wgpu::Device,
+    serial_row_kernels: bool,
     queue: ::wgpu::Queue,
     shader: ::wgpu::ShaderModule,
     f16_shaders: Option<F16Shaders>,
@@ -179,6 +180,10 @@ fn create_context(ordinal: usize) -> std::result::Result<Arc<Context>, String> {
         .ok_or_else(|| format!("adapter ordinal {ordinal} is unavailable"))?;
     let limits = required_limits();
     let shader_f16 = adapter.features().contains(::wgpu::Features::SHADER_F16);
+    let adapter_info = adapter.get_info();
+    let serial_row_kernels = std::env::var_os("RSTORCH_WGPU_SERIAL_ROWS").is_some()
+        || adapter_info.device_type == ::wgpu::DeviceType::Cpu
+        || adapter_info.vendor == 0x10005;
     let required_features = if shader_f16 {
         ::wgpu::Features::SHADER_F16
     } else {
@@ -237,6 +242,7 @@ fn create_context(ordinal: usize) -> std::result::Result<Arc<Context>, String> {
     Ok(Arc::new(Context {
         ordinal,
         device,
+        serial_row_kernels,
         queue,
         shader,
         f16_shaders,
@@ -814,8 +820,10 @@ impl BackendOps for WgpuBackend {
         for validation in dense.validations.iter() {
             let bytes = dense.context.read(&validation.buffer, 16)?;
             let fields: Vec<u32> = bytes
-                .chunks_exact(4)
-                .map(|v| u32::from_ne_bytes(v.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&v| u32::from_ne_bytes(v))
                 .collect();
             if fields[0] != 0 {
                 let bits = u64::from(fields[1]) | (u64::from(fields[2]) << 32);
@@ -834,20 +842,26 @@ impl BackendOps for WgpuBackend {
         if dense.dtype == DType::F16 {
             return Ok(CpuStorage::F16(Arc::new(
                 bytes
-                    .chunks_exact(2)
-                    .map(|v| half::f16::from_bits(u16::from_ne_bytes(v.try_into().unwrap())))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&v| half::f16::from_bits(u16::from_ne_bytes(v)))
                     .collect(),
             )));
         }
         let raw: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|v| u32::from_ne_bytes(v.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&v| u32::from_ne_bytes(v))
             .collect();
         Ok(match dense.dtype {
             DType::F32 => CpuStorage::F32(Arc::new(raw.into_iter().map(f32::from_bits).collect())),
             DType::Bool => CpuStorage::Bool(Arc::new(raw.into_iter().map(|v| v != 0).collect())),
             DType::I64 => CpuStorage::I64(Arc::new(
-                raw.chunks_exact(2)
+                raw.as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|v| (u64::from(v[0]) | (u64::from(v[1]) << 32)) as i64)
                     .collect(),
             )),
@@ -1611,7 +1625,7 @@ impl BackendOps for WgpuBackend {
 
     fn fused(&self, op: FusedOp, inputs: &[View<'_>], scalars: &[f64]) -> Result<Vec<Storage>> {
         let dtype = inputs.first().map_or(DType::F32, View::dtype);
-        let entry = match (op, inputs, scalars) {
+        let mut entry = match (op, inputs, scalars) {
             (FusedOp::Softmax, [x], []) if x.dtype() == DType::F32 => "softmax",
             (FusedOp::Softmax, [x], [])
                 if x.dtype() == DType::F16 && supports_f16(Device::Wgpu(self.ordinal)) =>
@@ -1653,6 +1667,13 @@ impl BackendOps for WgpuBackend {
         })?;
         let rows = x.layout().num_elements() / width;
         let context = context(self.ordinal)?;
+        if context.serial_row_kernels {
+            entry = match entry {
+                "softmax" => "softmax_serial",
+                "layer_norm" => "layer_norm_serial",
+                other => other,
+            };
+        }
         let values = inputs
             .iter()
             .map(|view| storage(*view, entry, self.ordinal))
@@ -1691,7 +1712,11 @@ impl BackendOps for WgpuBackend {
             dtype,
             &params,
             false,
-            Some([u32_checked(rows, entry)?, 1, 1]),
+            Some(if context.serial_row_kernels && dtype == DType::F32 {
+                [u32_checked(rows, entry)?.div_ceil(WORKGROUP), 1, 1]
+            } else {
+                [u32_checked(rows, entry)?, 1, 1]
+            }),
         )?;
         Ok(vec![Storage::Wgpu(result)])
     }
