@@ -15,7 +15,7 @@
 
 // The prelude brings the `Module` *trait* and the `Module` *derive macro*
 // (different namespaces, one name) in one glob — the intended user spelling.
-use rstorch::prelude::*;
+use rstorch_alias::prelude::*;
 
 /// If this compiles, `T`'s generated `impl Module` satisfies the real trait,
 /// its visitor calls resolved against the real `Visitor`/`VisitorMut`, and `T`
@@ -26,8 +26,8 @@ fn assert_module<T: Module>() {}
 /// `Module` to recurse into (no derive, no tensors).
 struct Leaf;
 impl Module for Leaf {
-    fn visit(&self, _v: &mut rstorch::nn::Visitor) {}
-    fn visit_mut(&mut self, _v: &mut rstorch::nn::VisitorMut) {}
+    fn visit(&self, _v: &mut rstorch_alias::nn::Visitor) {}
+    fn visit_mut(&mut self, _v: &mut rstorch_alias::nn::VisitorMut) {}
 }
 
 #[derive(Module)]

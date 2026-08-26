@@ -10,13 +10,13 @@ use crate::error::Result;
 const TINY_SHAKESPEARE_DATASET: &str = "tiny_shakespeare";
 
 /// The single-file `TinyShakespeare` corpus resource.
-pub const TINY_SHAKESPEARE: DatasetResource = DatasetResource {
-    name: "TinyShakespeare input.txt",
-    url: "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-    file_name: "input.txt",
-    sha256: Some("86c4e6aa9db7c042ec79f339dcb96d42b0075e16b8fc2e86bf0ca57e2dc565ed"),
-    max_bytes: Some(2_000_000),
-};
+pub const TINY_SHAKESPEARE: DatasetResource = DatasetResource::new(
+    "TinyShakespeare input.txt",
+    "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+    "input.txt",
+    Some("86c4e6aa9db7c042ec79f339dcb96d42b0075e16b8fc2e86bf0ca57e2dc565ed"),
+    Some(2_000_000),
+);
 
 /// The `TinyShakespeare` corpus source.
 ///
@@ -41,7 +41,12 @@ pub struct TinyShakespeare;
 
 impl TinyShakespeare {
     /// The cache path the corpus is (or would be) stored at.
-    pub fn cache_path(hub: &DatasetHub) -> std::path::PathBuf {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Data`](crate::Error::Data) if the fixed cache key is
+    /// ever changed to an invalid path component.
+    pub fn cache_path(hub: &DatasetHub) -> Result<std::path::PathBuf> {
         hub.resource_path(TINY_SHAKESPEARE_DATASET, &TINY_SHAKESPEARE)
     }
 
@@ -72,15 +77,20 @@ impl TinyShakespeare {
         Ok(std::fs::read_to_string(path)?)
     }
 
-    /// Reads the already-cached corpus as UTF-8 text without any network
-    /// access. Returns an [`crate::Error::Io`] if it has not been downloaded.
+    /// Reads the already-cached corpus as verified UTF-8 text without any
+    /// network access. Returns an [`crate::Error::Io`] if it has not been
+    /// downloaded, and [`crate::Error::Data`] if its fixed size or checksum
+    /// does not match [`TINY_SHAKESPEARE`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::Io`](crate::Error::Io) if the corpus has not been
-    /// downloaded into `hub`'s cache, or is not valid UTF-8.
+    /// downloaded into `hub`'s cache, [`Error::Data`](crate::Error::Data) if
+    /// the cached bytes fail verification, or [`Error::Io`](crate::Error::Io)
+    /// if the file is not valid UTF-8.
     pub fn read_cached_text(hub: &DatasetHub) -> Result<String> {
-        Ok(std::fs::read_to_string(Self::cache_path(hub))?)
+        let path = hub.verified_cached_path(TINY_SHAKESPEARE_DATASET, &TINY_SHAKESPEARE)?;
+        Ok(std::fs::read_to_string(path)?)
     }
 }
 
@@ -109,23 +119,23 @@ mod tests {
     #[test]
     fn cache_path_uses_dataset_subdir() {
         let hub = DatasetHub::new("/tmp/rstorch-ts-root");
-        let path = TinyShakespeare::cache_path(&hub);
+        let path = TinyShakespeare::cache_path(&hub).unwrap();
         assert!(path.ends_with("tiny_shakespeare/input.txt"));
     }
 
     #[test]
-    fn read_cached_text_round_trips_written_file() {
+    fn read_cached_text_rejects_unverified_file() {
         let root = scratch("read");
         let _ = std::fs::remove_dir_all(&root);
         let hub = DatasetHub::new(&root);
-        let path = TinyShakespeare::cache_path(&hub);
+        let path = TinyShakespeare::cache_path(&hub).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "To be, or not to be").unwrap();
 
-        assert_eq!(
-            TinyShakespeare::read_cached_text(&hub).unwrap(),
-            "To be, or not to be"
-        );
+        assert!(matches!(
+            TinyShakespeare::read_cached_text(&hub),
+            Err(Error::Data { msg, .. }) if msg.contains("checksum mismatch")
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

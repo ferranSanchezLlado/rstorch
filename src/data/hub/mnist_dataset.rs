@@ -24,6 +24,7 @@ use crate::tensor::Tensor;
 ///
 /// The pixels are identical either way — only the input tensor's shape
 /// differs, and with it which layers the batch can be fed to.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MnistLayout {
     /// One row of `rows * cols` pixels per image: a batch is

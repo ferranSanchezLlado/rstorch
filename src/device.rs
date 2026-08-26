@@ -31,7 +31,8 @@ pub enum Device {
     /// NVIDIA CUDA GPU, identified by device ordinal.
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     Cuda(usize),
-    /// Portable WebGPU adapter, identified by deterministic adapter ordinal.
+    /// Portable WebGPU adapter, identified by an ordinal in the current
+    /// process's sorted adapter set; it is not a stable device identity.
     #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
     Wgpu(usize),
 }
@@ -39,19 +40,24 @@ pub enum Device {
 impl Device {
     /// The best device available at runtime.
     ///
-    /// Returns the first available device in this order: Metal on macOS when
-    /// the `metal` feature is enabled, CUDA on Linux or Windows when the `cuda`
-    /// feature is enabled, the highest-ranked hardware WGPU adapter when the
-    /// `wgpu` feature is enabled, and finally [`Device::Cpu`]. Software
-    /// adapters are never selected, and the WGPU ranking prefers a discrete
-    /// GPU over an integrated one, then virtual, then other; ties break by
-    /// backend, preferring DX12 or Metal over Vulkan over GL.
+    /// Returns the first device that can initialize in this order: Metal
+    /// ordinal 0 on macOS when the `metal` feature is enabled, CUDA on Linux
+    /// or Windows when the `cuda` feature is enabled, the highest-ranked
+    /// eligible WGPU adapter when the `wgpu` feature is enabled, and finally
+    /// [`Device::Cpu`]. Metal availability includes runtime shader
+    /// compilation, command-queue creation, and validation-buffer allocation;
+    /// a Metal ordinal that fails any of those steps is skipped. WGPU adapter
+    /// type and backend are driver-reported; automatic selection excludes
+    /// adapters reported as `Cpu`, while other software classification is
+    /// backend-dependent. WGPU ranking prefers a discrete GPU over an
+    /// integrated one, then virtual, then other; ties break by backend,
+    /// preferring DX12 or Metal over Vulkan over GL.
     ///
     /// Availability and performance are runtime properties; selecting a GPU
     /// does not promise that it is faster than CPU.
     pub fn best_available() -> Device {
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        if !objc2_metal::MTLCopyAllDevices().is_empty() {
+        if crate::backend::metal::is_available(0) {
             return Device::Metal(0);
         }
         #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
@@ -151,7 +157,7 @@ mod tests {
     #[test]
     fn best_available_exists() {
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        if !objc2_metal::MTLCopyAllDevices().is_empty() {
+        if crate::backend::metal::is_available(0) {
             assert_eq!(Device::best_available(), Device::Metal(0));
             return;
         }

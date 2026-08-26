@@ -13,39 +13,40 @@ use crate::error::{Error, Result};
 const MNIST_DATASET: &str = "mnist";
 
 /// The training-set image archive.
-pub const TRAIN_IMAGES: DatasetResource = DatasetResource {
-    name: "train images",
-    url: "https://storage.googleapis.com/cvdf-datasets/mnist/train-images-idx3-ubyte.gz",
-    file_name: "train-images-idx3-ubyte.gz",
-    sha256: Some("440fcabf73cc546fa21475e81ea370265605f56be210a4024d2ca8f203523609"),
-    max_bytes: Some(12_000_000),
-};
+pub const TRAIN_IMAGES: DatasetResource = DatasetResource::new(
+    "train images",
+    "https://storage.googleapis.com/cvdf-datasets/mnist/train-images-idx3-ubyte.gz",
+    "train-images-idx3-ubyte.gz",
+    Some("440fcabf73cc546fa21475e81ea370265605f56be210a4024d2ca8f203523609"),
+    Some(12_000_000),
+);
 /// The training-set label archive.
-pub const TRAIN_LABELS: DatasetResource = DatasetResource {
-    name: "train labels",
-    url: "https://storage.googleapis.com/cvdf-datasets/mnist/train-labels-idx1-ubyte.gz",
-    file_name: "train-labels-idx1-ubyte.gz",
-    sha256: Some("3552534a0a558bbed6aed32b30c495cca23d567ec52cac8be1a0730e8010255c"),
-    max_bytes: Some(50_000),
-};
+pub const TRAIN_LABELS: DatasetResource = DatasetResource::new(
+    "train labels",
+    "https://storage.googleapis.com/cvdf-datasets/mnist/train-labels-idx1-ubyte.gz",
+    "train-labels-idx1-ubyte.gz",
+    Some("3552534a0a558bbed6aed32b30c495cca23d567ec52cac8be1a0730e8010255c"),
+    Some(50_000),
+);
 /// The test-set image archive.
-pub const TEST_IMAGES: DatasetResource = DatasetResource {
-    name: "test images",
-    url: "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-images-idx3-ubyte.gz",
-    file_name: "t10k-images-idx3-ubyte.gz",
-    sha256: Some("8d422c7b0a1c1c79245a5bcf07fe86e33eeafee792b84584aec276f5a2dbc4e6"),
-    max_bytes: Some(2_000_000),
-};
+pub const TEST_IMAGES: DatasetResource = DatasetResource::new(
+    "test images",
+    "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-images-idx3-ubyte.gz",
+    "t10k-images-idx3-ubyte.gz",
+    Some("8d422c7b0a1c1c79245a5bcf07fe86e33eeafee792b84584aec276f5a2dbc4e6"),
+    Some(2_000_000),
+);
 /// The test-set label archive.
-pub const TEST_LABELS: DatasetResource = DatasetResource {
-    name: "test labels",
-    url: "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-labels-idx1-ubyte.gz",
-    file_name: "t10k-labels-idx1-ubyte.gz",
-    sha256: Some("f7ae60f92e00ec6debd23a6088c31dbd2371eca3ffa0defaefb259924204aec6"),
-    max_bytes: Some(10_000),
-};
+pub const TEST_LABELS: DatasetResource = DatasetResource::new(
+    "test labels",
+    "https://storage.googleapis.com/cvdf-datasets/mnist/t10k-labels-idx1-ubyte.gz",
+    "t10k-labels-idx1-ubyte.gz",
+    Some("f7ae60f92e00ec6debd23a6088c31dbd2371eca3ffa0defaefb259924204aec6"),
+    Some(10_000),
+);
 
 /// Which half of MNIST to load.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MnistSplit {
     /// The 60 000-image training split.
@@ -66,6 +67,7 @@ impl MnistSplit {
 }
 
 /// A single MNIST example: one flattened image and its class label.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MnistSample {
     /// Row-major pixels normalized to `[0.0, 1.0]`; length `rows * cols`.
@@ -74,8 +76,29 @@ pub struct MnistSample {
     pub label: u8,
 }
 
+impl MnistSample {
+    /// Creates one sample from flattened normalized pixels and a digit label.
+    ///
+    /// This constructor does not validate the label or pixel geometry; parsed
+    /// MNIST data receives those checks through [`Mnist::from_idx_bytes`].
+    pub fn new(image: Vec<f32>, label: u8) -> Self {
+        Self { image, label }
+    }
+
+    /// The flattened normalized image pixels.
+    pub fn image(&self) -> &[f32] {
+        &self.image
+    }
+
+    /// The digit class.
+    pub fn label(&self) -> u8 {
+        self.label
+    }
+}
+
 /// The result of parsing an IDX image file: the raw pixel data plus its
 /// geometry.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawImages {
     /// One `f32` pixel vector per image, each normalized to `[0.0, 1.0]`.
@@ -84,6 +107,31 @@ pub struct RawImages {
     pub rows: usize,
     /// Image width in pixels.
     pub cols: usize,
+}
+
+impl RawImages {
+    /// Creates parsed image data with its declared geometry.
+    ///
+    /// This constructor records the supplied geometry without validating
+    /// individual pixel-vector lengths.
+    pub fn new(images: Vec<Vec<f32>>, rows: usize, cols: usize) -> Self {
+        Self { images, rows, cols }
+    }
+
+    /// The flattened normalized images.
+    pub fn images(&self) -> &[Vec<f32>] {
+        &self.images
+    }
+
+    /// Image height in pixels.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Image width in pixels.
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
 }
 
 /// A parsed MNIST split held entirely in memory as plain `Vec`s.
@@ -157,7 +205,8 @@ impl Mnist {
     /// # Errors
     ///
     /// As [`parse_idx_images`] and [`parse_idx_labels`]. Returns
-    /// [`Error::Data`] if the parsed image and label counts disagree.
+    /// [`Error::Data`] if the parsed image and label counts disagree or if a
+    /// label is outside the MNIST digit range `0..=9`.
     pub fn from_idx_bytes(images: &[u8], labels: &[u8]) -> Result<Self> {
         let parsed = parse_idx_images(images)?;
         let labels = parse_idx_labels(labels)?;
@@ -168,6 +217,11 @@ impl Mnist {
                 labels.len()
             )));
         }
+        if let Some((index, &label)) = labels.iter().enumerate().find(|&(_, &label)| label > 9) {
+            return Err(Error::data(format!(
+                "MNIST label at index {index} is {label}, expected a digit in 0..=9"
+            )));
+        }
         Ok(Self {
             images: parsed.images,
             labels,
@@ -175,7 +229,6 @@ impl Mnist {
             cols: parsed.cols,
         })
     }
-
     /// The `(rows, cols)` geometry of every image (always `(28, 28)` for the
     /// real dataset).
     pub fn image_shape(&self) -> (usize, usize) {
@@ -211,10 +264,10 @@ impl Mnist {
     /// Clones one example into an owned [`MnistSample`], or `None` if `index`
     /// is out of range.
     pub fn sample(&self, index: usize) -> Option<MnistSample> {
-        Some(MnistSample {
-            image: self.images.get(index)?.clone(),
-            label: self.labels[index],
-        })
+        Some(MnistSample::new(
+            self.images.get(index)?.clone(),
+            self.labels[index],
+        ))
     }
 }
 
@@ -302,14 +355,13 @@ pub fn parse_idx_images(bytes: &[u8]) -> Result<RawImages> {
         .chunks_exact(image_len)
         .map(|image| image.iter().map(|&pixel| pixel as f32 / 255.0).collect())
         .collect();
-    Ok(RawImages { images, rows, cols })
+    Ok(RawImages::new(images, rows, cols))
 }
 
 /// Parses a decompressed IDX1 (label) file into a vector of `u8` labels.
 ///
 /// The header magic and the exact byte length are validated.
 ///
-/// # Errors
 ///
 /// Returns [`Error::Data`] if `bytes` is shorter than the IDX1 header, has
 /// the wrong magic, the declared count overflows, or the byte length does
@@ -500,6 +552,27 @@ mod tests {
             Mnist::from_idx_bytes(&images, &labels),
             Err(Error::Data { .. })
         ));
+    }
+    #[test]
+    fn mnist_boundary_rejects_labels_above_nine() {
+        let images = image_fixture(2, 1, 1, &[1, 2]);
+        let labels = label_fixture(&[9, 10]);
+        assert!(matches!(
+            Mnist::from_idx_bytes(&images, &labels),
+            Err(Error::Data { msg, .. }) if msg.contains("0..=9")
+        ));
+        // The low-level IDX parser remains format-generic.
+        assert_eq!(parse_idx_labels(&labels).unwrap(), vec![9, 10]);
+    }
+
+    #[test]
+    fn public_raw_records_have_constructors_and_accessors() {
+        let sample = MnistSample::new(vec![0.25, 1.0], 9);
+        assert_eq!(sample.image(), &[0.25, 1.0]);
+        assert_eq!(sample.label(), 9);
+        let raw = RawImages::new(vec![vec![0.0]], 1, 1);
+        assert_eq!(raw.images(), &[vec![0.0]]);
+        assert_eq!((raw.rows(), raw.cols()), (1, 1));
     }
 
     // Exercises the gzip decode path fully offline: gzip is only compiled

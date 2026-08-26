@@ -2,7 +2,7 @@
 //! typo (e.g. `#[module(skpi)]` or `#[module(rename = "x")]`) cannot silently
 //! do nothing and leave a parameter unexpectedly visited/unvisited.
 
-use rstorch::prelude::*;
+use rstorch_alias::prelude::*;
 
 #[derive(Module)]
 struct Net {

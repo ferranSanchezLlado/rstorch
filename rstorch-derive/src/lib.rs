@@ -1,6 +1,13 @@
 #![warn(missing_docs)]
-
-//! Derive macros for `rstorch`.
+//! The generated paths resolve `rstorch` automatically in the caller. An
+//! in-package expansion uses the runtime library's `::rstorch` self-alias,
+//! while a dependency renamed in `Cargo.toml` (for example
+//! `rstorch_alias = { package = "rstorch", ... }`) uses that alias. If the
+//! macro is expanded outside Cargo, it falls back to `::rstorch` for direct
+//! unit-expansion tests and diagnostics.
+//!
+//! Both derives preserve their existing helper attributes; dependency-name
+//! resolution is independent of `#[module(...)]` and `#[typed_module(...)]`.
 //!
 //! Provides `#[derive(Module)]`: loud-by-default field classification, with
 //! `#[module(param)]`, `#[module(buffer)]`, `#[module(child)]`, and
@@ -100,6 +107,26 @@ mod shared;
 mod typed_module;
 
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::quote;
+
+/// Resolve the runtime crate path in the package that invokes this macro.
+///
+/// `proc-macro-crate` handles dependency aliases. The runtime library also
+/// aliases itself as `rstorch`, so the absolute spelling works both inside the
+/// library and in its separate example/fixture targets; using `crate` would
+/// incorrectly resolve to an example binary's crate root.
+fn runtime_crate() -> TokenStream2 {
+    match crate_name("rstorch") {
+        Ok(FoundCrate::Itself) => quote!(::rstorch),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, Span::call_site());
+            quote!(::#ident)
+        }
+        Err(_) => quote!(::rstorch),
+    }
+}
 
 /// Derive the `rstorch::nn::Module` trait for a `struct`.
 ///
@@ -117,7 +144,7 @@ use proc_macro::TokenStream;
 #[proc_macro_derive(Module, attributes(module))]
 pub fn derive_module(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
-    module::expand(input)
+    module::expand_with_crate(input, runtime_crate())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -135,7 +162,7 @@ pub fn derive_module(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(TypedModule, attributes(typed_module))]
 pub fn derive_typed_module(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
-    typed_module::expand(input)
+    typed_module::expand_with_crate(input, runtime_crate())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

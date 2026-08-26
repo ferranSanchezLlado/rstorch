@@ -1,26 +1,37 @@
 # Releasing
 
 Two crates publish, and the order matters: `rstorch` depends on
-`rstorch-derive` **by version**, so `cargo publish -p rstorch` cannot resolve
-until the matching derive is already on crates.io. This is also why CI's
-packaging job verifies the derive fully but only lists the file set for
-`rstorch` — the full verification is not available until the moment of
-release.
+`rstorch-derive` by an **exact matching version** (`=1.0.0` for this release),
+so the derive must be available on crates.io before the root package can be
+resolved or verified as a publishable package. The derive macro also resolves
+renamed runtime dependencies, and the two crates must remain in exact
+lockstep.
+
+The tag workflow is authoritative: it reruns the release gates on the exact
+commit named by the tag, checks that the tag version matches the workspace,
+and publishes `rstorch-derive` before `rstorch`. The local checklist below is a
+useful subset, not an exact copy of those tag-only gates.
 
 ## Before tagging
 
-Everything here is what CI runs; running it locally first just makes the
-failure cheaper.
+This is a local preflight subset of the tag workflow; running it locally first
+just makes failures cheaper. Tag-only checks (including the exact tag/version
+match, all release-gate jobs, and publication sequencing) remain authoritative.
+
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo test --workspace --no-default-features        # the CPU-only library
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo +1.88 check --workspace --all-features        # MSRV
-cargo +1.88 test --workspace --features testing     # MSRV, executed
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+cargo test --locked --workspace --no-default-features   # the CPU-only library
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
+cargo +1.88 check --locked --workspace --all-features        # MSRV
+cargo +1.88 test --locked --workspace --features testing     # MSRV, executed
+cargo +1.88 test --locked --workspace --no-default-features  # MSRV, CPU-only
 cargo deny check advisories licenses bans sources   # see deny.toml
+```
+
+```sh
 
 # Every trybuild suite early-returns without this variable, so a run that omits
 # it compiles the compile-fail fixtures and asserts nothing. The recorded
@@ -28,37 +39,40 @@ cargo deny check advisories licenses bans sources   # see deny.toml
 # cargo commands in `typed_ui` must use.
 RSTORCH_UI=1 RUSTUP_TOOLCHAIN=1.88 cargo test --locked --workspace --all-features
 
-# The tag is the version being published, so `release.yml` checks this before
-# it runs anything else; disagreement means the whole gate verified the wrong
-# number. Compare it against the tag you are about to push, minus the `v`.
+# For local information only. The tag workflow independently checks that this
+# manifest version matches the `v*` tag before running its release gates.
 cargo metadata --no-deps --format-version 1 \
   | jq -r '.packages[] | select(.name == "rstorch") | .version'
 ```
 
-Then confirm the release itself:
+Before creating the tag, finalize the changelog entry and confirm the release:
 
-- [ ] `CHANGELOG.md` has an entry for this version, and its heading is no
-      longer `unreleased`.
-- [ ] The workspace version in `Cargo.toml` matches it, and so does the
-      `rstorch-derive` dependency requirement.
-- [ ] `cargo package -p rstorch --list` contains no file the build does not
-      need, and no directory that is only present in a working tree.
+- [ ] `CHANGELOG.md` has an entry for this version, with a finalized heading
+      rather than `unreleased`.
+- [ ] The workspace version in `Cargo.toml` matches it, and
+      `rstorch-derive = "=1.0.0"` (the exact matching derive version) does too.
+- [ ] The tag workflow verifies and packages `rstorch-derive` first; only after
+      that derive is available does it verify the root `rstorch` package.
 - [ ] The macOS lanes are green: they are the only ones that build the Metal
       surface at all.
 
 ## Publishing
 
-Pushing the tag *is* the release action. `release.yml` triggers on `v*`, runs
-the gate above again on the exact commit the tag points at, and only then
-publishes: `rstorch-derive` first, `rstorch` second, because the second cannot
-resolve until the first is on the index.
+Pushing the tag *is* the release action. `release.yml` triggers on `v*`, reruns
+the full tag-only gate on the exact commit the tag points at, verifies the
+derive package first, and only then verifies/publishes the root package:
+`rstorch-derive` first, `rstorch` second, because the second cannot resolve
+until the first is on the index.
 
 ```sh
 git tag -a v1.0.0 -m "rstorch 1.0.0"
 git push origin v1.0.0
 ```
 
-Nothing reaches crates.io if the gate fails, so a red run costs only the tag.
+The verification jobs prevent publication before the publish job starts. The
+publish job is intentionally two-stage: if the derive publish succeeds and the
+root publish later fails, the derive version remains on crates.io and the
+release must be resumed rather than rolled back.
 
 ### Manual fallback
 
@@ -83,9 +97,10 @@ depends on the public API by path precisely so it cannot be published against.
 
 ## Raising the MSRV
 
-An MSRV bump is a minor release and needs four edits in step: the
-`rust-version` in `[workspace.package]`, the toolchain matrix in
+An MSRV bump is a minor release and needs the toolchain references updated in
+step: the `rust-version` in `[workspace.package]`, the toolchain matrix in
 `.github/workflows/ci.yml` (including the pinned lanes the UI suites use), the
-pinned `1.88` lanes in `.github/workflows/release.yml` (`verify`'s MSRV check,
-`verify-ui`, `verify-msrv` and `verify-ct20-boundary`), and the number quoted in
-`STABILITY.md` and `README.md`.
+pinned lanes in `.github/workflows/release.yml` (`verify`'s MSRV check,
+`verify-ui`, `verify-msrv` and `verify-ct20-boundary`), the commands and pinned
+toolchain references in this runbook, and the number quoted in `STABILITY.md`
+and `README.md`.

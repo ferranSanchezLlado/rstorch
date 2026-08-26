@@ -129,7 +129,22 @@ remains at the call site.
 | **`optim`** | `Sgd`, `Adam`, `AdamW`, parameter groups, learning-rate schedules |
 | **`data`** | `Dataset`, `DataLoader` with seeded shuffling, `TensorDataset`, `VecDataset`, MNIST and Tiny Shakespeare loaders |
 | **`models`** | `DecoderTransformer` with a config and a `KvCache` for generation |
-| **`persist`** | safetensors model state and composable envelope sections; model-only helpers are transactional, but files are not checksummed or authenticated |
+| **`persist`** | safetensors model state and composable envelope sections; model and optimizer loads are independently transactional, but files are not checksummed or authenticated |
+
+### Checkpoints and state
+
+Generic model checkpoints contain model state. `DecoderTransformer` convenience
+checkpoints contain config plus model tensors and exclude optimizer, RNG,
+application, cache, and tokenizer state. The `Envelope` is versioned as a
+container, while semantic sections own independent schemas; the transformer
+config is strict `version=1`, and future readers must explicitly support prior
+versions. There is no combined transaction spanning model, optimizer, RNG,
+caches, and application state.
+
+Randomness is caller-owned: capture an `Rng` with `state` and resume it with
+`from_state` when needed. `Dropout`'s private child stream is not in model
+state, so exact training resume with dropout requires reconstructing that model
+stream.
 
 ## Examples
 
@@ -152,11 +167,20 @@ cargo run --release --example typed_mnist --features typed,hub
 |---|---|---|
 | `typed` | off | Experimental compile-time checked rank, dimensions, dtype and device placement, as a wrapper over the same `Tensor`; outside the dynamic 1.x stability guarantee. |
 | `rayon` | off | Multi-threaded CPU kernels. Results stay bit-identical to the single-threaded kernels of the same build: kernels partition by output element, so no float is accumulated across threads in a racing order. |
-| `hub` | off | Downloads for the bundled MNIST and Tiny Shakespeare datasets. |
-| `metal` | on | GPU backend on macOS. `Device::best_available` selects the first Metal device when present, then considers CUDA, WGPU and CPU. |
+| `hub` | off | Downloads for the bundled MNIST and Tiny Shakespeare datasets. `DatasetHub::default_cache` uses `RSTORCH_DATA`, then `$HOME/.cache/rstorch`, then CWD-relative `data/`. |
+| `metal` | on | GPU backend on macOS. `Device::best_available` probes Metal ordinal 0 with complete context initialization, then considers CUDA, WGPU and CPU. |
 | `cuda` | off | Native NVIDIA CUDA backend on Linux and Windows, including Linux under WSL. Supports F16/F32 compute and lossless I64/Bool storage on compute capability 6.0 or newer. Bundled PTX requires a compatible NVIDIA driver but not the CUDA toolkit. **Validated locally, not CI-gated** — see [STABILITY.md](STABILITY.md). |
 | `wgpu` | off | Portable native WebGPU backend. F32 is always supported; native F16 is enabled only when the adapter advertises `SHADER_F16`. I64 index storage remains lossless. |
 | `testing` | off | The finite-difference gradient harness; outside the stability guarantee. |
+| `bench-resnet` | off | Benchmark-only feature enabling the `resnet_mnist` benchmark target; it adds no library runtime surface. |
+
+### Dataset hub cache and paths
+
+`DatasetHub::dataset_dir`, `resource_path`, and related public helpers validate
+that each dataset/resource name is one ordinary path component and return an
+error otherwise. Cache hits are checked against the declared size and checksum
+before use; Tiny Shakespeare verifies both before UTF-8 decoding. The checksum
+is an integrity check, not a cryptographic authenticity guarantee.
 
 ## Backends and dtypes
 
@@ -170,19 +194,19 @@ but a CUDA toolkit installation is not. CUDA is validated locally against the
 CPU reference rather than in CI (no CI runner has CUDA hardware), so its
 *behaviour* carries a weaker claim than the other backends' — its API is
 covered like everything else; see [STABILITY.md](STABILITY.md). WGPU is also
-opt-in and supports F32
-compute plus native F16 when `SHADER_F16` is available, with
-lossless I64 and Bool storage, and its kernels do execute in CI against a
-software Vulkan adapter. Unsupported combinations return an error rather
-than silently promoting or copying through the host.
+opt-in and supports F32 compute plus native F16 when `SHADER_F16` is available,
+with lossless I64 and Bool storage. Unsupported combinations return an error
+rather than silently promoting or copying through the host.
 
-`Device::best_available` chooses Metal first on macOS, then CUDA on Linux or
-Windows, then the highest-ranked hardware WGPU adapter — ranked by device type
-(discrete, then integrated, then virtual, then other) and, within a tie, by
-backend (DX12 or Metal, then Vulkan, then GL) — then CPU. WGPU uses native F16
-when the adapter exposes `SHADER_F16`; otherwise F16 operations fail loudly
-like other unsupported combinations. The feature and hardware must be
-available for a device to be selected; the selection order does not promise a
+`Device::best_available` first accepts Metal on macOS only when its complete
+context initialization succeeds, then considers CUDA, the best eligible WGPU
+adapter, and CPU. WGPU adapter type and backend are driver-reported
+classifications; automatic selection excludes adapters reported as `Cpu`, while
+other software classification is backend-dependent. WGPU ordinals are indices
+in the current process's adapter set, not stable device identities, and must
+not be persisted. WGPU uses native F16 when
+the adapter exposes `SHADER_F16`; otherwise F16 operations fail loudly like
+other unsupported combinations. The selection order does not promise a
 performance win. The complete stability and capability policy is in
 [STABILITY.md](STABILITY.md).
 
@@ -215,9 +239,10 @@ cargo run --release --target x86_64-pc-windows-gnu --features wgpu,hub --example
 ```
 
 WSL interoperability runs the resulting `.exe` directly.
-`Device::best_available` ignores software-only WGPU adapters such as Vulkan
-`llvmpipe`, so their presence does not displace the NVIDIA adapter or prevent
-the CPU fallback.
+`Device::best_available` excludes adapters the driver reports as `Cpu`; other
+software classifications are backend-dependent. Process-local WGPU ordinals
+are not stable identities and must not be persisted, so callers should not
+serialize them as device selections.
 
 ### GPU tests
 
@@ -257,6 +282,13 @@ the same code the dynamic API uses.
 1.0 is a semver commitment: see [STABILITY.md](STABILITY.md) for exactly what
 is covered and what an MSRV bump means. The minimum supported Rust version is
 **1.88**, and the crate is edition 2024.
+
+Public record-shaped types use constructors/builders or non-exhaustive
+boundaries, so downstream code should not depend on exhaustive struct
+literals. Traits are intentional extension points: 1.x additions use defaults
+or extension traits rather than new required methods. The derive macros resolve
+renamed runtime dependencies; `rstorch` and `rstorch-derive` release in exact
+lockstep.
 
 ## Version history
 

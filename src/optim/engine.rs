@@ -195,7 +195,9 @@ pub(crate) struct Decode<'a, R: Rule> {
     /// The whole incoming section, for a rule whose integrity check depends on
     /// a saved hyperparameter.
     pub(crate) incoming: &'a Incoming,
-    /// The optimizer's **current** groups: overrides are code and are never
+    /// The adopted base hyperparameters from the checkpoint.
+    pub(crate) base: R::Hyper,
+    /// The optimizer's current groups: overrides are code and are never
     /// persisted, so only a base can come from the file.
     pub(crate) groups: &'a Groups<R::Hyper>,
 }
@@ -432,7 +434,7 @@ impl<R: Rule> Engine<R> {
         let mut base = *self.groups.base();
         rule.adopt(&mut base, &incoming)?;
         self.check_adopted(model, &rule, lr, base)?;
-        let restored = state::restore(model, &incoming, &self.rule, &self.groups)?;
+        let restored = state::restore(model, &incoming, &rule, &self.groups, base)?;
 
         self.lr = lr;
         self.rule = rule;

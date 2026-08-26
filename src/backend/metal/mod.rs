@@ -225,6 +225,15 @@ pub(crate) fn backend(ordinal: usize) -> &'static dyn BackendOps {
         .or_insert_with(|| Box::leak(Box::new(MetalBackend { ordinal })))
 }
 
+/// Whether `ordinal` can initialize the complete Metal context used by real
+/// backend operations. This deliberately goes through [`context`] so the
+/// result is cached with normal backend initialization, including runtime
+/// shader compilation, command-queue creation, and validation-buffer
+/// allocation.
+pub(crate) fn is_available(ordinal: usize) -> bool {
+    context(ordinal).is_ok()
+}
+
 fn context(ordinal: usize) -> Result<Arc<Context>> {
     static CONTEXTS: OnceLock<ContextRegistry> = OnceLock::new();
     let value = CONTEXTS

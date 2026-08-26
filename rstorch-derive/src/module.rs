@@ -24,16 +24,29 @@ const PRIMITIVE_WHITELIST: &[&str] = &[
     "usize", "bool", "char", "str", "String",
 ];
 
-/// Top-level entry: build the `impl Module` for `input`.
+#[cfg(test)]
+/// Top-level entry used by unit tests and direct expansion tests. The proc
+/// macro entry point uses [`expand_with_crate`] so downstream dependency
+/// renames resolve to the name visible in the caller's manifest.
 pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
+    expand_with_crate(input, quote!(::rstorch))
+}
+
+/// Build the dynamic implementation using the caller-visible runtime crate
+/// path. `rstorch_crate` is either `crate` for an in-crate expansion or an
+/// absolute dependency path such as `::rstorch_alias` downstream.
+pub(crate) fn expand_with_crate(
+    input: DeriveInput,
+    rstorch_crate: TokenStream,
+) -> Result<TokenStream> {
     let spec = shared::Spec {
         derive_name: "Module",
         parameter_noun: "parameter",
         // `#[module(...)]` on the struct is not policed by this derive.
         field_only_attr: None,
-        trait_path: quote!(::rstorch::nn::Module),
-        visitor: quote!(::rstorch::nn::Visitor),
-        visitor_mut: quote!(::rstorch::nn::VisitorMut),
+        trait_path: quote!(#rstorch_crate::nn::Module),
+        visitor: quote!(#rstorch_crate::nn::Visitor),
+        visitor_mut: quote!(#rstorch_crate::nn::VisitorMut),
     };
     shared::expand(input, &spec, classify)
 }

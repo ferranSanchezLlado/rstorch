@@ -352,6 +352,7 @@ pub(crate) fn restore<R: Rule>(
     incoming: &Incoming,
     rule: &R,
     groups: &Groups<R::Hyper>,
+    base: R::Hyper,
 ) -> Result<States<R::Buffers>> {
     let values = engine::param_values(model);
     let keys: HashMap<String, GradKey> = engine::param_paths(model).into_iter().collect();
@@ -367,6 +368,7 @@ pub(crate) fn restore<R: Rule>(
                     saved,
                     value,
                     incoming,
+                    base,
                     groups,
                 })?,
             },

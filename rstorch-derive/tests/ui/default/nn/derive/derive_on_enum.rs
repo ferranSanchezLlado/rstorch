@@ -2,7 +2,7 @@
 //! statically known so every parameter is visited; an `enum` has no single
 //! field set, so it is rejected with a clear message.
 
-use rstorch::prelude::*;
+use rstorch_alias::prelude::*;
 
 #[derive(Module)]
 enum Net {

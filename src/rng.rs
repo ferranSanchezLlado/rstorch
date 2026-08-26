@@ -1,7 +1,7 @@
 //! Explicit, seedable, splittable random number generation. No global seed
-//! and no ambient state: stochastic constructors take
-//! `&mut Rng`, and RNG state is checkpointed alongside optimizer state for
-//! resumable training.
+//! and no ambient state: stochastic constructors take `&mut Rng`, and
+//! caller-owned state can be captured with [`Rng::state`] and stored in an
+//! application-controlled checkpoint section for resumable training.
 //!
 //! The generator is a `u64` register seeded through splitmix64, advanced by an
 //! LCG whose output word is scrambled into the returned `u64`. The scrambling

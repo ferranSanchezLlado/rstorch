@@ -12,6 +12,7 @@ rust-version.workspace = true
 proc-macro = true
 
 [dependencies]
+proc-macro-crate = "3.3"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
@@ -20,5 +21,7 @@ syn = { version = "2", features = ["full"] }
 # the derive's own tests need the real `nn` contracts to expand against, and
 # `trybuild` drives the pinned-toolchain UI suite (see `tests/`).
 [dev-dependencies]
-rstorch = { path = "..", default-features = false }
+# The alias exercises the proc macro's renamed-dependency resolution in the
+# compile-success and compile-fail suites.
+rstorch_alias = { package = "rstorch", path = "..", default-features = false, features = ["typed"] }
 trybuild = "1"

@@ -164,9 +164,11 @@ pub fn save_model_state<M: Module + ?Sized>(model: &M, envelope: &mut Envelope) 
 /// Stage and load dynamic model tensor state from an [`Envelope`].
 ///
 /// The target model supplies each tensor's expected shape, dtype, and device.
-/// Missing and unexpected model paths follow `options`; shape and dtype
-/// mismatches are always errors. Existing optimizer sections and `optim.*`
-/// tensors are rejected because this helper is model-only.
+/// Missing and unexpected **model** paths follow `options`; shape and dtype
+/// mismatches are always errors. This helper selects model state from a
+/// composable envelope, ignoring its reserved optimizer section and
+/// `optim.*` tensors. Optimizer restoration remains a separate caller
+/// operation; this load does not provide a combined rollback.
 ///
 /// # Errors
 ///
@@ -177,20 +179,12 @@ pub fn load_model_state<M: Module + ?Sized>(
     envelope: &Envelope,
     options: &LoadOptions,
 ) -> Result<()> {
-    if envelope.section("optimizer").is_some() {
-        return Err(Error::persistence(
-            "model-only load rejects an `optimizer` section",
-        ));
-    }
-    if let Some(path) = envelope
+    let model_tensors = envelope
         .tensors()
-        .keys()
-        .find(|path| reserved_optimizer_path(path))
-    {
-        return Err(Error::persistence(format!(
-            "model-only load rejects reserved optimizer tensor {path:?}"
-        )));
-    }
+        .iter()
+        .filter(|(path, _)| !reserved_optimizer_path(path))
+        .map(|(path, tensor)| (path.clone(), tensor.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let current = model.state_dict()?;
     reject_reserved_model_paths(current.paths(), "persist::load_model_state")?;
@@ -198,7 +192,7 @@ pub fn load_model_state<M: Module + ?Sized>(
         .iter()
         .map(|(path, tensor)| Expected::new(path, tensor.dtype(), tensor.dims().to_vec()))
         .collect::<Vec<_>>();
-    let staged = stage(&schema, envelope.tensors(), options)?;
+    let staged = stage(&schema, &model_tensors, options)?;
 
     let mut replacements = current;
     for (path, host) in staged.into_entries() {
@@ -225,7 +219,12 @@ pub fn save_checkpoint<M: Module + ?Sized>(
     envelope.save(path, limits)
 }
 
-/// Load a model-only dynamic checkpoint from `path` into `model`.
+/// Load model state from a checkpoint envelope at `path` into `model`.
+///
+/// The checkpoint may be a composable envelope carrying configuration,
+/// optimizer, RNG, or application state in addition to model tensors.
+/// Optimizer restoration remains a separate caller operation; this helper does
+/// not provide a combined rollback.
 pub fn load_checkpoint<M: Module + ?Sized>(
     model: &mut M,
     path: impl AsRef<Path>,
@@ -300,5 +299,48 @@ mod tests {
         assert_eq!(state["weight"].to_vec::<f32>().unwrap(), vec![3.0; 2]);
         assert_eq!(state["running"].to_vec::<f32>().unwrap(), vec![7.0; 2]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn model_load_selects_model_state_from_composable_optimizer_envelope() {
+        let mut source = model(2.0, 7.0);
+        let mut optimizer = crate::optim::Sgd::new(0.1).momentum(0.9);
+        let loss = source
+            .weight
+            .get(crate::nn::Mode::TRAIN)
+            .mul(&source.weight.get(crate::nn::Mode::TRAIN))
+            .unwrap()
+            .sum_all()
+            .unwrap();
+        optimizer
+            .step(&mut source, loss.backward().unwrap())
+            .unwrap();
+
+        let mut envelope = Envelope::new();
+        save_model_state(&source, &mut envelope).unwrap();
+        optimizer.save_state(&source, &mut envelope).unwrap();
+        let optimizer_section = envelope.section("optimizer").map(str::to_owned);
+        let optimizer_tensor = envelope.tensor("optim.weight.velocity").cloned();
+        assert!(optimizer_section.is_some());
+        assert!(optimizer_tensor.is_some());
+
+        let mut target = model(0.0, 0.0);
+        load_model_state(&mut target, &envelope, &LoadOptions::strict()).unwrap();
+        let state = target.state_dict().unwrap();
+        assert_eq!(
+            state["weight"].to_vec::<f32>().unwrap(),
+            source.state_dict().unwrap()["weight"]
+                .to_vec::<f32>()
+                .unwrap()
+        );
+        assert_eq!(state["running"].to_vec::<f32>().unwrap(), vec![7.0; 2]);
+        assert_eq!(
+            envelope.section("optimizer").map(str::to_owned),
+            optimizer_section
+        );
+        assert_eq!(
+            envelope.tensor("optim.weight.velocity"),
+            optimizer_tensor.as_ref()
+        );
     }
 }

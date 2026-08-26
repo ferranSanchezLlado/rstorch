@@ -1,10 +1,9 @@
 //! Staged, all-or-nothing restore surface.
 //!
-//! Loading a checkpoint into a live model must be transactional: if *any*
-//! parameter fails to match, the model, optimizer, RNG, and caches must be
-//! left exactly as they were. The failure mode this prevents is a half-loaded
-//! model — some weights swapped, some not — which silently produces wrong
-//! results.
+//! Loading a tensor map into one live target must be transactional: if any
+//! tensor fails schema validation, no target leaf is replaced. This host-layer
+//! type stages tensor state only; transactionality spanning model, optimizer,
+//! RNG, caches, or application state is the composing caller's responsibility.
 //!
 //! This host-layer type does the fallible half: it validates a loaded tensor
 //! map against a caller-declared **schema** (expected path → dtype + dims)
@@ -23,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One entry of the target's expected schema: its path and the dtype/dims a
 /// loaded tensor must match to be accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Expected {
     /// The dotted path the target parameter/buffer lives at.
     pub path: String,
@@ -33,13 +33,49 @@ pub struct Expected {
 }
 
 impl Expected {
-    /// Convenience constructor.
+    /// Construct one expected schema entry.
     pub fn new(path: impl Into<String>, dtype: DType, dims: Vec<usize>) -> Self {
         Self {
             path: path.into(),
             dtype,
             dims,
         }
+    }
+
+    /// Replace the expected path.
+    #[must_use]
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    /// Replace the expected dtype.
+    #[must_use]
+    pub fn with_dtype(mut self, dtype: DType) -> Self {
+        self.dtype = dtype;
+        self
+    }
+
+    /// Replace the expected dimensions.
+    #[must_use]
+    pub fn with_dims(mut self, dims: Vec<usize>) -> Self {
+        self.dims = dims;
+        self
+    }
+
+    /// Return the expected path.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Return the expected dtype.
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    /// Return the expected dimensions.
+    pub fn dims(&self) -> &[usize] {
+        &self.dims
     }
 }
 
@@ -263,5 +299,16 @@ mod tests {
             Expected::new("fc.weight", DType::F32, vec![4, 3]),
         ];
         assert!(stage(&duplicate, &loaded(), &LoadOptions::strict()).is_err());
+    }
+
+    #[test]
+    fn expected_constructor_and_builders_expose_schema_without_literals() {
+        let expected = Expected::new("old", DType::F32, vec![1])
+            .with_path("fc.weight")
+            .with_dtype(DType::F64)
+            .with_dims(vec![4, 3]);
+        assert_eq!(expected.path(), "fc.weight");
+        assert_eq!(expected.dtype(), DType::F64);
+        assert_eq!(expected.dims(), &[4, 3]);
     }
 }

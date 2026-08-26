@@ -558,6 +558,13 @@ impl Tensor {
     /// Returns [`Error::DTypeMismatch`](crate::Error::DTypeMismatch) if
     /// `self`'s dtype is not `T`.
     pub fn to_vec<T: Element>(&self) -> Result<Vec<T>> {
+        if self.dtype() != T::DTYPE {
+            return Err(Error::DTypeMismatch {
+                op: "to_vec",
+                expected: T::DTYPE,
+                got: self.dtype(),
+            });
+        }
         let host = dispatch::backend(self.device()).transfer_out(self.ready_view()?)?;
         <T as HostConv>::try_from_cpu_storage(&host, "to_vec")
     }
@@ -883,6 +890,7 @@ impl Tensor {
 // any field of `Inner` ever loses those bounds.
 const _: () = {
     fn assert_send_sync<T: Send + Sync>() {}
+
     fn check() {
         assert_send_sync::<Tensor>();
     }
@@ -891,3 +899,28 @@ const _: () = {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod extraction_regression_tests {
+    use super::*;
+
+    #[test]
+    fn host_extraction_checks_dtype_before_conversion_and_preserves_scalar_precedence() {
+        let values = Tensor::from_vec(vec![1.0f32, 2.0], [2], &Device::Cpu).unwrap();
+        assert!(matches!(
+            values.to_vec::<i64>(),
+            Err(Error::DTypeMismatch {
+                op: "to_vec",
+                expected: DType::I64,
+                got: DType::F32,
+            })
+        ));
+        assert!(matches!(
+            values.to_scalar::<i64>(),
+            Err(Error::InvalidArg {
+                op: "to_scalar",
+                ..
+            })
+        ));
+    }
+}

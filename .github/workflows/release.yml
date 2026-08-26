@@ -41,13 +41,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The tag *is* the version being published. If it disagrees with the
       # manifest, every step after this one would be verifying the wrong number.
-      - name: Check the tag matches the workspace version
+      - name: Check the tag matches the workspace version and derive requirement
         run: |
-          manifest=$(cargo metadata --no-deps --format-version 1 \
+          metadata=$(cargo metadata --no-deps --format-version 1)
+          manifest=$(echo "$metadata" \
             | jq -r '.packages[] | select(.name == "rstorch") | .version')
+          derive_req=$(echo "$metadata" \
+            | jq -r '.packages[] | select(.name == "rstorch") |
+                    .dependencies[] | select(.name == "rstorch-derive") | .req')
           tag=${GITHUB_REF_NAME#v}
           if [ "$manifest" != "$tag" ]; then
             echo "tag $GITHUB_REF_NAME does not match the Cargo.toml version $manifest"
+            exit 1
+          fi
+          if [ "$derive_req" != "=$tag" ]; then
+            echo "rstorch-derive requirement $derive_req does not match tag =$tag"
             exit 1
           fi
       - name: Format
@@ -77,6 +85,7 @@ jobs:
       - name: Install stable
         run: |
           rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin --toolchain stable
           rustup default stable
       - uses: Swatinem/rust-cache@v2
       # RELEASING.md: "the macOS lanes are green" is a release condition,
@@ -101,7 +110,7 @@ jobs:
       # and that render is the one that can fail on the `metal` cfg surface.
       # The Linux docs step in `verify` never compiles those items.
       - name: Docs (all features, native aarch64-apple-darwin)
-        run: cargo doc --locked --workspace --all-features --no-deps
+        run: cargo doc --locked --workspace --all-features --no-deps --target aarch64-apple-darwin
         env:
           RUSTDOCFLAGS: -D warnings
 

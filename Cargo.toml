@@ -40,7 +40,7 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
 [dependencies]
 half = "2"
 rayon = { version = "1", optional = true }
-rstorch-derive = { version = "1.0.0", path = "rstorch-derive" }
+rstorch-derive = { version = "=1.0.0", path = "rstorch-derive" }
 safetensors = "0.8"
 # The safetensors header is JSON; `serde_json` parses it (and already builds,
 # as a `safetensors` dependency) instead of a hand-rolled scanner here.
@@ -153,8 +153,8 @@ rayon = ["dep:rayon"]
 # `cargo bench`.
 bench-resnet = []
 # Conformance-tested GPU acceleration on macOS. On other targets this default
-# feature has no platform dependency; `Device::best_available` considers a
-# hardware WGPU adapter before falling back to CPU when WGPU is enabled.
+# feature has no platform dependency; `Device::best_available` considers an
+# eligible WGPU adapter before falling back to CPU when WGPU is enabled.
 metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
 # Portable native GPU compute through WebGPU. Kept opt-in because it adds a
 # substantial graphics dependency. F16 is negotiated per adapter at runtime.

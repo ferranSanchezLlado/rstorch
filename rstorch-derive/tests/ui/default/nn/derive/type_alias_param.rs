@@ -4,7 +4,7 @@
 //! the loud default (child module) and, because `Param` is not a `Module`,
 //! produces a `Module`-not-satisfied compile error. Spell `Param` out.
 
-use rstorch::prelude::*;
+use rstorch_alias::prelude::*;
 
 /// An alias for `Param` — deliberately not recognized by the derive.
 type Weights = Param;

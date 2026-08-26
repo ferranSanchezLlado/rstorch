@@ -4,7 +4,7 @@
 //! does not implement `Module`, this is a compile error — the exact bug class
 //! v3 abolishes (a silently unvisited, therefore untrained, field).
 
-use rstorch::prelude::*;
+use rstorch_alias::prelude::*;
 
 /// A plain configuration type that is *not* a `Module`.
 struct Config {

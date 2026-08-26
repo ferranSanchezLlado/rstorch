@@ -19,6 +19,19 @@ recorded in [STABILITY.md](STABILITY.md).
 - Optimizer scalar validation is backend-neutral, optimizer gradient
   validation avoids reduced-precision observation conversions, and the global
   step clock advances only after the final lazy realization boundary succeeds.
+- Envelope defaults now stamp the current format and round-trip through the
+  loader; transformer configuration sections carry strict `version=1` schemas.
+- Persistence and hub record types expose constructor/builder paths with
+  non-exhaustive evolution boundaries, while hub cache paths and offline
+  Tiny Shakespeare reads validate their resource keys and integrity metadata.
+- Derive macros resolve renamed runtime dependencies and the runtime pins the
+  matching derive version exactly.
+- Metadata errors retain their public operation labels, MNIST rejects
+  out-of-domain digit labels, and automatic Metal selection probes complete
+  context initialization before choosing a device.
+- Optimizer restore decodes parameter groups against adopted checkpoint
+  hyperparameters, and composable envelopes can load model state while
+  retaining optimizer sections for a separate restore.
 
 ### Lazy element-wise execution
 

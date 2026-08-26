@@ -191,6 +191,7 @@ impl Rule for SgdRule {
             saved,
             value,
             incoming,
+            base,
             groups,
         } = decode;
         let mut velocity = None;
@@ -212,7 +213,7 @@ impl Rule for SgdRule {
         // are the optimizer's own; only the base comes from the file.
         let saved_base = SgdGroup {
             momentum: incoming.hyper("momentum")?,
-            ..*groups.base()
+            ..base
         };
         let effective = groups.resolve_with_base(saved_base, path);
         if velocity.is_none() && effective.momentum != 0.0 && saved.clock > 0 {
@@ -695,6 +696,55 @@ mod tests {
         assert!(
             err.to_string().contains("no velocity buffer"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_uses_the_adopted_base_for_group_decoding() {
+        let mut model = Net::ones();
+        let mut source = Sgd::new(0.1).weight_decay(1.0).group(
+            |path| path == "trunk.weight",
+            |group| {
+                if group.weight_decay > 0.5 {
+                    group.momentum(0.9)
+                } else {
+                    group.momentum(0.0)
+                }
+            },
+        );
+        step(&mut source, &mut model);
+
+        let mut envelope = Envelope::new();
+        source.save_state(&model, &mut envelope).unwrap();
+        let mut stripped = Envelope::new();
+        stripped
+            .set_section(
+                "optimizer",
+                envelope.section("optimizer").unwrap().to_string(),
+            )
+            .unwrap();
+        for (key, tensor) in envelope.tensors() {
+            if !key.ends_with("velocity") {
+                stripped.insert_tensor(key.clone(), tensor.clone());
+            }
+        }
+
+        let mut target = Sgd::new(0.1).weight_decay(0.0).group(
+            |path| path == "trunk.weight",
+            |group| {
+                if group.weight_decay > 0.5 {
+                    group.momentum(0.9)
+                } else {
+                    group.momentum(0.0)
+                }
+            },
+        );
+        let error = target
+            .load_state(&model, &stripped)
+            .expect_err("adopted weight decay must select the saved momentum group");
+        assert!(
+            error.to_string().contains("no velocity buffer"),
+            "unexpected error: {error}"
         );
     }
 

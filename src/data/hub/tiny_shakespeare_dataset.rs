@@ -120,7 +120,8 @@ impl TinyShakespeareDataset {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if the corpus has not been cached, plus anything
+    /// [`Error::Io`] if the corpus has not been cached, [`Error::Data`] if the
+    /// cached resource fails its size or checksum verification, plus anything
     /// [`from_text`](Self::from_text) reports.
     pub fn from_cache(
         hub: &DatasetHub,
@@ -373,27 +374,18 @@ mod tests {
     }
 
     #[test]
-    fn from_cache_reads_the_hub_cache_without_network_access() {
+    fn from_cache_rejects_unverified_bytes_without_network_access() {
         let root = scratch("cache");
         let _ = std::fs::remove_dir_all(&root);
         let hub = DatasetHub::new(&root);
-        let path = TinyShakespeare::cache_path(&hub);
+        let path = TinyShakespeare::cache_path(&hub).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "To be, or not to be").unwrap();
 
-        let ds = TinyShakespeareDataset::from_cache(&hub, 4, &CPU).unwrap();
-        assert_eq!(ds.num_tokens(), "To be, or not to be".chars().count());
-        assert_eq!(ds.len(), ds.num_tokens() - 4);
-        let ids: Vec<usize> = ds
-            .batch(&[0])
-            .unwrap()
-            .0
-            .to_vec::<i64>()
-            .unwrap()
-            .iter()
-            .map(|&id| id as usize)
-            .collect();
-        assert_eq!(ds.tokenizer().decode(&ids).unwrap(), "To b");
+        assert!(matches!(
+            TinyShakespeareDataset::from_cache(&hub, 4, &CPU),
+            Err(Error::Data { msg, .. }) if msg.contains("checksum mismatch")
+        ));
 
         let _ = std::fs::remove_dir_all(root);
     }

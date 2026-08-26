@@ -50,6 +50,17 @@ The following are also covered contracts:
   promised here. Code that needs to carry its own per-call information extends
   the *input* type (`Forward<Input>`), not `Mode`.
 
+Public record-shaped API types, including persistence and hub records, use a
+constructor/builder or a `#[non_exhaustive]` boundary rather than promising
+exhaustive struct literals. They may gain fields in a minor release; callers
+should use the documented constructors/builders. Public traits remain
+intentional extension points: additions in 1.x use defaults or extension traits,
+not new required methods.
+
+The derive macros resolve the runtime crate through Cargo, including a renamed
+dependency. The root crate pins `rstorch-derive` to the exact matching version;
+that lockstep is part of the release contract.
+
 ## Execution Model
 
 Operations are eager by default. The opt-in lazy executor for dense CPU
@@ -140,36 +151,72 @@ as a bug — fixed in a patch — rather than as the kind of documented-behaviou
 break the rest of this document treats as semver-relevant. When an execution
 lane exists, this paragraph goes and CUDA joins Metal and WGPU.
 
-`Device::best_available` selects the first Metal device on macOS when the
-`metal` feature is enabled, then the first CUDA device on Linux or Windows when
-`cuda` is enabled, then the first hardware WGPU adapter when `wgpu` is enabled,
-and otherwise CPU. Hardware and driver availability are not guaranteed by the
-library. `to_device` is the explicit way to move a tensor between devices;
-missing operation kernels do not invoke it implicitly.
+`Device::best_available` probes Metal ordinal 0 with complete initialization
+when `metal` is enabled, then considers CUDA on Linux or Windows, the best
+eligible WGPU adapter when `wgpu` is enabled, and otherwise CPU. Metal's probe
+includes runtime shader compilation, command-queue creation, and
+validation-buffer allocation, so a Metal ordinal that fails any of those steps
+is skipped.
+WGPU adapter type and backend are driver-reported classifications; automatic
+selection excludes adapters reported as `Cpu`, while other software
+classification is backend-dependent. WGPU ordinals are indices in the current
+process's adapter set, not stable device identities, and must not be persisted.
+Hardware and driver availability are not guaranteed by the library. `to_device`
+is the explicit way to move a tensor between devices; missing operation
+kernels do not invoke it implicitly.
 
 ## Persistence
 
-Persistence provides versioned envelopes, reader limits, atomic replacement,
-schema validation, and transactional model/optimizer loading. The tensor data
-is not authenticated and carries no checksum: bit-level corruption can produce
-a valid file with different values. Applications that load untrusted or
-transported checkpoints should add an external integrity or authenticity check.
+Persistence provides a versioned `Envelope` container, reader limits, atomic
+replacement, and schema validation. The envelope version covers the container;
+semantic sections (such as `config`, `optimizer`, and `rng`) own independent
+schemas and compatibility rules. The DecoderTransformer config section is
+strict `version=1`: unknown, missing, duplicate, or unsupported fields/versions
+are rejected, and a future reader must explicitly support any prior version it
+accepts.
+
+Generic model checkpoints contain model state. The DecoderTransformer convenience
+checkpoint contains its config and model tensors only; optimizer, RNG,
+application, cache, and tokenizer state are excluded. Dynamic model-state and
+optimizer-state loads are independently transactional, but there is no combined
+transaction spanning model, optimizer, RNG, caches, or application state.
+Tensor data is not authenticated and carries no checksum: bit-level corruption
+can produce a valid file with different values. Applications that load
+untrusted or transported checkpoints should add an external integrity or
+authenticity check.
+
+## Dataset Hub
+
+With `hub`, `DatasetHub::default_cache` resolves `RSTORCH_DATA`, then
+`$HOME/.cache/rstorch`, then the project-local `data/` fallback. Public dataset
+and resource path helpers accept only one ordinary path component and return an
+error otherwise. Cache hits are re-verified against their declared size and
+checksum before use; Tiny Shakespeare performs that verification before UTF-8
+decoding. These checks are integrity checks, not cryptographic authenticity.
 
 ## Randomness
 
-Randomness is explicit: every sampling entry point takes `&mut Rng`, and there
-is no ambient, global, or thread-local generator. A given seed reproduces a
-given tensor for a fixed shape, dtype, **backend, feature set, and build** —
-that tuple is the scope of the promise. Results are not guaranteed to be
-reproducible across backends or across versions: whether samples are drawn on
-the host and uploaded or generated on the device is an implementation detail,
-and so is the order in which a tensor's elements consume the stream.
+Randomness is explicit: caller-owned sampling constructors take `&mut Rng`,
+and modules such as `Dropout` receive their own stream explicitly at
+construction. There is no ambient, global, or thread-local generator. A
+caller can capture a caller-owned generator with `Rng::state` and resume it
+with `Rng::from_state`. `Dropout`'s private child stream is not persisted by
+model state; exact training resume with dropout requires the caller to
+reconstruct that model stream.
+A given seed reproduces a given tensor for a fixed shape, dtype, **backend,
+feature set, and build** — that tuple is the scope of the promise. Results are
+not guaranteed to be reproducible across backends or across versions: whether
+samples are drawn on the host and uploaded or generated on the device is an
+implementation detail, and so is the order in which a tensor's elements
+consume the stream.
 
 ## What Is Not Covered
 
 - `rstorch::testing`, behind the `testing` feature, is the finite-difference
   harness used by the crate's own tests. Its signature follows test needs and
   may change without a semver event.
+- The `bench-resnet` feature only enables the `resnet_mnist` benchmark target;
+  it is benchmark-only and does not add library API or runtime guarantees.
 - `rstorch::typed`, behind the `typed` feature, is an experimental second
   frontend over the dynamic tensor runtime. Its modules, traits, wrappers,
   placement bindings, and persistence helpers may change independently of the
@@ -203,10 +250,12 @@ that guarantee as stated above. The `typed` API is a wrapper over the dynamic
 
 The derive macros are loud by default: unrecognized fields are treated as
 child modules and fail to compile when they do not implement the appropriate
-`Module` trait. The dynamic derive's `#[module(skip)]` is an explicit escape
-hatch and can intentionally omit any field, including a `Param`; an omitted
-parameter is not visited by the optimizer or state-dict utilities. The typed
-derive rejects `skip` on typed leaves and on `Option`/`Vec` containers.
+`Module` trait. They resolve the runtime crate, including renamed Cargo
+dependencies, rather than assuming the dependency is spelled `rstorch`. The
+dynamic derive's `#[module(skip)]` is an explicit escape hatch and can
+intentionally omit any field, including a `Param`; an omitted parameter is not
+visited by the optimizer or state-dict utilities. The typed derive rejects
+`skip` on typed leaves and on `Option`/`Vec` containers.
 
 ## Accelerator Performance
 

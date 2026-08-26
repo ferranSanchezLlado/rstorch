@@ -72,10 +72,11 @@ impl Param {
     /// traced leaf when `mode.records() && !self.is_frozen()` and the value is
     /// floating-point; otherwise returns the detached plain value.
     pub fn get(&self, mode: Mode) -> Tensor {
-        if mode.records() && !self.frozen {
-            if let Some(leaf) = &self.leaf {
-                return leaf.clone();
-            }
+        if mode.records()
+            && !self.frozen
+            && let Some(leaf) = &self.leaf
+        {
+            return leaf.clone();
         }
         self.value.clone()
     }

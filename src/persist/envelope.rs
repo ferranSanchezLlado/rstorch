@@ -75,12 +75,18 @@ const SECTION_PREFIX: &str = "rstorch.section.";
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Envelope {
     tensors: BTreeMap<String, HostTensor>,
     sections: BTreeMap<String, String>,
     major: u32,
     minor: u32,
+}
+
+impl Default for Envelope {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Envelope {
@@ -291,6 +297,23 @@ mod tests {
         assert_eq!(back.section("optimizer"), Some("adamw;lr=0.001;step=42"));
         assert_eq!(back.section("rng"), Some("seed=7;state=abcdef"));
         assert_eq!(back.section_names(), vec!["config", "optimizer", "rng"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn default_round_trips_as_current_format() {
+        let dir = tmpdir("default");
+        let path = dir.join("run.rstorch");
+        let expected = Envelope::new();
+        let envelope = Envelope::default();
+        assert_eq!(envelope, expected);
+        assert_eq!(envelope.version(), (FORMAT_MAJOR, FORMAT_MINOR));
+
+        envelope.save(&path, &Limits::defaults()).unwrap();
+        assert_eq!(
+            Envelope::load(&path, &Limits::defaults()).unwrap(),
+            expected
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

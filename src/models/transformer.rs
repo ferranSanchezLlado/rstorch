@@ -187,7 +187,7 @@ impl TransformerConfig {
 
     fn encode(&self) -> String {
         format!(
-            "vocab_size={};max_seq_len={};embed_dim={};num_heads={};num_layers={};feed_forward_dim={}",
+            "version=1;vocab_size={};max_seq_len={};embed_dim={};num_heads={};num_layers={};feed_forward_dim={}",
             self.vocab_size,
             self.max_seq_len,
             self.embed_dim,
@@ -209,6 +209,20 @@ impl TransformerConfig {
                 )));
             }
         }
+
+        let version = fields
+            .remove("version")
+            .ok_or_else(|| Error::persistence("transformer config missing \"version\""))?
+            .parse::<usize>()
+            .map_err(|source| {
+                Error::persistence_with("transformer config \"version\" is not a usize", source)
+            })?;
+        if version != 1 {
+            return Err(Error::persistence(format!(
+                "unsupported transformer config version {version} (expected 1)"
+            )));
+        }
+
         let mut parse = |name: &str| -> Result<usize> {
             fields
                 .remove(name)
@@ -243,7 +257,6 @@ impl TransformerConfig {
         Ok(config)
     }
 }
-
 #[derive(rstorch::Module)]
 struct Block {
     norm1: LayerNorm,
@@ -409,8 +422,10 @@ impl DecoderTransformer {
     pub fn config(&self) -> &TransformerConfig {
         &self.config
     }
-
-    /// Create an empty KV cache with one slot for each decoder block.
+    /// Create an empty key/value cache owned by this model.
+    ///
+    /// The returned cache is accepted by [`logits_cached`](Self::logits_cached)
+    /// and is tied to this model instance.
     pub fn empty_cache(&self) -> KvCache {
         KvCache {
             layers: (0..self.blocks.len()).map(|_| None).collect(),
@@ -428,7 +443,11 @@ impl DecoderTransformer {
     /// batch or for a sequence longer than `max_seq_len`; embedding, attention,
     /// and projection errors otherwise propagate.
     pub fn logits(&mut self, token_ids: &Tensor, mode: Mode) -> Result<Tensor> {
-        let (_batch, sequence) = checked_tokens(token_ids, self.config.max_seq_len)?;
+        let (_batch, sequence) = checked_tokens(
+            token_ids,
+            self.config.max_seq_len,
+            "DecoderTransformer::logits",
+        )?;
         let positions = Tensor::index_range(sequence, &token_ids.device())?;
         let mut hidden = self
             .token_embedding
@@ -457,7 +476,7 @@ impl DecoderTransformer {
         cache: &mut KvCache,
         mode: Mode,
     ) -> Result<Tensor> {
-        let (_batch, sequence) = checked_tokens(token_ids, 1)?;
+        let (_batch, sequence) = checked_tokens(token_ids, 1, "DecoderTransformer::logits_cached")?;
         if sequence != 1
             || cache.layers.len() != self.blocks.len()
             || !Arc::ptr_eq(&cache.model_id, &self.cache_id)
@@ -517,7 +536,7 @@ impl DecoderTransformer {
     /// As [`logits_cached`](Self::logits_cached), and
     /// [`Error::InvalidArg`] if the requested total exceeds `max_seq_len`.
     pub fn generate(&mut self, prompt: &Tensor, max_new_tokens: usize) -> Result<Tensor> {
-        self.generate_with_cache(prompt, max_new_tokens)
+        self.generate_with_cache_impl(prompt, max_new_tokens, "DecoderTransformer::generate")
             .map(|(tokens, _)| tokens)
     }
 
@@ -537,16 +556,29 @@ impl DecoderTransformer {
         prompt: &Tensor,
         max_new_tokens: usize,
     ) -> Result<(Tensor, KvCache)> {
-        let (_batch, prompt_len) = checked_tokens(prompt, self.config.max_seq_len)?;
+        self.generate_with_cache_impl(
+            prompt,
+            max_new_tokens,
+            "DecoderTransformer::generate_with_cache",
+        )
+    }
+
+    fn generate_with_cache_impl(
+        &mut self,
+        prompt: &Tensor,
+        max_new_tokens: usize,
+        op: &'static str,
+    ) -> Result<(Tensor, KvCache)> {
+        let (_batch, prompt_len) = checked_tokens(prompt, self.config.max_seq_len, op)?;
         let total = prompt_len
             .checked_add(max_new_tokens)
             .ok_or_else(|| Error::InvalidArg {
-                op: "DecoderTransformer::generate",
+                op,
                 msg: "generated sequence length overflow".to_string(),
             })?;
         if total > self.config.max_seq_len {
             return Err(Error::InvalidArg {
-                op: "DecoderTransformer::generate",
+                op,
                 msg: format!(
                     "prompt plus generation is {total}, above max_seq_len {}",
                     self.config.max_seq_len
@@ -649,21 +681,26 @@ impl Forward for DecoderTransformer {
     }
 }
 
-fn checked_tokens(token_ids: &Tensor, max_sequence: usize) -> Result<(usize, usize)> {
+fn checked_tokens(
+    token_ids: &Tensor,
+    max_sequence: usize,
+    op: &'static str,
+) -> Result<(usize, usize)> {
     let (batch, sequence) = token_ids.dims2().map_err(|_| Error::RankMismatch {
-        op: "DecoderTransformer::logits",
+        op,
         expected: 2,
         got: token_ids.rank(),
     })?;
     if batch == 0 || sequence == 0 || sequence > max_sequence {
         return Err(Error::InvalidArg {
-            op: "DecoderTransformer::logits",
+            op,
             msg: format!(
                 "expected non-empty [batch, sequence] with sequence <= {max_sequence}, got {}",
                 token_ids.shape()
             ),
         });
     }
+
     Ok((batch, sequence))
 }
 
@@ -676,6 +713,73 @@ mod tests {
 
     fn config() -> TransformerConfig {
         TransformerConfig::new(11, 8, 8, 2, 2).with_feed_forward_dim(16)
+    }
+
+    #[test]
+    fn config_v1_round_trips_and_requires_supported_version() {
+        let config = config();
+        let encoded = config.encode();
+        assert!(encoded.starts_with("version=1;"));
+        assert_eq!(TransformerConfig::decode(&encoded).unwrap(), config);
+
+        let without_version = encoded.split_once(';').map(|(_, rest)| rest).unwrap();
+        assert!(TransformerConfig::decode(without_version).is_err());
+        assert!(TransformerConfig::decode(&encoded.replacen("version=1", "version=2", 1)).is_err());
+    }
+
+    #[test]
+    fn config_v1_rejects_duplicate_and_unknown_fields() {
+        let encoded = config().encode();
+        assert!(TransformerConfig::decode(&format!("{encoded};num_layers=2")).is_err());
+        assert!(TransformerConfig::decode(&format!("{encoded};future=1")).is_err());
+    }
+
+    #[test]
+    fn public_token_operations_attribute_metadata_errors() {
+        let mut model = DecoderTransformer::new(config(), &CPU, &mut Rng::seed(8)).unwrap();
+        let rank_one = Tensor::from_vec(vec![1i64], [1], &CPU).unwrap();
+        assert!(matches!(
+            model.logits(&rank_one, Mode::EVAL),
+            Err(Error::RankMismatch {
+                op: "DecoderTransformer::logits",
+                ..
+            })
+        ));
+        let mut cache = model.empty_cache();
+        assert!(matches!(
+            model.logits_cached(&rank_one, &mut cache, Mode::EVAL),
+            Err(Error::RankMismatch {
+                op: "DecoderTransformer::logits_cached",
+                ..
+            })
+        ));
+        assert!(matches!(
+            model.generate_with_cache(&rank_one, 0),
+            Err(Error::RankMismatch {
+                op: "DecoderTransformer::generate_with_cache",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn direct_generation_overflow_uses_the_public_operation_label() {
+        let mut model = DecoderTransformer::new(config(), &CPU, &mut Rng::seed(9)).unwrap();
+        let prompt = Tensor::from_vec(vec![1i64], [1, 1], &CPU).unwrap();
+        assert!(matches!(
+            model.generate(&prompt, usize::MAX),
+            Err(Error::InvalidArg {
+                op: "DecoderTransformer::generate",
+                ..
+            })
+        ));
+        assert!(matches!(
+            model.generate_with_cache(&prompt, usize::MAX),
+            Err(Error::InvalidArg {
+                op: "DecoderTransformer::generate_with_cache",
+                ..
+            })
+        ));
     }
 
     #[test]

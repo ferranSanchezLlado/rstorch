@@ -59,6 +59,7 @@ pub struct DatasetHub {
 /// [`sha256`](DatasetResource::sha256) digest and rejected if it exceeds its
 /// optional [`max_bytes`](DatasetResource::max_bytes) size cap (an
 /// untrusted-download guard).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct DatasetResource {
     /// Human-readable name, used in diagnostics.
@@ -71,6 +72,25 @@ pub struct DatasetResource {
     pub sha256: Option<&'static str>,
     /// Maximum accepted payload size in bytes, if a cap is enforced.
     pub max_bytes: Option<u64>,
+}
+
+impl DatasetResource {
+    /// Creates static metadata for one downloadable dataset file.
+    pub const fn new(
+        name: &'static str,
+        url: &'static str,
+        file_name: &'static str,
+        sha256: Option<&'static str>,
+        max_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            name,
+            url,
+            file_name,
+            sha256,
+            max_bytes,
+        }
+    }
 }
 
 impl DatasetHub {
@@ -100,20 +120,66 @@ impl DatasetHub {
     }
 
     /// The directory holding files for `dataset`.
-    pub fn dataset_dir(&self, dataset: &str) -> PathBuf {
-        self.root.join(dataset)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Data`] unless `dataset` is one ordinary path
+    /// component. This keeps the returned path rooted below this hub.
+    pub fn dataset_dir(&self, dataset: &str) -> Result<PathBuf> {
+        check_cache_component("dataset", dataset)?;
+        Ok(self.dataset_dir_unchecked(dataset))
     }
 
     /// The full cache path for `resource` within `dataset`.
-    pub fn resource_path(&self, dataset: &str, resource: &DatasetResource) -> PathBuf {
-        self.dataset_dir(dataset).join(resource.file_name)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Data`] unless both names are one ordinary path
+    /// component. This keeps the returned path rooted below this hub.
+    pub fn resource_path(&self, dataset: &str, resource: &DatasetResource) -> Result<PathBuf> {
+        check_cache_key(dataset, resource.file_name)?;
+        Ok(self.resource_path_unchecked(dataset, resource))
     }
 
     /// Whether `resource` is already present in the cache.
-    pub fn is_cached(&self, dataset: &str, resource: &DatasetResource) -> bool {
-        self.resource_path(dataset, resource).is_file()
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Data`] for a dataset or file name that is not one
+    /// ordinary path component.
+    pub fn is_cached(&self, dataset: &str, resource: &DatasetResource) -> Result<bool> {
+        Ok(self.resource_path(dataset, resource)?.is_file())
     }
 
+    fn dataset_dir_unchecked(&self, dataset: &str) -> PathBuf {
+        self.root.join(dataset)
+    }
+
+    fn resource_path_unchecked(&self, dataset: &str, resource: &DatasetResource) -> PathBuf {
+        self.dataset_dir_unchecked(dataset).join(resource.file_name)
+    }
+
+    /// Returns an existing cache path after re-checking its size and digest.
+    ///
+    /// This is intentionally private: callers that only need a path must use
+    /// the fallible, name-validating public helpers, while offline readers use
+    /// this stronger cache-hit boundary.
+    fn verified_cached_path(&self, dataset: &str, resource: &DatasetResource) -> Result<PathBuf> {
+        check_cache_key(dataset, resource.file_name)?;
+        let path = self.resource_path_unchecked(dataset, resource);
+        if !path.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("cached resource `{}` is not present", resource.name),
+            )
+            .into());
+        }
+        resource.verify_cached(&path)?;
+        Ok(path)
+    }
+}
+
+impl DatasetHub {
     /// Ensures every resource is cached (downloading missing ones over the
     /// network), returning their paths in order.
     ///
@@ -197,7 +263,7 @@ impl DatasetHub {
         F: FnMut(&DatasetResource) -> Result<Vec<u8>>,
     {
         check_cache_key(dataset, resource.file_name)?;
-        let path = self.resource_path(dataset, resource);
+        let path = self.resource_path_unchecked(dataset, resource);
         if path.is_file() {
             resource.verify_cached(&path)?;
             return Ok(path);
@@ -256,9 +322,9 @@ impl DatasetHub {
         let bytes = fetch(resource)?;
         resource.verify(&bytes)?;
 
-        let dir = self.dataset_dir(dataset);
+        let dir = self.dataset_dir_unchecked(dataset);
         fs::create_dir_all(&dir)?;
-        let path = dir.join(resource.file_name);
+        let path = self.resource_path_unchecked(dataset, resource);
         crate::persist::atomic::write_atomic(&path, &bytes)?;
         Ok(path)
     }
@@ -324,19 +390,22 @@ impl DatasetResource {
 /// argument, or an index file could otherwise carry `..` or an absolute path
 /// and place a downloaded file anywhere the process can write. Requiring
 /// exactly one `Component::Normal` keeps every cache path inside the root.
-fn check_cache_key(dataset: &str, file_name: &str) -> Result<()> {
-    for (label, value) in [("dataset", dataset), ("file name", file_name)] {
-        let mut components = Path::new(value).components();
-        let single_normal =
-            matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
-        if !single_normal {
-            return Err(Error::data(format!(
-                "{label} `{value}` must be a single path component \
-                     (no separators, `..`, or absolute paths)"
-            )));
-        }
+fn check_cache_component(label: &str, value: &str) -> Result<()> {
+    let mut components = Path::new(value).components();
+    let single_normal =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    if !single_normal {
+        return Err(Error::data(format!(
+            "{label} `{value}` must be a single path component \
+                 (no separators, `..`, or absolute paths)"
+        )));
     }
     Ok(())
+}
+
+fn check_cache_key(dataset: &str, file_name: &str) -> Result<()> {
+    check_cache_component("dataset", dataset)?;
+    check_cache_component("file name", file_name)
 }
 
 /// How many bytes a fetch may read for a resource capped at `max_bytes`: one
@@ -509,6 +578,18 @@ mod tests {
         };
         for bad in ["..", "a/b", "/abs", ""] {
             assert!(
+                matches!(hub.dataset_dir(bad), Err(Error::Data { .. })),
+                "dataset_dir must reject dataset name {bad:?}"
+            );
+            assert!(
+                matches!(hub.resource_path(bad, &ok), Err(Error::Data { .. })),
+                "resource_path must reject dataset name {bad:?}"
+            );
+            assert!(
+                matches!(hub.is_cached(bad, &ok), Err(Error::Data { .. })),
+                "is_cached must reject dataset name {bad:?}"
+            );
+            assert!(
                 matches!(
                     hub.download_with(bad, &ok, |_| Ok(vec![1])),
                     Err(Error::Data { .. })
@@ -516,10 +597,34 @@ mod tests {
                 "dataset name {bad:?} must be rejected"
             );
         }
+        assert!(matches!(
+            hub.resource_path("ds", &escaping),
+            Err(Error::Data { .. })
+        ));
+        assert!(matches!(
+            hub.is_cached("ds", &escaping),
+            Err(Error::Data { .. })
+        ));
         // The ordinary case still works.
         assert!(hub.download_with("ds", &ok, |_| Ok(vec![1])).is_ok());
         assert!(!root.join("../../escaped.bin").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dataset_resource_constructor_preserves_metadata() {
+        let resource = DatasetResource::new(
+            "name",
+            "https://example.invalid/name",
+            "name.bin",
+            Some("digest"),
+            Some(12),
+        );
+        assert_eq!(resource.name, "name");
+        assert_eq!(resource.url, "https://example.invalid/name");
+        assert_eq!(resource.file_name, "name.bin");
+        assert_eq!(resource.sha256, Some("digest"));
+        assert_eq!(resource.max_bytes, Some(12));
     }
 
     /// A cached file must be re-verified, not trusted for merely existing:
@@ -683,7 +788,7 @@ mod tests {
         // First call fetches.
         hub.ensure_resource_with("fixture", &resource, |_| Ok(vec![9]))
             .unwrap();
-        assert!(hub.is_cached("fixture", &resource));
+        assert!(hub.is_cached("fixture", &resource).unwrap());
         // Second call must not invoke the fetcher.
         let path = hub
             .ensure_resource_with("fixture", &resource, |_| {

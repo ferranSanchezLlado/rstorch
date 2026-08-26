@@ -10,14 +10,28 @@ use crate::shared::{self, FieldKind};
 /// per-field parser so the two cannot drift apart.
 const ATTR: &str = "typed_module";
 
+#[cfg(test)]
+/// Top-level entry used by unit tests and direct expansion tests. The proc
+/// macro entry point uses [`expand_with_crate`] so downstream dependency
+/// renames resolve to the name visible in the caller's manifest.
 pub(crate) fn expand(input: DeriveInput) -> Result<TokenStream> {
+    expand_with_crate(input, quote!(::rstorch))
+}
+
+/// Build the typed implementation using the caller-visible runtime crate
+/// path. `rstorch_crate` is either `crate` for an in-crate expansion or an
+/// absolute dependency path such as `::rstorch_alias` downstream.
+pub(crate) fn expand_with_crate(
+    input: DeriveInput,
+    rstorch_crate: TokenStream,
+) -> Result<TokenStream> {
     let spec = shared::Spec {
         derive_name: "TypedModule",
         parameter_noun: "typed parameter",
         field_only_attr: Some(ATTR),
-        trait_path: quote!(::rstorch::typed::nn::Module),
-        visitor: quote!(::rstorch::typed::nn::TypedVisitor<'_>),
-        visitor_mut: quote!(::rstorch::typed::nn::TypedVisitorMut<'_>),
+        trait_path: quote!(#rstorch_crate::typed::nn::Module),
+        visitor: quote!(#rstorch_crate::typed::nn::TypedVisitor<'_>),
+        visitor_mut: quote!(#rstorch_crate::typed::nn::TypedVisitorMut<'_>),
     };
     shared::expand(input, &spec, classify)
 }
