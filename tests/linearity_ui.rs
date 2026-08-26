@@ -1,28 +1,11 @@
-//! Pinned-toolchain UI (compile-fail) suite for the **linearity guarantees**
-//! of [`Grads`](rstorch::Grads).
+//! Compile-fail tests for the linear behavior of [`Grads`](rstorch::Grads).
 //!
-//! Exploration §5 claims three bug classes are unrepresentable rather than
-//! merely discouraged, and §6 keeps a small compile-fail suite alive for
-//! exactly the claims that would otherwise regress silently. Each case in
-//! `tests/ui/default/autograd/linearity/*.rs` is a program that must **fail**
-//! to compile, with diagnostics matching its `.stderr` fixture:
+//! The cases cover `Grads: !Clone`, use-after-move, and the `#[must_use]`
+//! warning. Each source file under `tests/ui/default/autograd/linearity/` must
+//! fail with the matching `.stderr` fixture.
 //!
-//! - `grads_are_not_clone` — "same gradients applied twice" starts with a
-//!   duplicate, so `Grads: !Clone`.
-//! - `grads_used_after_move` — every consumer (`merge`, and the optimizer's
-//!   `step`) takes `Grads` by move, so a second use is a move error.
-//! - `grads_must_be_used` — `#[must_use]`, so computing gradients and never
-//!   applying them is a diagnostic, not a silent no-op training loop.
-//!
-//! # Why this suite is gated
-//!
-//! `trybuild` compares compiler diagnostics byte-for-byte, and those drift
-//! across `rustc` versions, so the fixtures are **pinned to one toolchain**
-//! (regenerate with `TRYBUILD=overwrite cargo +1.88 test --test linearity_ui`
-//! with `RSTORCH_UI=1` set, matching the convention of the
-//! `#[derive(Module)]` suite in `rstorch-derive/tests/ui.rs`). To keep
-//! `cargo test` green on any other toolchain the run is opt-in: set
-//! `RSTORCH_UI=1` to execute it.
+//! `trybuild` diagnostics vary by compiler version, so this suite runs only
+//! with `RSTORCH_UI=1` on the pinned Rust 1.88 toolchain.
 
 /// Run the compile-fail suite when `RSTORCH_UI=1` (pinned toolchain only).
 #[test]

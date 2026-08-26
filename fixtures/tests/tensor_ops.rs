@@ -1,17 +1,10 @@
-//! **The m1 acceptance fixture**:
-//! the tensor op surface exercised end to end from *outside* the crate.
+//! End-to-end tensor operations from a downstream crate.
 //!
-//! This file is deliberately a downstream consumer. It imports nothing but
-//! `rstorch::prelude::*`, so anything it needs must be public, documented,
-//! and reachable from the eleven-item first-hour vocabulary. If a step here
-//! requires a crate-internal type, an extra import, or a generic parameter
-//! in a value position, that is the API failing its own acceptance test —
-//! which is the point of keeping the fixtures in a separate crate.
+//! This fixture imports only `rstorch::prelude::*`, so it exercises the public
+//! API as a consumer would. Values are asserted, not just shapes.
 //!
-//! Coverage: construction, host round-trips, element-wise math and
-//! broadcasting, operator sugar, views and reshape, matmul (2-D and
-//! batched), reductions and softmax, indexing and masks, and the loud
-//! two-tier error behavior. Values are asserted, not just shapes.
+//! Coverage includes construction, host transfers, elementwise operations,
+//! views, matmul, reductions, indexing, masks, and error handling.
 
 use rstorch::prelude::*;
 
@@ -94,7 +87,7 @@ fn construct_and_inspect() -> Result<()> {
     assert_eq!(ints.dtype(), DType::I64);
     assert_eq!(ints.to_vec::<i64>()?, vec![1, 2, 3, 4, 5, 6]);
 
-    // Debug/Display are first-hour features: a summary a user can read.
+    // Debug and Display provide readable tensor summaries.
     let shown = format!("{x}");
     assert!(shown.contains("f32"), "{shown}");
     assert!(format!("{x:?}").contains("Tensor"), "{x:?}");
@@ -384,15 +377,13 @@ fn operator_sugar_panics_with_the_same_message() {
 }
 
 // ---------------------------------------------------------------------------
-// The composite: everything above in one small pipeline
+// Composite pipeline.
 // ---------------------------------------------------------------------------
 
-/// A dense layer + activation + cross-entropy-shaped read-out, written the
-/// way the flagship loop writes it, minus the `nn` types
-/// that arrive in wave 4. This is the m1 acceptance example: if this reads
-/// naturally, the op surface has done its job.
+/// A small dense-layer, activation, and classification pipeline using only
+/// tensor operations.
 #[test]
-fn first_hour_pipeline() -> Result<()> {
+fn composed_tensor_pipeline() -> Result<()> {
     let dev = dev();
     let mut rng = Rng::seed(7);
 

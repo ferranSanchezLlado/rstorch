@@ -1,10 +1,6 @@
-//! Neural-network modules: the [`Module`]/[`Forward`] traits, [`Param`],
-//! [`Mode`], the parameter [`Visitor`]s, the model-level utilities
-//! ([`ModuleExt`]: `state_dict`/`load_state_dict`/`to_device`/`to_dtype`), the
-//! [`init`] initializers, [`Sequential`], and (from wave 4 on) the layer zoo —
-//! [`Linear`], [`Embedding`], [`Dropout`], the activations, the normalizations,
-//! [`MultiHeadAttention`], and the convolution/pooling set ([`Conv2d`],
-//! [`MaxPool2d`], [`AvgPool2d`], [`Flatten`], [`Identity`]).
+//! Neural-network modules: [`Module`], [`Forward`], [`Param`], [`Mode`],
+//! parameter visitors, model utilities, initializers, [`Sequential`], and the
+//! built-in layer types.
 //!
 //! The dynamic core has five foundational public traits; two of them —
 //! [`Module`] and [`Forward`] — live here. The optional `typed` namespace adds
@@ -136,21 +132,16 @@ pub trait Module {
 }
 
 /// A module that maps an `Input` to an [`Output`](Forward::Output) under a
-/// [`Mode`] (exploration §4.1). `&mut self` is honest about layer state
-/// (dropout RNG, `BatchNorm` running stats as plain fields — no interior
-/// mutability, no mutexes).
+/// [`Mode`).
+///
+/// `&mut self` allows stateful layers to update their own state, such as a
+/// dropout RNG or `BatchNorm` running statistics.
 ///
 /// # Why `Input` is a type parameter
 ///
-/// `Mode` is the crate-owned axis set and stays closed — `record` is the
-/// alternative to a global no-grad switch and must reach every
-/// [`Param::get`], so every layer relies on every axis existing, which only
-/// works if the crate owns the set (and lets rstorch add axes in a minor
-/// release without breaking anyone). `Input` is therefore the *user's*
-/// channel: a layer that needs more than one tensor — an attention mask, a
-/// sequence-length vector, a conditioning embedding — declares a struct and
-/// implements `Forward<ThatStruct>`, instead of smuggling the extra state
-/// through `&mut self` in call order.
+/// `Mode` carries layer behavior and parameter recording. A layer that needs
+/// additional per-call data puts it in `Input`; for example,
+/// `MultiHeadAttention` takes an input containing an optional mask.
 ///
 /// `Input` defaults to [`Tensor`], so the single-tensor spelling
 /// `impl Forward for Relu` is unchanged. A trait object must still name the

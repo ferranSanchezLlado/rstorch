@@ -221,7 +221,8 @@ fn main() -> Result<()> {
     for step in 0..200 {
         let traced_x = x.traced()?;
         let prediction = model.forward(&traced_x, Mode::TRAIN)?;
-        let loss = prediction.sub(&y)?.mul(&prediction.sub(&y)?)?.mean_all()?;
+        let residual = prediction.sub(&y)?;
+        let loss = residual.mul(&residual)?.mean_all()?;
         let loss_value = loss.item()?;
         first_loss.get_or_insert(loss_value);
         last_loss = loss_value;

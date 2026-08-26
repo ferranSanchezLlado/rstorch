@@ -1,10 +1,8 @@
-//! The table-driven backend conformance harness: one op × dtype table, run
-//! against the CPU reference.
+//! Shared table-driven backend conformance tests against the CPU reference.
 //!
-//! CPU is *the* reference implementation. Every other backend is validated
-//! against it by this one suite rather than by a per-backend pile of
-//! bespoke tests, so adding backend #5 costs "one module + a conformance
-//! run" instead of a new test corpus.
+//! Each case uploads host-visible operands, runs one backend entry point, and
+//! compares the downloaded outputs. Targeted integration tests supplement this
+//! table with public graphs and model-level behavior.
 //!
 //! # How it works
 //!
@@ -27,20 +25,17 @@
 //! - **Layouts**: cases deliberately include transposed and broadcast
 //!   views, because the kernel contract is stride-aware.
 //! - **`Unsupported` is not a mismatch.** A backend that reports
-//!   [`Error::Unsupported`] for a case has *loudly* declined it (there are
-//!   no silent fallbacks). Declared out-of-scope rows land in
+//!   [`Error::Unsupported`] has declined the case; there are no silent
+//!   fallbacks. Declared out-of-scope rows land in
 //!   `Report::expected_unsupported`; any other decline lands in
 //!   `Report::skipped`, which a promotion gate requires to be empty.
-//! - **Fused ops are in the table.** The runner compares a *list* of
-//!   downloaded outputs, so the multi-output encodings (`LayerNorm` with
-//!   `save_stats`, the optimizer steps' `(param, state…)` tuples) are ordinary
-//!   rows. A backend that declines a fused variant lands in
-//!   `expected_unsupported` only if the declining is declared; otherwise it is
-//!   an unexpected skip, exactly as for any other entry point.
+//! - **Fused ops are in the table.** The runner compares a list of downloaded
+//!   outputs, so multi-output encodings such as saved normalization statistics
+//!   and optimizer state are ordinary rows.
 //!
-//! CPU is the reference, and the Metal and WGPU test lanes reuse `run`
-//! unchanged for the rows their capability declarations cover. The CPU
-//! self-check still proves the complete table is runnable on every target.
+//! CPU is the reference. Metal, CUDA, and WGPU reuse `run` for the rows their
+//! capability declarations cover; the CPU self-check keeps the full table
+//! runnable on every target.
 
 use crate::backend::{
     ArgReduceOp, BackendOps, BinaryOp, CmpOp, Conv2dParams, ConvOp, FusedOp, ReduceOp, UnaryOp,

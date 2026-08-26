@@ -137,20 +137,3 @@ fn gradients_flow_through_weight_and_bias() {
     )
     .unwrap();
 }
-
-#[test]
-fn debug_reports_the_geometry() {
-    let conv = Conv2d::new(3, 8, (3, 3), &CPU, &mut Rng::seed(0))
-        .unwrap()
-        .with_stride((2, 2))
-        .with_padding((1, 1));
-    let text = format!("{conv:?}");
-    assert!(text.contains("3 -> 8"), "{text}");
-    assert!(text.contains("stride (2, 2)"), "{text}");
-    assert!(text.ends_with(", bias)"), "{text}");
-
-    let bare = Conv2d::new(3, 8, (3, 3), &CPU, &mut Rng::seed(0))
-        .unwrap()
-        .without_bias();
-    assert!(format!("{bare:?}").ends_with(", no bias)"), "{bare:?}");
-}

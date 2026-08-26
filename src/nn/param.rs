@@ -81,13 +81,11 @@ impl Param {
         self.value.clone()
     }
 
-    /// Swap the value (optimizer step / checkpoint load) and rebuild the
-    /// cached leaf. Any graph that already captured the previous value keeps
-    /// it alive and consistent (`Param::set` swaps the `Arc`; exploration
-    /// §5 "Param updated under a live graph").
+    /// Replace the value used by this parameter and rebuild its cached leaf.
     ///
-    /// The replacement is detached before storage, so a caller cannot smuggle
-    /// an unrelated graph into a parameter through `set`.
+    /// Graphs that already captured the previous value keep it alive. The
+    /// replacement is detached before storage, so `set` cannot retain an
+    /// unrelated graph.
     ///
     /// # Errors
     ///

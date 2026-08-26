@@ -883,7 +883,7 @@ impl BackendOps for WgpuBackend {
                 return Err(Error::unsupported("copy", x.device(), x.dtype()));
             }
             let mut params = [0; 64];
-            let output = Layout::contiguous(x.layout().dims().to_vec())?;
+            let output = Layout::contiguous(x.layout().dims())?;
             params[3] = u32::from(x.layout().is_contiguous());
             params[4] = 1;
             descriptor(&mut params, 26, &output, "copy")?;
@@ -896,10 +896,11 @@ impl BackendOps for WgpuBackend {
                 false,
             );
         }
-        words(x.dtype()).ok_or_else(|| Error::unsupported("copy", x.device(), x.dtype()))?;
+        let word_count =
+            words(x.dtype()).ok_or_else(|| Error::unsupported("copy", x.device(), x.dtype()))?;
         let mut params = [0; 64];
-        params[2] = words(x.dtype()).unwrap() as u32;
-        let output = Layout::contiguous(x.layout().dims().to_vec())?;
+        params[2] = word_count as u32;
+        let output = Layout::contiguous(x.layout().dims())?;
         params[3] = u32::from(x.layout().is_contiguous());
         params[4] = 1;
         descriptor(&mut params, 26, &output, "copy")?;

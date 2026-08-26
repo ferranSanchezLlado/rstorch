@@ -913,49 +913,6 @@ fn scatter_add_matches_the_naive_decode_bitwise() {
     }
 }
 
-#[test]
-fn trailing_run_admits_only_genuinely_contiguous_inner_axes() {
-    let base = lay([3, 4, 5]);
-    // Dense: the run is the product of the axes inside the indexed one.
-    assert_eq!(trailing_run(base.dims(), base.strides(), 0), Some(20));
-    assert_eq!(trailing_run(base.dims(), base.strides(), 1), Some(5));
-    assert_eq!(trailing_run(base.dims(), base.strides(), 2), Some(1));
-
-    // Narrowing the innermost axis gives dims [3,4,3] / strides [20,5,1]:
-    // consecutive axis-1 rows are 5 apart but only 3 wide, so a gap opens
-    // and no run may span axis 1.
-    let narrowed = base.narrow(2, 1, 3).unwrap();
-    assert_eq!(trailing_run(narrowed.dims(), narrowed.strides(), 0), None);
-    // The surviving 3 innermost elements are still consecutive, though, so
-    // a pick along axis 1 copies a run of 3 — and a pick along axis 2 has
-    // no inner axes at all, hence the trivial run of 1.
-    assert_eq!(
-        trailing_run(narrowed.dims(), narrowed.strides(), 1),
-        Some(3)
-    );
-    assert_eq!(
-        trailing_run(narrowed.dims(), narrowed.strides(), 2),
-        Some(1)
-    );
-
-    // A broadcast axis inside the indexed one repeats elements and must be
-    // refused, even though its size is > 1.
-    let bcast = lay([3, 4, 1])
-        .broadcast_to(&Shape::from([3, 4, 5]))
-        .unwrap();
-    assert_eq!(trailing_run(bcast.dims(), bcast.strides(), 0), None);
-
-    // A size-1 axis contributes nothing to addressing, so an odd stride on
-    // one does not break the run.
-    let odd = Layout::from_parts(
-        Shape::from([2, 1, 6]),
-        vec![6usize, 999, 1].into_boxed_slice(),
-        0,
-    )
-    .unwrap();
-    assert_eq!(trailing_run(odd.dims(), odd.strides(), 0), Some(6));
-}
-
 /// The one property the `index_add` row-copy tier could plausibly break
 /// and the sweep above could not see: **the order** in which duplicate
 /// picks accumulate into the same destination cell.

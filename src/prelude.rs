@@ -1,43 +1,30 @@
-//! The first-hour surface: `use rstorch::prelude::*;`.
-//!
-//! Exposes the crate's core vocabulary. Edits here are
-//! **append-only** re-exports: later tasks add their public types (the
-//! `nn` layers, `Sgd`/`Adam`, `DataLoader`, `#[derive(Module)]`) without
-//! reordering or removing.
-
+//! Common tensor, neural-network, optimizer, data, text, and model APIs.
 pub use crate::{DType, Device, Error, Grads, Result, Rng, Shape, Tensor};
 
 pub use crate::nn::{Forward, Mode, Module, ModuleExt, Param, Sequential, StateDict};
 
-// The core layer zoo.
+// Common activation and layer types.
 pub use crate::nn::{Dropout, Gelu, Linear, Relu};
 
-// The normalization layers.
+// Normalization layers.
 pub use crate::nn::{BatchNorm2d, LayerNorm, RMSNorm};
 
-// The optimizers of the first-hour loop, so that `Adam::new(1e-3)` works
-// under a bare `use rstorch::prelude::*`. The parameter-group
-// builder types and the `schedule` functions stay behind `rstorch::optim::` —
-// they belong to hour two.
+// Optimizers commonly used in the examples.
 pub use crate::optim::{Adam, AdamW, Sgd};
 
 pub use crate::text::{BpeTokenizer, CharTokenizer, Tokenizer};
 
-// The data pipeline: the loader, the trait its batches come from, and
-// the two provided datasets that cover the in-memory cases.
+// In-memory datasets and the data loader.
 pub use crate::data::{DataLoader, Dataset, TensorDataset, VecDataset};
 
-// The layer zoo: the two layers a transformer cannot be written without.
+// Attention and embedding layers.
 pub use crate::nn::{AttentionInput, Embedding, MultiHeadAttention};
 
-// The `Module` *derive macro* lives in the macro namespace, so it coexists
-// with the `Module` trait above under the one name: a single
-// `use rstorch::prelude::*;` brings both, and `#[derive(Module)]` resolves.
+// The trait and derive macro intentionally share the name `Module`.
 pub use crate::Module;
 
-// Config-driven decoder language model and its incremental cache.
+// Transformer model and generation cache.
 pub use crate::models::{DecoderTransformer, KvCache, TransformerConfig};
 
-// The convolutional layer zoo: the loudest first-ten-minutes signal for a
-// vision model.
+// Convolution and pooling layers.
 pub use crate::nn::{AvgPool2d, Conv2d, Flatten, Identity, MaxPool2d};

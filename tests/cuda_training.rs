@@ -141,14 +141,8 @@ fn seeded_cnn_loss_decreases_on_cuda() -> Result<()> {
     Ok(())
 }
 
-/// CUDA-vs-CPU parity for `LayerNorm` gradients at every rank the fused
-/// backward kernel handles.
-///
-/// The fused ops are deliberately absent from the `conformance` op x dtype
-/// table, so this is the only thing standing between a wrong fused
-/// `LayerNorm` backward and a silently mistrained model: a rank-3
-/// `[batch, seq, embed]` input is what every transformer block normalizes, and
-/// a "loss decreased" assertion cannot see a gradient that is merely wrong.
+/// CUDA-vs-CPU parity for the public `LayerNorm` backward graph across the
+/// supported input ranks. This supplements entry-point conformance.
 #[test]
 fn layer_norm_gradients_match_cpu_on_every_rank() -> Result<()> {
     if !gpu::available() {

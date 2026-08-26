@@ -1,4 +1,15 @@
 use rstorch::{DType, Device, Tensor};
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[path = "common/metal.rs"]
+mod metal_gpu;
+
+#[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+#[path = "common/wgpu.rs"]
+mod wgpu_gpu;
+
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+#[path = "common/cuda.rs"]
+mod cuda_gpu;
 
 fn bits(tensor: &Tensor) -> Vec<u32> {
     tensor
@@ -43,23 +54,28 @@ fn cpu_chain_matches_eager_bit_for_bit() {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn metal_deferred_chain_matches_when_hardware_is_available() {
+    if !metal_gpu::available() {
+        return;
+    }
     parity_on_device(Device::Metal(0));
 }
 
 #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
 #[test]
 fn wgpu_deferred_chain_matches_when_hardware_is_available() {
-    if Tensor::zeros([1], DType::F32, &Device::Wgpu(0)).is_ok() {
-        parity_on_device(Device::Wgpu(0));
+    if !wgpu_gpu::available() {
+        return;
     }
+    parity_on_device(Device::Wgpu(0));
 }
 
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 #[test]
 fn cuda_deferred_chain_matches_when_hardware_is_available() {
-    if Tensor::zeros([1], DType::F32, &Device::Cuda(0)).is_ok() {
-        parity_on_device(Device::Cuda(0));
+    if !cuda_gpu::available() {
+        return;
     }
+    parity_on_device(Device::Cuda(0));
 }
 
 #[cfg(any(

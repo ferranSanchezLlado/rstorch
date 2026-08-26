@@ -17,18 +17,14 @@ license.workspace = true
 readme = "README.md"
 repository.workspace = true
 documentation = "https://docs.rs/rstorch"
-description = "A safer PyTorch-inspired deep learning library: one tensor type, linear gradients"
+description = "PyTorch-inspired tensor and autograd library with a dynamic Tensor API and linear gradients"
 keywords = ["neural-network", "machine-learning", "deep-learning", "pytorch", "tensor"]
 categories = ["science", "mathematics", "algorithms"]
 edition.workspace = true
 rust-version.workspace = true
-# What a consumer of the published crate never reads: CI configuration
-# (`.github/`, `deny.toml`), the maintainer-only release runbook
-# (`RELEASING.md`), and the untracked local working material `api/` (generated
-# API snapshots) and `test-tools/` (throwaway scripts). `tests/` and `benches/`
-# stay in: they are declared targets, so the manifest a consumer resolves must
-# still find their sources.
-exclude = [".github/", "api/", "test-tools/", ".gitignore", "deny.toml", "RELEASING.md"]
+
+# Keep local tooling out of the published package.
+exclude = [".github/", "api/", "test-tools/", ".gitignore", "deny.toml"]
 
 # docs.rs renders the whole surface, not just the default features, so `typed`,
 # `hub`, `rayon`, `metal`, and `wgpu` are documented. `metal` compiles only on macOS, so
@@ -62,9 +58,6 @@ objc2-metal = { version = "0.3.2", optional = true, default-features = false, fe
 
 [dev-dependencies]
 criterion = "0.8.2"
-# Reads the committed PyTorch reference vectors in `tests/numerics.rs`, in
-# place of a bespoke parser inside the test file.
-serde_json = "1"
 trybuild = "1"
 
 [[bench]]
@@ -161,8 +154,5 @@ metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
 wgpu = ["dep:pollster", "dep:wgpu"]
 # NVIDIA CUDA acceleration on Linux and Windows.
 cuda = ["dep:cudarc"]
-# The finite-difference gradient harness (`rstorch::testing`). It is a test
-# utility, not frozen library surface, so it is the one public module outside
-# the semver guarantee in STABILITY.md — hence a feature rather than an
-# unconditional `pub mod`.
+# Finite-difference gradient helper for tests; opt-in so it is not runtime API.
 testing = []

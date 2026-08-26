@@ -1,9 +1,8 @@
 #![cfg(feature = "typed")]
-//! The typed API's first-hour path, start to finish: bind a device context,
-//! construct typed tensors, build and run a module, then save and reload it.
+//! Typed API smoke test: bind a device context, construct tensors, run a
+//! module, and save and reload its state.
 //!
-//! This crate depends only on the `rstorch` public API, so passing here is
-//! evidence a downstream user can actually walk the path in this order.
+//! The fixture depends only on the public `rstorch` API.
 use rstorch::typed::nn::{
     Forward, Linear, Mode, TypedBuffer, TypedModule, TypedParam, load_state_dict, state_dict,
 };

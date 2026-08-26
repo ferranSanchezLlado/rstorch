@@ -394,26 +394,11 @@ fn softmax_contiguous_f32(values: &[f32], layout: &Layout) -> Vec<f32> {
     output
 }
 
-/// How many work units **one element** of a row-normalizing kernel costs:
-/// softmax and layernorm each sweep their row about three times (statistics,
-/// then the transform), and softmax's middle pass evaluates `exp`, which is far
-/// dearer than the multiply-add the unit is calibrated to.
-///
-/// Measured rather than guessed. Sequentially, `softmax_last_f32/128x512` runs
-/// 65,536 elements in ~136 µs and `layernorm/forward_f32/128x512` the same
-/// count in ~255 µs — 2 ns and 3.9 ns per element against the ~0.067 ns of one
-/// calibrated unit, so an element here is worth roughly 30–60 of them. An
-/// earlier guess of 8 left these kernels just under the parallel threshold,
-/// where they picked up only two tasks and lost 13% to the sequential form.
-///
-/// Per element, not per row. The element-indexed drivers
-/// ([`build`](crate::backend::parallel::build),
-/// [`for_each_window_mut`](crate::backend::parallel::for_each_window_mut)) take
-/// a per-element cost and multiply by the output length themselves; only
-/// [`for_each_row_mut3`](crate::backend::parallel::for_each_row_mut3) is quoted
-/// per row and scales this by `width`. Passing the per-row figure to an
-/// element-indexed driver overstates the job by a factor of `width`, which sent
-/// a 32×128 softmax onto the thread pool and made it 4.6× slower.
+/// Cost estimate for row-normalizing kernels used by the parallel scheduler.
+/// Softmax and layer normalization make several passes over each row, and
+/// softmax also evaluates `exp`, so they cost more than a simple elementwise
+/// operation. The estimate is per element; row-based drivers scale it by the
+/// row width.
 const ROW_PASS_COST: usize = 32;
 
 fn softmax_generic<E>(values: &[E], layout: &Layout) -> Vec<E>

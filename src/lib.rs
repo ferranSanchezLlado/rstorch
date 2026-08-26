@@ -1,10 +1,7 @@
 #![warn(missing_docs)]
 
-//! A safer PyTorch-inspired deep learning library: one concrete tensor type
-//! with zero generic parameters, and linear gradients.
-//!
-//! The first-hour surface is re-exported at the crate root and, together
-//! with the `nn`/`optim`/`data` types, through [`prelude`]:
+//! A PyTorch-inspired deep-learning library with one dynamic tensor type and
+//! linear gradients.
 //!
 //! ```
 //! use rstorch::prelude::*;
@@ -16,30 +13,26 @@
 //!
 //! # Feature flags
 //!
-//! Features are additive: enabling one never removes or changes an item that
-//! was there without it. `metal` is enabled by default and only affects macOS.
+//! Features are additive. `metal` is enabled by default on macOS.
 //!
 //! | Feature | What it adds |
 //! |---|---|
-//! | `typed` | Experimental `typed` namespace: rank, dimensions, dtype and placement checked at compile time, as a wrapper over this same [`Tensor`]. It is excluded from the dynamic 1.x stability guarantee. |
-//! | `rayon` | Multi-threaded CPU kernels. Results are bit-identical to the single-threaded ones: kernels partition by output element, so no float is accumulated across threads in a racing order. |
-//! | `hub` | Downloads for the bundled datasets in [`data::hub`]. |
-//! | `metal` | The default macOS GPU backend. [`Device::best_available`] selects the first Metal device when present, then considers CUDA, WGPU and CPU. |
-//! | `cuda` | Opt-in native NVIDIA GPU backend on Linux and Windows, including Linux under WSL. [`Device::best_available`] selects it when present before considering WGPU and CPU. Supports compute capability 6.0+, F16/F32 compute, and I64/Bool storage. Bundled PTX requires a compatible NVIDIA driver, but not the CUDA toolkit. |
-//! | `wgpu` | Opt-in portable native GPU backend. Supports F32 compute plus lossless I64/Bool storage and native F16 when the adapter exposes `SHADER_F16`; unsupported dtypes fail loudly. |
-//! | `testing` | The `testing` finite-difference gradient harness. The public module outside the stability guarantee. |
+//! | `typed` | Experimental compile-time checked tensor wrappers |
+//! | `rayon` | Parallel CPU kernels |
+//! | `hub` | Dataset downloads |
+//! | `metal` | The macOS Metal backend |
+//! | `cuda` | Native NVIDIA CUDA on Linux and Windows |
+//! | `wgpu` | Portable native WebGPU |
+//! | `testing` | The finite-difference gradient helper |
 //!
-//! # Stability
+//! The `rstorch::lazy` namespace is an experimental deferred executor and is
+//! disabled unless enabled at runtime.
 //!
-//! This crate follows semantic versioning from 1.0. `STABILITY.md` states the
-//! covered surface, backend and dtype capability policy, checkpoint integrity
-//! limits, and MSRV policy. Public API changes should be reviewed against that
-//! contract before release.
+//! The dynamic API follows semantic versioning from 1.0. The `testing`,
+//! `typed`, and `lazy` namespaces are outside that compatibility promise.
 
-// `#[derive(Module)]` (the `rstorch-derive` crate) generates paths
-// rooted at `::rstorch`; this alias lets that expansion resolve when the
-// derive is used *inside* this crate (the layer zoo from wave 4 on) exactly
-// as it does downstream.
+// `#[derive(Module)]` resolves the runtime crate through this alias when the
+// derive is used inside `rstorch`, just as it does in downstream crates.
 extern crate self as rstorch;
 
 // ---- public namespaces (types also re-exported flat below) --------------

@@ -378,33 +378,15 @@ fn byte_len(dtype: DType, len: usize) -> Result<u64> {
     })
 }
 
-/// A caching allocator for device buffers, keyed by byte size.
+/// Caching allocator for Metal buffers, keyed by byte size.
 ///
-/// `newBufferWithLength:` measures 1.7–7 µs on an M4 Pro, and this backend
-/// allocates one buffer per op output. A transformer step encodes hundreds of
-/// ops, so allocation alone accounted for milliseconds — far more than the
-/// kernels themselves, which is why the backend was losing to CPU on small
-/// models rather than on arithmetic.
+/// A buffer is reusable only when the pool holds the sole `Arc` reference.
+/// Tensors, open command buffers, and pending validation work hold clones while
+/// the GPU may still access it. Reusing a buffer based only on tensor lifetime
+/// could let a new operation overwrite an in-flight result.
 ///
-/// # How a buffer is known to be free
-///
-/// The pool keeps an [`Arc`] to every buffer it has ever handed out and never
-/// returns one whose `strong_count` exceeds 1. That single reference is the
-/// pool's own, so a count of 1 proves that
-///
-/// - no live [`MetalStorage`] holds it (tensors clone the `Arc`), **and**
-/// - no un-reaped command buffer references it — [`OpenBuffer::resources`] and
-///   [`PendingBuffer`] hold `Arc` clones for exactly as long as the GPU may
-///   touch the buffer, and [`reap`] drops them only after the command buffer
-///   reports completion.
-///
-/// Tracking the `Arc` rather than the storage's lifetime is the whole safety
-/// argument: recycling on `MetalStorage` drop alone would hand a buffer to a
-/// new op while a command buffer still in flight was writing it.
-///
-/// Buffers are cached rather than freed, so the pool settles at the peak
-/// concurrent footprint per size class. That is the same bargain `PyTorch`'s
-/// caching allocator makes.
+/// Buffers stay cached, so the pool grows to the peak footprint of each size
+/// class.
 #[derive(Default)]
 struct BufferPool {
     by_size: HashMap<u64, Vec<Arc<MetalBuffer>>>,

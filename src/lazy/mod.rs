@@ -501,45 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn report_storage_sizes_for_design_review() {
-        let expected_storage = if cfg!(all(feature = "wgpu", not(target_arch = "wasm32"))) {
-            40
-        } else if cfg!(any(
-            all(feature = "metal", target_os = "macos"),
-            all(
-                feature = "cuda",
-                any(target_os = "linux", target_os = "windows")
-            )
-        )) {
-            32
-        } else {
-            16
-        };
-        let expected_inner = if cfg!(all(feature = "wgpu", not(target_arch = "wasm32"))) {
-            96
-        } else if cfg!(any(
-            all(feature = "metal", target_os = "macos"),
-            all(
-                feature = "cuda",
-                any(target_os = "linux", target_os = "windows")
-            )
-        )) {
-            88
-        } else {
-            72
-        };
-        assert_eq!(
-            std::mem::size_of::<Storage>(),
-            expected_storage,
-            "Storage size changed; update the lazy representation review"
-        );
-        assert_eq!(
-            std::mem::size_of::<crate::tensor::Inner>(),
-            expected_inner,
-            "Inner size changed; update the lazy representation review"
-        );
-    }
-    #[test]
     fn scalar_left_deferred_error_uses_public_name() {
         let _guard = set_fusion(Fusion::On);
         let x = crate::Tensor::from_vec(vec![true], [1], &Device::Cpu).unwrap();

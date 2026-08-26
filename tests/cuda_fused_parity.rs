@@ -1,17 +1,12 @@
-//! CUDA **fused** kernels against the CPU reference: softmax, the
-//! normalization layers, cross-entropy, and the optimizer steps — forward and
-//! backward, contiguous and strided.
+//! CUDA fused kernels against the CPU reference: softmax, normalization,
+//! cross-entropy, and optimizer steps, including their backward paths.
 //!
-//! The `backend::conformance` table deliberately excludes fused ops (their
-//! multi-output encodings do not fit its single-output harness), and the
-//! in-crate CUDA fused test checks output *shapes and dtypes* for `LayerNorm`
-//! plus hardcoded values for one SGD step. Nothing compared a fused CUDA
-//! **value** against the CPU reference, which is where a hand-written
-//! block reduction or a mis-set eps hides: the numbers stay finite and
-//! the model still trains, only worse.
+//! These end-to-end public-graph checks supplement the shared
+//! `backend::conformance` table with strided inputs, parameter gradients, and
+//! optimizer behavior.
 //!
-//! Every case runs the identical graph on both devices from identical host
-//! bytes. `Device::Cpu` is the reference (see `backend::conformance`).
+//! Each case runs the same graph on both devices from the same host bytes.
+//! `Device::Cpu` is the reference.
 
 #![cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 

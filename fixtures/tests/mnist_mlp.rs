@@ -1,58 +1,12 @@
-//! **The m3 acceptance fixture**:
-//! the flagship loop — an MLP over an MNIST split, trained end to end through
-//! `DataLoader` + `Adam`, with the loss going down and the accuracy going up.
+//! Offline end-to-end training fixture for the public API.
 //!
-//! Like every fixture this file is a downstream consumer: it imports the
-//! first-hour prelude plus the two `data::hub` paths the dataset lives behind,
-//! and nothing else. Every step below therefore has to be expressible in the
-//! public vocabulary. What it pins:
+//! The fixture is a downstream consumer and imports the prelude plus the
+//! dataset types. It builds a small synthetic ten-class image dataset through
+//! the same IDX parser and batching path as the real MNIST loader.
 //!
-//! - The `#[derive(Module)]` + `Forward` model —
-//!   `Linear`/`Dropout`/`Linear` with a `relu` between — reaches
-//!   `Adam::step(&mut model, loss.backward()?)` with no glue types.
-//! - `MnistDataset` with [`MnistLayout::Flat`] drops straight into
-//!   `DataLoader::new(&ds, 32).shuffle(0)`, and its `(F32, I64)` batch is
-//!   exactly what `cross_entropy` takes — no conversion, no collator.
-//! - **Real learning, not "it ran"**: the epoch loss falls monotonically from
-//!   near `ln 10` to a fraction of it, and held-out accuracy goes from chance
-//!   to a floor no random model reaches.
-//! - **Determinism**: everything is seeded (data, init, dropout, shuffling), so
-//!   two runs produce bit-identical loss sequences. A flaky training test is
-//!   worse than none. This is *structural*, not luck: the CPU kernels partition
-//!   work by **output** element/chunk, so no float is accumulated across
-//!   threads in a racing order. Verified by measurement — the 15-epoch loss
-//!   sequence is bit-identical with the `rayon` feature off, and on at
-//!   `RAYON_NUM_THREADS` of 1, 2 and 8.
-//! - **The loudness net**: with every parameter read through
-//!   `Param::get(mode)` under a recording `Mode`, every parameter gets a
-//!   gradient and `MissingGrad` never fires — which is the *correct* outcome,
-//!   asserted positively here (`Grads::len` equals the parameter count and the
-//!   step succeeds). The last test then shows the net catching the one
-//!   mistake it exists to catch.
-//!
-//! # Offline by construction
-//!
-//! CI has no network, so nothing here downloads: the split is a small
-//! **synthetic** stand-in built from a 5×7 stroke font for the ten digits,
-//! encoded into MNIST's own IDX bytes and parsed with
-//! [`Mnist::from_idx_bytes`] — the same parser, wrapper, upload, and batching
-//! path the real 28×28 archives take, only 10×10 and a few hundred items so
-//! the whole file runs in seconds. It is honestly *not* MNIST: it is a
-//! learnable ten-class image problem that exercises the identical code.
-//!
-//! Two consequences worth stating plainly rather than discovering later:
-//!
-//! - The problem is easy enough that the trained net **saturates** held-out
-//!   accuracy at `1.000`. So the `> 0.9` floor proves learning happened but
-//!   cannot measure how *well* — it has no resolution left. The loss-trend
-//!   assertions are the sensitive ones; accuracy is the sanity check. What
-//!   makes either meaningful is the asserted starting point: the untrained net
-//!   scores `0.105` at a loss of `2.363`, so the floors are not reachable
-//!   without training.
-//! - No assertion here is a performance claim. The benches measure these CPU kernels
-//!   at 4–15× slower than v2; this fixture would pass just as green once that
-//!   is fixed. It gates *correctness of the assembled stack*, nothing else.
-
+//! The test checks that a derived MLP trains, that seeded runs are repeatable,
+//! and that every parameter receives a gradient. It is a correctness smoke
+//! test, not a benchmark.
 use rstorch::data::hub::{Mnist, MnistDataset, MnistLayout};
 use rstorch::prelude::*;
 
@@ -162,14 +116,10 @@ fn splits(device: &Device) -> Result<(MnistDataset, MnistDataset)> {
 }
 
 // ---------------------------------------------------------------------------
-// The model, verbatim in shape.
+// Model.
 // ---------------------------------------------------------------------------
 
-/// The flagship MLP: `784 → 128 → 10` in the design's example, `100 → 64 → 10`
-/// here so the fixture runs in seconds. `#[derive(Module)]` writes both
-/// parameter walks; `Dropout` contributes no parameters but is still a visited
-/// child, and leaving it out of the struct would be a compile error rather
-/// than a silently untrained layer.
+/// A small derived MLP with dropout between two linear layers.
 #[derive(Module)]
 struct Mlp {
     fc1: Linear,
@@ -293,32 +243,15 @@ const CHANCE_LOSS: f64 = std::f64::consts::LN_10;
 const CHANCE_ACCURACY: f64 = 1.0 / CLASSES as f64;
 
 // ---------------------------------------------------------------------------
-// The acceptance tests.
+// Training checks.
 // ---------------------------------------------------------------------------
-
-/// How many epochs the flagship trains for — chosen for the *headroom* of the
-/// strictest assertion below, not for the best final number.
-///
-/// Measured at this setting (unoptimized, ~3 s): training loss
-/// `2.271 → 0.335`, monotone every epoch; held-out loss `2.363 → 0.317`;
-/// held-out accuracy `0.105 → 1.000`. The floors are `0.25 × first`, `< 0.5`
-/// and `> 0.9`, so every margin is wide — except one.
-///
-/// ⚠️ **The binding constraint is the per-epoch monotonicity**, whose headroom
-/// is the *smallest* consecutive drop: `0.046` here. That number shrinks as the
-/// curve flattens, and the drops are already non-smooth at the tail (`0.046`
-/// then `0.060`), so monotonicity is noise-limited, not trend-limited. At 20
-/// epochs the loss is a prettier `0.192` but the smallest drop falls to
-/// `0.020` — the same assertion riding 2.3× less margin. Raising `EPOCHS`
-/// therefore makes this test *more* fragile while making its headline number
-/// look better; re-measure the smallest drop before touching it.
+/// Number of epochs used by the deterministic training smoke test.
 const EPOCHS: u64 = 15;
 
-/// **The m3 example.** The flagship MLP trains: the epoch loss falls from
-/// chance to a fraction of it, monotonically, and held-out accuracy clears a
-/// floor a random model cannot reach.
+/// The model should reduce the training loss and beat chance accuracy on the
+/// held-out synthetic split.
 #[test]
-fn the_flagship_mlp_learns_from_an_mnist_split() -> Result<()> {
+fn synthetic_mlp_learns_from_an_mnist_split() -> Result<()> {
     let device = Device::best_available();
     let (train, held_out) = splits(&device)?;
     assert_eq!(train.len(), 600);
@@ -444,13 +377,10 @@ fn training_is_reproducible_from_its_seeds() -> Result<()> {
     Ok(())
 }
 
-/// The loudness net, from the *quiet* side: every parameter of the flagship is
-/// read through `Param::get(mode)` under a recording mode, so `backward`
-/// produces one gradient per parameter and `Adam::step` never raises
-/// [`Error::MissingGrad`]. That is the correct outcome, and asserting it
-/// positively is what makes the next test's failure meaningful.
+/// Every parameter in the derived model should receive a gradient during a
+/// normal training step.
 #[test]
-fn every_parameter_of_the_flagship_is_traced() -> Result<()> {
+fn every_model_parameter_gets_a_gradient() -> Result<()> {
     let device = Device::best_available();
     let (train, _) = splits(&device)?;
     let mut rng = Rng::seed(42);
@@ -474,13 +404,10 @@ fn every_parameter_of_the_flagship_is_traced() -> Result<()> {
     Ok(())
 }
 
-/// The loudness net catching the mistake it exists for: a layer that reads
-/// `Param::value()` (the untraced accessor) instead of `Param::get(mode)`
-/// contributes to the forward pass but not to the graph, so the next step
-/// names it — rather than training everything else and leaving it frozen
-/// forever.
+/// A parameter read through `Param::value()` instead of `Param::get(mode)`
+/// should be reported as missing at the next optimizer step.
 #[test]
-fn an_untraced_parameter_is_loud_at_the_next_step() -> Result<()> {
+fn untraced_parameter_fails_at_next_step() -> Result<()> {
     /// `fc` is traced correctly; `head` is not.
     #[derive(Module)]
     struct HalfTraced {

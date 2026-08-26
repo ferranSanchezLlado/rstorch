@@ -1,24 +1,19 @@
-# The downstream acceptance crate: depends only on the rstorch public API, so
-# its tests are evidence that a first-hour user can actually run these paths.
+# Downstream integration fixtures that depend only on the public rstorch API.
 [package]
 name = "fixtures"
 version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Compile-tested acceptance fixtures for rstorch (not published)"
+description = "Downstream integration fixtures for rstorch (not published)"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
 [dependencies]
 rstorch = { path = "..", default-features = false }
-# `half::f16`/`half::bf16` are public rstorch contract surface: a downstream
-# crate must depend on `half` itself in order to name a reduced-precision typed
-# tensor at all, so depending on it here reproduces the real first-hour user
-# experience. `half` is already an unconditional, non-optional rstorch
-# dependency under the same `2` requirement, so resolution unifies both on one
-# version and there is no skew between the fixture's `f16` and rstorch's.
+# Reduced-precision typed tensors use the same public `half` dependency as
+# rstorch.
 half = "2"
 
 [features]

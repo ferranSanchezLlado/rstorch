@@ -864,7 +864,7 @@ mod tests {
         });
     }
 
-    // ---- the loudness gate ----------------------------------------------
+    // ---- missing-gradient check ------------------------------------------
 
     #[test]
     fn an_untraced_weight_is_missing_grad_and_no_moment_is_touched() {

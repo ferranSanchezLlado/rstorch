@@ -76,7 +76,7 @@ fn concat_values(
 ) -> Result<Tensor> {
     let dtype = parts[0].dtype();
     let backend = dispatch::backend(parts[0].device());
-    let layout = Layout::contiguous(out_dims.to_vec())?;
+    let layout = Layout::contiguous(out_dims)?;
     let total = layout.num_elements();
     if total == 0 {
         // No elements to move: allocate the (empty) buffer and be done. This

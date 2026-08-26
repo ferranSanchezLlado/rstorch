@@ -880,7 +880,7 @@ impl Tensor {
         // What survives is `target_dims` with its summed-away size-1 axes
         // deleted, so the element counts agree and re-viewing the (contiguous)
         // reduction output as `target_dims` simply puts them back.
-        let layout = Layout::contiguous(Shape::from(target_dims.to_vec()))?;
+        let layout = Layout::contiguous(target_dims)?;
         debug_assert_eq!(layout.num_elements(), cur.num_elements());
         Ok(Tensor::from_parts(cur.storage().clone(), layout))
     }

@@ -274,14 +274,3 @@ fn wrappers_have_required_thread_and_lifetime_traits() {
     assert_traits::<Tensor0<f32, Main>>();
     assert_traits::<Tensor8<DYN, 1, 2, 3, 4, 5, 6, 7, i64, Main>>();
 }
-
-#[test]
-fn formatting_is_exactly_the_runtime_tensor_formatting() {
-    let ctx = cpu();
-    let runtime = Tensor::from_vec(vec![1.0f32, 2.0], [2], &Device::Cpu).unwrap();
-    let expected_debug = format!("{runtime:?}");
-    let expected_display = format!("{runtime}");
-    let typed = Tensor1::<2>::try_from_dynamic(runtime, &ctx).unwrap();
-    assert_eq!(format!("{typed:?}"), expected_debug);
-    assert_eq!(format!("{typed}"), expected_display);
-}

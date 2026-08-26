@@ -1,11 +1,9 @@
 //! Operator sugar: the panicking tier of the two-tier fallibility policy.
 //!
-//! Every named method returns [`Result`](crate::Result). The `std::ops`
-//! spellings — `a + b`, `a - b`, `a * b`, `a / b`, `-a`, plus the `tensor
-//! <op> f64` and `f64 <op> tensor` forms — call exactly those methods and
-//! **panic with the identical structured message** when they fail. The impls
-//! are `#[track_caller]`, so the panic is reported at the user's expression,
-//! not inside this file:
+//! Fallible tensor operations expose named [`Result`](crate::Result)-returning
+//! methods. The `std::ops` spellings — `a + b`, `a - b`, `a * b`, `a / b`,
+//! `-a`, plus scalar forms on either side — call those methods and panic with
+//! the same structured message when they fail.
 //!
 //! ```text
 //! thread 'main' panicked at src/main.rs:12:17:

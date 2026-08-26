@@ -1,10 +1,6 @@
-# Tag-triggered publish, in the one order that resolves: `rstorch` depends on
-# `rstorch-derive` *by version*, so the derive has to be live on crates.io before
-# `cargo publish -p rstorch` can resolve it (RELEASING.md). Everything before the
-# publish job is the "Before tagging" checklist from that file, run again on the
-# exact commit the tag points at — GitHub cannot express `needs:` across
-# workflows, and a `v*` tag push matches neither of ci.yml's triggers, so the
-# gate is reproduced here rather than referenced from ci.yml.
+# Tag-triggered publish. `rstorch` pins `rstorch-derive` by exact version, so
+# the derive must be available before the root package can be published. The
+# tag workflow repeats the release gates because a tag does not trigger ci.yml.
 #
 # Deliberately not reproduced: ci.yml's per-combination lanes (`features`:
 # hub+rayon; `surfaces`: default, typed, all features), which exist to catch
@@ -88,8 +84,7 @@ jobs:
           rustup target add aarch64-apple-darwin --toolchain stable
           rustup default stable
       - uses: Swatinem/rust-cache@v2
-      # RELEASING.md: "the macOS lanes are green" is a release condition,
-      # because they are the only ones that build the Metal surface at all.
+      # These are the only release jobs that build the Metal surface.
       - name: Test the Metal suites
         run: >
           cargo test --locked --features metal
@@ -114,11 +109,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # A tag push does not match ci.yml's `branches:` filter, so ci.yml does not
-  # run for a tagged commit at all: without this job the release gate would
-  # execute Metal kernels and no WGSL, while STABILITY.md claims both backends
-  # are validated in CI. This is `wgpu-software-adapter` from ci.yml, reproduced
-  # for the same reason as the rest of the gate.
+  # A tag does not trigger ci.yml, so the release gate needs its own WGPU lane.
+  # This job uses the same lavapipe software adapter as ci.yml.
   verify-wgpu:
     name: Release gate (WGPU, lavapipe software adapter)
     runs-on: ubuntu-latest
@@ -184,12 +176,9 @@ jobs:
       # `Error::Unsupported` when it is not, so it is meaningful either way on
       # lavapipe. No WGPU suite is skipped on this lane.
 
-  # ci.yml's `ui` and `ui-stable`, merged into one job. Every trybuild suite in
-  # the tree early-returns unless RSTORCH_UI is set (tests/typed_ui.rs,
-  # tests/linearity_ui.rs, rstorch-derive/tests/ui.rs and
-  # rstorch-derive/tests/typed_ui.rs), so no other job here asserts a single
-  # compile-fail diagnostic — while CHANGELOG.md's Infrastructure section claims
-  # CI enforces those suites on a pinned toolchain.
+  # Every compile-fail suite runs from the all-features command below when
+  # `RSTORCH_UI` is set. The stable typed run checks only compiler-independent
+  # semantic fragments.
   verify-ui:
     name: Release gate (compile-fail diagnostics)
     runs-on: ubuntu-latest
@@ -209,22 +198,10 @@ jobs:
           rustup toolchain install 1.88 --profile minimal
           rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
-      # `--locked` on every step here: trybuild compares rustc diagnostics
-      # against recorded text pinned to this compiler, so a dependency's patch
-      # release must not be able to change the expectations without a lockfile
-      # change in the tree.
+      # `--locked` keeps recorded diagnostics tied to the pinned dependency
+      # graph and compiler.
       - name: Test all UI suites (all features)
         run: cargo test --locked --workspace --all-features
-      - name: Test typed check and build diagnostics
-        run: cargo test --locked --test typed_ui --features typed
-      - name: Test Grads linearity diagnostics
-        run: cargo test --locked --test linearity_ui
-      - name: Test derive diagnostics
-        run: cargo test --locked -p rstorch-derive --test ui
-      # ci.yml's `ui-stable`: the typed diagnostics also assert semantic
-      # fragments that must hold on the compiler a consumer actually has, whose
-      # exact wording is not pinned. Overrides the job toolchain for this step
-      # only.
       - name: Test typed diagnostic semantics (stable)
         run: cargo test --locked --test typed_ui --features typed
         env:
@@ -250,8 +227,7 @@ jobs:
       - name: Test without default features
         run: cargo +1.88 test --locked --workspace --no-default-features
 
-  # The only lane in either workflow that builds the library for windows-msvc,
-  # and the one backing the Windows/CUDA claim in README.md and STABILITY.md.
+  # The Windows job is the only release lane that builds the Windows target.
   verify-windows:
     name: Release gate (Windows build and CPU-only tests)
     runs-on: windows-latest
@@ -266,10 +242,9 @@ jobs:
       # only reachable with the defaults off.
       - name: Test without default features
         run: cargo test --locked --workspace --no-default-features
-      # A build claim and nothing more: GitHub-hosted Windows runners have no
-      # NVIDIA hardware, so no CUDA kernel executes here. `cudarc` is configured
-      # with `dynamic-loading`, so the CUDA surface links without the toolkit and
-      # without a driver — which is exactly the claim those two files make.
+      # GitHub-hosted Windows runners have no NVIDIA hardware, so no CUDA
+      # kernel executes here. Dynamic loading lets the feature build without
+      # the CUDA toolkit or a driver.
       - name: Check the CUDA feature
         run: cargo check --locked --workspace --features cuda
 

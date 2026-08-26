@@ -1,33 +1,20 @@
-//! [`Mode`] — two orthogonal axes in one `Copy` value.
+//! [`Mode`] combines layer behavior with parameter recording.
 //!
-//! `Mode` carries **layer behavior** (Train vs Eval — dropout on/off,
-//! `BatchNorm` batch-stats vs running-stats) and **recording** (whether
-//! `Param::get` hands back a traced leaf) as *independent* axes, because
-//! conflating them makes standard flows inexpressible. The diagonal
-//! constants cover hour one; the off-diagonals are one call away.
+//! `training` controls things such as dropout and batch-normalization
+//! statistics. `record` controls whether `Param::get` creates a traced leaf.
+//! Existing traced inputs still propagate a graph in either mode.
 
 /// The behavior/recording pair threaded through every `forward`.
 ///
 /// | want | spell it |
 /// |---|---|
-/// | train (dropout on, recording) | [`Mode::TRAIN`] |
-/// | eval (dropout off, no recording) | [`Mode::EVAL`] |
-/// | fine-tune (eval behavior, but record) | [`Mode::EVAL`]`.recorded()` |
-/// | MC-dropout sample (train behavior, no graph) | [`Mode::TRAIN`]`.frozen()` |
+/// | train (dropout on, parameter recording) | [`Mode::TRAIN`] |
+/// | eval (dropout off, no parameter recording) | [`Mode::EVAL`] |
+/// | eval behavior with parameter recording | [`Mode::EVAL`]`.recorded()` |
+/// | train behavior without parameter recording | [`Mode::TRAIN`]`.frozen()` |
 ///
-/// Freezing a *subtree* is per-`Param` (`Param::freeze`), never a `Mode`
-/// side effect.
-///
-/// # Axis ownership
-///
-/// The axes belong to the crate, and **the set may grow in a minor release**.
-/// The fields are private and there is no public constructor — `TRAIN`, `EVAL`,
-/// [`recorded`](Mode::recorded), and [`frozen`](Mode::frozen) are the only ways
-/// to name a mode — so adding an axis cannot break a caller who spelled one of
-/// those. An autocast dtype for mixed precision and a determinism flag are the
-/// plausible additions; neither is promised here. Per-call information a layer
-/// of your own needs goes in the *input* type it accepts
-/// ([`Forward<Input>`](crate::nn::Forward)), not in `Mode`.
+/// Freezing a subtree is per-`Param` (`Param::freeze`), not a `Mode` side
+/// effect.
 ///
 /// # Examples
 ///
@@ -45,21 +32,23 @@ pub struct Mode {
 }
 
 impl Mode {
-    /// Train behavior **and** gradient recording.
+    /// Train behavior with parameter recording enabled.
     pub const TRAIN: Mode = Mode {
         training: true,
         record: true,
     };
 
-    /// Eval behavior **and** no recording (inference retains no
-    /// activations, which is the memory win).
+    /// Eval behavior with parameter recording disabled.
+    ///
+    /// Explicitly traced inputs remain differentiable.
     pub const EVAL: Mode = Mode {
         training: false,
         record: false,
     };
 
-    /// This mode's behavior with recording forced **on**
-    /// (`Mode::EVAL.recorded()` = frozen-BatchNorm/dropout-off fine-tuning).
+    /// Force parameter recording on while keeping this mode's behavior.
+    ///
+    /// `Mode::EVAL.recorded()` is useful for fine-tuning with dropout disabled.
     #[must_use]
     pub fn recorded(self) -> Mode {
         Mode {
@@ -68,8 +57,10 @@ impl Mode {
         }
     }
 
-    /// This mode's behavior with recording forced **off**
-    /// (`Mode::TRAIN.frozen()` = MC-dropout sampling with no graph cost).
+    /// Force parameter recording off while keeping this mode's behavior.
+    ///
+    /// `Mode::TRAIN.frozen()` keeps training behavior without creating
+    /// parameter leaves.
     #[must_use]
     pub fn frozen(self) -> Mode {
         Mode {
@@ -78,14 +69,13 @@ impl Mode {
         }
     }
 
-    /// Whether layers should use **training** behavior (dropout active,
+    /// Whether layers should use training behavior (dropout active,
     /// `BatchNorm` using batch statistics).
     pub fn is_training(self) -> bool {
         self.training
     }
 
-    /// Whether computation is **recorded** — the condition (with
-    /// `!Param::is_frozen`) under which `Param::get` returns a traced leaf.
+    /// Whether `Param::get` may create a traced leaf.
     pub fn records(self) -> bool {
         self.record
     }
@@ -106,7 +96,7 @@ mod tests {
         // EVAL.recorded(): eval behavior, but records.
         let ft = Mode::EVAL.recorded();
         assert!(!ft.is_training() && ft.records());
-        // TRAIN.frozen(): train behavior, no recording.
+        // TRAIN.frozen(): train behavior, no parameter recording.
         let mc = Mode::TRAIN.frozen();
         assert!(mc.is_training() && !mc.records());
     }

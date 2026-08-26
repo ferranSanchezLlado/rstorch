@@ -69,20 +69,14 @@
 //!   different parameters by dotted `state_dict` path. A hand-written
 //!   optimizer has no such mechanism unless it builds one.
 //!
-//! # There is no `Optimizer` trait
+//! # Optimizer types
 //!
-//! [`Sgd`] and [`Adam`] are concrete types — every layer and every optimizer
-//! is. Generic-over-optimizer code is not a
-//! first-hour need, and another dynamic trait would widen the core vocabulary;
-//! a caller who wants to switch optimizers at runtime
-//! writes an enum over the two.
+//! `Sgd`, `Adam`, and `AdamW` are concrete types; there is no public
+//! `Optimizer` trait. Code that selects an optimizer at runtime can use an enum.
 //!
-//! Internally the two *are* one implementation: each is a crate-private
-//! `Engine` over a crate-private `Rule` naming the only things they differ in —
-//! an update formula, the buffers it carries, and the scalars a checkpoint
-//! holds. Everything else, this module's guarantees included, is written once.
-//! That trait is not exported and cannot be named or implemented from outside,
-//! so it is machinery rather than a sixth trait in the public vocabulary.
+//! Their shared implementation is private `Engine`/`Rule` machinery. It keeps
+//! validation, parameter traversal, checkpoint state, and step handling in one
+//! place without adding another public trait.
 //!
 //! # Parameter groups
 //!

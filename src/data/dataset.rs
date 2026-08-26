@@ -1,23 +1,10 @@
-//! The batch-level [`Dataset`] trait and the two provided implementations
-//! ([`VecDataset`], [`TensorDataset`]).
+//! The batch-level [`Dataset`] trait and the [`VecDataset`] and
+//! [`TensorDataset`] implementations.
 //!
-//! # Why a dataset yields batches, not items
-//!
-//! A per-item trait (`fn get(&self, i) -> Item`) forces every loader to build
-//! one tensor per item and then collate them, which is exactly the wrong shape
-//! for the two cases that matter: a split that already lives on the device
-//! (where a batch is one `index_select`, not `n` host reads plus a stack) and a
-//! language-model window (where a "batch" is a strided view of one long token
-//! buffer). Exploration §4.6 therefore makes the batch the unit:
-//!
-//! ```text
-//! trait Dataset { type Batch; fn len(&self) -> usize;
-//!                 fn batch(&self, indices: &[usize]) -> Result<Self::Batch>; }
-//! ```
-//!
-//! The cost is that a dataset author writes the collation. [`VecDataset`] pays
-//! that cost once for the common in-memory case (stack each item along a new
-//! leading axis), so the everyday path stays three lines.
+//! Datasets yield batches rather than individual items. This lets an existing
+//! device tensor use one indexed batch and lets a language-model dataset expose
+//! a window into one token buffer. [`VecDataset`] provides the common
+//! in-memory collation.
 
 use crate::error::{Error, Result};
 use crate::tensor::Tensor;

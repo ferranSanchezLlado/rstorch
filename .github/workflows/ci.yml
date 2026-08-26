@@ -195,12 +195,6 @@ jobs:
       # lockfile change in the tree.
       - name: Test all UI suites (all features)
         run: cargo test --locked --workspace --all-features
-      - name: Test typed check and build diagnostics
-        run: cargo test --locked --test typed_ui --features typed
-      - name: Test Grads linearity diagnostics
-        run: cargo test --locked --test linearity_ui
-      - name: Test derive diagnostics
-        run: cargo test --locked -p rstorch-derive --test ui
 
   ui-stable:
     name: Typed UI semantic fragments (stable)
@@ -223,8 +217,7 @@ jobs:
       - name: Install stable
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
-      # The derive publishes first (see RELEASING.md), and it verifies fully
-      # because everything it needs is already on crates.io.
+      # Verify the derive package separately; rstorch pins it by exact version.
       - name: Package and verify rstorch-derive
         run: cargo package -p rstorch-derive
       # `cargo package -p rstorch` cannot verify until the matching
@@ -290,11 +283,8 @@ jobs:
       # the library on Windows at all.
       - name: Test without default features
         run: cargo test --workspace --no-default-features
-      # A build claim and nothing more: GitHub-hosted Windows runners have no
-      # NVIDIA hardware, so no CUDA kernel executes here. `cudarc` is configured
-      # with `dynamic-loading`, so the CUDA surface links without the toolkit
-      # and without a driver — which is exactly the claim README.md and
-      # STABILITY.md now make for Windows.
+      # Windows has no NVIDIA hardware, so this job only checks that the CUDA
+      # feature builds with dynamic loading and no toolkit or driver.
       - name: Check the CUDA feature
         run: cargo check --workspace --features cuda
 

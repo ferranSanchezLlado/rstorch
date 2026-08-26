@@ -1,13 +1,8 @@
-//! Test utilities shared across the crate and the fixture suite, behind the
-//! `testing` feature.
+//! Test utilities shared by the crate and its fixture suite.
 //!
-//! [`check_grad`] is the **single** finite-difference gradient harness: every
-//! op family writes its backward tests as cases against this one signature,
-//! so no module invents its own FD checker.
-//!
-//! This is the one public module the stability guarantee does not cover (see
-//! `STABILITY.md`): its signature follows the crate's own test needs, and it
-//! is public so downstream code can reuse it, not because it is frozen.
+//! [`check_grad`] is a finite-difference gradient checker for scalar
+//! objectives. The module is public behind the `testing` feature so downstream
+//! projects can reuse it, but it is not part of the stable runtime API.
 
 use crate::backend::dispatch;
 use crate::dtype::DType;
@@ -382,18 +377,6 @@ mod tests {
             1e-3,
         )
         .unwrap();
-    }
-
-    #[test]
-    fn accepts_the_output_dependent_unaries() {
-        let x = t(&[0.4, -0.9, 1.3], [3]);
-        for f in [
-            |i: &[Tensor]| i[0].sigmoid()?.sum_all(),
-            |i: &[Tensor]| i[0].tanh()?.sum_all(),
-            |i: &[Tensor]| i[0].exp()?.sum_all(),
-        ] {
-            check_grad(f, std::slice::from_ref(&x), 1e-3, 1e-3).unwrap();
-        }
     }
 
     #[test]

@@ -1,22 +1,13 @@
-//! **The m2 acceptance fixture**: gradients as a linear value, and
-//! gradient-with-respect-to-*input* done the way the design says to do it.
+//! Public-autograd fixture for input gradients, parameter gradients, and
+//! weight tying.
 //!
-//! Like every fixture this file is a downstream consumer — it imports nothing
-//! but `rstorch::prelude::*`, so each step below has to be expressible in the
-//! public first-hour vocabulary. What it pins:
+//! This file is a downstream consumer and imports only `rstorch::prelude::*`.
+//! It covers:
 //!
-//! - **Saliency**: `let xt = x.traced()?; let y = f(&xt)?; let g =
-//!   y.backward()?; g.wrt_input(&xt)?` — the traced binding is the one used in
-//!   the computation *and* in the lookup. Getting that wrong is loud, not
-//!   silently zero, and the misuse cases below assert exactly that.
-//! - **Parameter gradients** alongside input gradients, from the same
-//!   `backward()`, keyed by `Param` identity rather than by a `.grad` slot.
-//! - **Weight tying**: one `Param` read twice accumulates both contributions.
-//! - **The linear surface**: `merge` / `scale` / `clip_norm` as explicit
-//!   pipelines. There is no `zero_grad()` to forget, because gradients are
-//!   return values.
-//! - **No ambient mode**: `Mode::EVAL` records nothing, so an eval forward
-//!   cannot be differentiated at all.
+//! - input gradients through an explicitly traced input;
+//! - parameter gradients and tied-parameter accumulation;
+//! - explicit gradient merging, scaling, and clipping;
+//! - the distinction between parameter recording and graph propagation.
 
 use rstorch::prelude::*;
 
@@ -216,8 +207,8 @@ fn tracing_is_data_flow_not_an_ambient_mode() -> Result<()> {
     let model = Scorer::new(&dev)?;
     let x = Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], [1, 4], &dev)?;
 
-    // No traced input, no recording mode: nothing is retained, and asking for
-    // gradients is a structured error rather than an empty `Grads`.
+    // With no traced input, EVAL creates no parameter leaves, so backward
+    // returns a structured error instead of an empty `Grads`.
     assert!(model.logits(&x, Mode::EVAL)?.backward().is_err());
 
     // Recording follows the *data*, not a mode flag: a traced input records

@@ -1,125 +1,32 @@
-//! The parallelism switch: a thin façade over slice iteration that becomes a
-//! rayon parallel iterator.
+//! Parallel slice iteration, sequential unless the `rayon` feature is enabled.
 //!
-//! # Why this module is always compiled
+//! The feature switch lives inside these helpers, so kernels keep one loop
+//! body. Callers describe work as `output_len * cost_per_element`; the estimate
+//! affects only when work is split, not the result.
 //!
-//! The original façade was itself behind `#[cfg(feature = "rayon")]`, so every
-//! kernel that wanted it had to carry two copies of its loop body — one under
-//! `#[cfg(feature = "rayon")]` calling the façade, one under
-//! `#[cfg(not(...))]` repeating the same loop sequentially. That cost is why
-//! adoption stalled at two call sites in `cpu::elementwise` while matmul,
-//! reduce, conv, index, and the fused optimizer steps stayed single-threaded.
+//! Helpers partition output slices into disjoint windows. Each slot is written
+//! by one task in the same order, so enabling `rayon` does not change floating
+//! point reduction order for the kernels that use this module.
 //!
-//! This module is now compiled unconditionally and the feature switch lives
-//! *inside* each helper. A kernel adopts parallelism by writing its loop body
-//! **once**, and the same source runs sequentially in a default build. The
-//! `Send`/`Sync` bounds are also unconditional, so a body that compiles without
-//! the feature is guaranteed to compile with it.
-//!
-//! # The work model
-//!
-//! Splitting work across threads costs on the order of a microsecond per task,
-//! which a small tensor never earns back. Callers therefore describe the size
-//! of the job in **work units** as `output_len * cost_per_element`.
-//!
-//! One work unit is calibrated to **one multiply-add step of a blocked,
-//! vectorized F32 matmul** — the cheapest inner step in the crate, which on an
-//! M4 Pro core retires at roughly 15 per nanosecond. A step that is dearer than
-//! that costs proportionally more units, so a caller whose inner loop is
-//! memory-bound rather than arithmetic-bound must say so:
-//!
-//! | Kernel | `cost_per_element` |
-//! |---|---|
-//! | matmul | the contracted dimension `k` (one FMA each) |
-//! | conv2d / pooling | window size × input channels |
-//! | softmax / layernorm | ~32 per element; `exp` and the repeated row sweeps |
-//! | dense element-wise | [`STREAMING_COST`] — bandwidth-bound, not FMA-bound |
-//! | strided element-wise | [`STREAMING_COST`] plus the index walk per input |
-//!
-//! Getting this wrong by a small factor only shifts where the thresholds bite;
-//! getting it wrong by an order of magnitude is what makes a kernel either
-//! thrash the pool on tiny inputs or leave cores idle on large ones. Both
-//! failure modes were measured while calibrating the constants below.
-//!
-//! The estimate never affects *what* a kernel computes — only whether and how
-//! finely it is split.
-//!
-//! # Determinism
-//!
-//! Every helper partitions an output slice: each slot is written by exactly one
-//! task, from the same inputs, in the same order within a task. Results do not
-//! depend on the feature flag, the thread count, or the scheduling order. This
-//! is the whole reason the façade hands out disjoint `&mut` windows rather than
-//! a reduction combinator — a floating-point reduction whose association order
-//! followed the thread count would make `rayon` a correctness switch instead of
-//! a speed one.
-//!
-//! # What is deliberately *not* driven from here
-//!
-//! - **Axis reductions** (`cpu::reduce`). Restructuring the `Vec::push` loop
-//!   into a window body put the hot `for_each_on_axis` walk behind two layers
-//!   of closure and cost 12–60% on `max_last`/`sum_all`, while the shapes that
-//!   occur in training sit below the parallel threshold and so gained nothing
-//!   back. Reverting to the original loop restored baseline exactly. Making
-//!   large reductions parallel needs a body that survives the nesting, not a
-//!   different threshold.
-//! - **Scatter-shaped backward kernels** — conv input/weight gradients and both
-//!   pool backwards (`cpu::conv`), and `index_add`/`scatter_add` (`cpu::index`).
-//!   These accumulate into a shared input-shaped buffer where two output
-//!   positions can target the same slot; splitting them needs either a lock or
-//!   a per-thread accumulator whose merge would reassociate a gradient sum.
-//! - **`copy_view` / `cast` (`cpu::host`)**. Pure memory movement driven by a
-//!   stateful `Walk` cursor that cannot be seeded at an arbitrary offset
-//!   without being rewritten.
+//! Axis reductions, scatter-shaped backward kernels, and host copies stay on
+//! their dedicated loops because their writes are not independent output slots.
 
-/// The smallest amount of work a single task is given.
-///
-/// Calibrated against the cheapest work unit in the crate, a matmul inner-
-/// product step: the blocked F32 kernels retire on the order of 15 of those per
-/// nanosecond, so this floor is ~17 µs of arithmetic there and proportionally
-/// more in kernels whose units are dearer. Spawning and joining a `rayon` task
-/// costs on the order of a microsecond, so this keeps scheduling under roughly
-/// a tenth of a task's runtime even in the worst case.
-///
-/// Measured on `matmul/square_f32` (M4 Pro, 12 threads). A floor of 16 Ki left
-/// the 128³ case handing out 4-row tasks of ~4 µs each and scaling only 1.5×;
-/// at this floor the same case takes ~16-row tasks and scales far better.
+/// Minimum work assigned to one task.
 #[cfg(any(feature = "rayon", test))]
 const MIN_TASK_WORK: usize = 1 << 18;
 
-/// Total work below which a kernel runs sequentially.
-///
-/// Two whole tasks' worth: below this there is not enough work to keep even a
-/// second thread busy past its own spawn cost. `matmul/square_f32/64` sits just
-/// under it at 2^18 units and was 2.3× *slower* threaded, which is what fixed
-/// this constant.
+/// Total work below which a kernel stays sequential.
 #[cfg(any(feature = "rayon", test))]
 const PARALLEL_MIN_WORK: usize = 2 * MIN_TASK_WORK;
 
-/// The cost of one element of a bandwidth-bound streaming kernel — a load, an
-/// arithmetic op or two, and a store — in the FMA-calibrated units above.
-///
-/// Element-wise kernels move several bytes per element and cannot hide that
-/// behind arithmetic, so they retire elements a few times slower than a blocked
-/// matmul retires multiply-adds. Weighting them at 1 made a 1 Mi-element `add`
-/// take four coarse tasks and lose ~18% to the sequential form; weighting them
-/// here restores the ~16-task split that measured best.
+/// Cost of one element in a bandwidth-bound streaming kernel.
 pub(crate) const STREAMING_COST: usize = 4;
 
-/// How many tasks to aim for per thread. More than one so that an uneven
-/// window — a ragged tail, a core stolen by another process — does not leave
-/// the whole join waiting on a single straggler.
+/// Target number of tasks per worker thread.
 #[cfg(any(feature = "rayon", test))]
 const TASKS_PER_THREAD: usize = 4;
 
-/// The number of threads the pool will actually use (1 without `rayon`).
-///
-/// Cached. Every kernel call asks this question at least twice, and
-/// `rayon::current_num_threads` reaches through to the global registry —
-/// cheap in isolation, but it is on the entry path of even the reductions that
-/// go on to run sequentially, where it measured ~12% of a small `max` and
-/// ~48% of a `sum_all`. The global pool's size is fixed once it is built, so
-/// there is nothing to invalidate.
+/// Number of threads used by the configured pool, or one without `rayon`.
 #[cfg(any(feature = "rayon", test))]
 #[inline]
 fn thread_count() -> usize {

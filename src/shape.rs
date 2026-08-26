@@ -102,9 +102,9 @@ impl Shape {
         Ok(resolved as usize)
     }
 
-    /// Compute the NumPy/PyTorch broadcast of two shapes (exploration
-    /// §4.2): align ranks to the right, pad the shorter with 1s; each axis
-    /// pair must be equal or contain a 1, producing the max.
+    /// Compute the NumPy/PyTorch broadcast of two shapes: align ranks to the
+    /// right, pad the shorter shape with 1s, and require each pair to be equal
+    /// or contain a 1.
     ///
     /// Returns [`Error::ShapeMismatch`] carrying `op` when incompatible.
     ///

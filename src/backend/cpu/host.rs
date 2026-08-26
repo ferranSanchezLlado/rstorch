@@ -15,26 +15,12 @@ use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::storage::{CpuStorage, Storage};
 
-/// Incremental row-major odometer over `dims`, carrying one running storage
-/// index per *lane*.
+/// Incremental row-major walk over `dims`, carrying one storage index per lane.
 ///
-/// Each lane pairs a stride slice with a running index seeded from that lane's
-/// storage offset. [`Walk::step`] advances the logical position by one
-/// (rightmost axis fastest) and fixes up every lane's index with additions and
-/// subtractions of strides only — never the
-/// `offset + Σ (i / place[a]) % dims[a] * stride[a]` recomputation (two
-/// divisions per axis) that the first version of these kernels paid *per
-/// element*. This is the shared walk behind [`copy_view`] and the
-/// `super::index` kernels.
-///
-/// A lane's stride slice may be **longer** than `dims`; only its first
-/// `dims.len()` entries are read, so a caller can walk the outer axes of a
-/// full stride vector without copying it. `dims` may be empty (a rank-0 view,
-/// or a walk whose axes are all covered by an inner block): the walk then has
-/// exactly one position.
-///
-/// Stepping past the last position wraps back to the start instead of
-/// panicking; callers drive exactly `dims.iter().product()` positions.
+/// Each lane starts at its view offset and advances with stride additions and
+/// subtractions. The walk is shared by [`copy_view`] and the index kernels.
+/// A rank-0 walk has one position, and stepping past the end wraps to the
+/// start; callers drive exactly `dims.iter().product()` positions.
 pub(super) struct Walk<'a, const L: usize> {
     dims: &'a [usize],
     strides: [&'a [usize]; L],
@@ -924,7 +910,7 @@ mod tests {
 
     #[test]
     fn cast_f64_lanes_are_unsupported() {
-        // F64 is a real dtype but its cast lanes are not in the m1 set.
+        // F64 is a real dtype, but these cast kernels do not support it.
         let storage = f32_storage(vec![1.0]);
         let layout = Layout::contiguous([1]).unwrap();
         assert!(matches!(

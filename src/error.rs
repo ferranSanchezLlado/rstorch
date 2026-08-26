@@ -189,17 +189,9 @@ pub enum Error {
         op: &'static str,
     },
 
-    /// The optimizer visited a non-frozen parameter that has no gradient in
-    /// the `Grads` it was given. This is the loud answer to a silently
-    /// untrained parameter: an untraced weight access is
-    /// an error at the very next `step`, not silent non-training.
+    /// The optimizer found no gradient for a non-frozen parameter.
     ///
-    /// `op` is a field rather than a constant baked into the message so this
-    /// variant obeys the same rule as every other operation error: the name is
-    /// the public method the caller invoked, and a seam can rewrite it.
-    /// `"step"` is what [`Sgd`](crate::optim::Sgd) and
-    /// [`Adam`](crate::optim::Adam) report; an optimizer whose entry point is
-    /// called something else is not blamed on a method it never exposed.
+    /// `op` is the public method that reported the missing gradient.
     #[error(
         "{op}: missing gradient for non-frozen parameter `{path}` (was it used under a recording Mode?)"
     )]
@@ -449,16 +441,7 @@ impl Error {
         }
     }
 
-    /// Rename the operation this error blames, keeping everything else.
-    ///
-    /// An inner layer names an error after whatever it knows: a kernel reports
-    /// the op *family* (`"reduce"`, `"add"`), and a composed implementation
-    /// reports the primitive it happened to call (`gather` inside a loss).
-    /// The public seam rewrites that to the method the user actually called.
-    ///
-    /// The match is deliberately exhaustive — no `_` arm — so that adding a
-    /// variant to this `#[non_exhaustive]` enum is a compile error here rather
-    /// than a silently mis-labelled error at every seam.
+    /// Replace the operation name while keeping the rest of the error.
     pub(crate) fn with_op(mut self, op: &'static str) -> Error {
         match &mut self {
             Error::ShapeMismatch { op: slot, .. }

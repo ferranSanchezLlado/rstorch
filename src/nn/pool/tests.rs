@@ -75,38 +75,25 @@ fn avg_pool2d_defaults_stride_to_the_kernel() {
 }
 
 #[test]
-fn flatten_default_start_dim_keeps_the_batch_axis() {
-    let mut flatten = Flatten::new();
+fn flatten_honors_start_dim_and_rejects_invalid_axes() {
     let x = t(&(0..24).map(|v| v as f32).collect::<Vec<_>>(), [2, 3, 4]);
+
+    let mut flatten = Flatten::new();
     let y = flatten.forward(&x, Mode::EVAL).unwrap();
     assert_eq!(y.dims(), &[2, 12]);
     assert_eq!(y.to_vec::<f32>().unwrap(), x.to_vec::<f32>().unwrap());
-}
 
-#[test]
-fn flatten_with_start_dim_flattens_from_a_different_axis() {
-    let mut flatten = Flatten::new().with_start_dim(2);
-    let x = t(&(0..24).map(|v| v as f32).collect::<Vec<_>>(), [2, 3, 4]);
-    assert_eq!(flatten.forward(&x, Mode::EVAL).unwrap().dims(), &[2, 3, 4]);
+    let mut from_last = Flatten::new().with_start_dim(2);
+    assert_eq!(
+        from_last.forward(&x, Mode::EVAL).unwrap().dims(),
+        &[2, 3, 4]
+    );
 
-    let mut flatten_all = Flatten::new().with_start_dim(0);
-    assert_eq!(flatten_all.forward(&x, Mode::EVAL).unwrap().dims(), &[24]);
-}
+    let mut from_first = Flatten::new().with_start_dim(0);
+    assert_eq!(from_first.forward(&x, Mode::EVAL).unwrap().dims(), &[24]);
 
-#[test]
-fn flatten_rejects_an_out_of_range_start_dim() {
-    let mut flatten = Flatten::new().with_start_dim(5);
-    let x = t(&[1.0, 2.0], [2]);
-    assert!(flatten.forward(&x, Mode::EVAL).is_err());
-}
-
-#[test]
-fn identity_returns_the_input_unchanged() {
-    let mut id = Identity;
-    let x = t(&[1.0, 2.0, 3.0], [3]);
-    let y = id.forward(&x, Mode::EVAL).unwrap();
-    assert_eq!(y.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
-    assert_eq!(y.dims(), x.dims());
+    let mut invalid = Flatten::new().with_start_dim(5);
+    assert!(invalid.forward(&x, Mode::EVAL).is_err());
 }
 
 #[test]

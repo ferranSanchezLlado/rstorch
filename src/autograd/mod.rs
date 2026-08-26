@@ -1,56 +1,26 @@
-//! Autograd: tracing is data flow, gradients are a linear value.
+//! Autograd traces tensors through data flow and returns gradients as a linear
+//! value.
 //!
-//! The types and the *seams* the rest of the crate codes against:
+//! A [`Node`] stores the operation that produced a value and how to send a
+//! cotangent to its parents. Nodes form a DAG with shared `Arc`s, so using a
+//! parameter twice accumulates both paths.
 //!
-//! - [`record`] — the seam every differentiable op calls to (maybe) wrap its
-//!   forward output in a graph node. Op tasks never touch [`Node`] internals —
-//!   only [`record`].
-//! - [`make_leaf`] — the seam [`Param`](crate::nn::Param) and
-//!   [`traced`] use to build a leaf tensor carrying a fresh [`GradKey`].
-//! - [`Grads`] — the linear result of [`backward`]: `!Clone`,
-//!   `#[must_use]`, consumed by the optimizer via move.
+//! - [`record`] adds a node when an input is already traced.
+//! - [`make_leaf`] and [`traced`] create the two kinds of leaf.
+//! - [`Grads`] is the `!Clone`, `#[must_use]` result consumed by optimizers.
 //!
-//! # How the engine works
+//! Only floating-point tensors are traced. Casting to `i64` or `bool` stops a
+//! graph, and `backward` returns [`Error::NotTraced`](crate::Error::NotTraced)
+//! for an untraced result.
 //!
-//! A [`Node`] is an immutable record of "this value came from `op` applied to
-//! these parent nodes, and here is how to push a cotangent back through it".
-//! Nodes are shared by `Arc`, so the graph is a DAG: a value used twice has
-//! one node with two consumers, and a [`Param`](crate::nn::Param) used twice
-//! (weight tying) is *one* leaf node reached along two paths.
+//! `backward` walks the graph iteratively, accumulates fan-in in F32 for
+//! reduced-precision nodes, and drops cotangents after processing each node.
+//! Dropping a graph is iterative too, so long chains do not recurse on the
+//! stack.
 //!
-//! - **Tracing is data flow.** There is no ambient grad mode: [`record`]
-//!   builds a node **iff** at least one input already carries one, and the
-//!   only sources of leaf nodes are [`make_leaf`] (behind
-//!   [`Param::get`](crate::nn::Param::get)) and [`traced`]. An eval-mode
-//!   forward therefore retains nothing.
-//! - **Only float tensors trace.** [`record`] returns a non-float output
-//!   untraced: an `i64`/`bool` value has no cotangent, so a chain through
-//!   `to_dtype(DType::I64)` simply stops being traced there — and a later
-//!   `backward()` on it is the loud [`Error::NotTraced`] rather than a silent
-//!   zero.
-//! - **[`backward`] is a pure function over the graph.** It walks an
-//!   *iterative* reverse topological order (an explicit worklist; a 100k-node
-//!   chain must not touch the stack), keeps one cotangent per node in a map,
-//!   sums the contributions that arrive from several consumers in F32 for
-//!   F16/BF16 nodes (narrowing once when the fan-in is complete), and drops each
-//!   cotangent as soon as its node has been processed. Graph nodes are never
-//!   mutated; deferred storage may fill its write-once computation cache, so
-//!   the same graph can still be differentiated twice and from several
-//!   threads.
-//! - **[`Drop`] is iterative too.** Dropping the head of a long chain would
-//!   otherwise recurse once per node; [`Node`]'s `Drop` moves the parents onto
-//!   a worklist instead.
-//!
-//! # The detached-output capture rule
-//!
-//! A backward closure may capture the op's **output only in detached form**
-//! (a fresh `Inner` that shares storage but has `node: None`), built *before*
-//! the traced output is assembled. Output-dependent formulas (sigmoid, tanh,
-//! softmax) need the output value; capturing the *traced* output instead
-//! would create an `Arc` cycle (output node → closure → output node) that
-//! leaks the whole graph. The op author is responsible for honoring this;
-//! [`record`] takes the already-built forward output and the closure
-//! separately so the rule is expressible. A strong-count leak test gates it.
+//! Backward closures that need the output must capture a detached copy. Holding
+//! the traced output would create a reference cycle and keep the graph alive.
+//! The corresponding strong-count test guards this rule.
 
 use crate::DType;
 use crate::error::{Error, Result};
@@ -144,19 +114,14 @@ impl Drop for Node {
     }
 }
 
-/// The seam every differentiable op calls after computing its forward
-/// `output`. If any of `inputs` is traced, the returned tensor carries a new
-/// interior [`Node`] wiring `backward` to the inputs' nodes; otherwise the
-/// output is returned untraced.
+/// Add a graph node after computing `output` when any input is traced.
 ///
-/// `output` **must be detached** (`node: None`); `backward` may close over it
-/// (see the detached-output capture rule in the module docs). `backward`
-/// receives the output cotangent and returns one optional cotangent per
-/// entry of `inputs`, in the same order.
+/// `output` must be detached because the backward closure may capture it.
+/// The closure receives the output cotangent and returns one cotangent per
+/// input, in the same order.
 ///
-/// A non-float `output` is never traced: integers and booleans carry no
-/// cotangent, so a cast to [`I64`](crate::DType::I64) ends the graph instead
-/// of extending it with an unusable node.
+/// Integer and boolean outputs are never traced because they have no
+/// cotangent.
 pub(crate) fn record(
     op: &'static str,
     output: Tensor,
@@ -234,29 +199,17 @@ pub(crate) fn traced(t: &Tensor) -> Result<Tensor> {
 
 /// Run reverse-mode autodiff from `t`, returning a fresh [`Grads`].
 ///
-/// # The seed
+/// The walk starts with a cotangent of ones shaped like `t`, so
+/// `t.backward()` differentiates `sum(t)` with respect to every leaf. For a
+/// scalar loss this is the usual gradient used by an optimizer.
 ///
-/// The walk starts from a cotangent of **ones** shaped like `t`, so
-/// `t.backward()` differentiates `sum(t)` with respect to every leaf. For the
-/// scalar `t` of a training loop — the only shape the flagship loop uses —
-/// that is the ordinary `d loss / d θ`.
-///
-/// # Purity and repeated use
-///
-/// The graph is never mutated: `backward` is an immutable walk over the `Arc`
-/// DAG, iterative (an explicit worklist, so a 100k-node chain costs heap, not
-/// stack), and may be run twice or from several threads on the same graph.
-/// A leaf reached along several paths — a tied weight, a value used twice —
-/// accumulates every contribution under its one [`GradKey`].
+/// The graph is not mutated. The walk is iterative and can be repeated on the
+/// same graph; contributions to a leaf reached by several paths are summed.
 ///
 /// # Errors
 ///
-/// [`Error::NotTraced`] (`op: "backward"`) if `t` carries no graph. A
-/// graph-less backward is loud, never an empty [`Grads`].
-/// Whatever a backward closure's tensor ops report propagates out of here
-/// unchanged, naming the op that failed: a backend failure during the backward
-/// pass is that error, never a silently missing gradient that resurfaces as a
-/// misleading [`Error::MissingGrad`] at the next `step`.
+/// Returns [`Error::NotTraced`] when `t` carries no graph. Errors from
+/// backward closures propagate unchanged.
 pub(crate) fn backward(t: &Tensor) -> Result<Grads> {
     let root = t
         .node()

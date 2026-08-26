@@ -1,38 +1,12 @@
-//! Element-wise CPU kernels: the strided + broadcast-aware iteration
-//! engine (the largest chunk of new tensor-core work)
-//! and the binary/unary/compare/where/masked-fill families built on it.
+//! Element-wise CPU kernels for strided and broadcast-aware views.
 //!
-//! The design:
+//! `Cursor` maps each row-major logical index to a storage index for
+//! contiguous, permuted, narrowed, and broadcast layouts. The op layer
+//! pre-broadcasts binary inputs to the same shape.
 //!
-//! - **One iteration engine.** Every kernel walks its inputs through
-//!   [`Cursor`], which maps a row-major logical index to a storage index for
-//!   an arbitrary [`Layout`](crate::layout::Layout) — contiguous, permuted,
-//!   narrowed, or broadcast (stride-0 axes repeat elements). The op layer
-//!   pre-broadcasts multi-input kernels to shape-identical views, so the
-//!   output is dense/contiguous and one logical index addresses every input.
-//! - **A contiguous fast path.** When *every* input view is
-//!   [`is_contiguous`](crate::layout::Layout::is_contiguous), the cursor is
-//!   the identity map, so the kernel drops it entirely and zips flat slices
-//!   instead. The layout decision is made **once per call**, outside the loop: `dense`
-//!   turns a view into a `&[E]`, and the `map1_dense`/`map2_dense`/
-//!   `map3_dense` drivers walk it with equal-length iterators, so the
-//!   per-element work is the arithmetic alone — no layout match and no bounds
-//!   check, which lets the loop vectorize. Mixed contiguous/strided inputs (in
-//!   particular a broadcast operand) keep the general [`Cursor`] path, which
-//!   is allowed to stay slower.
-//! - **Two families of dispatch macro, both hoisted out of the loop.**
-//!   `super::dispatch`'s `dispatch_all!` routes a runtime
-//!   [`DType`](crate::dtype::DType) to a monomorphized body over the concrete
-//!   element type, so each multi-dtype op is written once.
-//!   `dispatch_binary_op!`/`dispatch_unary_op!`/
-//!   `dispatch_cmp_op!` do the same for the *op discriminant*: they rebind it
-//!   as a `const`, so the kernel closure captures nothing and the arithmetic
-//!   `match` inside `binary_f32` and friends folds at compile time instead of
-//!   re-running for every element.
-//! - **The parallelism switch.** Output buffers are filled through `fill`,
-//!   which becomes a rayon parallel loop under the `rayon` feature
-//!   (`backend::parallel`) and a sequential loop otherwise.
-
+//! Contiguous inputs use flat-slice drivers; other inputs use the cursor path.
+//! Runtime dtype and operation dispatch happens once per call, outside the
+//! element loop. The `rayon` feature changes only how output slots are split.
 use crate::backend::cpu::dispatch::{CpuElement, dispatch_all};
 use crate::backend::{BinaryOp, CmpOp, UnaryOp, View};
 use crate::dtype::DType;

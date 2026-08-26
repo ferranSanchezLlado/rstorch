@@ -5,7 +5,7 @@
 //! axis than its input". Their bounds identify an operation's *output family*;
 //! they do not by themselves prove every const-geometry relationship. Each op
 //! family generates complete rank-table implementations and compile-tests those
-//! relationships (`tests/typed_ui.rs`, `tests/typed_rank_oracle.rs`).
+//! relationships in `tests/typed_ui.rs`.
 //!
 //! The per-op signatures are on the methods themselves; what follows is the
 //! policy they share, which no individual signature states.

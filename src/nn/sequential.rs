@@ -1,13 +1,8 @@
-//! [`Sequential`] — a chain of layers behind one [`Forward`] (exploration
-//! §4.1).
+//! [`Sequential`] stores a chain of layers behind one [`Forward`].
 //!
-//! The container is a plain `Vec` of boxed layers. Its only subtlety is a Rust
-//! one: `dyn Forward<Input> + Module` is not a legal type (E0225 — at most one
-//! non-auto trait per object type), so the box is typed by a crate-private
-//! combining trait `SeqLayer<Input>` with a blanket impl. Nothing about that
-//! leaks: the public surface is
-//! `push(impl Forward<Input, Output = Input> + Module + Send + 'static)`, and
-//! the crate's public trait count is unchanged.
+//! The implementation uses a private combining trait because Rust trait
+//! objects allow only one non-auto trait directly. The public API still accepts
+//! any `Forward` + `Module` layer.
 //!
 //! `Input` defaults to [`Tensor`], so `Sequential` and `Sequential::new()`
 //! still mean the tensor-to-tensor chain.

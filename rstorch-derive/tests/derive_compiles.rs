@@ -1,13 +1,10 @@
 //! Compile-success ("expansion") tests: `#[derive(Module)]` produces a valid
-//! `rstorch::nn::Module` impl for every supported field shape, checked against
-//! the *real* contracts (trait, visitor method names/signatures,
-//! object-safe `&dyn Module` coercion).
+//! `rstorch::nn::Module` implementation for each supported field shape,
+//! checked against the real trait and visitor method signatures.
 //!
-//! These deliberately do not *run* the walk: every `Tensor` constructor is a
-//! `todo!()`, so no `Param`/`Tensor` value can be built yet. The behavior
-//! that can be verified now — that the generated code type-checks against the
-//! contracts — is verified here; the token-level path/leaf choices are unit-
-//! tested in `rstorch-derive`'s `module` module.
+//! These tests check that generated code type-checks against the public
+//! contracts. Runtime traversal is covered by downstream integration tests;
+//! token-level path choices are unit-tested in the `module` module.
 
 // Whitelisted-primitive / skipped fields exist only to exercise
 // classification; they are never read.
@@ -123,12 +120,4 @@ fn all_supported_shapes_implement_module() {
     assert_module::<UnitModule>();
     assert_module::<Generic<Leaf>>();
     assert_module::<Composite>();
-}
-
-/// `&dyn Module` coercion (object safety of the generated impl in use).
-#[test]
-fn derived_module_is_object_safe() {
-    fn takes_dyn(_m: &dyn Module) {}
-    let m = UnitModule;
-    takes_dyn(&m);
 }

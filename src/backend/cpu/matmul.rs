@@ -155,15 +155,9 @@ fn plan(lhs: &Layout, rhs: &Layout) -> Result<Plan> {
     })
 }
 
-/// How many output columns the strided-`rhs` order accumulates at once, so the
-/// multiply-add chains are independent instead of one latency-bound chain. Each
-/// chain still walks its own output element's `k` terms in ascending order, so
-/// the width is a pure throughput knob and cannot change a result.
-///
-/// Measured on `matmul/square_transposed_rhs_f32/256` (9.75 ms unblocked):
-/// 4 → 4.74 ms, **8 → 3.43 ms**, 12 → 3.89 ms, 16 → 4.12 ms. Past 8 the extra
-/// accumulators cost more in register pressure and loads per step than the
-/// added overlap buys.
+/// Number of output columns accumulated together on the strided-RHS path.
+/// Each output still consumes its `k` terms in ascending order; this only
+/// exposes independent multiply-add chains.
 const COL_BLOCK: usize = 8;
 
 /// Adjacent logical rows processed together on the F32 row-major-rhs path.
