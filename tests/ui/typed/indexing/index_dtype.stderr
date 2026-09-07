@@ -1,0 +1,25 @@
+error[E0308]: mismatched types
+   --> src/main.rs:7:41
+    |
+7   |     let _ = source.index_select::<0, 1>(&floats);
+    |                    -------------------- ^^^^^^^ expected `&Tensor1<1, i64>`, found `&Tensor1<1>`
+    |                    |
+    |                    arguments to this method are incorrect
+    |
+    = note: expected reference `&Tensor1<_, i64>`
+               found reference `&Tensor1<_, f32>`
+note: method defined here
+   --> $WORKSPACE/src/typed/ops/index.rs:143:1
+    |
+143 | / impl_typed_indexing! {
+144 | |     (Tensor1, [D0]),
+145 | |     (Tensor2, [D0, D1]),
+146 | |     (Tensor3, [D0, D1, D2]),
+...   |
+151 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+152 | | }
+    | |_^
+    = note: this error originates in the macro `impl_typed_indexing` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `rstorch-typed-ui-index-dtype` (bin "rstorch-typed-ui-index-dtype") due to 1 previous error

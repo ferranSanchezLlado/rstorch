@@ -1,0 +1,10 @@
+error: #[derive(TypedModule)] supports structs only, not unions
+ --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/derive_on_union.rs:4:1
+  |
+4 | / union Net {
+5 | |     integer: u32,
+6 | |     float: f32,
+7 | | }
+  | |_^
+
+error: could not compile `rstorch-typed-derive-ui-derive-on-union` (bin "case") due to 1 previous error

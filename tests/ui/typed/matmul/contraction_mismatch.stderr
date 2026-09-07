@@ -1,0 +1,31 @@
+error[E0080]: evaluation of `typed::const_check::assert_matmul_contract` failed
+  --> $WORKSPACE/src/typed/ops/matmul.rs:83:1
+   |
+83 | impl_matmul!(Tensor2, [D0, D1]);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation panicked: typed matmul contracted dimensions are incompatible
+   |
+note: inside `typed::const_check::assert_matmul_contract`
+  --> $WORKSPACE/src/typed/const_check.rs:10:5
+   |
+10 | /     assert!(
+11 | |         dimensions_compatible(left, right),
+12 | |         "typed matmul contracted dimensions are incompatible"
+13 | |     );
+   | |_____^ the failure occurred here
+
+note: erroneous constant encountered
+  --> $WORKSPACE/src/typed/ops/matmul.rs:83:1
+   |
+83 | impl_matmul!(Tensor2, [D0, D1]);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this note originates in the macro `impl_matmul` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: the above error was encountered while instantiating `fn rstorch::typed::ops::matmul::<impl rstorch::typed::Tensor2<2, 3>>::matmul::<rstorch::typed::Tensor2<4, 2>>`
+ --> src/main.rs:9:13
+  |
+9 |     let _ = lhs.matmul(&invalid);
+  |             ^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `rstorch-typed-ui-contraction-mismatch` (bin "rstorch-typed-ui-contraction-mismatch") due to 1 previous error

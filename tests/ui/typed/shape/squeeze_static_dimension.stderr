@@ -1,0 +1,43 @@
+error[E0080]: evaluation of `typed::const_check::assert_squeezable` failed
+   --> $WORKSPACE/src/typed/ops/shape.rs:188:1
+    |
+188 | / impl_existing_axis_ops! {
+189 | |     (Tensor1, [D0]),
+190 | |     (Tensor2, [D0, D1]),
+191 | |     (Tensor3, [D0, D1, D2]),
+...   |
+196 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+197 | | }
+    | |_^ evaluation panicked: typed squeeze axis must have dimension one
+    |
+note: inside `typed::const_check::assert_squeezable`
+   --> $WORKSPACE/src/typed/const_check.rs:48:5
+    |
+48  | /     assert!(
+49  | |         dimension == DYN || dimension == 1,
+50  | |         "typed squeeze axis must have dimension one"
+51  | |     );
+    | |_____^ the failure occurred here
+
+note: erroneous constant encountered
+   --> $WORKSPACE/src/typed/ops/shape.rs:188:1
+    |
+188 | / impl_existing_axis_ops! {
+189 | |     (Tensor1, [D0]),
+190 | |     (Tensor2, [D0, D1]),
+191 | |     (Tensor3, [D0, D1, D2]),
+...   |
+196 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+197 | | }
+    | |_^
+    |
+    = note: this note originates in the macro `impl_existing_axis_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: the above error was encountered while instantiating `fn rstorch::typed::ops::shape::<impl rstorch::typed::Tensor2<2, 3>>::squeeze::<0>`
+ --> src/main.rs:8:13
+  |
+8 |     let _ = invalid.squeeze::<0>();
+  |             ^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `rstorch-typed-ui-squeeze-static-dimension` (bin "rstorch-typed-ui-squeeze-static-dimension") due to 1 previous error

@@ -1,69 +1,84 @@
-#![allow(dead_code)]
+#![warn(missing_docs)]
+
+//! A PyTorch-inspired deep-learning library with one dynamic tensor type and
+//! linear gradients.
+//!
+//! ```
+//! use rstorch::prelude::*;
+//!
+//! let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], [3], &Device::Cpu)?;
+//! assert_eq!(x.dims(), &[3]);
+//! # Ok::<(), rstorch::Error>(())
+//! ```
+//!
+//! # Feature flags
+//!
+//! Features are additive. `metal` is enabled by default on macOS.
+//!
+//! | Feature | What it adds |
+//! |---|---|
+//! | `typed` | Experimental compile-time checked tensor wrappers |
+//! | `rayon` | Parallel CPU kernels |
+//! | `hub` | Dataset downloads |
+//! | `metal` | The macOS Metal backend |
+//! | `cuda` | Native NVIDIA CUDA on Linux and Windows |
+//! | `wgpu` | Portable native WebGPU |
+//! | `testing` | The finite-difference gradient helper |
+//!
+//! The `rstorch::lazy` namespace is an experimental deferred executor and is
+//! disabled unless enabled at runtime.
+//!
+//! The dynamic API follows semantic versioning from 1.0. The `testing`,
+//! `typed`, and `lazy` namespaces are outside that compatibility promise.
+
+// `#[derive(Module)]` resolves the runtime crate through this alias when the
+// derive is used inside `rstorch`, just as it does in downstream crates.
+extern crate self as rstorch;
+
+// ---- public namespaces (types also re-exported flat below) --------------
+pub mod device;
+pub mod dtype;
+pub mod error;
+pub mod shape;
+
+// ---- flat vocabulary: private modules, root re-exports ------------------
+mod autograd;
+mod checkpoint;
+mod rng;
+mod tensor;
+
+// ---- crate-internal foundations -----------------------------------------
+mod backend;
+pub(crate) mod layout;
+pub(crate) mod storage;
+
+// ---- subsystems ----------------------------------------------------------
 pub mod data;
-mod iterator;
-pub mod loss;
-mod model;
-pub mod module;
+/// Experimental runtime control for deferred and fused element-wise execution.
+pub mod lazy;
+pub mod models;
+pub mod nn;
 pub mod optim;
-pub mod utils;
+pub mod persist;
+pub mod prelude;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+pub mod text;
 
-#[cfg(feature = "dataset_hub")]
-pub use data::dataset::hub;
-pub use loss::CrossEntropyLoss;
-pub use module::{Identity, Linear, ReLU, SafeModule, Sequential, Softmax};
-pub use optim::SGD;
+/// Compile-time checked tensor and neural-network APIs.
+#[cfg(feature = "typed")]
+pub mod typed;
 
-mod macros {
-    #[doc(hidden)]
-    #[macro_export]
-    macro_rules! __rust_force_expr {
-        ($e:expr) => {
-            $e
-        };
-    }
+// ---- root re-exports: the design's flat vocabulary ----------------------
+pub use autograd::Grads;
+pub use device::Device;
+pub use dtype::{DType, Element};
+pub use error::{Error, Result};
+pub use rng::Rng;
+pub use shape::Shape;
+pub use tensor::Tensor;
 
-    #[cfg(test)]
-    #[macro_export]
-    macro_rules! assert_array_eq {
-        ($lhs:expr, $rhs:expr) => {
-            $crate::assert_array_eq!($lhs, $rhs, 1e-6)
-        };
-        ($lhs:expr, $rhs:expr, $tol:literal) => {
-            if $lhs.shape() != $rhs.shape() {
-                panic!(
-                    "Incompatible shape \n- a={:?} \n\n- b={:?}",
-                    $lhs.shape(),
-                    $rhs.shape()
-                );
-            }
-
-            for (a, b) in $lhs.iter().zip(&$rhs) {
-                let diff = if a < b { b - a } else { a - b };
-                if (diff > $tol) {
-                    panic!(
-                        "Not equal with tolerance={}\n- a={} \n\n- b={}",
-                        $tol, &$lhs, &$rhs
-                    );
-                }
-            }
-        };
-    }
-}
-
-pub mod prelude {
-    // traits
-    pub use crate::module::init::InitParameters;
-    pub use crate::module::Module;
-
-    pub use crate::data::dataset::{Dataset, IterableDataset};
-    pub use crate::data::sampler::Sampler;
-
-    pub use crate::loss::Loss;
-
-    pub use crate::optim::Optimizer;
-
-    // macros
-    pub use crate::{safe, sequential};
-
-    pub use ndarray::prelude::*;
-}
+/// Derive an implementation of [`nn::Module`] — see the [`rstorch_derive`]
+/// crate docs for the loud-by-default field-classification rule and
+/// `#[module(skip)]`.
+pub use rstorch_derive::Module;

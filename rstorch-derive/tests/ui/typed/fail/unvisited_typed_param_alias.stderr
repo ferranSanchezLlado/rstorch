@@ -1,0 +1,48 @@
+error[E0277]: the trait bound `TypedParam<Tensor1<2>>: rstorch::typed::nn::Module` is not satisfied
+  --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/unvisited_typed_param_alias.rs:7:10
+   |
+7  | #[derive(TypedModule)]
+   |          ^^^^^^^^^^^ the trait `rstorch::typed::nn::Module` is not implemented for `TypedParam<Tensor1<2>>`
+   |
+   = help: the following other types implement trait `rstorch::typed::nn::Module`:
+             Net
+             rstorch::typed::nn::BatchNorm2d<C, E, P>
+             rstorch::typed::nn::Dropout
+             rstorch::typed::nn::Embedding<VOCAB, WIDTH, E, P>
+             rstorch::typed::nn::Gelu
+             rstorch::typed::nn::LayerNorm<S>
+             rstorch::typed::nn::Linear<IN, OUT, E, P>
+             rstorch::typed::nn::MultiHeadAttention<EMBED, HEADS, E, P>
+           and 4 others
+note: required by a bound in `rstorch::typed::nn::visit::<impl TypedVisitor<'a>>::module`
+  --> $WORKSPACE/src/typed/nn/visit.rs:51:22
+   |
+51 |     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &M) {
+   |                      ^^^^^^ required by this bound in `rstorch::typed::nn::visit::<impl TypedVisitor<'a>>::module`
+   = note: this error originates in the derive macro `TypedModule` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `TypedParam<Tensor1<2>>: rstorch::typed::nn::Module` is not satisfied
+   --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/unvisited_typed_param_alias.rs:7:10
+    |
+7   | #[derive(TypedModule)]
+    |          ^^^^^^^^^^^ the trait `rstorch::typed::nn::Module` is not implemented for `TypedParam<Tensor1<2>>`
+    |
+    = help: the following other types implement trait `rstorch::typed::nn::Module`:
+              Net
+              rstorch::typed::nn::BatchNorm2d<C, E, P>
+              rstorch::typed::nn::Dropout
+              rstorch::typed::nn::Embedding<VOCAB, WIDTH, E, P>
+              rstorch::typed::nn::Gelu
+              rstorch::typed::nn::LayerNorm<S>
+              rstorch::typed::nn::Linear<IN, OUT, E, P>
+              rstorch::typed::nn::MultiHeadAttention<EMBED, HEADS, E, P>
+            and 4 others
+note: required by a bound in `rstorch::typed::nn::visit::<impl TypedVisitorMut<'a>>::module`
+   --> $WORKSPACE/src/typed/nn/visit.rs:100:22
+    |
+100 |     pub fn module<M: Module + ?Sized>(&mut self, name: &str, child: &mut M) {
+    |                      ^^^^^^ required by this bound in `rstorch::typed::nn::visit::<impl TypedVisitorMut<'a>>::module`
+    = note: this error originates in the derive macro `TypedModule` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `rstorch-typed-derive-ui-unvisited-typed-param-alias` (bin "case") due to 2 previous errors

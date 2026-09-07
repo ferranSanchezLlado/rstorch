@@ -1,0 +1,17 @@
+error[E0382]: borrow of moved value: `first`
+  --> tests/ui/default/autograd/linearity/grads_used_after_move.rs:17:23
+   |
+10 |     let first = xt.mul(&xt)?.sum_all()?.backward()?;
+   |         ----- move occurs because `first` has type `Grads`, which does not implement the `Copy` trait
+...
+14 |     let merged = first.merge(second)?;
+   |                        ------------- `first` moved due to this method call
+...
+17 |     println!("{} {}", first.len(), merged.len());
+   |                       ^^^^^ value borrowed here after move
+   |
+note: `Grads::merge` takes ownership of the receiver `self`, which moves `first`
+  --> src/autograd/mod.rs
+   |
+   |     pub fn merge(self, other: Grads) -> Result<Grads> {
+   |                  ^^^^

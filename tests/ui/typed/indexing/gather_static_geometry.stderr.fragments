@@ -1,0 +1,2 @@
+error[E0080]
+typed gather index grid exceeds the source on a non-selected dimension

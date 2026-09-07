@@ -1,0 +1,1132 @@
+//! The indexing kernels (`index_select`, `index_add`, `gather`, `scatter_add`)
+//! over contiguous, permuted, narrowed and broadcast views.
+
+use super::*;
+use std::sync::Arc;
+
+// ----- helpers ------------------------------------------------------
+
+fn f32_storage(v: Vec<f32>) -> Storage {
+    Storage::Cpu(CpuStorage::F32(Arc::new(v)))
+}
+fn i64_storage(v: Vec<i64>) -> Storage {
+    Storage::Cpu(CpuStorage::I64(Arc::new(v)))
+}
+fn f16_storage(v: Vec<f32>) -> Storage {
+    Storage::Cpu(CpuStorage::F16(Arc::new(
+        v.into_iter().map(half::f16::from_f32).collect(),
+    )))
+}
+fn bf16_storage(v: Vec<f32>) -> Storage {
+    Storage::Cpu(CpuStorage::BF16(Arc::new(
+        v.into_iter().map(half::bf16::from_f32).collect(),
+    )))
+}
+fn bool_storage(v: Vec<bool>) -> Storage {
+    Storage::Cpu(CpuStorage::Bool(Arc::new(v)))
+}
+
+fn as_f32(s: &Storage) -> Vec<f32> {
+    match s {
+        Storage::Cpu(CpuStorage::F32(v)) => v.as_ref().clone(),
+        _ => panic!("expected f32 storage"),
+    }
+}
+fn as_f16(s: &Storage) -> Vec<f32> {
+    match s {
+        Storage::Cpu(CpuStorage::F16(v)) => v.iter().map(|e| e.to_f32()).collect(),
+        _ => panic!("expected f16 storage"),
+    }
+}
+fn as_bf16(s: &Storage) -> Vec<f32> {
+    match s {
+        Storage::Cpu(CpuStorage::BF16(v)) => v.iter().map(|e| e.to_f32()).collect(),
+        _ => panic!("expected bf16 storage"),
+    }
+}
+fn as_i64(s: &Storage) -> Vec<i64> {
+    match s {
+        Storage::Cpu(CpuStorage::I64(v)) => v.as_ref().clone(),
+        _ => panic!("expected i64 storage"),
+    }
+}
+fn as_bool(s: &Storage) -> Vec<bool> {
+    match s {
+        Storage::Cpu(CpuStorage::Bool(v)) => v.as_ref().clone(),
+        _ => panic!("expected bool storage"),
+    }
+}
+
+fn lay(dims: impl Into<Shape>) -> Layout {
+    Layout::contiguous(dims).unwrap()
+}
+
+// ----- index_select --------------------------------------------------
+
+#[test]
+fn index_select_picks_rows() {
+    // [[1,2],[3,4],[5,6]] — the embedding lookup shape.
+    let s = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let l = lay([3, 2]);
+    let idx = i64_storage(vec![2, 0, 2]);
+    let il = lay([3]);
+    let out = index_select(View::new(&s, &l), 0, View::new(&idx, &il)).unwrap();
+    assert_eq!(as_f32(&out), vec![5.0, 6.0, 1.0, 2.0, 5.0, 6.0]);
+}
+
+#[test]
+fn index_select_picks_columns_and_middle_axes() {
+    let s = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let l = lay([2, 3]);
+    let idx = i64_storage(vec![2, 1]);
+    let il = lay([2]);
+    let out = index_select(View::new(&s, &l), 1, View::new(&idx, &il)).unwrap();
+    assert_eq!(as_f32(&out), vec![3.0, 2.0, 6.0, 5.0]);
+
+    // Middle axis of a rank-3 source.
+    let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
+    let s = f32_storage(data);
+    let l = lay([2, 3, 4]);
+    let idx = i64_storage(vec![1]);
+    let il = lay([1]);
+    let out = index_select(View::new(&s, &l), 1, View::new(&idx, &il)).unwrap();
+    // Rows 1 of each plane: 4..8 and 16..20.
+    assert_eq!(
+        as_f32(&out),
+        vec![4.0, 5.0, 6.0, 7.0, 16.0, 17.0, 18.0, 19.0]
+    );
+}
+
+#[test]
+fn index_select_reads_strided_sources_and_indices() {
+    // [2,3] transposed to [3,2]; selecting rows of the transposed view
+    // must walk the source strides, not the raw buffer.
+    let s = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let l = lay([2, 3]).transpose(0, 1).unwrap();
+    assert_eq!(l.dims(), &[3, 2]);
+    let idx = i64_storage(vec![0, 2]);
+    let out = index_select(View::new(&s, &l), 0, View::new(&idx, &lay([2]))).unwrap();
+    // Transposed rows are [1,4], [2,5], [3,6].
+    assert_eq!(as_f32(&out), vec![1.0, 4.0, 3.0, 6.0]);
+
+    // A strided *index* view is legal too: stride 2 over [0, 9, 2] reads
+    // indices 0 and 2 and never touches the (out-of-range) middle value.
+    let idx = i64_storage(vec![0, 9, 2]);
+    let strided = Layout::from_parts(Shape::from([2]), vec![2usize].into_boxed_slice(), 0).unwrap();
+    let out = index_select(View::new(&s, &l), 0, View::new(&idx, &strided)).unwrap();
+    assert_eq!(as_f32(&out), vec![1.0, 4.0, 3.0, 6.0]);
+}
+
+#[test]
+fn index_select_handles_every_dtype_and_empty_indices() {
+    let s = i64_storage(vec![7, 8, 9]);
+    let l = lay([3]);
+    let idx = i64_storage(vec![1, 1]);
+    let il = lay([2]);
+    let out = index_select(View::new(&s, &l), 0, View::new(&idx, &il)).unwrap();
+    assert_eq!(as_i64(&out), vec![8, 8]);
+
+    let s = bool_storage(vec![true, false, true]);
+    let out = index_select(View::new(&s, &l), 0, View::new(&idx, &il)).unwrap();
+    assert_eq!(as_bool(&out), vec![false, false]);
+
+    // An empty index list yields an empty result, not an error.
+    let empty = i64_storage(vec![]);
+    let el = lay([0]);
+    let s = f32_storage(vec![1.0, 2.0, 3.0]);
+    let out = index_select(View::new(&s, &l), 0, View::new(&empty, &el)).unwrap();
+    assert!(as_f32(&out).is_empty());
+}
+
+#[test]
+fn index_select_bounds_and_shape_errors() {
+    let s = f32_storage(vec![1.0, 2.0, 3.0]);
+    let l = lay([3]);
+    let il = lay([1]);
+
+    let idx = i64_storage(vec![3]);
+    assert!(matches!(
+        index_select(View::new(&s, &l), 0, View::new(&idx, &il)),
+        Err(Error::IndexOutOfBounds {
+            op: "index_select",
+            index: 3,
+            axis: 0,
+            size: 3
+        })
+    ));
+
+    // Negative indices are rejected, never wrapped.
+    let idx = i64_storage(vec![-1]);
+    assert!(matches!(
+        index_select(View::new(&s, &l), 0, View::new(&idx, &il)),
+        Err(Error::IndexOutOfBounds {
+            op: "index_select",
+            index: -1,
+            ..
+        })
+    ));
+
+    // The index tensor must be I64 and rank 1.
+    let bad = f32_storage(vec![0.0]);
+    assert!(matches!(
+        index_select(View::new(&s, &l), 0, View::new(&bad, &il)),
+        Err(Error::DTypeMismatch {
+            op: "index_select",
+            expected: DType::I64,
+            got: DType::F32
+        })
+    ));
+    let idx = i64_storage(vec![0, 1]);
+    let two_d = lay([1, 2]);
+    assert!(matches!(
+        index_select(View::new(&s, &l), 0, View::new(&idx, &two_d)),
+        Err(Error::RankMismatch {
+            op: "index_select",
+            expected: 1,
+            got: 2
+        })
+    ));
+
+    // An axis beyond the source rank is loud, not an out-of-range read.
+    assert!(matches!(
+        index_select(View::new(&s, &l), 4, View::new(&idx, &lay([2]))),
+        Err(Error::InvalidAxis {
+            op: "index_select",
+            rank: 1,
+            ..
+        })
+    ));
+}
+
+// ----- index_add ------------------------------------------------------
+
+#[test]
+fn index_add_accumulates_repeated_slices() {
+    // Base [3,2] zeros; add two rows into slot 1 and one into slot 0.
+    let base = f32_storage(vec![0.0; 6]);
+    let bl = lay([3, 2]);
+    let idx = i64_storage(vec![1, 0, 1]);
+    let il = lay([3]);
+    let src = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 10.0, 20.0]);
+    let sl = lay([3, 2]);
+    let out = index_add(
+        View::new(&base, &bl),
+        0,
+        View::new(&idx, &il),
+        View::new(&src, &sl),
+    )
+    .unwrap();
+    // Row 0 gets [3,4]; row 1 gets [1,2] + [10,20]; row 2 untouched.
+    assert_eq!(as_f32(&out), vec![3.0, 4.0, 11.0, 22.0, 0.0, 0.0]);
+}
+
+#[test]
+fn index_add_keeps_the_base_values() {
+    let base = f32_storage(vec![1.0, 1.0, 1.0]);
+    let bl = lay([3]);
+    let idx = i64_storage(vec![2]);
+    let il = lay([1]);
+    let src = f32_storage(vec![5.0]);
+    let sl = lay([1]);
+    let out = index_add(
+        View::new(&base, &bl),
+        0,
+        View::new(&idx, &il),
+        View::new(&src, &sl),
+    )
+    .unwrap();
+    assert_eq!(as_f32(&out), vec![1.0, 1.0, 6.0]);
+}
+
+#[test]
+fn index_add_accumulates_in_the_wide_acc_type() {
+    // 4096 f16 ones into a single row: native f16 addition saturates at
+    // 2048, the `Acc = f32` contract does not.
+    let base = f16_storage(vec![0.0]);
+    let bl = lay([1]);
+    let idx = i64_storage(vec![0; 4096]);
+    let il = lay([4096]);
+    let src = f16_storage(vec![1.0; 4096]);
+    let sl = lay([4096]);
+    let out = index_add(
+        View::new(&base, &bl),
+        0,
+        View::new(&idx, &il),
+        View::new(&src, &sl),
+    )
+    .unwrap();
+    assert_eq!(as_f16(&out), vec![4096.0]);
+}
+
+#[test]
+fn bf16_index_add_accumulates_in_the_wide_acc_type() {
+    let base = bf16_storage(vec![0.0]);
+    let idx = i64_storage(vec![0; 4096]);
+    let src = bf16_storage(vec![1.0; 4096]);
+    let out = index_add(
+        View::new(&base, &lay([1])),
+        0,
+        View::new(&idx, &lay([4096])),
+        View::new(&src, &lay([4096])),
+    )
+    .unwrap();
+    assert_eq!(as_bf16(&out), vec![4096.0]);
+}
+
+#[test]
+fn index_add_reads_strided_bases_and_sources() {
+    // Base is a transposed [2,3] -> [3,2] view; the accumulator must be
+    // seeded through the strides and the output emitted row-major.
+    let base = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let bl = lay([2, 3]).transpose(0, 1).unwrap(); // [[1,4],[2,5],[3,6]]
+    let idx = i64_storage(vec![0]);
+    let il = lay([1]);
+    let src = f32_storage(vec![10.0, 20.0]);
+    let sl = lay([1, 2]);
+    let out = index_add(
+        View::new(&base, &bl),
+        0,
+        View::new(&idx, &il),
+        View::new(&src, &sl),
+    )
+    .unwrap();
+    assert_eq!(as_f32(&out), vec![11.0, 24.0, 2.0, 5.0, 3.0, 6.0]);
+}
+
+#[test]
+fn index_add_shape_dtype_and_bool_errors() {
+    let base = f32_storage(vec![0.0; 4]);
+    let bl = lay([2, 2]);
+    let idx = i64_storage(vec![0]);
+    let il = lay([1]);
+
+    // src must be the base shape with the indexed axis at the index count.
+    let src = f32_storage(vec![1.0, 2.0, 3.0, 4.0]);
+    assert!(matches!(
+        index_add(
+            View::new(&base, &bl),
+            0,
+            View::new(&idx, &il),
+            View::new(&src, &lay([2, 2]))
+        ),
+        Err(Error::ShapeMismatch {
+            op: "index_add",
+            ..
+        })
+    ));
+
+    // No implicit promotion between base and source.
+    let src = i64_storage(vec![1, 2]);
+    assert!(matches!(
+        index_add(
+            View::new(&base, &bl),
+            0,
+            View::new(&idx, &il),
+            View::new(&src, &lay([1, 2]))
+        ),
+        Err(Error::DTypeMismatch {
+            op: "index_add",
+            ..
+        })
+    ));
+
+    // Bool has no wide accumulator.
+    let base = bool_storage(vec![false; 4]);
+    let src = bool_storage(vec![true, true]);
+    assert!(matches!(
+        index_add(
+            View::new(&base, &bl),
+            0,
+            View::new(&idx, &il),
+            View::new(&src, &lay([1, 2]))
+        ),
+        Err(Error::Unsupported {
+            op: "index_add",
+            dtype: DType::Bool,
+            ..
+        })
+    ));
+}
+
+// ----- gather ---------------------------------------------------------
+
+#[test]
+fn gather_picks_per_element_along_an_axis() {
+    // [[1,2,3],[4,5,6]]; gather along axis 1 with [[0,2],[1,1]].
+    let s = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let l = lay([2, 3]);
+    let idx = i64_storage(vec![0, 2, 1, 1]);
+    let il = lay([2, 2]);
+    let out = gather(View::new(&s, &l), 1, View::new(&idx, &il)).unwrap();
+    assert_eq!(as_f32(&out), vec![1.0, 3.0, 5.0, 5.0]);
+
+    // Along axis 0: index [[1,0,1]] picks per column.
+    let idx = i64_storage(vec![1, 0, 1]);
+    let il = lay([1, 3]);
+    let out = gather(View::new(&s, &l), 0, View::new(&idx, &il)).unwrap();
+    assert_eq!(as_f32(&out), vec![4.0, 2.0, 6.0]);
+}
+
+#[test]
+fn gather_reads_strided_sources() {
+    let s = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let l = lay([2, 3]).transpose(0, 1).unwrap(); // [[1,4],[2,5],[3,6]]
+    let idx = i64_storage(vec![1, 0, 1]);
+    let il = lay([3, 1]);
+    let out = gather(View::new(&s, &l), 1, View::new(&idx, &il)).unwrap();
+    assert_eq!(as_f32(&out), vec![4.0, 2.0, 6.0]);
+}
+
+#[test]
+fn gather_bounds_and_shape_errors() {
+    let s = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let l = lay([2, 3]);
+
+    let idx = i64_storage(vec![0, 3]);
+    assert!(matches!(
+        gather(View::new(&s, &l), 1, View::new(&idx, &lay([1, 2]))),
+        Err(Error::IndexOutOfBounds {
+            op: "gather",
+            index: 3,
+            axis: 1,
+            size: 3
+        })
+    ));
+
+    // Same-rank index grid required.
+    let idx = i64_storage(vec![0, 1]);
+    assert!(matches!(
+        gather(View::new(&s, &l), 1, View::new(&idx, &lay([2]))),
+        Err(Error::RankMismatch {
+            op: "gather",
+            expected: 2,
+            got: 1
+        })
+    ));
+
+    // A non-gathered axis larger than the source is a shape error.
+    let idx = i64_storage(vec![0; 9]);
+    assert!(matches!(
+        gather(View::new(&s, &l), 1, View::new(&idx, &lay([3, 3]))),
+        Err(Error::ShapeMismatch { op: "gather", .. })
+    ));
+}
+
+// ----- scatter_add ----------------------------------------------------
+
+#[test]
+fn scatter_add_accumulates_duplicate_destinations() {
+    let base = f32_storage(vec![0.0; 6]);
+    let bl = lay([2, 3]);
+    // Both columns of row 0 land on index 1; row 1 spreads out.
+    let idx = i64_storage(vec![1, 1, 0, 2]);
+    let il = lay([2, 2]);
+    let src = f32_storage(vec![1.0, 2.0, 3.0, 4.0]);
+    let sl = lay([2, 2]);
+    let out = scatter_add(
+        View::new(&base, &bl),
+        1,
+        View::new(&idx, &il),
+        View::new(&src, &sl),
+    )
+    .unwrap();
+    assert_eq!(as_f32(&out), vec![0.0, 3.0, 0.0, 3.0, 0.0, 4.0]);
+}
+
+/// `PyTorch`'s rule is `index.size(d) <= src.size(d)`, so `src` may be
+/// strictly larger than the index grid: the grid names which `src`
+/// positions participate, and the rest are simply never read.
+///
+/// Every other `scatter_add` test passes an index grid of exactly `src`'s
+/// shape, which makes "walk the grid" and "walk `src`" indistinguishable.
+/// The Metal kernel walked `src`, so it visited positions the grid never
+/// named and decoded one flat counter against two different shapes. Hand
+/// computed rather than differential, so it pins the semantics here
+/// without needing a second backend to agree with.
+#[test]
+fn scatter_add_reads_only_the_positions_the_index_grid_names() {
+    let base = f32_storage(vec![0.0; 6]);
+    let bl = lay([2, 3]);
+    // A [2, 2] grid selecting from a [2, 3] source: column 2 of `src`
+    // (30.0 and 60.0) lies outside the grid and must not contribute.
+    let idx = i64_storage(vec![0, 2, 1, 1]);
+    let il = lay([2, 2]);
+    let src = f32_storage(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    let sl = lay([2, 3]);
+    let out = scatter_add(
+        View::new(&base, &bl),
+        1,
+        View::new(&idx, &il),
+        View::new(&src, &sl),
+    )
+    .unwrap();
+    // row 0: src[0,0]=10 -> col 0, src[0,1]=20 -> col 2.
+    // row 1: src[1,0]=40 and src[1,1]=50 both -> col 1.
+    assert_eq!(out.len(), 6, "the output has `x`'s shape, not `src`'s");
+    assert_eq!(as_f32(&out), vec![10.0, 0.0, 20.0, 0.0, 90.0, 0.0]);
+}
+
+#[test]
+fn scatter_add_is_the_transpose_of_gather() {
+    // Property: scattering ones through the same index grid a gather used
+    // counts how many times each source element was read.
+    let s = f32_storage(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let l = lay([2, 3]);
+    let idx = i64_storage(vec![0, 2, 1, 1]);
+    let il = lay([2, 2]);
+    let picked = gather(View::new(&s, &l), 1, View::new(&idx, &il)).unwrap();
+    assert_eq!(as_f32(&picked), vec![1.0, 3.0, 5.0, 5.0]);
+
+    let base = f32_storage(vec![0.0; 6]);
+    let ones = f32_storage(vec![1.0; 4]);
+    let counts = scatter_add(
+        View::new(&base, &l),
+        1,
+        View::new(&idx, &il),
+        View::new(&ones, &il),
+    )
+    .unwrap();
+    assert_eq!(as_f32(&counts), vec![1.0, 0.0, 1.0, 0.0, 2.0, 0.0]);
+}
+
+#[test]
+fn scatter_add_accumulates_in_the_wide_acc_type() {
+    let base = f16_storage(vec![0.0, 0.0]);
+    let bl = lay([1, 2]);
+    let idx = i64_storage(vec![0; 4096]);
+    let il = lay([1, 4096]);
+    let src = f16_storage(vec![1.0; 4096]);
+    let sl = lay([1, 4096]);
+    let out = scatter_add(
+        View::new(&base, &bl),
+        1,
+        View::new(&idx, &il),
+        View::new(&src, &sl),
+    )
+    .unwrap();
+    assert_eq!(as_f16(&out), vec![4096.0, 0.0]);
+}
+
+#[test]
+fn bf16_scatter_add_accumulates_in_the_wide_acc_type() {
+    let base = bf16_storage(vec![0.0, 0.0]);
+    let idx = i64_storage(vec![0; 4096]);
+    let src = bf16_storage(vec![1.0; 4096]);
+    let out = scatter_add(
+        View::new(&base, &lay([1, 2])),
+        1,
+        View::new(&idx, &lay([1, 4096])),
+        View::new(&src, &lay([1, 4096])),
+    )
+    .unwrap();
+    assert_eq!(as_bf16(&out), vec![4096.0, 0.0]);
+}
+
+#[test]
+fn scatter_add_bounds_and_shape_errors() {
+    let base = f32_storage(vec![0.0; 6]);
+    let bl = lay([2, 3]);
+    let src = f32_storage(vec![1.0; 4]);
+    let sl = lay([2, 2]);
+
+    let idx = i64_storage(vec![0, 5, 0, 0]);
+    assert!(matches!(
+        scatter_add(
+            View::new(&base, &bl),
+            1,
+            View::new(&idx, &lay([2, 2])),
+            View::new(&src, &sl)
+        ),
+        Err(Error::IndexOutOfBounds {
+            op: "scatter_add",
+            index: 5,
+            axis: 1,
+            size: 3
+        })
+    ));
+
+    // The index grid may not exceed `src`.
+    let idx = i64_storage(vec![0; 6]);
+    assert!(matches!(
+        scatter_add(
+            View::new(&base, &bl),
+            1,
+            View::new(&idx, &lay([2, 3])),
+            View::new(&src, &sl)
+        ),
+        Err(Error::ShapeMismatch {
+            op: "scatter_add",
+            ..
+        })
+    ));
+
+    // Bool has no wide accumulator here either.
+    let base = bool_storage(vec![false; 6]);
+    let src = bool_storage(vec![true; 4]);
+    let idx = i64_storage(vec![0; 4]);
+    assert!(matches!(
+        scatter_add(
+            View::new(&base, &bl),
+            1,
+            View::new(&idx, &lay([2, 2])),
+            View::new(&src, &sl)
+        ),
+        Err(Error::Unsupported {
+            op: "scatter_add",
+            dtype: DType::Bool,
+            ..
+        })
+    ));
+}
+
+// ----- fast paths vs. the naive per-element decode ---------------------
+//
+// Every kernel above grew a whole-row `memcpy` tier and a division-free
+// odometer. Both must be *indistinguishable* from the per-element decode
+// they replaced, so the decode is reproduced here verbatim and the two are
+// compared over a matrix of layouts chosen to hit each tier:
+//
+// - dense source, indexed on the outer axis  -> row-copy tier
+// - dense source, indexed on the innermost axis -> run length 1
+// - transposed / inner-narrowed / broadcast source -> general walk
+//
+// For the accumulating kernels the comparison is `assert_eq!` on the
+// *result elements*, which for floats is bitwise equality — the fast path
+// is required to add the same contributions to each cell in the same
+// order, so no tolerance is involved or allowed.
+
+/// The storage index of logical (row-major) position `i` of `layout`,
+/// whose place values are `place`. The decode the kernels used before the
+/// odometer replaced it.
+fn naive_storage_index(layout: &Layout, place: &[usize], i: usize) -> usize {
+    let dims = layout.dims();
+    let strides = layout.strides();
+    let mut idx = layout.offset();
+    for a in 0..dims.len() {
+        idx += ((i / place[a]) % dims[a]) * strides[a];
+    }
+    idx
+}
+
+/// Pre-optimization `index_select_generic`.
+fn naive_index_select(
+    data: &[f32],
+    x_strides: &[usize],
+    x_offset: usize,
+    out_dims: &[usize],
+    axis: usize,
+    picks: &[usize],
+) -> Vec<f32> {
+    let place = place_values(out_dims);
+    let n: usize = out_dims.iter().product();
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut src = x_offset;
+        for a in 0..out_dims.len() {
+            let c = (i / place[a]) % out_dims[a];
+            src += if a == axis { picks[c] } else { c } * x_strides[a];
+        }
+        out.push(data[src]);
+    }
+    out
+}
+
+/// Pre-optimization `gather_generic`.
+fn naive_gather(
+    data: &[f32],
+    x_strides: &[usize],
+    x_offset: usize,
+    out_dims: &[usize],
+    axis: usize,
+    picks: &[usize],
+) -> Vec<f32> {
+    let place = place_values(out_dims);
+    let mut out = Vec::with_capacity(picks.len());
+    for (i, &pick) in picks.iter().enumerate() {
+        let mut src = x_offset;
+        for a in 0..out_dims.len() {
+            let c = if a == axis {
+                pick
+            } else {
+                (i / place[a]) % out_dims[a]
+            };
+            src += c * x_strides[a];
+        }
+        out.push(data[src]);
+    }
+    out
+}
+
+/// Pre-optimization `index_add_generic` (f32, so `Acc` is f32 too).
+fn naive_index_add(
+    x_data: &[f32],
+    x_layout: &Layout,
+    src_data: &[f32],
+    src_layout: &Layout,
+    axis: usize,
+    picks: &[usize],
+) -> Vec<f32> {
+    let x_place = place_values(x_layout.dims());
+    let mut acc: Vec<f32> = (0..x_layout.num_elements())
+        .map(|i| x_data[naive_storage_index(x_layout, &x_place, i)])
+        .collect();
+    let src_dims = src_layout.dims();
+    let src_strides = src_layout.strides();
+    let src_place = place_values(src_dims);
+    for i in 0..src_layout.num_elements() {
+        let mut from = src_layout.offset();
+        let mut dst = 0usize;
+        for a in 0..src_dims.len() {
+            let c = (i / src_place[a]) % src_dims[a];
+            from += c * src_strides[a];
+            dst += if a == axis { picks[c] } else { c } * x_place[a];
+        }
+        acc[dst] += src_data[from];
+    }
+    acc
+}
+
+/// Pre-optimization `scatter_add_generic` (f32).
+fn naive_scatter_add(
+    x_data: &[f32],
+    x_layout: &Layout,
+    src_data: &[f32],
+    src_layout: &Layout,
+    idx_dims: &[usize],
+    axis: usize,
+    picks: &[usize],
+) -> Vec<f32> {
+    let x_place = place_values(x_layout.dims());
+    let mut acc: Vec<f32> = (0..x_layout.num_elements())
+        .map(|i| x_data[naive_storage_index(x_layout, &x_place, i)])
+        .collect();
+    let idx_place = place_values(idx_dims);
+    let src_strides = src_layout.strides();
+    for (i, &pick) in picks.iter().enumerate() {
+        let mut from = src_layout.offset();
+        let mut dst = 0usize;
+        for a in 0..idx_dims.len() {
+            let c = (i / idx_place[a]) % idx_dims[a];
+            from += c * src_strides[a];
+            dst += if a == axis { pick } else { c } * x_place[a];
+        }
+        acc[dst] += src_data[from];
+    }
+    acc
+}
+
+/// `0.5, 1.0, 1.5, …` — values a float sum reorder would expose, in a
+/// buffer long enough for every layout below plus an offset.
+fn ramp(n: usize) -> Vec<f32> {
+    (0..n).map(|i| 0.5 * (i as f32 + 1.0)).collect()
+}
+
+/// The rank-3 source layouts the equivalence tests sweep, paired with the
+/// axis to index and a label. All are views over `ramp(240)`.
+fn source_layouts() -> Vec<(&'static str, Layout, usize)> {
+    let base = lay([3, 4, 5]);
+    vec![
+        // Dense: outer axis is the row-copy tier (run = 20).
+        ("dense, axis 0", base.clone(), 0),
+        // Dense: middle axis, run = 5.
+        ("dense, axis 1", base.clone(), 1),
+        // Dense: innermost axis, run = 1.
+        ("dense, axis 2", base.clone(), 2),
+        // Offset run: still dense, so still the row-copy tier.
+        ("outer narrow, axis 1", base.narrow(0, 1, 2).unwrap(), 1),
+        // Inner narrow: the axes inside 0 are no longer contiguous, so
+        // axis 0 falls to the general walk.
+        ("inner narrow, axis 0", base.narrow(2, 1, 3).unwrap(), 0),
+        // Transposed: reordered strides, general walk.
+        ("transposed 0/2, axis 0", base.transpose(0, 2).unwrap(), 0),
+        ("transposed 1/2, axis 1", base.transpose(1, 2).unwrap(), 1),
+        // Permuted.
+        ("permuted, axis 2", base.permute(&[2, 0, 1]).unwrap(), 2),
+        // Broadcast innermost axis: stride 0 inside the indexed axis, so
+        // the row-copy tier must refuse it.
+        (
+            "broadcast innermost, axis 0",
+            lay([3, 4, 1])
+                .broadcast_to(&Shape::from([3, 4, 5]))
+                .unwrap(),
+            0,
+        ),
+        // Broadcast leading axis, indexed on a later axis.
+        (
+            "broadcast leading, axis 1",
+            lay([1, 4, 5])
+                .broadcast_to(&Shape::from([3, 4, 5]))
+                .unwrap(),
+            1,
+        ),
+    ]
+}
+
+#[test]
+fn index_select_fast_and_general_paths_match_the_naive_decode() {
+    let data = ramp(240);
+    for (name, layout, axis) in source_layouts() {
+        let size = layout.dims()[axis];
+        // Repeats, reversal and a truncated list, so `picks.len()` differs
+        // from the source size in both directions.
+        for picks in [
+            vec![0usize],
+            (0..size).collect::<Vec<_>>(),
+            (0..size).rev().collect::<Vec<_>>(),
+            vec![size - 1, 0, size - 1],
+        ] {
+            let mut out_dims = layout.dims().to_vec();
+            out_dims[axis] = picks.len();
+            let got = index_select_generic(
+                &data,
+                layout.strides(),
+                layout.offset(),
+                &out_dims,
+                axis,
+                &picks,
+            );
+            let want = naive_index_select(
+                &data,
+                layout.strides(),
+                layout.offset(),
+                &out_dims,
+                axis,
+                &picks,
+            );
+            assert_eq!(got, want, "{name} picks={picks:?}");
+        }
+    }
+}
+
+#[test]
+fn gather_matches_the_naive_decode_on_strided_sources() {
+    let data = ramp(240);
+    for (name, layout, axis) in source_layouts() {
+        let out_dims = layout.dims().to_vec();
+        let size = layout.dims()[axis];
+        // One index per output element, cycling so neighbours differ.
+        let picks: Vec<usize> = (0..out_dims.iter().product::<usize>())
+            .map(|i| (i * 3 + 1) % size)
+            .collect();
+        let got = gather_generic(
+            &data,
+            layout.strides(),
+            layout.offset(),
+            &out_dims,
+            axis,
+            &picks,
+        );
+        let want = naive_gather(
+            &data,
+            layout.strides(),
+            layout.offset(),
+            &out_dims,
+            axis,
+            &picks,
+        );
+        assert_eq!(got, want, "{name}");
+    }
+}
+
+#[test]
+fn index_add_fast_and_general_paths_match_the_naive_decode_bitwise() {
+    let x_data = ramp(240);
+    // `src` gets its own buffer so a mixed-up read is visible.
+    let src_data: Vec<f32> = ramp(240).iter().map(|v| -v - 0.25).collect();
+    let base = lay([3, 4, 5]);
+    for axis in 0..3 {
+        let size = base.dims()[axis];
+        for picks in [
+            (0..size).collect::<Vec<_>>(),
+            (0..size).rev().collect::<Vec<_>>(),
+            // Duplicates: several `src` slices land on one base slice.
+            // (What makes the *order* of those adds observable is
+            // `index_add_accumulates_duplicates_in_source_order`, below —
+            // this ramp's sums are exact in f32, so order alone would not
+            // show up here.)
+            vec![0usize; size],
+            vec![size - 1, 0, size - 1],
+        ] {
+            let mut src_dims = base.dims().to_vec();
+            src_dims[axis] = picks.len();
+            // A dense `src` (row-copy tier) and a transposed one (general
+            // walk) must both agree with the decode.
+            let dense = lay(src_dims.clone());
+            let swapped = {
+                let (a, b) = (axis, (axis + 1) % 3);
+                let mut d = src_dims.clone();
+                d.swap(a, b);
+                lay(d).transpose(a, b).unwrap()
+            };
+            for (label, src_layout) in [("dense src", dense), ("transposed src", swapped)] {
+                assert_eq!(src_layout.dims(), &src_dims[..], "{label}: dims");
+                let got: Vec<f32> =
+                    index_add_generic(&x_data, &base, &src_data, &src_layout, axis, &picks);
+                let want = naive_index_add(&x_data, &base, &src_data, &src_layout, axis, &picks);
+                assert_eq!(got, want, "axis={axis} {label} picks={picks:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn scatter_add_matches_the_naive_decode_bitwise() {
+    let x_data = ramp(240);
+    let src_data: Vec<f32> = ramp(240).iter().map(|v| -v - 0.25).collect();
+    let base = lay([3, 4, 5]);
+    for axis in 0..3 {
+        let size = base.dims()[axis];
+        let idx_dims = base.dims().to_vec();
+        let n: usize = idx_dims.iter().product();
+        // Collide deliberately: `% (size.min(2))` sends many grid cells to
+        // the same destination on every axis.
+        let picks: Vec<usize> = (0..n).map(|i| i % size.min(2)).collect();
+        for (label, src_layout) in [
+            ("dense src", lay(idx_dims.clone())),
+            (
+                "transposed src",
+                lay([idx_dims[1], idx_dims[0], idx_dims[2]])
+                    .transpose(0, 1)
+                    .unwrap(),
+            ),
+        ] {
+            let got: Vec<f32> = scatter_add_generic(
+                &x_data,
+                &base,
+                &src_data,
+                &src_layout,
+                &idx_dims,
+                axis,
+                &picks,
+            );
+            let want = naive_scatter_add(
+                &x_data,
+                &base,
+                &src_data,
+                &src_layout,
+                &idx_dims,
+                axis,
+                &picks,
+            );
+            assert_eq!(got, want, "axis={axis} {label}");
+        }
+    }
+}
+
+/// The one property the `index_add` row-copy tier could plausibly break
+/// and the sweep above could not see: **the order** in which duplicate
+/// picks accumulate into the same destination cell.
+///
+/// `index_add` is `index_select`'s backward, so this is the embedding
+/// gradient: many source rows summing into one row of the base. The fast
+/// path adds a whole row at a time (outer coordinate, then `k`, then
+/// position within the row); the decode it replaced added one element at a
+/// time in row-major `src` order. Those are the same order, and this test
+/// is what holds them to it.
+///
+/// The values are chosen so that floating-point addition is *not*
+/// associative over them, and the test asserts that itself before asserting
+/// the kernel: `1.0` followed by four ties-away-from-zero-sized crumbs sums
+/// to exactly `1.0` in ascending order (each crumb is below half an ulp of
+/// 1.0 on its own) but to `1.0 + 1 ulp` when the crumbs are added together
+/// first. So a reordered accumulation cannot pass.
+#[test]
+fn index_add_accumulates_duplicates_in_source_order() {
+    const CRUMB: f32 = 3e-8;
+    let (rows, cols) = (5usize, 3usize);
+
+    // Self-check: these values really are order-sensitive in f32.
+    let ascending = {
+        let mut a = 1.0f32;
+        for _ in 1..rows {
+            a += CRUMB;
+        }
+        a
+    };
+    let descending = {
+        let mut a = 0.0f32;
+        for _ in 1..rows {
+            a += CRUMB;
+        }
+        a + 1.0
+    };
+    assert_ne!(
+        ascending, descending,
+        "the test's own values must be order-sensitive, else it proves nothing"
+    );
+
+    // Every source row lands on base row 0.
+    let picks = vec![0usize; rows];
+    let x_layout = lay([2, cols]);
+    let x_data = vec![0.0f32; x_layout.num_elements()];
+    // Row 0 is the big value, rows 1.. are the crumbs.
+    let src_data: Vec<f32> = (0..rows * cols)
+        .map(|i| if i < cols { 1.0 } else { CRUMB })
+        .collect();
+
+    // Dense source: the row-copy tier (run = cols).
+    let dense = lay([rows, cols]);
+    assert_eq!(trailing_run(dense.dims(), dense.strides(), 0), Some(cols));
+    let got: Vec<f32> = index_add_generic(&x_data, &x_layout, &src_data, &dense, 0, &picks);
+    assert_eq!(
+        got,
+        naive_index_add(&x_data, &x_layout, &src_data, &dense, 0, &picks),
+        "row-copy tier reordered the accumulation"
+    );
+    assert_eq!(got[0], ascending, "…and the order is source order");
+
+    // Transposed source: the general element-at-a-time walk, same order.
+    let transposed = lay([cols, rows]).transpose(0, 1).unwrap();
+    assert_eq!(transposed.dims(), &[rows, cols]);
+    assert_eq!(
+        trailing_run(transposed.dims(), transposed.strides(), 0),
+        None
+    );
+    let got: Vec<f32> = index_add_generic(&x_data, &x_layout, &src_data, &transposed, 0, &picks);
+    assert_eq!(
+        got,
+        naive_index_add(&x_data, &x_layout, &src_data, &transposed, 0, &picks),
+        "general walk reordered the accumulation"
+    );
+}
+
+/// The same order guarantee for `scatter_add`, whose grid picks one
+/// destination per element: collide every grid cell of a column onto one
+/// base cell and check the sum against the decode.
+#[test]
+fn scatter_add_accumulates_collisions_in_grid_order() {
+    const CRUMB: f32 = 3e-8;
+    let (rows, cols) = (5usize, 3usize);
+    let x_layout = lay([2, cols]);
+    let x_data = vec![0.0f32; x_layout.num_elements()];
+    let idx_dims = vec![rows, cols];
+    // Whole grid scatters onto base row 0, along axis 0.
+    let picks = vec![0usize; rows * cols];
+    let src_data: Vec<f32> = (0..rows * cols)
+        .map(|i| if i < cols { 1.0 } else { CRUMB })
+        .collect();
+    let src_layout = lay([rows, cols]);
+    let got: Vec<f32> = scatter_add_generic(
+        &x_data,
+        &x_layout,
+        &src_data,
+        &src_layout,
+        &idx_dims,
+        0,
+        &picks,
+    );
+    assert_eq!(
+        got,
+        naive_scatter_add(
+            &x_data,
+            &x_layout,
+            &src_data,
+            &src_layout,
+            &idx_dims,
+            0,
+            &picks
+        ),
+        "scatter_add reordered the accumulation"
+    );
+    // Ascending grid order: 1.0 first, then the crumbs, each lost.
+    assert_eq!(got[0], 1.0f32);
+}
+
+// ----- arg_sort -------------------------------------------------------
+
+#[test]
+fn arg_sort_is_stable_in_both_directions() {
+    // Two pairs of equal values. `sort_by` is stable, so equal elements keep
+    // their source order whichever direction is asked for — descending must
+    // reverse the *keys*, never the tie order.
+    let s = f32_storage(vec![2.0, 1.0, 2.0, 1.0]);
+    let l = lay([4]);
+    let up = arg_sort(View::new(&s, &l), 0, false).unwrap();
+    assert_eq!(as_i64(&up), vec![1, 3, 0, 2]);
+    let down = arg_sort(View::new(&s, &l), 0, true).unwrap();
+    assert_eq!(as_i64(&down), vec![0, 2, 1, 3]);
+}
+
+#[test]
+fn arg_sort_places_nan_above_every_number() {
+    // The documented total order, matching `argmax`/`max`: NaN is greater
+    // than every number, so it lands last ascending and first descending.
+    let s = f32_storage(vec![1.0, f32::NAN, -1.0]);
+    let l = lay([3]);
+    assert_eq!(
+        as_i64(&arg_sort(View::new(&s, &l), 0, false).unwrap()),
+        vec![2, 0, 1]
+    );
+    assert_eq!(
+        as_i64(&arg_sort(View::new(&s, &l), 0, true).unwrap()),
+        vec![1, 0, 2]
+    );
+}
+
+#[test]
+fn arg_sort_orders_adjacent_f16_values() {
+    // One f16 ulp apart, which is the tightest ordering the dtype can be
+    // asked to resolve. `f16::from_f32(1.0).to_f32().next_up()` would *not*
+    // work here: that is the next f32, which rounds back to f16 1.0 and makes
+    // the two lanes equal.
+    let one = half::f16::ONE;
+    let next = half::f16::from_bits(one.to_bits() + 1);
+    assert!(next > one);
+    let s = Storage::Cpu(CpuStorage::F16(Arc::new(vec![next, one])));
+    let l = lay([2]);
+    assert_eq!(
+        as_i64(&arg_sort(View::new(&s, &l), 0, false).unwrap()),
+        vec![1, 0]
+    );
+}
+
+#[test]
+fn arg_sort_follows_a_transposed_view() {
+    // [[3,1],[2,4]] transposed is [[3,2],[1,4]]: sorting each row of the
+    // *view* must read through the strides, not the backing order.
+    let s = f32_storage(vec![3.0, 1.0, 2.0, 4.0]);
+    let l = lay([2, 2]).transpose(0, 1).unwrap();
+    let out = arg_sort(View::new(&s, &l), 1, false).unwrap();
+    assert_eq!(as_i64(&out), vec![1, 0, 0, 1]);
+}
+
+#[test]
+fn arg_sort_follows_an_offset_view() {
+    // Narrow away the first column: the surviving line is [2, 5, 1], whose
+    // ascending order is 2, 0, 1 — wrong if the kernel ignores the offset.
+    let s = f32_storage(vec![9.0, 2.0, 5.0, 1.0]);
+    let l = lay([4]).narrow(0, 1, 3).unwrap();
+    let out = arg_sort(View::new(&s, &l), 0, false).unwrap();
+    assert_eq!(as_i64(&out), vec![2, 0, 1]);
+}
+
+#[test]
+fn arg_sort_handles_i64_and_declines_bool() {
+    let s = i64_storage(vec![5, -3, 5, 0]);
+    let l = lay([4]);
+    assert_eq!(
+        as_i64(&arg_sort(View::new(&s, &l), 0, false).unwrap()),
+        vec![1, 3, 0, 2]
+    );
+
+    // `dispatch_numeric!` has no `NumAcc` for Bool, so the kernel declines
+    // rather than inventing an accumulator it does not need.
+    let s = bool_storage(vec![true, false]);
+    let l = lay([2]);
+    assert!(matches!(
+        arg_sort(View::new(&s, &l), 0, false),
+        Err(Error::Unsupported {
+            op: "arg_sort",
+            dtype: DType::Bool,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn arg_sort_on_an_empty_axis_is_empty() {
+    let s = f32_storage(Vec::new());
+    let l = lay([0, 3]);
+    assert!(as_i64(&arg_sort(View::new(&s, &l), 0, false).unwrap()).is_empty());
+    assert!(as_i64(&arg_sort(View::new(&s, &l), 1, false).unwrap()).is_empty());
+}

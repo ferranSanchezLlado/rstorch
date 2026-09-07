@@ -1,0 +1,5 @@
+error: unknown #[module(...)] option; supported options are `param`, `buffer`, `child`, and `skip`
+ --> tests/ui/default/nn/derive/unknown_module_option.rs:9:14
+  |
+9 |     #[module(rename = "w")]
+  |              ^^^^^^

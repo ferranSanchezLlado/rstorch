@@ -1,0 +1,369 @@
+# restart-v3 CI (implementation-plan §1.2): stable + MSRV, fmt, clippy
+# -D warnings, and doc build. Branch filters keep pushed task branches from triggering
+# this; only integration branches and PRs targeting them run.
+name: CI
+
+on:
+  push:
+    branches: [master, restart-v3, compile-time]
+  pull_request:
+    branches: [master, restart-v3, compile-time]
+
+# Nothing here writes to the repository or the registry.
+permissions:
+  contents: read
+
+# Third-party actions are pinned to a commit SHA, not a tag: a tag can be
+# repointed at new code by whoever owns the action, and these jobs hold a
+# publish token. The trailing comment is the release the SHA belongs to, so an
+# upgrade is a visible one-line change with a version to read.
+
+# A push that supersedes an in-flight run cancels it: the macOS and lavapipe
+# lanes are the expensive ones, and re-running them for an obsolete commit buys
+# nothing. Keyed per ref, so a push to one branch never cancels another's run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.88 is the MSRV; lints/fmt run on stable only so lint drift
+        # between toolchains cannot wedge CI.
+        toolchain: [stable, "1.88"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install toolchain
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy,rustfmt
+          rustup default ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Format
+        if: matrix.toolchain == 'stable'
+        run: cargo fmt --all --check
+      # On Ubuntu, --all-features checks the Linux cfg surface only; it does
+      # not exercise the macOS-only Metal backend or Metal hardware.
+      - name: Clippy (all features)
+        if: matrix.toolchain == 'stable'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # `testing` gates the finite-difference harness, and with it the
+      # `numerics` and `reduced_precision` suites. This is the lane that owns
+      # their coverage on both stable and MSRV, so it opts in explicitly; the
+      # feature-surface lanes below deliberately run without it.
+      - name: Test
+        run: cargo test --workspace --features testing
+      # `metal` is a *default* feature, so every other lane here either takes
+      # the defaults or names features explicitly, and `cargo test --workspace`
+      # feature-unifies rstorch back to its own defaults even though `fixtures`
+      # asks for `default-features = false`. Without this step the CPU-only
+      # library — the configuration a non-macOS consumer gets — is never
+      # compiled or run anywhere in CI.
+      - name: Test without default features
+        run: cargo test --workspace --no-default-features
+      - name: Compile benchmarks
+        if: matrix.toolchain == 'stable'
+        run: cargo bench --workspace --no-run
+
+  features:
+    name: Linux features (hub, rayon; no Metal hardware)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Metal is macOS-only. This lane tests the portable optional features
+      # and must not be interpreted as a Metal runtime or hardware test.
+      - name: Test hub and rayon
+        run: cargo test --workspace --features hub,rayon
+
+  surfaces:
+    name: Surface (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    env:
+      # The all-features matrix entry validates feature composition on a
+      # generic runner; it is not a GPU hardware lane. CUDA has no execution
+      # lane anywhere in CI (GitHub hosts no NVIDIA runner), and the executed
+      # WGPU lane is `wgpu-software-adapter` below, which sets neither variable.
+      RSTORCH_SKIP_CUDA_TESTS: "1"
+      RSTORCH_SKIP_WGPU_TESTS: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            feature_args: ""
+          - name: typed
+            feature_args: --features typed
+          - name: all features
+            feature_args: --all-features
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Check
+        run: cargo check --workspace ${{ matrix.feature_args }}
+      - name: Test
+        run: cargo test --workspace ${{ matrix.feature_args }}
+      - name: Docs
+        run: cargo doc --workspace --no-deps ${{ matrix.feature_args }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  wgpu-software-adapter:
+    name: WGPU execution (lavapipe software adapter)
+    runs-on: ubuntu-latest
+    # Software rasterization is slow: the transformer and CNN training suites
+    # run the same graphs the Metal lane runs, on a CPU-backed Vulkan driver.
+    timeout-minutes: 60
+    env:
+      # Deliberately *not* set here: RSTORCH_SKIP_WGPU_TESTS. This is the lane
+      # that executes WGSL, so a failed adapter initialization must fail it
+      # rather than turn into a skip.
+      #
+      # `Device::Wgpu(0)` — what every WGPU test names — is an index into the
+      # crate's adapter list, which is sorted by backend name, so a software GL
+      # adapter would take ordinal 0 ahead of Vulkan. glvnd reads its EGL vendor
+      # list from this variable, and pointing it at an empty file leaves the GL
+      # backend with no vendor to load, so ordinal 0 is the lavapipe Vulkan
+      # adapter installed below. That also makes LIBGL_ALWAYS_SOFTWARE
+      # pointless here: there is no GL path left to force onto llvmpipe.
+      __EGL_VENDOR_LIBRARY_FILENAMES: /dev/null
+      # Lavapipe's F32 workgroup reductions are unreliable; select the
+      # one-invocation-per-row kernels while retaining parallel rows.
+      RSTORCH_WGPU_SERIAL_ROWS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install the lavapipe software Vulkan driver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools
+      # Pin the loader to lavapipe rather than trusting enumeration order, and
+      # fail here — with a readable message — if the package ever stops
+      # shipping the ICD this lane is built on.
+      - name: Point the Vulkan loader at lavapipe
+        run: |
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+      # Adapter evidence. Without a visible device the suites below panic in
+      # `tests/common/wgpu.rs`; this step is what distinguishes "no driver" from
+      # "kernel is wrong".
+      - name: Show the Vulkan adapter
+        run: vulkaninfo --summary
+      # `backend::conformance` is a `#[cfg(test)] pub(crate) mod`, not a test
+      # target: there is no `--test conformance` to name. Its op × dtype table
+      # runs from the in-crate test `backend::wgpu::tests::conformance_if_adapter_exists`,
+      # so this filtered `--lib` run is what executes those lines against WGSL.
+      # A filter that matches nothing prints `running 0 tests` and exits 0, so
+      # the pass count is asserted: a rename must fail this step rather than
+      # turn it into a green check over an empty selection.
+      - name: Test the WGPU backend and the conformance table
+        run: |
+          set -o pipefail
+          cargo test --features wgpu --lib backend::wgpu:: -- --nocapture \
+            | tee "$RUNNER_TEMP/wgpu-lib.log"
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/wgpu-lib.log"
+      - name: Test the WGPU integration suites
+        run: >
+          cargo test --features wgpu
+          --test wgpu_training --test wgpu_fused_parity
+          --test wgpu_conv_backward --test wgpu_f16
+      # `wgpu_f16` is not skipped: it asks the adapter for `SHADER_F16` and
+      # asserts native F16 results when the feature is present and a loud
+      # `Error::Unsupported` when it is not, so it is meaningful either way on
+      # lavapipe. No WGPU suite is skipped on this lane.
+
+  ui:
+    name: UI (Rust 1.88 pinned)
+    runs-on: ubuntu-latest
+    env:
+      RSTORCH_UI: "1"
+      # This job compiles all features to exercise diagnostics, but GitHub's
+      # generic Ubuntu runner has no CUDA or required WGPU hardware contract.
+      RSTORCH_SKIP_CUDA_TESTS: "1"
+      RSTORCH_SKIP_WGPU_TESTS: "1"
+      # Nested cargo commands in typed_ui must use the fixture-pinned compiler.
+      RUSTUP_TOOLCHAIN: "1.88"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88 --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # `--locked` on every step here: trybuild compares rustc diagnostics
+      # against recorded text pinned to this compiler, so a dependency's patch
+      # release must not be able to change the expectations without a
+      # lockfile change in the tree.
+      - name: Test all UI suites (all features)
+        run: cargo test --locked --workspace --all-features
+
+  ui-stable:
+    name: Typed UI semantic fragments (stable)
+    runs-on: ubuntu-latest
+    env:
+      RSTORCH_UI: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install stable
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Test typed diagnostic semantics
+        run: cargo test --locked --test typed_ui --features typed
+
+  package:
+    name: Publishable tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install stable
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Verify the derive package separately; rstorch pins it by exact version.
+      - name: Package and verify rstorch-derive
+        run: cargo package -p rstorch-derive
+      # `cargo package -p rstorch` cannot verify until the matching
+      # rstorch-derive is published, because the manifest resolves it by
+      # version. What CI can check every run is the file set: this catches a
+      # source the build needs that exists only in an untracked or excluded
+      # directory, which has happened here before and stays invisible until a
+      # consumer unpacks the published tarball.
+      - name: List the rstorch package contents
+        run: cargo package -p rstorch --list
+
+  deny:
+    name: Dependency gate (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Config and the reasoning behind every allowed license live in
+      # `deny.toml`; run the identical check locally with
+      # `cargo deny check advisories licenses bans sources`.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories licenses bans sources
+
+  docs:
+    name: Docs (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The pair docs.rs builds (`[package.metadata.docs.rs]`: all features,
+        # plus aarch64-apple-darwin because `metal` compiles only on macOS).
+        # Each runner is native for its target, so a docs.rs failure shows up
+        # here first instead of after publishing.
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Docs (all features)
+        run: cargo doc --workspace --all-features --no-deps --target ${{ matrix.target }}
+
+  windows:
+    name: Windows build and CPU-only tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # `metal` is a default feature and macOS-only, so the Windows library is
+      # only reachable with the defaults off. This is the only lane that runs
+      # the library on Windows at all.
+      - name: Test without default features
+        run: cargo test --workspace --no-default-features
+      # Windows has no NVIDIA hardware, so this job only checks that the CUDA
+      # feature builds with dynamic loading and no toolkit or driver.
+      - name: Check the CUDA feature
+        run: cargo check --workspace --features cuda
+
+  metal-macos:
+    name: Metal execution and conformance (macOS runner)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install stable
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # This executes Metal on the current hosted macOS runner. Hosted runner
+      # hardware is not guaranteed, so this is execution evidence, not a
+      # persistent hardware-availability claim.
+      - name: Test Metal training
+        run: cargo +stable test --features metal --test metal_training
+      # `metal` is the default feature, so these two suites are the parity
+      # evidence for the fused kernels and the conv/pool backward geometries
+      # that the conformance table deliberately does not cover.
+      - name: Test Metal fused parity and conv backward
+        run: cargo +stable test --features metal --test metal_fused_parity --test metal_conv_backward
+      # `backend::conformance` is a `#[cfg(test)] pub(crate) mod`, so its op ×
+      # dtype table has no test target of its own; it runs from the in-crate
+      # test `backend::metal::tests::required_backend_table_matches_cpu`. This
+      # filtered `--lib` run is what makes those lines execute on Metal — a
+      # separate step from the integration suites because a `cargo test` filter
+      # applies to every selected target. A filter that matches nothing prints
+      # `running 0 tests` and exits 0, so the pass count is asserted: a rename
+      # must fail this step rather than silently select nothing.
+      - name: Test the Metal backend and the conformance table
+        run: |
+          set -o pipefail
+          cargo +stable test --features metal --lib backend::metal:: -- --nocapture \
+            | tee "$RUNNER_TEMP/metal-lib.log"
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/metal-lib.log"
+
+  ct20-macos-boundary:
+    name: CT20 wrong-device boundary (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88 --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The filter names a single test, and a filter that matches nothing prints
+      # `running 0 tests` and exits 0: assert the pass count so a rename cannot
+      # quietly drop the only lane that covers this rejection.
+      - name: Test hardware-independent wrong-device rejection
+        run: |
+          set -o pipefail
+          cargo +1.88 test --features typed,metal --lib wrong_runtime_device_is_rejected_without_metal_storage \
+            | tee "$RUNNER_TEMP/wrong-device.log"
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/wrong-device.log"
+      # The typed boundary suite carries macOS+metal-gated cases — notably
+      # public_relabel_rejects_a_different_physical_device — that no other lane
+      # can reach: every `cargo test` job is ubuntu, and the macOS jobs run
+      # only the Metal suites and the filtered `--lib` case above. What they
+      # assert is a placement rejection, but they need the `metal` cfg surface
+      # to exist — the case binds `Device::Metal(0)` through
+      # `metal::available()`, which panics unless a device initializes or
+      # RSTORCH_SKIP_METAL_TESTS is set — so macOS is where they can run.
+      - name: Test typed boundary placement rejections
+        run: cargo +1.88 test --features typed,metal --test typed_boundary

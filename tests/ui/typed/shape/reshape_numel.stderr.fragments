@@ -1,0 +1,3 @@
+error[E0080]
+typed reshape element counts are incompatible
+reshape::<rstorch::typed::Tensor1<5>>

@@ -1,0 +1,43 @@
+error[E0080]: evaluation of `typed::const_check::assert_reshape_numel` failed
+  --> $WORKSPACE/src/typed/ops/shape.rs:80:1
+   |
+80 | / impl_shape_ops! {
+81 | |     (Tensor0, []),
+82 | |     (Tensor1, [D0]),
+83 | |     (Tensor2, [D0, D1]),
+...  |
+89 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+90 | | }
+   | |_^ evaluation panicked: typed reshape element counts are incompatible
+   |
+note: inside `typed::const_check::assert_reshape_numel`
+  --> $WORKSPACE/src/typed/const_check.rs:73:9
+   |
+73 | /         assert!(
+74 | |             source == target,
+75 | |             "typed reshape element counts are incompatible"
+76 | |         );
+   | |_________^ the failure occurred here
+
+note: erroneous constant encountered
+  --> $WORKSPACE/src/typed/ops/shape.rs:80:1
+   |
+80 | / impl_shape_ops! {
+81 | |     (Tensor0, []),
+82 | |     (Tensor1, [D0]),
+83 | |     (Tensor2, [D0, D1]),
+...  |
+89 | |     (Tensor8, [D0, D1, D2, D3, D4, D5, D6, D7]),
+90 | | }
+   | |_^
+   |
+   = note: this note originates in the macro `impl_shape_ops` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: the above error was encountered while instantiating `fn rstorch::typed::ops::shape::<impl rstorch::typed::Tensor2<2, 3>>::reshape::<rstorch::typed::Tensor1<5>>`
+ --> src/main.rs:8:13
+  |
+8 |     let _ = source.reshape::<Tensor1<5>>([5]);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `rstorch-typed-ui-reshape-numel` (bin "rstorch-typed-ui-reshape-numel") due to 1 previous error

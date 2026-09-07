@@ -1,0 +1,12 @@
+error[E0277]: the trait bound `Tensor2<2, 3>: IndexSelectOutput<2, Tensor1<1, i64>>` is not satisfied
+ --> src/main.rs:7:20
+  |
+7 |     let _ = source.index_select::<2, 1>(&indices);
+  |                    ^^^^^^^^^^^^ the trait `IndexSelectOutput<2, Tensor1<1, i64>>` is not implemented for `Tensor2<2, 3>`
+  |
+  = help: the following other types implement trait `IndexSelectOutput<AXIS, Indices>`:
+            `Tensor2<D0, D1, E, P>` implements `IndexSelectOutput<0, Tensor1<LEN, i64, P>>`
+            `Tensor2<D0, D1, E, P>` implements `IndexSelectOutput<1, Tensor1<LEN, i64, P>>`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `rstorch-typed-ui-invalid-axis` (bin "rstorch-typed-ui-invalid-axis") due to 1 previous error

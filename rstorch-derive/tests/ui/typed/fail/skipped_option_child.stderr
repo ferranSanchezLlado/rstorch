@@ -1,0 +1,8 @@
+error: #[typed_module(skip)] cannot exclude an Option field because it may contain a typed child module; wrap the value in a skippable newtype (`struct Config(Option<T>)`) or hand-write `impl Module`
+ --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/skipped_option_child.rs:7:5
+  |
+7 | /     #[typed_module(skip)]
+8 | |     child: Option<Child>,
+  | |________________________^
+
+error: could not compile `rstorch-typed-derive-ui-skipped-option-child` (bin "case") due to 1 previous error

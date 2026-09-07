@@ -1,0 +1,29 @@
+error[E0080]: evaluation of `typed::const_check::assert_conv2d_channels` failed
+  --> $WORKSPACE/src/typed/ops/conv.rs:44:17
+   |
+44 |         const { assert_conv2d_channels(INPUT_CHANNELS, WEIGHT_INPUT) };
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation panicked: typed conv2d input channels are incompatible
+   |
+note: inside `typed::const_check::assert_conv2d_channels`
+  --> $WORKSPACE/src/typed/const_check.rs:17:5
+   |
+17 | /     assert!(
+18 | |         dimensions_compatible(input, weight_input),
+19 | |         "typed conv2d input channels are incompatible"
+20 | |     );
+   | |_____^ the failure occurred here
+
+note: erroneous constant encountered
+  --> $WORKSPACE/src/typed/ops/conv.rs:44:9
+   |
+44 |         const { assert_conv2d_channels(INPUT_CHANNELS, WEIGHT_INPUT) };
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: the above error was encountered while instantiating `fn rstorch::typed::ops::conv::<impl rstorch::typed::Tensor4<1, 2, 3, 3>>::conv2d::<1, 3, 1, 1>`
+ --> src/main.rs:9:13
+  |
+9 |     let _ = input.conv2d(&weight, (1, 1), (0, 0), (1, 1))?;
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `rstorch-typed-ui-channel-mismatch` (bin "rstorch-typed-ui-channel-mismatch") due to 1 previous error

@@ -1,0 +1,8 @@
+error: #[typed_module(skip)] cannot exclude a TypedBuffer field; every typed buffer must be visited
+ --> $WORKSPACE/rstorch-derive/tests/ui/typed/fail/skipped_typed_buffer.rs:7:5
+  |
+7 | /     #[typed_module(skip)]
+8 | |     running: TypedBuffer<Tensor1<2, f32, Cpu>>,
+  | |______________________________________________^
+
+error: could not compile `rstorch-typed-derive-ui-skipped-typed-buffer` (bin "case") due to 1 previous error

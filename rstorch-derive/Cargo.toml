@@ -1,0 +1,30 @@
+[package]
+name = "rstorch-derive"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derive macros for rstorch (#[derive(Module)])"
+documentation = "https://docs.rs/rstorch-derive"
+keywords = ["neural-network", "machine-learning", "derive", "macro", "tensor"]
+categories = ["science", "development-tools::procedural-macro-helpers"]
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro-crate = "3.3"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+# The dev-dependency cycle (rstorch depends on rstorch-derive) is deliberate:
+# the derive's own tests need the real `nn` contracts to expand against, and
+# `trybuild` drives the pinned-toolchain UI suite (see `tests/`).
+[dev-dependencies]
+# The alias exercises the proc macro's renamed-dependency resolution in the
+# compile-success and compile-fail suites.
+rstorch_alias = { package = "rstorch", path = "..", default-features = false, features = ["typed"] }
+trybuild = "1"

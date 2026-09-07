@@ -1,0 +1,3 @@
+error[E0080]
+typed matmul contracted dimensions are incompatible
+matmul::<rstorch::typed::Tensor2<4, 2>>

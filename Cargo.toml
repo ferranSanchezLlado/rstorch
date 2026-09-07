@@ -1,30 +1,158 @@
-[package]
-name = "rstorch"
-version = "0.2.0"
+[workspace]
+members = ["rstorch-derive", "fixtures"]
+
+[workspace.package]
+version = "1.0.0"
 authors = ["Ferran Sanchez Llado"]
 license = "MIT OR Apache-2.0"
-readme = "README.md"
 repository = "https://github.com/ferranSanchezLlado/rstorch.git"
-homepage = "https://github.com/ferranSanchezLlado/rstorch.git"
-documentation = "https://docs.rs/rstorch"
-description = "Implementation from scratch of a neural network framework in Rust inspired by PyTorch"
-keywords = ["neural-network", "machine-learning", "deep-learning", "pytorch", "rust"]
-categories = ["science", "mathematics", "algorithms"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[package]
+name = "rstorch"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+documentation = "https://docs.rs/rstorch"
+description = "PyTorch-inspired tensor and autograd library with a dynamic Tensor API and linear gradients"
+keywords = ["neural-network", "machine-learning", "deep-learning", "pytorch", "tensor"]
+categories = ["science", "mathematics", "algorithms"]
+edition.workspace = true
+rust-version.workspace = true
+
+# Keep local tooling out of the published package.
+exclude = [".github/", "test-tools/", ".gitignore", "deny.toml"]
+
+# docs.rs renders the whole surface, not just the default features, so `typed`,
+# `hub`, `rayon`, `metal`, and `wgpu` are documented. `metal` compiles only on macOS, so
+# that target is built as well as the default Linux one.
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+
 [dependencies]
-ndarray = "0.15.6"
-ndarray-rand = "0.14.0"
-rand = "0.8.5"
-reqwest = { version = "0.11.18", features = ["blocking"], optional = true }
-flate2 = { version = "1.0.26", optional = true }
+half = "2"
+rayon = { version = "1", optional = true }
+rstorch-derive = { version = "=1.0.0", path = "rstorch-derive" }
+safetensors = "0.8"
+# The safetensors header is JSON; `serde_json` parses it (and already builds,
+# as a `safetensors` dependency) instead of a hand-rolled scanner here.
+serde = "1"
+serde_json = "1"
+thiserror = "2"
+flate2 = { version = "1", optional = true }
+ureq = { version = "2", optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "26", optional = true, default-features = false, features = ["wgsl", "vulkan", "metal", "dx12", "gles"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+cudarc = { version = "0.19.9", optional = true, default-features = false, features = ["driver", "nvrtc", "f16", "cuda-13030", "dynamic-loading", "std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.4", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSArray", "NSString"] }
+objc2-metal = { version = "0.3.2", optional = true, default-features = false, features = ["std", "MTLAllocation", "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLDevice", "MTLTypes"] }
 
 [dev-dependencies]
-fs_extra = "1.3.0"
+criterion = "0.8.2"
+trybuild = "1"
+
+[[bench]]
+name = "tensor_ops"
+harness = false
+
+[[bench]]
+name = "lazy"
+harness = false
+
+[[bench]]
+name = "training"
+harness = false
+
+[[bench]]
+name = "metal_ops"
+harness = false
+required-features = ["metal"]
+
+[[bench]]
+name = "wgpu_ops"
+harness = false
+required-features = ["wgpu"]
+
+[[bench]]
+name = "cuda_ops"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "data_pipeline"
+harness = false
+
+# Typed-vs-dynamic wrapper overhead. Gated on the feature it measures, so the
+# default bench build is unchanged.
+[[bench]]
+name = "typed_overhead"
+harness = false
+required-features = ["typed"]
+
+# Big-model (ResNet/MNIST) backend throughput. One sample is a whole training
+# step, so it is gated behind its own feature and never joins a plain
+# `cargo bench`.
+[[bench]]
+name = "resnet_mnist"
+harness = false
+required-features = ["bench-resnet"]
+
+# The typed example names typed types, so a default `cargo build --examples`
+# must skip it rather than fail to compile.
+[[example]]
+name = "typed"
+required-features = ["typed"]
+
+[[example]]
+name = "mnist"
+required-features = ["hub"]
+
+[[example]]
+name = "tiny_shakespeare"
+required-features = ["hub"]
+
+[[example]]
+name = "typed_mnist"
+required-features = ["typed", "hub"]
+
+# The two integration suites that drive `rstorch::testing::check_grad`, which
+# the `testing` feature gates. Declaring the requirement here means a plain
+# `cargo test` skips them instead of failing to compile; the CI lanes that own
+# their coverage pass `--features testing`.
+[[test]]
+name = "numerics"
+required-features = ["testing"]
+
+[[test]]
+name = "reduced_precision"
+required-features = ["testing"]
 
 [features]
-default = []
-dataset_hub = ["dep:reqwest", "dep:flate2"]
-full = ["dataset_hub"]
-
+default = ["metal"]
+typed = []
+hub = ["dep:flate2", "dep:ureq"]
+rayon = ["dep:rayon"]
+# Enables the `resnet_mnist` bench target only — no library code depends on it.
+# It exists so a minutes-long big-model benchmark cannot be picked up by a plain
+# `cargo bench`.
+bench-resnet = []
+# Conformance-tested GPU acceleration on macOS. On other targets this default
+# feature has no platform dependency; `Device::best_available` considers an
+# eligible WGPU adapter before falling back to CPU when WGPU is enabled.
+metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
+# Portable native GPU compute through WebGPU. Kept opt-in because it adds a
+# substantial graphics dependency. F16 is negotiated per adapter at runtime.
+wgpu = ["dep:pollster", "dep:wgpu"]
+# NVIDIA CUDA acceleration on Linux and Windows.
+cuda = ["dep:cudarc"]
+# Finite-difference gradient helper for tests; opt-in so it is not runtime API.
+testing = []

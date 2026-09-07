@@ -1,0 +1,18 @@
+error[E0599]: the method `sum` exists for struct `Tensor1<2, bool>`, but its trait bounds were not satisfied
+   --> src/main.rs:6:19
+    |
+6   |     let _ = value.sum::<0>();
+    |                   ^^^ method cannot be called on `Tensor1<2, bool>` due to unsatisfied trait bounds
+    |
+   ::: $WORKSPACE/src/typed/mod.rs:380:1
+    |
+380 | typed_rank_table!(define_typed_tensors);
+    | --------------------------------------- doesn't satisfy `Tensor1<2, bool>: Iterator`
+    |
+    = note: the following trait bounds were not satisfied:
+            `bool: NumericElement`
+            `Tensor1<2, bool>: Iterator`
+            which is required by `&mut Tensor1<2, bool>: Iterator`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `rstorch-typed-ui-bool-reduction` (bin "rstorch-typed-ui-bool-reduction") due to 1 previous error

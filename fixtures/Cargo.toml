@@ -1,0 +1,21 @@
+# Downstream integration fixtures that depend only on the public rstorch API.
+[package]
+name = "fixtures"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Downstream integration fixtures for rstorch (not published)"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+rstorch = { path = "..", default-features = false }
+# Reduced-precision typed tensors use the same public `half` dependency as
+# rstorch.
+half = "2"
+
+[features]
+default = []
+typed = ["rstorch/typed"]

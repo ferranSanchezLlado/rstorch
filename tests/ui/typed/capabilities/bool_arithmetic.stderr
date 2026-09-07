@@ -1,0 +1,11 @@
+error[E0599]: the method `add` exists for struct `Tensor1<2, bool>`, but its trait bounds were not satisfied
+ --> src/main.rs:6:19
+  |
+6 |     let _ = value.add(&value);
+  |                   ^^^ method cannot be called on `Tensor1<2, bool>` due to unsatisfied trait bounds
+  |
+  = note: the following trait bounds were not satisfied:
+          `bool: NumericElement`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `rstorch-typed-ui-bool-arithmetic` (bin "rstorch-typed-ui-bool-arithmetic") due to 1 previous error

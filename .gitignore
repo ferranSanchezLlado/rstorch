@@ -1,4 +1,16 @@
-target
-Cargo.lock
-.test_cache
-data
+/target
+# The UI harnesses build nested fixture crates under the crate they run from, so
+# rstorch-derive/target appears whenever the derive suite runs. Its cleanup is
+# skipped when the pinned-toolchain assertion panics first, which left an
+# untracked directory that root-anchored /target does not cover.
+target/
+# `Cargo.lock` is committed: the trybuild UI expectations are pinned to a
+# compiler version, so an upstream patch release must not be able to redden CI
+# with no local change. The UI lanes run `--locked`.
+/.test_cache
+/data
+.DS_Store
+# The design record and the milestone baseline snapshots: working material,
+# kept locally rather than carried in the history.
+/docs
+/test-tools

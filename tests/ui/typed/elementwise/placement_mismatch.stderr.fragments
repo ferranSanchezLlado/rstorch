@@ -1,0 +1,3 @@
+error[E0308]
+expected reference `&Tensor1<_, _, Left>`
+found reference `&Tensor1<_, _, Right>`
