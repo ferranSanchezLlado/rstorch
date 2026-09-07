@@ -5,6 +5,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Derive macros for rstorch (#[derive(Module)])"
+documentation = "https://docs.rs/rstorch-derive"
+keywords = ["neural-network", "machine-learning", "derive", "macro", "tensor"]
+categories = ["science", "development-tools::procedural-macro-helpers"]
 edition.workspace = true
 rust-version.workspace = true
 

@@ -7,11 +7,9 @@
 A PyTorch-inspired deep-learning library for Rust with one dynamic `Tensor`
 type, reverse-mode autograd, and linear gradients.
 
-`1.0.0` is still being prepared. To try this tree before it is published:
-
 ```toml
 [dependencies]
-rstorch = { git = "https://github.com/ferranSanchezLlado/rstorch.git" }
+rstorch = "1.0"
 ```
 
 ```rust
@@ -156,8 +154,8 @@ let y: Tensor2<2, 4> = x.matmul(&w)?;
 
 ## Status and license
 
-The current release target is `1.0.0`; the minimum supported Rust version is
-**1.88** and the crate uses edition 2024. See [`CHANGELOG.md`](CHANGELOG.md)
+This is the `1.0.0` release; the minimum supported Rust version is **1.88**
+and the crate uses edition 2024. See [`CHANGELOG.md`](CHANGELOG.md)
 for the history of the rewrite from 0.x.
 
 Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the

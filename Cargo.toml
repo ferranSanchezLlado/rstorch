@@ -24,7 +24,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 # Keep local tooling out of the published package.
-exclude = [".github/", "api/", "test-tools/", ".gitignore", "deny.toml"]
+exclude = [".github/", "test-tools/", ".gitignore", "deny.toml"]
 
 # docs.rs renders the whole surface, not just the default features, so `typed`,
 # `hub`, `rayon`, `metal`, and `wgpu` are documented. `metal` compiles only on macOS, so

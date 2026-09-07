@@ -14,6 +14,22 @@ on:
   push:
     tags: ["v*"]
 
+# The publish authenticates to crates.io with CARGO_REGISTRY_TOKEN, not with
+# GITHUB_TOKEN, so nothing here needs write access to the repository.
+permissions:
+  contents: read
+
+# Third-party actions are pinned to a commit SHA, not a tag: a tag can be
+# repointed at new code by whoever owns the action, and these jobs hold a
+# publish token. The trailing comment is the release the SHA belongs to, so an
+# upgrade is a visible one-line change with a version to read.
+
+# Never cancel a release in flight: a half-run publish job is the one thing
+# this workflow must not produce. Two tags pushed together queue instead.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -28,13 +44,13 @@ jobs:
       RSTORCH_SKIP_CUDA_TESTS: "1"
       RSTORCH_SKIP_WGPU_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install stable and the MSRV toolchain
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup toolchain install 1.88 --profile minimal
           rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # The tag *is* the version being published. If it disagrees with the
       # manifest, every step after this one would be verifying the wrong number.
       - name: Check the tag matches the workspace version and derive requirement
@@ -77,13 +93,13 @@ jobs:
     name: Release gate (macOS Metal)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install stable
         run: |
           rustup toolchain install stable --profile minimal
           rustup target add aarch64-apple-darwin --toolchain stable
           rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # These are the only release jobs that build the Metal surface.
       - name: Test the Metal suites
         run: >
@@ -132,12 +148,12 @@ jobs:
       # Match ci.yml's software-adapter row kernels.
       RSTORCH_WGPU_SERIAL_ROWS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install stable
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install the lavapipe software Vulkan driver
         run: |
           sudo apt-get update
@@ -194,12 +210,12 @@ jobs:
       # cargo commands in typed_ui must use the same one.
       RUSTUP_TOOLCHAIN: "1.88"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust 1.88 and stable
         run: |
           rustup toolchain install 1.88 --profile minimal
           rustup toolchain install stable --profile minimal
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # `--locked` keeps recorded diagnostics tied to the pinned dependency
       # graph and compiler.
       - name: Test all UI suites (all features)
@@ -218,12 +234,12 @@ jobs:
     name: Release gate (MSRV 1.88 execution)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust 1.88
         run: |
           rustup toolchain install 1.88 --profile minimal
           rustup default 1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Test with the finite-difference harness
         run: cargo +1.88 test --locked --workspace --features testing
       - name: Test without default features
@@ -234,12 +250,12 @@ jobs:
     name: Release gate (Windows build and CPU-only tests)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install stable
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # `metal` is a default feature and macOS-only, so the Windows library is
       # only reachable with the defaults off.
       - name: Test without default features
@@ -257,10 +273,10 @@ jobs:
     name: Release gate (CT20 wrong-device boundary, macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust 1.88
         run: rustup toolchain install 1.88 --profile minimal
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # The filter names a single test, and a filter that matches nothing prints
       # `running 0 tests` and exits 0: assert the pass count so a rename cannot
       # quietly drop the only lane that covers this rejection.
@@ -281,11 +297,11 @@ jobs:
     name: Dependency gate (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Config and the reasoning behind every allowed license live in
       # `deny.toml`; run the identical check locally with
       # `cargo deny check advisories licenses bans sources`.
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories licenses bans sources
 
@@ -301,16 +317,36 @@ jobs:
       - verify-ct20-boundary
       - deny
     runs-on: ubuntu-latest
+    # A crates.io version number cannot be reused, so this job waits for a
+    # human. The `crates-io` environment holds CARGO_REGISTRY_TOKEN and a
+    # required reviewer: a mistaken or premature tag push runs every gate above
+    # and then pauses here instead of publishing something unrecallable.
+    environment: crates-io
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install stable
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      # Re-running this job after a failure downstream must not be blocked by
+      # the derive already being on the registry, so publish it only when the
+      # exact version is absent. `cargo publish` itself would exit non-zero
+      # with "already exists" and never reach the root package.
       - name: Publish rstorch-derive
-        run: cargo publish --locked -p rstorch-derive
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          # crates.io rejects requests without a descriptive User-Agent, and
+          # `-f` turns the 404 for an unpublished version into a non-zero exit,
+          # which is the "not there yet" answer this needs.
+          if curl -sSf -A "rstorch release workflow (github actions)" \
+            "https://crates.io/api/v1/crates/rstorch-derive/$version" \
+            | jq -e --arg v "$version" '.version.num == $v' >/dev/null; then
+            echo "rstorch-derive $version is already on crates.io; skipping"
+          else
+            cargo publish --locked -p rstorch-derive
+          fi
       # `cargo publish` waits for the new version to appear in the registry
       # index, but that wait is bounded: on timeout it warns and exits 0, and
       # `rstorch-derive = "<version>"` is then still unresolvable. Retry rather

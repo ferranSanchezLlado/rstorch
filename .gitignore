@@ -13,6 +13,4 @@ target/
 # The design record and the milestone baseline snapshots: working material,
 # kept locally rather than carried in the history.
 /docs
-# Generated public-API surface snapshots: working material, not carried in history.
-/api
 /test-tools

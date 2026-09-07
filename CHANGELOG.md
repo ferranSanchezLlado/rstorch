@@ -3,9 +3,7 @@
 This project is a rewrite of the 0.x crate. The 0.x releases remain available
 on [crates.io](https://crates.io/crates/rstorch), but they do not share this API.
 
-## [Unreleased]
-
-The next release is intended to be `1.0.0`.
+## [1.0.0] - 2026-09-07
 
 ### Added
 
